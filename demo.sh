@@ -2,14 +2,17 @@
 set -euo pipefail
 
 # ============================================================================
-# llama.cpp RPC Split Inference - Helper Script
+# llama.cpp RPC Split Inference Demo
 #
 # Usage:
-#   ./run.sh              # default: GLM-4.7-Flash
-#   ./run.sh glm          # GLM-4.7-Flash Q4_K_M (17GB, deepseek2 arch, thinking mode)
-#   ./run.sh qwen3        # Qwen3-Coder-30B-A3B Q4_K_M (18GB, qwen3moe arch, from ollama)
-#   ./run.sh /path/to.gguf  # any GGUF file
-#   ./run.sh stop         # kill all rpc-server and llama-server processes
+#   ./demo.sh              # default: GLM-4.7-Flash
+#   ./demo.sh glm          # GLM-4.7-Flash Q4_K_M (17GB, deepseek2 arch, thinking mode)
+#   ./demo.sh qwen3        # Qwen3-Coder-30B-A3B Q4_K_M (18GB, qwen3moe arch)
+#   ./demo.sh /path/to.gguf  # any GGUF file
+#   ./demo.sh stop         # kill all rpc-server and llama-server processes
+#
+# Models are downloaded to ~/.models/ if not already present.
+# See notes.md for full details on how RPC split inference works.
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,7 +28,8 @@ SERVER_PORT=8080
 GLM_GGUF="$MODELS_DIR/GLM-4.7-Flash-Q4_K_M.gguf"
 GLM_URL="https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf"
 
-QWEN3_GGUF="$HOME/.ollama/models/blobs/sha256-1194192cf2a187eb02722edcc3f77b11d21f537048ce04b67ccf8ba78863006a"
+QWEN3_GGUF="$MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+QWEN3_URL="https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
 
 # --- Functions ---
 
@@ -68,10 +72,11 @@ download_model() {
     fi
 
     mkdir -p "$(dirname "$path")"
-    log "Downloading $name (~17GB)..."
+    log "Downloading $name..."
     log "  From: $url"
     log "  To:   $path"
-    curl -L --progress-bar -o "$path" "$url"
+    curl -L --progress-bar -o "${path}.tmp" "$url"
+    mv "${path}.tmp" "$path"
     log "Download complete"
 }
 
@@ -145,7 +150,7 @@ start_server() {
             echo "    -d '{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"max_tokens\":200}'"
             echo ""
             log "Logs: /tmp/llama-server.log, /tmp/rpc-$RPC_PORT_1.log, /tmp/rpc-$RPC_PORT_2.log"
-            log "Stop with: ./run.sh stop"
+            log "Stop with: ./demo.sh stop"
             return
         fi
         sleep 1
@@ -164,15 +169,13 @@ case "$MODEL_ARG" in
         ;;
     glm)
         build_llamacpp
-        download_model "$GLM_GGUF" "$GLM_URL" "GLM-4.7-Flash Q4_K_M"
+        download_model "$GLM_GGUF" "$GLM_URL" "GLM-4.7-Flash Q4_K_M (~17GB)"
         ensure_rpc_servers
         start_server "$GLM_GGUF"
         ;;
     qwen3)
-        if [[ ! -f "$QWEN3_GGUF" ]]; then
-            err "Qwen3-Coder not found in ollama. Run: ollama pull qwen3-coder"
-        fi
         build_llamacpp
+        download_model "$QWEN3_GGUF" "$QWEN3_URL" "Qwen3-Coder-30B-A3B Q4_K_M (~18GB)"
         ensure_rpc_servers
         start_server "$QWEN3_GGUF"
         ;;
@@ -182,12 +185,14 @@ case "$MODEL_ARG" in
         start_server "$MODEL_ARG"
         ;;
     *)
-        echo "Usage: ./run.sh [glm|qwen3|/path/to/model.gguf|stop]"
+        echo "Usage: ./demo.sh [glm|qwen3|/path/to/model.gguf|stop]"
         echo ""
-        echo "  glm     GLM-4.7-Flash Q4_K_M (default, downloads if needed)"
-        echo "  qwen3   Qwen3-Coder-30B-A3B from ollama"
+        echo "  glm     GLM-4.7-Flash Q4_K_M - 17GB (default)"
+        echo "  qwen3   Qwen3-Coder-30B-A3B Q4_K_M - 18GB"
         echo "  *.gguf  Any GGUF file path"
         echo "  stop    Kill all servers"
+        echo ""
+        echo "Models are downloaded to ~/.models/ if not already present."
         exit 1
         ;;
 esac

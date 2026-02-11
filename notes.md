@@ -140,13 +140,13 @@ It exposes a standard OpenAI-compatible API (`/v1/chat/completions`, `/v1/comple
 
 ## Helper Script
 
-`run.sh` automates all of the above (build, download, start servers):
+`demo.sh` automates all of the above (build, download, start servers):
 
 ```bash
-./run.sh glm          # GLM-4.7-Flash (downloads if needed)
-./run.sh qwen3        # Qwen3-Coder-30B from ollama
-./run.sh /path/to.gguf  # any GGUF
-./run.sh stop         # kill everything
+./demo.sh glm           # GLM-4.7-Flash (downloads to ~/.models/ if needed)
+./demo.sh qwen3         # Qwen3-Coder-30B-A3B (downloads to ~/.models/ if needed)
+./demo.sh /path/to.gguf # any GGUF
+./demo.sh stop          # kill everything
 ```
 
 ## How the Split Works
@@ -171,8 +171,10 @@ Override proportions with `--tensor-split 0.5,0.5,0`.
 
 | Model | Source | Size | Arch | Speed (M4 Max 64GB) |
 |---|---|---|---|---|
-| GLM-4.7-Flash Q4_K_M | [unsloth HF](https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF) | 17GB | deepseek2 | ~61 tok/s |
-| Qwen3-Coder-30B-A3B Q4_K_M | ollama blob | 18GB | qwen3moe | ~44 tok/s |
+| GLM-4.7-Flash Q4_K_M | [unsloth](https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF) | 17GB | deepseek2 | ~61 tok/s |
+| Qwen3-Coder-30B-A3B Q4_K_M | [unsloth](https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF) | 18GB | qwen3moe | ~44 tok/s |
+
+Both are downloaded to `~/.models/` by `demo.sh`.
 
 ## Gotchas
 
