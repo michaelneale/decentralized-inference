@@ -25,7 +25,7 @@ Run large language models split across multiple devices using llama.cpp's RPC ba
 │  rpc-server   │  │  rpc-server   │  │  Metal GPU    │
 │  :50052       │  │  :50053       │  │  (built-in)   │
 │  Metal GPU    │  │  CPU          │  │               │
-│  layers 0-14  │  │  layers 15-30 │  │  layers 31-47 │
+│  layers 0-15  │  │  layers 16-31 │  │  layers 32-47 │
 └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
@@ -105,17 +105,84 @@ Add this to `~/.pi/agent/models.json` under `"providers"`:
 
 ## Performance (Apple M4 Max, 64GB)
 
+### Model Speeds (3 nodes, no latency)
+
 | Model | Size | Generation Speed |
 |---|---|---|
-| GLM-4.7-Flash Q4_K_M | 17GB | ~61 tok/s |
+| GLM-4.7-Flash Q4_K_M | 17GB | ~60 tok/s |
 | Qwen3-Coder-30B-A3B Q4_K_M | 18GB | ~44 tok/s |
+
+### Scaling & Latency Benchmark
+
+How throughput changes as you add more nodes and inject network latency.
+Tested with GLM-4.7-Flash Q4_K_M using even tensor splits and a Python
+TCP proxy (`latency-proxy.py`) that adds delay only on compute operations.
+
+| Nodes | Latency | tok/s | vs baseline |
+|-------|---------|------:|-------------|
+| 3     | 0ms     | 60.2  | 1.00×       |
+| 3     | 5ms     | 30.1  | 0.50×       |
+| 3     | 10ms    | 21.4  | 0.36×       |
+| 3     | 20ms    | 12.6  | 0.21×       |
+| 3     | 30ms    |  9.4  | 0.16×       |
+| 4     | 0ms     | 57.1  | 0.95×       |
+| 4     | 5ms     | 21.8  | 0.36×       |
+| 4     | 10ms    | 15.7  | 0.26×       |
+| 4     | 20ms    |  8.0  | 0.13×       |
+| 5     | 0ms     | 52.8  | 0.88×       |
+| 5     | 5ms     | 18.4  | 0.31×       |
+
+**Key observations:**
+
+- **At 0ms (same machine):** adding nodes barely hurts — 3→5 nodes only drops
+  60→53 tok/s. The overhead is just pipeline scheduling across more splits.
+- **Latency × nodes multiplies:** each token requires a serial forward pass
+  through every RPC node, so the per-token cost is roughly
+  `compute_time + (N-1) × round_trip_latency`.
+- **5ms is realistic** for same-datacenter machines and already halves throughput
+  at 3 nodes. Cross-region latency (20-40ms) makes this impractical unless the
+  model simply doesn't fit on fewer machines.
+- **The sweet spot** for multi-machine inference is low-latency links (< 5ms)
+  with as few nodes as possible — use it when the model doesn't fit in one
+  machine's memory, not as a performance optimization.
+
+## Latency Simulation
+
+Inject artificial per-node latency to simulate real network conditions:
+
+```bash
+# Per-node latency (ms) — applied to GRAPH_COMPUTE ops only, not model loading
+LATENCY1=5 LATENCY2=10 ./demo.sh glm
+
+# Force specific layer split ratios
+TENSOR_SPLIT="0.33,0.33,0.34" ./demo.sh glm
+
+# Verbose logging — shows per-layer device assignment
+VERBOSE=1 ./demo.sh glm
+
+# Combine all
+LATENCY1=10 LATENCY2=20 TENSOR_SPLIT="0.5,0.25,0.25" VERBOSE=1 ./demo.sh glm
+```
+
+The latency proxy (`latency-proxy.py`) parses the llama.cpp RPC binary protocol
+and injects `time.sleep()` only on `GRAPH_COMPUTE` and `GRAPH_RECOMPUTE` commands.
+Model loading (SET_TENSOR, ALLOC_BUFFER, etc.) passes through at full speed.
+
+### Run the full benchmark
+
+```bash
+./bench.sh               # full matrix: 3/4/5 nodes × multiple latencies
+NODES=4 LATENCY=10 ./bench.sh   # single data point
+```
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `README.md` | This file — overview and quick start |
-| `demo.sh` | One-command setup: build, download, run |
+| `demo.sh` | One-command setup: build, download, run (supports latency + split) |
+| `bench.sh` | Automated benchmark across node counts and latencies |
+| `latency-proxy.py` | TCP proxy that injects delay on RPC compute commands |
 | `notes.md` | Detailed reference: build steps, architecture, gotchas, debug |
 | `llama.cpp/` | Built from source with `-DGGML_RPC=ON` |
 | `~/.models/` | Downloaded GGUF model files |

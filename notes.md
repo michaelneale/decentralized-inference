@@ -176,6 +176,70 @@ Override proportions with `--tensor-split 0.5,0.5,0`.
 
 Both are downloaded to `~/.models/` by `demo.sh`.
 
+## Latency Simulation
+
+`latency-proxy.py` is a Python TCP proxy that sits between `llama-server` and `rpc-server`, parsing the RPC binary protocol and injecting `time.sleep()` on compute operations only.
+
+### RPC Protocol (from ggml-rpc.cpp)
+
+```
+Client→Server: | cmd (1 byte) | payload_size (8 bytes LE) | payload |
+Server→Client: | response_size (8 bytes LE) | response |          (for commands with responses)
+```
+
+The proxy reads the 1-byte command ID to identify the operation:
+- **Fire-and-forget** (no response): `SET_TENSOR` (6), `GRAPH_COMPUTE` (10), `GRAPH_RECOMPUTE` (16)
+- **Request-response** (proxy must also forward reply): everything else
+
+Latency is injected only on `GRAPH_COMPUTE` (10) and `GRAPH_RECOMPUTE` (16) — these are the per-token forward-pass operations. `SET_TENSOR` (bulk weight transfer at startup) passes through undelayed so model loading stays fast.
+
+### Usage
+
+```bash
+# Direct usage
+python3 latency-proxy.py --listen-port 60052 --target-port 50052 --latency-ms 20
+
+# Via demo.sh environment variables
+LATENCY1=20 LATENCY2=30 ./demo.sh glm
+```
+
+### Running more than 3 nodes
+
+You can run multiple RPC workers on the same machine. The first uses `MTL0` (Metal GPU), the rest use `CPU`. Each gets its own port:
+
+```bash
+# 5 nodes = 4 RPC workers + 1 local Metal
+rpc-server -d MTL0 -p 50052
+rpc-server -d CPU  -p 50053
+rpc-server -d CPU  -p 50054
+rpc-server -d CPU  -p 50055
+
+llama-server -m model.gguf \
+  --rpc 127.0.0.1:50052,127.0.0.1:50053,127.0.0.1:50054,127.0.0.1:50055 \
+  --tensor-split 0.2,0.2,0.2,0.2,0.2 \
+  -ngl 99
+```
+
+`bench.sh` automates this for benchmarking across 3/4/5 nodes with variable latency.
+
+### Benchmark results (GLM-4.7-Flash Q4_K_M, M4 Max 64GB)
+
+| Nodes | Latency | tok/s | vs baseline |
+|-------|---------|------:|-------------|
+| 3     | 0ms     | 60.2  | 1.00×       |
+| 3     | 5ms     | 30.1  | 0.50×       |
+| 3     | 10ms    | 21.4  | 0.36×       |
+| 3     | 20ms    | 12.6  | 0.21×       |
+| 3     | 30ms    |  9.4  | 0.16×       |
+| 4     | 0ms     | 57.1  | 0.95×       |
+| 4     | 5ms     | 21.8  | 0.36×       |
+| 4     | 10ms    | 15.7  | 0.26×       |
+| 4     | 20ms    |  8.0  | 0.13×       |
+| 5     | 0ms     | 52.8  | 0.88×       |
+| 5     | 5ms     | 18.4  | 0.31×       |
+
+Inference is pipeline-serial: each token does a forward pass through every device in sequence. The per-token wall time is roughly `compute_time + (N-1) × latency`, making network latency the dominant factor at scale.
+
 ## Gotchas
 
 - Two RPC servers on the same machine must use different `-d` device flags or one will crash
