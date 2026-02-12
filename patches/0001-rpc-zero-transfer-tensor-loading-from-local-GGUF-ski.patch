@@ -1,0 +1,407 @@
+From bc3d8b5a7771fcfcd4b6c727e165297a98212e87 Mon Sep 17 00:00:00 2001
+From: Michael Neale <michael.neale@gmail.com>
+Date: Thu, 12 Feb 2026 19:37:23 +1100
+Subject: [PATCH 1/2] rpc: zero-transfer tensor loading from local GGUF + skip
+ probing for RPC backends
+
+Three changes:
+
+1. New RPC command SET_TENSOR_GGUF: client sends tensor name, server looks it
+   up in its local GGUF file and loads from disk. Zero bytes transferred over
+   the network for model weights. Falls back to regular SET_TENSOR/SET_TENSOR_HASH
+   if the server doesn't have the GGUF or tensor isn't found.
+
+2. Skip probing for RPC backends: weight_buft_supported() was doing
+   ALLOC_BUFFER(0) + FREE_BUFFER round-trips for every tensor to test op
+   support. Since RPC's supports_op() always returns true, short-circuit
+   the check when buft name starts with 'RPC'.
+
+3. rpc-server --gguf flag: pass a local GGUF model file path. The server
+   lazily parses the GGUF index on first SET_TENSOR_GGUF request and caches
+   it for subsequent lookups.
+
+Results on same machine (17GB GLM-4.7-Flash-Q4_K_M):
+  Before: 111s to load model (transferring 11.8GB over localhost TCP)
+  After:  5s to load model (zero network transfer, reads from local NVMe)
+  427 tensors / 8.3GB loaded from local GGUF, 0 via wire transfer
+---
+ ggml/include/ggml-rpc.h        |   5 +
+ ggml/src/ggml-rpc/ggml-rpc.cpp | 166 ++++++++++++++++++++++++++++++++-
+ src/llama-model.cpp            |   7 ++
+ tools/rpc/rpc-server.cpp       |  29 ++++--
+ 4 files changed, 197 insertions(+), 10 deletions(-)
+
+diff --git a/ggml/include/ggml-rpc.h b/ggml/include/ggml-rpc.h
+index df1ad2a51..74b3edfe8 100644
+--- a/ggml/include/ggml-rpc.h
++++ b/ggml/include/ggml-rpc.h
+@@ -22,6 +22,11 @@ GGML_BACKEND_API void ggml_backend_rpc_get_device_memory(const char * endpoint,
+ GGML_BACKEND_API void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
+                                                     size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices);
+ 
++// Start server with a local GGUF file — tensors are loaded from disk instead of over the wire
++GGML_BACKEND_API void ggml_backend_rpc_start_server_with_gguf(const char * endpoint, const char * cache_dir,
++                                                               size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices,
++                                                               const char * gguf_path);
++
+ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_reg(void);
+ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint);
+ 
+diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
+index d7c8ad8c1..2cc14c8fd 100644
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -2,6 +2,7 @@
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ #include "ggml-cpp.h"
++#include "gguf.h"
+ 
+ #include <cinttypes>
+ #include <string>
+@@ -107,6 +108,7 @@ enum rpc_cmd {
+     RPC_CMD_HELLO,
+     RPC_CMD_DEVICE_COUNT,
+     RPC_CMD_GRAPH_RECOMPUTE,
++    RPC_CMD_SET_TENSOR_GGUF,  // load tensor from server's local GGUF file
+     RPC_CMD_COUNT,
+ };
+ 
+@@ -220,6 +222,18 @@ struct rpc_msg_graph_recompute_req {
+     uint32_t device;
+ };
+ 
++// SET_TENSOR_GGUF: tell the server to load tensor data from its local GGUF file
++// instead of receiving the data over the wire.
++// The server looks up the tensor by name in its pre-loaded GGUF index.
++struct rpc_msg_set_tensor_gguf_req {
++    rpc_tensor tensor;        // tensor metadata (includes name for GGUF lookup)
++    uint64_t   offset;        // offset within the tensor data (for chunked loading, usually 0)
++};
++
++struct rpc_msg_set_tensor_gguf_rsp {
++    uint8_t result;           // 1 = loaded from local GGUF, 0 = tensor not found / no GGUF
++};
++
+ #pragma pack(pop)
+ 
+ // RPC data structures
+@@ -636,6 +650,24 @@ static enum ggml_status ggml_backend_rpc_buffer_init_tensor(ggml_backend_buffer_
+ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+     rpc_tensor rpc_tensor = serialize_tensor(tensor);
++
++    // Try SET_TENSOR_GGUF first: ask the server to load from its local GGUF file.
++    // This avoids transferring weight data over the network entirely.
++    // Only try for tensors with a name (model weights), not anonymous tensors (activations).
++    if (rpc_tensor.name[0] != '\0' && offset == 0) {
++        rpc_msg_set_tensor_gguf_req gguf_req;
++        gguf_req.tensor = rpc_tensor;
++        gguf_req.offset = offset;
++        rpc_msg_set_tensor_gguf_rsp gguf_rsp;
++        bool status = send_rpc_cmd(ctx->sock, RPC_CMD_SET_TENSOR_GGUF, &gguf_req, sizeof(gguf_req), &gguf_rsp, sizeof(gguf_rsp));
++        RPC_STATUS_ASSERT(status);
++        if (gguf_rsp.result) {
++            // server loaded from local GGUF — no network transfer needed
++            return;
++        }
++        // fall through to hash/transfer path
++    }
++
+     if (size > HASH_THRESHOLD) {
+         rpc_msg_set_tensor_hash_req request;
+         request.tensor = rpc_tensor;
+@@ -999,6 +1031,7 @@ public:
+     bool buffer_clear(const rpc_msg_buffer_clear_req & request);
+     bool set_tensor(const std::vector<uint8_t> & input);
+     bool set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rpc_msg_set_tensor_hash_rsp & response);
++    bool set_tensor_gguf(const rpc_msg_set_tensor_gguf_req & request, rpc_msg_set_tensor_gguf_rsp & response);
+     bool get_tensor(const rpc_msg_get_tensor_req & request, std::vector<uint8_t> & response);
+     bool copy_tensor(const rpc_msg_copy_tensor_req & request, rpc_msg_copy_tensor_rsp & response);
+     bool graph_compute(const std::vector<uint8_t> & input);
+@@ -1007,6 +1040,9 @@ public:
+     bool get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_msg_get_alloc_size_rsp & response);
+     bool get_device_memory(const rpc_msg_get_device_memory_req & request, rpc_msg_get_device_memory_rsp & response);
+ 
++    // Set the local GGUF file path for SET_TENSOR_GGUF
++    void set_gguf_path(const char * path) { gguf_path = path ? path : ""; }
++
+     struct stored_graph {
+         ggml_context_ptr ctx_ptr;
+         ggml_cgraph *    graph;
+@@ -1023,6 +1059,8 @@ private:
+ 
+     std::vector<ggml_backend_t> backends;
+     const char * cache_dir;
++    std::string  gguf_path;   // local GGUF file for SET_TENSOR_GGUF
++    gguf_context_ptr gguf_ctx; // parsed GGUF index (lazy-initialized)
+     std::unordered_set<ggml_backend_buffer_t> buffers;
+     // store the last computed graph for each backend
+     std::vector<stored_graph> stored_graphs;
+@@ -1313,6 +1351,95 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
+     return true;
+ }
+ 
++bool rpc_server::set_tensor_gguf(const rpc_msg_set_tensor_gguf_req & request, rpc_msg_set_tensor_gguf_rsp & response) {
++    response.result = 0;
++
++    if (gguf_path.empty()) {
++        LOG_DBG("[%s] no GGUF path configured\n", __func__);
++        return true;
++    }
++
++    const char * tensor_name = request.tensor.name;
++
++    // Build GGUF index on first use
++    if (!gguf_ctx) {
++        struct gguf_init_params gparams = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
++        gguf_ctx.reset(gguf_init_from_file(gguf_path.c_str(), gparams));
++        if (!gguf_ctx) {
++            GGML_LOG_ERROR("[%s] failed to parse GGUF file: %s\n", __func__, gguf_path.c_str());
++            gguf_path.clear(); // don't try again
++            return true;
++        }
++        GGML_LOG_INFO("[%s] indexed GGUF file: %s (%" PRId64 " tensors)\n",
++                      __func__, gguf_path.c_str(), gguf_get_n_tensors(gguf_ctx.get()));
++    }
++
++    // Look up tensor in GGUF by name
++    int64_t tensor_idx = gguf_find_tensor(gguf_ctx.get(), tensor_name);
++    if (tensor_idx < 0) {
++        LOG_DBG("[%s] tensor '%s' not found in GGUF\n", __func__, tensor_name);
++        return true;
++    }
++
++    size_t data_offset = gguf_get_data_offset(gguf_ctx.get()) + gguf_get_tensor_offset(gguf_ctx.get(), tensor_idx);
++
++    // Deserialize the tensor to get the buffer pointer and size
++    struct ggml_init_params params {
++        /*.mem_size   =*/ ggml_tensor_overhead(),
++        /*.mem_buffer =*/ NULL,
++        /*.no_alloc   =*/ true,
++    };
++    ggml_context_ptr ctx_ptr { ggml_init(params) };
++    GGML_ASSERT(ctx_ptr != nullptr);
++    ggml_context * ctx = ctx_ptr.get();
++    ggml_tensor * tensor = deserialize_tensor(ctx, &request.tensor);
++    if (tensor == nullptr || tensor->buffer == nullptr) {
++        GGML_LOG_ERROR("[%s] error deserializing tensor '%s'\n", __func__, tensor_name);
++        return true;
++    }
++
++    size_t size = ggml_nbytes(tensor);
++
++    // Sanitize tensor->data against buffer bounds
++    {
++        const size_t p0 = (size_t) ggml_backend_buffer_get_base(tensor->buffer);
++        const size_t p1 = p0 + ggml_backend_buffer_get_size(tensor->buffer);
++
++        if (request.tensor.data + request.offset < p0
++         || request.tensor.data + request.offset >= p1
++         || size > (p1 - request.tensor.data - request.offset)) {
++            GGML_LOG_ERROR("[%s] tensor '%s' data out of buffer bounds\n", __func__, tensor_name);
++            return true;
++        }
++    }
++
++    // Read from local GGUF file
++    std::ifstream ifs(gguf_path, std::ios::binary);
++    if (!ifs.is_open()) {
++        GGML_LOG_ERROR("[%s] failed to open GGUF file: %s\n", __func__, gguf_path.c_str());
++        return true;
++    }
++
++    std::vector<uint8_t> data(size);
++    ifs.seekg(data_offset);
++    if (!ifs.good()) {
++        GGML_LOG_ERROR("[%s] failed to seek to offset %zu in GGUF file\n", __func__, data_offset);
++        return true;
++    }
++    ifs.read((char *)data.data(), size);
++    if ((size_t)ifs.gcount() != size) {
++        GGML_LOG_ERROR("[%s] short read for '%s': got %zu, expected %zu\n",
++                       __func__, tensor_name, (size_t)ifs.gcount(), size);
++        return true;
++    }
++
++    ggml_backend_tensor_set(tensor, data.data(), request.offset, size);
++    response.result = 1;
++
++    GGML_LOG_INFO("[%s] loaded '%s' (%zu bytes) from local GGUF\n", __func__, tensor_name, size);
++    return true;
++}
++
+ bool rpc_server::init_tensor(const rpc_msg_init_tensor_req & request) {
+     struct ggml_init_params params {
+         /*.mem_size   =*/ ggml_tensor_overhead(),
+@@ -1579,8 +1706,9 @@ rpc_server::~rpc_server() {
+ }
+ 
+ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const char * cache_dir,
+-                             sockfd_t sockfd) {
++                             sockfd_t sockfd, const char * gguf_path = nullptr) {
+     rpc_server server(backends, cache_dir);
++    server.set_gguf_path(gguf_path);
+     uint8_t cmd;
+     if (!recv_data(sockfd, &cmd, 1)) {
+         return;
+@@ -1818,6 +1946,20 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+                 }
+                 break;
+             }
++            case RPC_CMD_SET_TENSOR_GGUF: {
++                rpc_msg_set_tensor_gguf_req request;
++                if (!recv_msg(sockfd, &request, sizeof(request))) {
++                    return;
++                }
++                rpc_msg_set_tensor_gguf_rsp response;
++                if (!server.set_tensor_gguf(request, response)) {
++                    return;
++                }
++                if (!send_msg(sockfd, &response, sizeof(response))) {
++                    return;
++                }
++                break;
++            }
+             default: {
+                 GGML_LOG_ERROR("Unknown command: %d\n", cmd);
+                 return;
+@@ -1826,8 +1968,9 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
+     }
+ }
+ 
+-void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
+-                                   size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
++static void rpc_start_server_impl(const char * endpoint, const char * cache_dir,
++                                  size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices,
++                                  const char * gguf_path) {
+     if (n_devices == 0 || devices == nullptr) {
+         fprintf(stderr, "Invalid arguments to ggml_backend_rpc_start_server\n");
+         return;
+@@ -1839,6 +1982,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+         RPC_PROTO_PATCH_VERSION);
+     printf("  endpoint       : %s\n", endpoint);
+     printf("  local cache    : %s\n", cache_dir ? cache_dir : "n/a");
++    printf("  local GGUF     : %s\n", gguf_path ? gguf_path : "n/a");
+     printf("Devices:\n");
+     for (size_t i = 0; i < n_devices; i++) {
+         auto dev = devices[i];
+@@ -1889,7 +2033,7 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+         }
+         printf("Accepted client connection\n");
+         fflush(stdout);
+-        rpc_serve_client(backends, cache_dir, client_socket->fd);
++        rpc_serve_client(backends, cache_dir, client_socket->fd, gguf_path);
+         printf("Client connection closed\n");
+         fflush(stdout);
+     }
+@@ -1901,6 +2045,17 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
+     }
+ }
+ 
++void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
++                                   size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
++    rpc_start_server_impl(endpoint, cache_dir, n_threads, n_devices, devices, nullptr);
++}
++
++void ggml_backend_rpc_start_server_with_gguf(const char * endpoint, const char * cache_dir,
++                                              size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices,
++                                              const char * gguf_path) {
++    rpc_start_server_impl(endpoint, cache_dir, n_threads, n_devices, devices, gguf_path);
++}
++
+ // device interface
+ 
+ struct ggml_backend_rpc_device_context {
+@@ -2032,6 +2187,9 @@ static void * ggml_backend_rpc_get_proc_address(ggml_backend_reg_t reg, const ch
+     if (std::strcmp(name, "ggml_backend_rpc_start_server") == 0) {
+         return (void *)ggml_backend_rpc_start_server;
+     }
++    if (std::strcmp(name, "ggml_backend_rpc_start_server_with_gguf") == 0) {
++        return (void *)ggml_backend_rpc_start_server_with_gguf;
++    }
+     return NULL;
+ 
+     GGML_UNUSED(reg);
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 7a06e96c8..c4cda6537 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -299,6 +299,13 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
+             GGML_ABORT("%s: missing test for op %s for tensor %s", __func__, ggml_op_name(op), w->name);
+     }
+ 
++    // RPC backends always report supports_op=true, so skip the expensive
++    // alloc_buffer(0) + free_buffer round-trips over the network
++    const char * buft_name = ggml_backend_buft_name(buft);
++    if (buft_name && strncmp(buft_name, "RPC", 3) == 0) {
++        return true;
++    }
++
+     // create a temporary dummy buffer for the weight so that supports_op can check the buffer type
+     GGML_ASSERT(w->buffer == nullptr);
+     w->buffer = ggml_backend_buft_alloc_buffer(buft, 0);
+diff --git a/tools/rpc/rpc-server.cpp b/tools/rpc/rpc-server.cpp
+index 521f79622..578c2256a 100644
+--- a/tools/rpc/rpc-server.cpp
++++ b/tools/rpc/rpc-server.cpp
+@@ -171,6 +171,7 @@ struct rpc_server_params {
+     bool                     use_cache   = false;
+     int                      n_threads   = std::max(1U, std::thread::hardware_concurrency()/2);
+     std::vector<std::string> devices;
++    std::string              gguf_path;  // local GGUF file for zero-transfer loading
+ };
+ 
+ static void print_usage(int /*argc*/, char ** argv, rpc_server_params params) {
+@@ -182,6 +183,7 @@ static void print_usage(int /*argc*/, char ** argv, rpc_server_params params) {
+     fprintf(stderr, "  -H, --host HOST                  host to bind to (default: %s)\n", params.host.c_str());
+     fprintf(stderr, "  -p, --port PORT                  port to bind to (default: %d)\n", params.port);
+     fprintf(stderr, "  -c, --cache                      enable local file cache\n");
++    fprintf(stderr, "  -m, --gguf PATH                  local GGUF model file (enables zero-transfer tensor loading)\n");
+     fprintf(stderr, "\n");
+ }
+ 
+@@ -229,6 +231,11 @@ static bool rpc_server_params_parse(int argc, char ** argv, rpc_server_params &
+             }
+         } else if (arg == "-c" || arg == "--cache") {
+             params.use_cache = true;
++        } else if (arg == "-m" || arg == "--gguf") {
++            if (++i >= argc) {
++                return false;
++            }
++            params.gguf_path = argv[i];
+         } else if (arg == "-h" || arg == "--help") {
+             print_usage(argc, argv, params);
+             exit(0);
+@@ -325,12 +332,22 @@ int main(int argc, char * argv[]) {
+         return 1;
+     }
+ 
+-    auto start_server_fn = (decltype(ggml_backend_rpc_start_server)*) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_start_server");
+-    if (!start_server_fn) {
+-        fprintf(stderr, "Failed to obtain RPC backend start server function\n");
+-        return 1;
+-    }
++    const char * gguf_path = params.gguf_path.empty() ? nullptr : params.gguf_path.c_str();
+ 
+-    start_server_fn(endpoint.c_str(), cache_dir, params.n_threads, devices.size(), devices.data());
++    if (gguf_path) {
++        auto start_server_fn = (decltype(ggml_backend_rpc_start_server_with_gguf)*) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_start_server_with_gguf");
++        if (!start_server_fn) {
++            fprintf(stderr, "Failed to obtain RPC backend start server with GGUF function\n");
++            return 1;
++        }
++        start_server_fn(endpoint.c_str(), cache_dir, params.n_threads, devices.size(), devices.data(), gguf_path);
++    } else {
++        auto start_server_fn = (decltype(ggml_backend_rpc_start_server)*) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_start_server");
++        if (!start_server_fn) {
++            fprintf(stderr, "Failed to obtain RPC backend start server function\n");
++            return 1;
++        }
++        start_server_fn(endpoint.c_str(), cache_dir, params.n_threads, devices.size(), devices.data());
++    }
+     return 0;
+ }
+-- 
+2.51.0
+

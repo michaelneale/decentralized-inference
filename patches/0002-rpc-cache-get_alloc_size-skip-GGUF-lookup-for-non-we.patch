@@ -1,0 +1,97 @@
+From fb8f5439d0b44066c6d9fb858691f86c9cf186ee Mon Sep 17 00:00:00 2001
+From: Michael Neale <michael.neale@gmail.com>
+Date: Thu, 12 Feb 2026 20:06:00 +1100
+Subject: [PATCH 2/2] rpc: cache get_alloc_size + skip GGUF lookup for
+ non-weight tensors
+
+Two changes to reduce per-token RPC round-trips:
+
+1. Cache get_alloc_size responses: keyed on (type, dims, op, src types+dims).
+   These are deterministic for a given tensor config. Dropped from 558 to 8
+   round-trips per token (550 cache hits).
+
+2. Skip SET_TENSOR_GGUF for non-weight tensors: compute graph intermediates
+   have '#' in their names (e.g. 'RPC0[...]#leaf_8#0') and are tiny. Don't
+   waste a round-trip trying to find them in the GGUF index. Also skip
+   tensors under 1KB.
+
+Cross-machine WiFi inference (M4 Max worker, Mac Mini orchestrator):
+  Before: gen 1.3-5.5 tok/s, prompt 1.4-2.4 tok/s
+  After:  gen 9.4-24.2 tok/s, prompt 36-59 tok/s
+---
+ ggml/src/ggml-rpc/ggml-rpc.cpp | 44 +++++++++++++++++++++++++++-------
+ 1 file changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/ggml/src/ggml-rpc/ggml-rpc.cpp b/ggml/src/ggml-rpc/ggml-rpc.cpp
+index 2cc14c8fd..9ed835de9 100644
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp
+@@ -653,8 +653,11 @@ static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggm
+ 
+     // Try SET_TENSOR_GGUF first: ask the server to load from its local GGUF file.
+     // This avoids transferring weight data over the network entirely.
+-    // Only try for tensors with a name (model weights), not anonymous tensors (activations).
+-    if (rpc_tensor.name[0] != '\0' && offset == 0) {
++    // Only try for tensors that look like GGUF model weights — their names never contain '#'
++    // (which is used by compute graph intermediates like "RPC0[...]#leaf_8#0").
++    // Also skip tiny tensors (activations/inputs) to avoid wasted round-trips.
++    if (rpc_tensor.name[0] != '\0' && offset == 0
++            && strchr(rpc_tensor.name, '#') == nullptr && size > 1024) {
+         rpc_msg_set_tensor_gguf_req gguf_req;
+         gguf_req.tensor = rpc_tensor;
+         gguf_req.offset = offset;
+@@ -805,7 +808,6 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
+ 
+     if (rpc_get) {
+         ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buft->context;
+-        auto sock = get_socket(buft_ctx->endpoint);
+ 
+         rpc_msg_get_alloc_size_req request = {
+             /*.device =*/ buft_ctx->device,
+@@ -818,12 +820,38 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
+             request.srcs[i] = serialize_tensor(tensor->src[i]);
+         }
+ 
+-        // TODO: cache the alloc responses to avoid extra RPC calls?
+-        rpc_msg_get_alloc_size_rsp response;
+-        bool status = send_rpc_cmd(sock, RPC_CMD_GET_ALLOC_SIZE, &request, sizeof(request), &response, sizeof(response));
+-        RPC_STATUS_ASSERT(status);
++        // Cache alloc_size responses keyed on (type, dims, op, src types+dims) to avoid
++        // repeated RPC round-trips. The result is deterministic for a given tensor configuration.
++        {
++            static std::mutex cache_mutex;
++            static std::unordered_map<uint64_t, size_t> alloc_size_cache;
++
++            // Build a cache key from the fields that determine alloc_size
++            uint64_t key = fnv_hash((const uint8_t *)&request.tensor.type, sizeof(request.tensor.type));
++            key ^= fnv_hash((const uint8_t *)request.tensor.ne, sizeof(request.tensor.ne));
++            key ^= fnv_hash((const uint8_t *)&request.tensor.op, sizeof(request.tensor.op));
++            for (int i = 0; i < GGML_MAX_SRC; i++) {
++                if (request.srcs[i].id != 0) {
++                    key ^= fnv_hash((const uint8_t *)&request.srcs[i].type, sizeof(request.srcs[i].type));
++                    key ^= fnv_hash((const uint8_t *)request.srcs[i].ne, sizeof(request.srcs[i].ne));
++                }
++            }
++            key ^= fnv_hash((const uint8_t *)&request.device, sizeof(request.device));
+ 
+-        return response.alloc_size;
++            std::lock_guard<std::mutex> lock(cache_mutex);
++            auto it = alloc_size_cache.find(key);
++            if (it != alloc_size_cache.end()) {
++                return it->second;
++            }
++
++            auto sock = get_socket(buft_ctx->endpoint);
++            rpc_msg_get_alloc_size_rsp response;
++            bool status = send_rpc_cmd(sock, RPC_CMD_GET_ALLOC_SIZE, &request, sizeof(request), &response, sizeof(response));
++            RPC_STATUS_ASSERT(status);
++
++            alloc_size_cache[key] = response.alloc_size;
++            return response.alloc_size;
++        }
+     }
+ 
+     return ggml_nbytes(tensor);
+-- 
+2.51.0
+

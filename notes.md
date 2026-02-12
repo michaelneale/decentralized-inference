@@ -1,7 +1,16 @@
 # llama.cpp RPC Split Inference
 
 Split a model across multiple devices using RPC workers over TCP.
-Workers are stateless — they don't need the model file. `llama-server` sends weights and compute graphs over the wire.
+
+## Patched vs Stock
+
+We have patches in `patches/` (branch `rpc-local-gguf` in `llama.cpp/`) that add:
+- **`SET_TENSOR_GGUF`**: workers load model weights from their own local GGUF copy instead of receiving them over the wire. Zero network transfer for model loading.
+- **Cached `get_alloc_size`**: eliminates ~550 redundant RPC round-trips per token.
+- **Skip probing for RPC**: eliminates hundreds of `ALLOC_BUFFER(0)` + `FREE_BUFFER` round-trips during model setup.
+
+With patches, workers need the GGUF file locally. Use `rpc-server --gguf <path>`.
+Without `--gguf`, behavior is identical to stock llama.cpp (weights transferred over TCP).
 
 - Reference: https://github.com/ggml-org/llama.cpp/blob/master/tools/rpc/README.md
 - Enabled by: https://github.com/ggml-org/llama.cpp/pull/6829
@@ -16,17 +25,14 @@ Homebrew's `llama.cpp` is built **without** RPC support. Must build from source.
 brew install cmake
 ```
 
-### Clone
+### Clone and Patch
 
 ```bash
 cd /Users/micn/Documents/code/deez
 git clone https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
-```
-
-Tested at commit `612db6188` (tag ~b7991). To pin to that:
-```bash
-git checkout 612db6188
+git checkout 612db6188           # tested base commit (tag ~b7991)
+git am ../patches/*.patch        # apply local GGUF + chatter reduction patches
 ```
 
 ### Build
