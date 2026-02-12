@@ -104,7 +104,7 @@ pub async fn start_llama_server(
 
     // Wait for health check
     let url = format!("http://localhost:{http_port}/health");
-    for i in 0..120 {
+    for i in 0..600 {
         if i > 0 && i % 10 == 0 {
             tracing::info!("Still waiting for llama-server to load model... ({i}s)");
         }
@@ -117,7 +117,7 @@ pub async fn start_llama_server(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    anyhow::bail!("llama-server failed to become healthy within 120s");
+    anyhow::bail!("llama-server failed to become healthy within 600s");
 }
 
 /// Find an available TCP port

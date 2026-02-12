@@ -201,7 +201,20 @@ impl Node {
         }
 
         tracing::info!("Connecting to peer {}...", peer_id.fmt_short());
-        let conn = self.endpoint.connect(addr.clone(), ALPN).await?;
+        let conn = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.endpoint.connect(addr.clone(), ALPN),
+        ).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to connect to {}: {e}", peer_id.fmt_short());
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::warn!("Timeout connecting to {} (10s)", peer_id.fmt_short());
+                return Ok(());
+            }
+        };
 
         // Store connection and start dispatcher for inbound streams from this peer
         {
@@ -240,9 +253,11 @@ impl Node {
         // Register peer
         self.add_peer(peer_id, addr).await;
 
-        // Discover new peers
+        // Discover new peers (don't block on failures)
         for peer_addr in their_addrs {
-            Box::pin(self.connect_to_peer(peer_addr)).await?;
+            if let Err(e) = Box::pin(self.connect_to_peer(peer_addr)).await {
+                tracing::warn!("Failed to discover peer: {e}");
+            }
         }
 
         Ok(())
@@ -281,10 +296,12 @@ impl Node {
             }
         }
 
-        // Discover new peers
+        // Discover new peers (don't block on failures)
         for addr in their_addrs {
             if addr.id != self.endpoint.id() {
-                Box::pin(self.connect_to_peer(addr)).await?;
+                if let Err(e) = Box::pin(self.connect_to_peer(addr)).await {
+                    tracing::warn!("Failed to discover peer: {e}");
+                }
             }
         }
 
