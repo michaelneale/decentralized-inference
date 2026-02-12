@@ -26,11 +26,12 @@ The release bundles binaries from the [llama.cpp B2B fork](https://github.com/ni
 
 ## Quick Start
 
-Download and extract on each machine:
+### Install (run on each machine)
 
 ```bash
-tar xzf mesh-inference-v0.1.0-aarch64-apple-darwin.tar.gz
-cd bin
+curl -L -o mesh-inference.tar.gz https://github.com/michaelneale/decentralized-inference/releases/download/v0.1.0/mesh-inference-v0.1.0-aarch64-apple-darwin.tar.gz
+mkdir -p mesh-inference && tar xzf mesh-inference.tar.gz -C mesh-inference
+cd mesh-inference/bin
 ```
 
 ### Two Machines
