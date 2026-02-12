@@ -25,14 +25,13 @@ Homebrew's `llama.cpp` is built **without** RPC support. Must build from source.
 brew install cmake
 ```
 
-### Clone and Patch
+### Clone
 
 ```bash
 cd /Users/micn/Documents/code/deez
-git clone https://github.com/ggml-org/llama.cpp.git
+git clone https://github.com/michaelneale/llama.cpp.git
 cd llama.cpp
-git checkout 612db6188           # tested base commit (tag ~b7991)
-git am ../patches/*.patch        # apply local GGUF + chatter reduction patches
+git checkout rpc-local-gguf
 ```
 
 ### Build

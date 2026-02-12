@@ -8,7 +8,7 @@ Stock llama.cpp RPC transfers **all model weights** from the orchestrator to eve
 
 ## The Fix: Local GGUF Loading + Chatter Reduction
 
-Our patches to `ggml-rpc.cpp` (in `patches/`):
+Our patches to `ggml-rpc.cpp` ([fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf)):
 
 1. **`SET_TENSOR_GGUF`** — worker loads tensors from its own local copy of the GGUF file. Zero bytes transferred over the network for model weights. Falls back to wire transfer if the worker doesn't have the file.
 
@@ -45,8 +45,9 @@ curl -L -o ~/.models/GLM-4.7-Flash-Q4_K_M.gguf \
 
 ### Build
 ```bash
+git clone https://github.com/michaelneale/llama.cpp.git
 cd llama.cpp
-git checkout rpc-local-gguf   # or apply patches: git am ../patches/*.patch
+git checkout rpc-local-gguf
 mkdir build && cd build
 cmake .. -DGGML_METAL=ON -DGGML_RPC=ON
 cmake --build . --config Release -j$(sysctl -n hw.ncpu)
@@ -108,8 +109,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 | File | Purpose |
 |---|---|
-| `patches/` | llama.cpp patches (apply with `git am`) |
-| `llama.cpp/` | Patched llama.cpp (branch `rpc-local-gguf`) |
+| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC patches (branch `rpc-local-gguf`) |
 | `PLAN.md` | Design analysis and benchmark results |
 | `notes.md` | Detailed reference: build, architecture, gotchas |
 | `demo.sh` | One-command local setup: build, download, run |
