@@ -1,4 +1,4 @@
-# Distributed LLM Inference — Revised Plan
+# Distributed LLM Inference — Plan & Results
 
 ## What We Learned
 
@@ -120,16 +120,46 @@ Time per inference token (activation transfer):
   Network overhead: ~1-2% of compute time
 ```
 
+## Results — Option C Implemented ✅
+
+Branch: `rpc-local-gguf` in `llama.cpp/`
+
+### Changes (197 lines, 4 files)
+- `ggml/src/ggml-rpc/ggml-rpc.cpp` — new `RPC_CMD_SET_TENSOR_GGUF` command + server handler
+- `ggml/include/ggml-rpc.h` — `ggml_backend_rpc_start_server_with_gguf()` API
+- `tools/rpc/rpc-server.cpp` — `--gguf PATH` CLI flag
+- `src/llama-model.cpp` — skip probing round-trips for RPC backends
+
+### Same-machine test (localhost TCP)
+- **Before:** 111s to load 17GB model (transferring 11.8GB over TCP)
+- **After:** 5s to load (zero network transfer, local NVMe reads)
+- 427 tensors / 8.3 GB loaded from GGUF, 0 via wire
+
+### Cross-machine test (M4 Max worker ↔ Mac Mini orchestrator, WiFi)
+- **Worker:** M4 Max (192.168.86.250), `rpc-server --gguf` on port 50052
+- **Orchestrator:** Mac Mini (192.168.86.60), `llama-server --rpc`
+- **843 tensors / 16.88 GB loaded from local GGUF on worker — zero bytes over WiFi**
+- **0 tensors transferred over network**
+- Model ready in ~30s (buffer alloc + disk reads + warmup), vs 14+ min before
+- Inference: ~2 tok/s (WiFi GRAPH_COMPUTE round-trip latency ~480ms/token)
+
+### Inference benchmarks (warmed up, WiFi)
+| Run | Prompt eval | Generation | Notes |
+|-----|-------------|------------|-------|
+| Cold (first request) | 2.4 tok/s | 1.3 tok/s | First request after startup |
+| Warm (cache hit) | 6.7-7.2 tok/s | 7.2-8.7 tok/s | Same prompt, prompt cache hit |
+| New prompt, 50 tok gen | 1.4 tok/s | 4.0 tok/s | Fresh prompt |
+| New prompt, 100 tok gen | 1.5 tok/s | **5.5 tok/s** | Longer gen amortizes round-trips |
+
+### Remaining bottleneck: GRAPH_COMPUTE round-trips
+Every token generation requires at least one synchronous `GRAPH_COMPUTE` RPC
+round-trip. On WiFi (~80ms avg ping), that's 100-500ms per token depending on
+graph complexity. Longer generation batches amortize better (5.5 tok/s at 100 tokens).
+See "Next Steps" below for analysis.
+
 ## Next Steps
 
-1. **Prototype Option C** — fork ggml-rpc.cpp, add `RPC_CMD_SET_TENSOR_GGUF`
-2. **Test locally** — verify model loads from local GGUF with zero network transfer
-3. **Swap transport** — replace iroh with plain TCP for LAN, WebRTC for WAN
-4. **Layer splitting** — implement CLI to specify which layers go where
-5. **Benchmark** — measure actual tok/s on 2-machine setup
-
-## Files to modify
-- `ggml/src/ggml-rpc/ggml-rpc.cpp` — add GGUF-aware loading
-- `ggml/include/ggml-rpc.h` — new command enum
-- `tools/rpc-server/rpc-server.cpp` — handle new command server-side
-- New: coordinator binary or script that orchestrates the split
+1. **Reduce inference round-trip cost** — see analysis below
+2. **Upstream PR** — clean up the patch and submit to llama.cpp upstream. The `SET_TENSOR_GGUF` + probing skip are fully backward compatible.
+3. **Mesh/discovery** — integrate with mesh-inference or p2p-llm for NAT traversal and auto-discovery.
+4. **Model distribution** — auto-download GGUF from HuggingFace on workers that don't have it yet.
