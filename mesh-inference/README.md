@@ -50,11 +50,7 @@ It prints an invite token. Copy it.
 **Machine B** — orchestrator (runs `llama-server`):
 
 ```bash
-./mesh-inference \
-  --device CPU \
-  --join <PASTE_TOKEN> \
-  --serve 8080 \
-  --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf
+TOKEN=<paste> ./mesh-inference --device CPU --join $TOKEN --serve 8080 --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf
 ```
 
 The model file only needs to be on Machine B (the `--serve` node). It will load the model and push tensor data to all peers over the mesh.
