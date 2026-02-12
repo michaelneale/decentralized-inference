@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MODEL="$HOME/.models/GLM-4.7-Flash-Q4_K_M.gguf"
 SERVER_PORT=8080
 RPC_BASE_PORT=50052
@@ -115,8 +116,8 @@ run_single() {
 # --- Main ---
 nuke
 
-UPSTREAM="$SCRIPT_DIR/llama.cpp/build"
-B2B="$SCRIPT_DIR/llama.cpp-rpc-b2b/build"
+UPSTREAM="$PROJECT_DIR/llama.cpp/build"
+B2B="$PROJECT_DIR/llama.cpp-rpc-b2b/build"
 
 echo "╔══════════════════════════════════════════════════════════════════╗"
 echo "║  RPC Backend-to-Backend Comms Benchmark                         ║"

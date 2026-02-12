@@ -21,7 +21,8 @@ set -euo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/llama.cpp/build"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="$PROJECT_DIR/llama.cpp/build"
 MODELS_DIR="$HOME/.models"
 
 RPC_PORT_1=50052
@@ -68,8 +69,9 @@ build_llamacpp() {
 
     log "Building llama.cpp with RPC support..."
 
-    if [[ ! -d "$SCRIPT_DIR/llama.cpp" ]]; then
-        git clone https://github.com/ggml-org/llama.cpp.git "$SCRIPT_DIR/llama.cpp"
+    if [[ ! -d "$PROJECT_DIR/llama.cpp" ]]; then
+        git clone https://github.com/michaelneale/llama.cpp.git "$PROJECT_DIR/llama.cpp"
+        cd "$PROJECT_DIR/llama.cpp" && git checkout rpc-local-gguf && cd -
     fi
 
     mkdir -p "$BUILD_DIR"

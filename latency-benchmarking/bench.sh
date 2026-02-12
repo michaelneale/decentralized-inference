@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/llama.cpp/build"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="$PROJECT_DIR/llama.cpp/build"
 MODEL="$HOME/.models/GLM-4.7-Flash-Q4_K_M.gguf"
 SERVER_PORT=8080
 RPC_BASE_PORT=50052

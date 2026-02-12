@@ -35,43 +35,27 @@ Our patches to `ggml-rpc.cpp` ([fork](https://github.com/michaelneale/llama.cpp/
 
 ## Quick Start
 
-### Prerequisites
-Both machines need the same GGUF model file:
+### Quick Start (same machine)
 ```bash
-mkdir -p ~/.models
-curl -L -o ~/.models/GLM-4.7-Flash-Q4_K_M.gguf \
-  "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf"
+just local          # clones fork, builds, downloads model, starts worker + server
+just test           # run a test inference
+just stop           # kill everything
 ```
 
-### Build
+### Two machines
 ```bash
-git clone https://github.com/michaelneale/llama.cpp.git
-cd llama.cpp
-git checkout rpc-local-gguf
-mkdir build && cd build
-cmake .. -DGGML_METAL=ON -DGGML_RPC=ON
-cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+just build          # on both machines
+just download-model # on both machines
 ```
-
-### Run (two machines)
 
 **Worker** (big GPU machine):
 ```bash
-./bin/rpc-server --host 0.0.0.0 --port 50052 -d MTL0 \
-  --gguf ~/.models/GLM-4.7-Flash-Q4_K_M.gguf
+just worker --host 0.0.0.0
 ```
 
 **Orchestrator** (any machine):
 ```bash
-./bin/llama-server \
-  --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf \
-  --rpc <worker-ip>:50052 \
-  -ngl 99 -fit off --port 8080
-```
-
-### Run (same machine)
-```bash
-./demo.sh glm   # builds, downloads model, starts everything
+just serve rpc=<worker-ip>:50052
 ```
 
 ### Test
@@ -79,6 +63,15 @@ cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"max_tokens":200}'
+```
+
+### Manual build (no just)
+```bash
+git clone https://github.com/michaelneale/llama.cpp.git
+cd llama.cpp && git checkout rpc-local-gguf
+mkdir build && cd build
+cmake .. -DGGML_METAL=ON -DGGML_RPC=ON
+cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 ```
 
 ## How It Works
