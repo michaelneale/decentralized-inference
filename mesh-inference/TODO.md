@@ -16,7 +16,7 @@
 ## Medium Priority
 
 - [ ] **Retry/reconnect on QUIC connection drop** — if the tunnel dies mid-transfer, everything fails. Should reconnect and resume.
-- [ ] **Model loading timeout is brutal** — 17GB over relay takes ~100s. Would be much faster with direct UDP (iroh supports it). Investigate why it's going through relay even on LAN.
+- [ ] **iroh not using direct LAN path** — even when both machines are on the same LAN (192.168.86.x), iroh routes everything through the relay in Australia (~400ms each way). The token includes LAN IPs but iroh's holepunching fails (firewall? UDP blocked?). macOS firewall is enabled and may block inbound UDP. Need to investigate: try disabling firewall, or configure iroh to prefer direct paths. This is the #1 reason real-world performance is bad — it turns 8ms LAN latency into 800ms relay latency.
 - [ ] **Reduce tunnel log spam** — every 3278-byte HELLO exchange logs two lines. At info level, hundreds of these during model fitting. Should be debug level.
 - [ ] **Graceful shutdown** — Ctrl-C should kill child rpc-server and llama-server processes. Currently they may orphan.
 
