@@ -89,7 +89,11 @@ pub async fn start_llama_server(
         .context("Failed to create llama-server log file")?;
     let log_file2 = log_file.try_clone()?;
 
+    // Disable local Metal on the orchestrator — all GPU work goes through RPC backends.
+    // Without this, llama-server detects the local GPU and tries to load the full model
+    // onto it, which swap-thrashes machines with less VRAM than the model size.
     let mut child = Command::new(&llama_server)
+        .env("GGML_METAL_DEVICES", "0")
         .args([
             "-m", &model.to_string_lossy(),
             "--rpc", &rpc_arg,

@@ -1,6 +1,43 @@
-# mesh-inference
+# mesh-inference (experiment — archived)
 
-P2P mesh for distributed LLM inference. Connects machines over QUIC (via [iroh](https://iroh.computer/)) and tunnels llama.cpp RPC traffic between them — no port forwarding, no VPN.
+> **Status: Experiment that kind of worked, but not viable for real use.**
+>
+> This was a proof-of-concept for tunneling llama.cpp RPC traffic over iroh QUIC
+> between machines. It successfully formed meshes, tunneled RPC, and ran inference
+> on a single machine. Cross-machine inference partially worked but hit fundamental
+> limitations — see below.
+>
+> The approach of tunneling stock llama.cpp RPC is being replaced by a custom RPC
+> protocol that avoids transferring model weights over the network entirely.
+> See `../PLAN.md` for the new direction.
+
+## What Worked
+- Mesh formation over iroh QUIC with gossip-based peer discovery
+- Bidirectional QUIC stream multiplexing (gossip + tunnel on single connection)
+- Same-machine inference: model loaded in ~111s, ~51 tok/s
+- Self-contained release tarball with llama.cpp binaries + dylibs
+- Persistent node identity (key saved to `~/.mesh-inference/key`)
+
+## What Didn't Work
+- **iroh direct UDP holepunching**: Only works in one direction. macOS firewall
+  stealth mode silently drops incoming UDP, preventing path validation. WebRTC ICE
+  handles this fine; iroh's QUIC multipath doesn't.
+- **iroh relay throughput**: Public relay servers are rate-limited to ~4 MB/s.
+  Unusable for transferring 13GB+ of model weights.
+- **iroh QUIC throughput**: Even with direct connection, only achieved 3-5 MB/s
+  (echo test) vs 30 MB/s raw TCP on the same WiFi link. 10MB transfers stalled.
+- **llama.cpp RPC model loading**: The protocol sends all tensor weights from
+  orchestrator to worker over TCP. 13GB at 15 MB/s = 14+ minutes. The `-fit`
+  auto-probing phase also does hundreds of synchronous round-trips.
+
+## Key Insight
+
+The transport doesn't matter when you're transferring 13GB of weights. The fix is
+**not transferring weights at all** — both machines have the GGUF on disk, so the
+worker should load tensors from its own local file. Only activations (~8KB per layer
+per token) need to cross the network.
+
+## Architecture (for reference)
 
 ```
 ┌──────────────────────────┐          QUIC (iroh)          ┌──────────────────────────┐
@@ -10,106 +47,21 @@ P2P mesh for distributed LLM inference. Connects machines over QUIC (via [iroh](
 └──────────────────────────┘                               └──────────────────────────┘
 ```
 
-Every node runs the same binary. Each starts a local `rpc-server` and joins a mesh. One node runs `llama-server` to expose an OpenAI-compatible API, splitting the model across all peers.
+Same binary on every node. Each starts `rpc-server`, joins mesh, tunnels RPC over QUIC.
+One node runs `llama-server` as orchestrator.
 
-## Install
-
-macOS Apple Silicon:
-
-```bash
-curl -L -o mesh-inference.tar.gz \
-  https://github.com/michaelneale/decentralized-inference/releases/download/v0.1.0/mesh-inference-v0.1.0-aarch64-apple-darwin.tar.gz
-mkdir -p mesh-inference && tar xzf mesh-inference.tar.gz -C mesh-inference
-cd mesh-inference/bin
-```
-
-Self-contained — includes `mesh-inference`, `rpc-server`, `llama-server`, and all required libraries.
-
-## Get a Model
+## Building
 
 ```bash
-mkdir -p ~/.models
-curl -L -o ~/.models/GLM-4.7-Flash-Q4_K_M.gguf \
-  https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf
-```
-
-This downloads GLM-4.7-Flash (~17GB). Any GGUF model works.
-
-## Run
-
-You need two machines. Run the install step on both.
-
-**Machine A** — GPU worker:
-
-```bash
-./mesh-inference --device MTL0
-```
-
-It prints an invite token. Copy it.
-
-**Machine B** — orchestrator (runs `llama-server`):
-
-```bash
-TOKEN=<paste> ./mesh-inference --device CPU --join $TOKEN --serve 8080 --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf
-```
-
-The model file only needs to be on Machine B (the `--serve` node). It will load the model and push tensor data to all peers over the mesh.
-
-Wait for `llama-server ready` then:
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"max_tokens":100}'
-```
-
-Either machine can start first. Direction of `--join` doesn't matter.
-
-### Three+ Machines
-
-Any node's token works — peers discover each other via gossip:
-
-```bash
-./mesh-inference --device MTL0 --join <ANY_TOKEN>
-```
-
-The `--serve` node automatically uses all discovered peers as RPC backends.
-
-## CLI
-
-```
-mesh-inference [OPTIONS]
-
-Options:
-  -j, --join <TOKEN>      Join mesh via invite token
-      --serve <PORT>      Run llama-server on this HTTP port (requires --model)
-      --model <PATH>      Path to GGUF model file
-      --min-peers <N>     Wait for N peers before starting [default: 1]
-      --bin-dir <PATH>    Directory containing rpc-server/llama-server
-                          [default: same directory as mesh-inference]
-      --device <DEVICE>   Device for local rpc-server: MTL0, CPU, CUDA0, etc.
-                          [default: MTL0 on macOS]
-```
-
-## Using Upstream llama.cpp
-
-The release bundles the [B2B fork](https://github.com/nicholasgasior/llama.cpp) (superset of upstream). Stock llama.cpp works too — build with `-DGGML_RPC=ON` and point `--bin-dir` at it:
-
-```bash
-./mesh-inference --bin-dir /path/to/llama.cpp/build/bin --device MTL0
-```
-
-## Building from Source
-
-```bash
-cd mesh-inference
 cargo build --release
 ./target/release/mesh-inference --bin-dir /path/to/llama.cpp/build/bin --device MTL0
 ```
 
-## Logs
+## Benchmarks collected
 
-- `/tmp/mesh-inference-rpc-<port>.log` — rpc-server
-- `/tmp/mesh-inference-llama-server.log` — llama-server
-- `RUST_LOG=mesh_inference=info` for mesh/tunnel logging
-- `RUST_LOG=mesh_inference=debug` for per-stream byte counts
+| Transport | Ping | Throughput | Notes |
+|-----------|------|------------|-------|
+| Raw TCP (python) | — | 30 MB/s | WiFi ceiling |
+| WebRTC (p2p-llm) | ~48ms | ~15 MB/s | Works both directions |
+| iroh QUIC direct | ~14ms | 3-5 MB/s | One direction only, stalls on large transfers |
+| iroh QUIC relay | ~400ms | ~2 MB/s | Rate-limited, unusable |
