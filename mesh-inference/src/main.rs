@@ -20,7 +20,8 @@ struct Cli {
     #[arg(long)]
     serve: Option<u16>,
 
-    /// Path to GGUF model file (required with --serve)
+    /// Path to GGUF model file. Required with --serve.
+    /// If provided without --serve, the local rpc-server uses it for zero-transfer loading.
     #[arg(long)]
     model: Option<PathBuf>,
 
@@ -64,7 +65,11 @@ async fn main() -> Result<()> {
     };
 
     // 1. Start local rpc-server (every node offers compute)
-    let rpc_port = launch::start_rpc_server(&bin_dir, cli.device.as_deref()).await?;
+    let rpc_port = launch::start_rpc_server(
+        &bin_dir,
+        cli.device.as_deref(),
+        cli.model.as_deref(),
+    ).await?;
     eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
 
     // 2. Start the mesh node (returns a channel for inbound tunnel bi-streams)
@@ -102,8 +107,11 @@ async fn main() -> Result<()> {
     // 5. If --serve, wait for peers then launch llama-server
     if let Some(http_port) = cli.serve {
         let model = cli.model.unwrap();
-        eprintln!("Waiting for {} peer(s)...", cli.min_peers);
+        eprintln!("Waiting for {} peer(s) with active tunnels...", cli.min_peers);
         tunnel_mgr.wait_for_peers(cli.min_peers).await?;
+
+        // Small delay for tunnel port allocation to complete after peer discovery
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let tunnel_ports = tunnel_mgr.peer_ports().await;
         // Include local rpc-server + all remote tunnel ports

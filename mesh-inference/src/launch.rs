@@ -10,7 +10,8 @@ use tokio::net::TcpListener;
 
 /// Start a local rpc-server and return the port it's listening on.
 /// Picks an available port automatically.
-pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>) -> Result<u16> {
+/// If `gguf_path` is provided, passes `--gguf` so the server loads weights from the local file.
+pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>, gguf_path: Option<&Path>) -> Result<u16> {
     let rpc_server = bin_dir.join("rpc-server");
     anyhow::ensure!(
         rpc_server.exists(),
@@ -30,8 +31,15 @@ pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>) -> Result<u1
         .with_context(|| format!("Failed to create rpc-server log file {rpc_log}"))?;
     let rpc_log_file2 = rpc_log_file.try_clone()?;
 
+    let mut args = vec!["-d".to_string(), device.clone(), "-p".to_string(), port.to_string()];
+    if let Some(path) = gguf_path {
+        args.push("--gguf".to_string());
+        args.push(path.to_string_lossy().to_string());
+        tracing::info!("rpc-server will load weights from local GGUF: {}", path.display());
+    }
+
     let mut child = Command::new(&rpc_server)
-        .args(["-d", &device, "-p", &port.to_string()])
+        .args(&args)
         .stdout(std::process::Stdio::from(rpc_log_file))
         .stderr(std::process::Stdio::from(rpc_log_file2))
         .spawn()
