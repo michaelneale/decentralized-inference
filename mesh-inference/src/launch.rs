@@ -94,6 +94,7 @@ pub async fn start_llama_server(
             "-m", &model.to_string_lossy(),
             "--rpc", &rpc_arg,
             "-ngl", "99",
+            "-fit", "off",
             "--host", "0.0.0.0",
             "--port", &http_port.to_string(),
         ])
@@ -107,13 +108,17 @@ pub async fn start_llama_server(
     for i in 0..600 {
         if i > 0 && i % 10 == 0 {
             let bytes = crate::tunnel::bytes_transferred();
+            let kb = bytes as f64 / 1024.0;
             let mb = bytes as f64 / (1024.0 * 1024.0);
             let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-            if gb >= 1.0 {
-                tracing::info!("Still waiting for llama-server to load model... ({i}s, {gb:.1} GB transferred)");
+            let transferred = if gb >= 1.0 {
+                format!("{gb:.1} GB")
+            } else if mb >= 1.0 {
+                format!("{mb:.1} MB")
             } else {
-                tracing::info!("Still waiting for llama-server to load model... ({i}s, {mb:.0} MB transferred)");
-            }
+                format!("{kb:.0} KB")
+            };
+            tracing::info!("Still waiting for llama-server to load model... ({i}s, {transferred} transferred)");
         }
         if reqwest_health_check(&url).await {
             tokio::spawn(async move {
