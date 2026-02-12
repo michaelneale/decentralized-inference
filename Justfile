@@ -11,12 +11,10 @@ build:
     set -euo pipefail
     if [ ! -d "{{llama_dir}}" ]; then
         echo "Cloning michaelneale/llama.cpp (rpc-local-gguf branch)..."
-        git clone https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
-        cd "{{llama_dir}}" && git checkout rpc-local-gguf
+        git clone -b rpc-local-gguf https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
     fi
-    mkdir -p "{{build_dir}}"
-    cd "{{build_dir}}" && cmake .. -DGGML_METAL=ON -DGGML_RPC=ON
-    cd "{{build_dir}}" && cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+    cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON
+    cmake --build "{{build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
     echo "Build complete: {{build_dir}}/bin/"
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
