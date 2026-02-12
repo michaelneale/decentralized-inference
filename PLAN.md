@@ -143,19 +143,25 @@ Branch: `rpc-local-gguf` in `llama.cpp/`
 - Model ready in ~30s (buffer alloc + disk reads + warmup), vs 14+ min before
 - Inference: ~2 tok/s (WiFi GRAPH_COMPUTE round-trip latency ~480ms/token)
 
-### Inference benchmarks (warmed up, WiFi)
+### Inference benchmarks (cross-machine WiFi, warmed up)
+
+**Before chatter reduction:**
 | Run | Prompt eval | Generation | Notes |
 |-----|-------------|------------|-------|
-| Cold (first request) | 2.4 tok/s | 1.3 tok/s | First request after startup |
-| Warm (cache hit) | 6.7-7.2 tok/s | 7.2-8.7 tok/s | Same prompt, prompt cache hit |
-| New prompt, 50 tok gen | 1.4 tok/s | 4.0 tok/s | Fresh prompt |
-| New prompt, 100 tok gen | 1.5 tok/s | **5.5 tok/s** | Longer gen amortizes round-trips |
+| Cold | 2.4 tok/s | 1.3 tok/s | ~558 get_alloc_size + 20 wasted GGUF lookups per token |
+| Warm | 6.7-7.2 tok/s | 7.2-8.7 tok/s | Prompt cache hit |
+| New prompt, 50 tok | 1.4 tok/s | 4.0 tok/s | |
+| New prompt, 100 tok | 1.5 tok/s | 5.5 tok/s | |
 
-### Remaining bottleneck: GRAPH_COMPUTE round-trips
-Every token generation requires at least one synchronous `GRAPH_COMPUTE` RPC
-round-trip. On WiFi (~80ms avg ping), that's 100-500ms per token depending on
-graph complexity. Longer generation batches amortize better (5.5 tok/s at 100 tokens).
-See "Next Steps" below for analysis.
+**After chatter reduction (cached get_alloc_size + skip GGUF for non-weights):**
+| Run | Prompt eval | Generation | Notes |
+|-----|-------------|------------|-------|
+| Cold | 14.0 tok/s | **24.2 tok/s** | |
+| Warm | 13-15 tok/s | **17-19 tok/s** | |
+| New prompt, 50 tok | **59 tok/s** | **18.5 tok/s** | |
+| New prompt, 100 tok | **36 tok/s** | **9.4 tok/s** | |
+
+**2-18x improvement** from eliminating 550+ wasted RPC round-trips per token.
 
 ## Next Steps
 
