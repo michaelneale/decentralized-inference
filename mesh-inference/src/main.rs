@@ -3,7 +3,7 @@ mod mesh;
 mod rewrite;
 mod tunnel;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -28,9 +28,10 @@ struct Cli {
     #[arg(long, default_value = "1")]
     min_peers: usize,
 
-    /// Path to llama.cpp build bin directory
-    #[arg(long, default_value = "../llama.cpp-rpc-b2b/build/bin")]
-    bin_dir: PathBuf,
+    /// Path to directory containing rpc-server and llama-server binaries.
+    /// Defaults to the same directory as the mesh-inference binary itself.
+    #[arg(long)]
+    bin_dir: Option<PathBuf>,
 
     /// Device for rpc-server (e.g. MTL0, CPU). Default: auto-detect.
     #[arg(long)]
@@ -52,8 +53,18 @@ async fn main() -> Result<()> {
         anyhow::bail!("--model is required when using --serve");
     }
 
+    // Resolve bin_dir: explicit flag, or same directory as our own binary
+    let bin_dir = match cli.bin_dir {
+        Some(d) => d,
+        None => std::env::current_exe()
+            .context("Failed to determine own binary path")?
+            .parent()
+            .context("Binary has no parent directory")?
+            .to_path_buf(),
+    };
+
     // 1. Start local rpc-server (every node offers compute)
-    let rpc_port = launch::start_rpc_server(&cli.bin_dir, cli.device.as_deref()).await?;
+    let rpc_port = launch::start_rpc_server(&bin_dir, cli.device.as_deref()).await?;
     eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
 
     // 2. Start the mesh node (returns a channel for inbound tunnel bi-streams)
@@ -97,7 +108,7 @@ async fn main() -> Result<()> {
             tunnel_ports.len()
         );
 
-        launch::start_llama_server(&cli.bin_dir, &model, http_port, &all_rpc_ports).await?;
+        launch::start_llama_server(&bin_dir, &model, http_port, &all_rpc_ports).await?;
         eprintln!("llama-server ready: http://localhost:{http_port}");
     }
 
