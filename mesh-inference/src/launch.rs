@@ -80,9 +80,9 @@ pub async fn start_llama_server(
     let rpc_arg = rpc_endpoints.join(",");
 
     tracing::info!(
-        "Starting llama-server on :{http_port} with model {} and {} RPC endpoints",
+        "Starting llama-server on :{http_port} with model {} and --rpc {}",
         model.display(),
-        tunnel_ports.len()
+        rpc_arg
     );
 
     let log_file = std::fs::File::create("/tmp/mesh-inference-llama-server.log")
