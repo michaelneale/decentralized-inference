@@ -106,7 +106,14 @@ pub async fn start_llama_server(
     let url = format!("http://localhost:{http_port}/health");
     for i in 0..600 {
         if i > 0 && i % 10 == 0 {
-            tracing::info!("Still waiting for llama-server to load model... ({i}s)");
+            let bytes = crate::tunnel::bytes_transferred();
+            let mb = bytes as f64 / (1024.0 * 1024.0);
+            let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            if gb >= 1.0 {
+                tracing::info!("Still waiting for llama-server to load model... ({i}s, {gb:.1} GB transferred)");
+            } else {
+                tracing::info!("Still waiting for llama-server to load model... ({i}s, {mb:.0} MB transferred)");
+            }
         }
         if reqwest_health_check(&url).await {
             tokio::spawn(async move {

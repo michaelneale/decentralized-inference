@@ -70,25 +70,33 @@ async fn main() -> Result<()> {
     // 2. Start the mesh node (returns a channel for inbound tunnel bi-streams)
     let (node, tunnel_stream_rx) = mesh::Node::start().await?;
     let token = node.invite_token();
-    eprintln!("Invite token: {token}");
 
     // 3. Start tunnel manager
     let tunnel_mgr = tunnel::Manager::start(node.clone(), rpc_port, tunnel_stream_rx).await?;
 
     // 4. Join the mesh via provided tokens
     if cli.join.is_empty() {
-        eprintln!("No --join specified, waiting for inbound connections...");
-    }
-    for token in &cli.join {
-        match node.join(token).await {
-            Ok(()) => {
-                eprintln!("Joined mesh via provided token");
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to join via token: {e}");
+        eprintln!("Invite token: {token}");
+        eprintln!("Waiting for inbound connections...");
+    } else {
+        let mut joined = false;
+        for t in &cli.join {
+            match node.join(t).await {
+                Ok(()) => {
+                    eprintln!("Joined mesh");
+                    joined = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to join via token: {e}");
+                }
             }
         }
+        if !joined {
+            eprintln!("Failed to join any peer, running standalone");
+        }
+        // Print token so a third node can join via this one
+        eprintln!("This node's token (for others to join): {token}");
     }
 
     // 5. If --serve, wait for peers then launch llama-server

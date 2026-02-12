@@ -15,9 +15,18 @@ use anyhow::Result;
 use iroh::EndpointId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+
+/// Global byte counter for tunnel traffic
+static BYTES_TRANSFERRED: AtomicU64 = AtomicU64::new(0);
+
+/// Get total bytes transferred through all tunnels
+pub fn bytes_transferred() -> u64 {
+    BYTES_TRANSFERRED.load(Ordering::Relaxed)
+}
 
 /// Manages all tunnels for a node
 #[derive(Clone)]
@@ -211,6 +220,7 @@ async fn relay_tcp_to_quic(
         }
         quic_send.write_all(&buf[..n]).await?;
         total += n as u64;
+        BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
         tracing::debug!("TCP→QUIC: wrote {n} bytes (total: {total})");
     }
     quic_send.finish()?;
@@ -229,6 +239,7 @@ async fn relay_quic_to_tcp(
             Ok(Some(n)) => {
                 tcp_write.write_all(&buf[..n]).await?;
                 total += n as u64;
+                BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
                 tracing::debug!("QUIC→TCP: wrote {n} bytes (total: {total})");
             }
             Ok(None) => {

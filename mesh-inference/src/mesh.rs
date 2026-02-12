@@ -39,7 +39,7 @@ struct MeshState {
 
 impl Node {
     pub async fn start() -> Result<(Self, tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>)> {
-        let secret_key = SecretKey::generate(&mut rand::rng());
+        let secret_key = load_or_create_key().await?;
         // Configure QUIC transport for heavy RPC traffic:
         // - Allow many concurrent bi-streams (model loading opens hundreds)
         // - Long idle timeout to survive pauses during tensor transfers
@@ -324,4 +324,29 @@ impl Node {
         addrs.push(self.endpoint.addr());
         addrs
     }
+}
+
+/// Load secret key from ~/.mesh-inference/key, or create a new one and save it.
+async fn load_or_create_key() -> Result<SecretKey> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+        .join(".mesh-inference");
+    let key_path = dir.join("key");
+
+    if key_path.exists() {
+        let hex = tokio::fs::read_to_string(&key_path).await?;
+        let bytes = hex::decode(hex.trim())?;
+        if bytes.len() != 32 {
+            anyhow::bail!("Invalid key length in {}", key_path.display());
+        }
+        let key = SecretKey::from_bytes(&bytes.try_into().unwrap());
+        tracing::info!("Loaded key from {}", key_path.display());
+        return Ok(key);
+    }
+
+    let key = SecretKey::generate(&mut rand::rng());
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(&key_path, hex::encode(key.to_bytes())).await?;
+    tracing::info!("Generated new key, saved to {}", key_path.display());
+    Ok(key)
 }
