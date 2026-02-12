@@ -35,23 +35,25 @@ cd bin
 
 ### Two Machines
 
-**Machine A** (has GPU — starts the mesh):
+Start `mesh-inference` on both machines. Either one can go first — every node prints an invite token on startup.
+
+**Machine A** (has GPU):
 
 ```bash
 ./mesh-inference --device MTL0
 ```
 
-This prints an invite token. Copy it.
-
-**Machine B** (orchestrator — joins and serves the API):
+**Machine B** (orchestrator — serves the API):
 
 ```bash
 ./mesh-inference \
   --device CPU \
-  --join <PASTE_TOKEN> \
+  --join <TOKEN_FROM_A> \
   --serve 8080 \
   --model ~/.models/your-model.gguf
 ```
+
+Copy the invite token from whichever node started first and pass it to the other via `--join`. Direction doesn't matter — A can join B or B can join A.
 
 Once the model loads:
 
@@ -63,14 +65,14 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Three+ Machines
 
-Start Machine A as above. Join any number of additional machines with the same token:
+Start `mesh-inference` on each machine. Any node's token works to join — peers discover each other via gossip, so only one token is needed to bootstrap the whole mesh:
 
 ```bash
-# Machine C (another GPU)
-./mesh-inference --device MTL0 --join <TOKEN>
+# Machine C (another GPU — use any existing node's token)
+./mesh-inference --device MTL0 --join <ANY_TOKEN>
 ```
 
-Peers discover each other via gossip — only one token is needed to bootstrap. The `--serve` node automatically uses all discovered peers as RPC backends.
+The `--serve` node automatically uses all discovered peers as RPC backends.
 
 ### Which Machine Should Be the Orchestrator?
 
@@ -135,10 +137,10 @@ Each RPC command from llama.cpp opens a TCP connection to a tunnel port. The tun
 You can test locally by running two instances in separate terminals:
 
 ```bash
-# Terminal 1: GPU worker
+# Terminal 1
 ./mesh-inference --device MTL0
 
-# Terminal 2: CPU orchestrator (paste token from terminal 1)
+# Terminal 2 (paste token from terminal 1, or vice versa)
 ./mesh-inference \
   --device CPU \
   --join <TOKEN> \
@@ -146,7 +148,7 @@ You can test locally by running two instances in separate terminals:
   --model ~/.models/your-model.gguf
 ```
 
-Note: same-machine traffic still goes through iroh's relay, so model loading will be slower than direct localhost RPC. The real benefit is cross-machine where direct TCP isn't possible.
+Note: even on the same machine, traffic goes through iroh's relay, so model loading will be slower than direct localhost RPC. The real benefit is cross-machine where direct TCP isn't possible.
 
 ## Building from Source
 
