@@ -2,7 +2,9 @@
 
 ## High Priority
 
-- [ ] **Increase llama-server health timeout** — 120s is not enough for large models over QUIC relay. First attempt timed out, second worked. Make it 300s or configurable.
+- [x] **Increase llama-server health timeout** — was 120s, now 600s.
+- [x] **Stale peer connect timeout** — was 5 minutes (iroh default), now 10s.
+- [ ] **Persist secret key to disk** — every restart generates a new key = new invite token. Should save to `~/.mesh-inference/key` so the token is stable across restarts.
 - [ ] **B2B REGISTER_PEER rewriting** — `rewrite.rs` is scaffolded but not wired into the tunnel relay. Without this, B2B worker-to-worker tensor transfers won't go through the mesh (workers try direct TCP to each other using orchestrator-side addresses). Need to intercept command byte 17 in the QUIC→TCP path and rewrite the endpoint field to the local tunnel port.
 - [ ] **Auto-detect device** — don't require `--device CPU` or `--device MTL0`. rpc-server with no `-d` flag auto-detects (picks Metal on Mac, CPU otherwise). Just don't pass `-d` by default and let it figure it out.
 
