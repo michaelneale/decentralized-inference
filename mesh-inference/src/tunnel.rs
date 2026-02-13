@@ -11,6 +11,7 @@
 //! 3. Bidirectionally relay
 
 use crate::mesh::Node;
+use crate::rewrite::{self, PortRewriteMap};
 use anyhow::Result;
 use iroh::EndpointId;
 use std::collections::HashMap;
@@ -35,6 +36,8 @@ pub struct Manager {
     rpc_port: u16,
     /// EndpointId → local tunnel port
     tunnel_ports: Arc<Mutex<HashMap<EndpointId, u16>>>,
+    /// Port rewrite map for B2B: orchestrator tunnel port → local tunnel port
+    port_rewrite_map: PortRewriteMap,
 }
 
 impl Manager {
@@ -44,10 +47,12 @@ impl Manager {
         rpc_port: u16,
         mut tunnel_stream_rx: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     ) -> Result<Self> {
+        let port_rewrite_map = rewrite::new_rewrite_map();
         let mgr = Manager {
             node: node.clone(),
             rpc_port,
             tunnel_ports: Arc::new(Mutex::new(HashMap::new())),
+            port_rewrite_map,
         };
 
         // Watch for peer changes and create outbound tunnels
@@ -56,12 +61,14 @@ impl Manager {
             mgr2.watch_peers().await;
         });
 
-        // Handle inbound tunnel streams
+        // Handle inbound tunnel streams (with REGISTER_PEER rewriting)
         let rpc_port = mgr.rpc_port;
+        let rewrite_map = mgr.port_rewrite_map.clone();
         tokio::spawn(async move {
             while let Some((send, recv)) = tunnel_stream_rx.recv().await {
+                let rewrite_map = rewrite_map.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_inbound_stream(send, recv, rpc_port).await {
+                    if let Err(e) = handle_inbound_stream(send, recv, rpc_port, rewrite_map).await {
                         tracing::warn!("Inbound tunnel stream error: {e}");
                     }
                 });
@@ -87,6 +94,44 @@ impl Manager {
     pub async fn peer_ports(&self) -> Vec<u16> {
         let ports = self.tunnel_ports.lock().await;
         ports.values().copied().collect()
+    }
+
+    /// Get the full mapping of EndpointId → local tunnel port
+    pub async fn peer_ports_map(&self) -> HashMap<EndpointId, u16> {
+        self.tunnel_ports.lock().await.clone()
+    }
+
+    /// Update the B2B port rewrite map from all received remote tunnel maps.
+    ///
+    /// For each remote peer's tunnel map, maps their tunnel ports to our local
+    /// tunnel ports for the same target EndpointIds. This enables REGISTER_PEER
+    /// rewriting: when the orchestrator tells us "peer X is at 127.0.0.1:PORT",
+    /// we replace PORT (an orchestrator tunnel port) with our own tunnel port
+    /// to the same EndpointId.
+    pub async fn update_rewrite_map(
+        &self,
+        remote_maps: &HashMap<EndpointId, HashMap<EndpointId, u16>>,
+    ) {
+        let my_tunnels = self.tunnel_ports.lock().await;
+        let mut rewrite = self.port_rewrite_map.write().await;
+        rewrite.clear();
+
+        for (remote_peer, their_map) in remote_maps {
+            for (target_id, &their_port) in their_map {
+                if let Some(&my_port) = my_tunnels.get(target_id) {
+                    rewrite.insert(their_port, my_port);
+                    tracing::info!(
+                        "B2B rewrite: peer {}'s port {} → my port {} (target {})",
+                        remote_peer.fmt_short(),
+                        their_port,
+                        my_port,
+                        target_id.fmt_short()
+                    );
+                }
+            }
+        }
+
+        tracing::info!("B2B port rewrite map: {} entries", rewrite.len());
     }
 
     /// Allocate a free port by binding to :0
@@ -170,10 +215,13 @@ async fn relay_outbound(node: Node, peer_id: EndpointId, tcp_stream: TcpStream) 
 }
 
 /// Handle an inbound tunnel bi-stream: connect to local rpc-server and relay.
+/// The QUIC→TCP direction uses relay_with_rewrite to intercept REGISTER_PEER.
+/// The TCP→QUIC direction (responses) is plain byte relay.
 async fn handle_inbound_stream(
     quic_send: iroh::endpoint::SendStream,
     quic_recv: iroh::endpoint::RecvStream,
     rpc_port: u16,
+    port_rewrite_map: PortRewriteMap,
 ) -> Result<()> {
     tracing::info!("Inbound tunnel stream → rpc-server :{rpc_port}");
     let tcp_stream = TcpStream::connect(format!("127.0.0.1:{rpc_port}")).await?;
@@ -181,7 +229,20 @@ async fn handle_inbound_stream(
     tracing::info!("Connected to rpc-server, starting relay");
 
     let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
-    relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+
+    // QUIC→TCP: use rewrite relay (intercepts REGISTER_PEER)
+    let mut t1 = tokio::spawn(async move {
+        rewrite::relay_with_rewrite(quic_recv, tcp_write, port_rewrite_map).await
+    });
+    // TCP→QUIC: plain byte relay (responses from rpc-server)
+    let mut t2 = tokio::spawn(async move {
+        relay_tcp_to_quic(tcp_read, quic_send).await
+    });
+    tokio::select! {
+        _ = &mut t1 => { t2.abort(); }
+        _ = &mut t2 => { t1.abort(); }
+    }
+    Ok(())
 }
 
 /// Bidirectional relay. When either direction finishes, abort the other.

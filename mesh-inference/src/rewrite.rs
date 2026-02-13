@@ -1,13 +1,13 @@
 //! REGISTER_PEER endpoint rewriting.
 //!
-//! The B2B fork's orchestrator sends RPC_CMD_REGISTER_PEER (command byte 17)
-//! to tell each worker about its peers. The endpoint string in that message
-//! is a `host:port` that was valid on the orchestrator's machine but meaningless
+//! The B2B fork's orchestrator sends RPC_CMD_REGISTER_PEER to tell each
+//! worker about its peers. The endpoint string in that message is a
+//! `host:port` that was valid on the orchestrator's machine but meaningless
 //! on the worker's machine.
 //!
-//! This module intercepts that one command in the QUIC→TCP relay path and
-//! rewrites the endpoint to the local tunnel port on this machine that
-//! corresponds to the given peer_id.
+//! This module intercepts that command in the QUIC→TCP relay path (inbound
+//! tunnel to local rpc-server) and rewrites the endpoint to the local tunnel
+//! port on this machine that routes to the correct peer.
 //!
 //! Wire format:
 //!   Client→Server: | cmd (1 byte) | payload_size (8 bytes LE) | payload |
@@ -15,7 +15,8 @@
 //! REGISTER_PEER payload (132 bytes):
 //!   | peer_id (4 bytes LE) | endpoint (128 bytes, null-terminated string) |
 //!
-//! We rewrite the 128-byte endpoint field to "127.0.0.1:<tunnel_port>".
+//! We parse the port from the endpoint string, look it up in the
+//! `remote_port → local_port` map, and rewrite the endpoint field.
 //!
 //! All other commands pass through as raw bytes.
 
@@ -23,26 +24,34 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
-const RPC_CMD_REGISTER_PEER: u8 = 17;
+const RPC_CMD_REGISTER_PEER: u8 = 18; // enum position after SET_TENSOR_GGUF (17)
 const REGISTER_PEER_PAYLOAD_SIZE: usize = 4 + 128; // peer_id + endpoint
+
+/// Shared map from orchestrator's tunnel port → worker's local tunnel port.
+/// Built by combining the orchestrator's tunnel map (received via gossip)
+/// with the worker's own tunnel map.
+pub type PortRewriteMap = Arc<RwLock<HashMap<u16, u16>>>;
+
+/// Create a new empty rewrite map.
+pub fn new_rewrite_map() -> PortRewriteMap {
+    Arc::new(RwLock::new(HashMap::new()))
+}
 
 /// Relay bytes from QUIC recv to TCP write, rewriting REGISTER_PEER commands.
 ///
-/// We parse just enough of the RPC framing to identify commands:
-///   - Read 1 byte: command
-///   - Read 8 bytes: payload_size
-///   - Read payload_size bytes: payload
+/// RPC framing: | cmd (1 byte) | payload_size (8 bytes LE) | payload |
 ///
-/// For REGISTER_PEER, we rewrite the endpoint field in the payload.
-/// For everything else, we forward all bytes verbatim, streaming large
-/// payloads (e.g. SET_TENSOR) without buffering.
+/// For REGISTER_PEER, we rewrite the endpoint field.
+/// For everything else, we stream bytes through verbatim.
 pub async fn relay_with_rewrite(
     mut quic_recv: iroh::endpoint::RecvStream,
     mut tcp_write: tokio::io::WriteHalf<tokio::net::TcpStream>,
-    peer_id_map: Arc<Mutex<HashMap<u32, u16>>>,
+    port_map: PortRewriteMap,
 ) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+
     loop {
         // Read command byte
         let mut cmd_buf = [0u8; 1];
@@ -64,26 +73,39 @@ pub async fn relay_with_rewrite(
             // Extract peer_id (first 4 bytes LE)
             let peer_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
-            // Look up the local tunnel port for this peer_id
-            let map = peer_id_map.lock().await;
-            if let Some(&tunnel_port) = map.get(&peer_id) {
-                // Rewrite endpoint field (bytes 4..132)
-                let new_endpoint = format!("127.0.0.1:{tunnel_port}");
-                let mut endpoint_bytes = [0u8; 128];
-                let copy_len = new_endpoint.len().min(127);
-                endpoint_bytes[..copy_len].copy_from_slice(&new_endpoint.as_bytes()[..copy_len]);
-                payload[4..132].copy_from_slice(&endpoint_bytes);
+            // Extract endpoint string (bytes 4..132) — copy to avoid borrow conflict
+            let endpoint_bytes = &payload[4..132];
+            let endpoint_str = std::str::from_utf8(
+                &endpoint_bytes[..endpoint_bytes.iter().position(|&b| b == 0).unwrap_or(128)]
+            ).unwrap_or("").to_string();
 
-                tracing::info!(
-                    "Rewrote REGISTER_PEER: peer_id={peer_id} → 127.0.0.1:{tunnel_port}"
-                );
-            } else {
-                tracing::warn!(
-                    "REGISTER_PEER for unknown peer_id={peer_id}, passing through unmodified"
-                );
+            // Parse port from endpoint string like "127.0.0.1:49502"
+            if let Some(port_str) = endpoint_str.rsplit(':').next() {
+                if let Ok(remote_port) = port_str.parse::<u16>() {
+                    let map = port_map.read().await;
+                    if let Some(&local_port) = map.get(&remote_port) {
+                        // Rewrite endpoint field
+                        let new_endpoint = format!("127.0.0.1:{local_port}");
+                        let mut new_endpoint_bytes = [0u8; 128];
+                        let copy_len = new_endpoint.len().min(127);
+                        new_endpoint_bytes[..copy_len]
+                            .copy_from_slice(&new_endpoint.as_bytes()[..copy_len]);
+                        payload[4..132].copy_from_slice(&new_endpoint_bytes);
+
+                        tracing::info!(
+                            "Rewrote REGISTER_PEER: peer_id={peer_id} \
+                             {endpoint_str} → 127.0.0.1:{local_port}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "REGISTER_PEER: no rewrite mapping for port {remote_port} \
+                             (peer_id={peer_id}, endpoint={endpoint_str}), passing through"
+                        );
+                    }
+                }
             }
 
-            // Forward rewritten command
+            // Forward (possibly rewritten) command
             tcp_write.write_all(&[cmd]).await?;
             tcp_write.write_all(&size_buf).await?;
             tcp_write.write_all(&payload).await?;
@@ -92,7 +114,7 @@ pub async fn relay_with_rewrite(
             tcp_write.write_all(&[cmd]).await?;
             tcp_write.write_all(&size_buf).await?;
 
-            // Stream payload without buffering the whole thing
+            // Stream payload in chunks
             let mut remaining = payload_size;
             let mut buf = vec![0u8; 64 * 1024];
             while remaining > 0 {

@@ -120,18 +120,54 @@ async fn main() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let tunnel_ports = tunnel_mgr.peer_ports().await;
-        // Only use remote tunnel ports as RPC backends.
-        // The orchestrator uses its own GPU directly (local Metal / CUDA) — much faster
-        // than going through a local rpc-server since it avoids the RPC round-trip overhead.
-        // Remote workers contribute their GPUs via the QUIC tunnel.
         eprintln!(
             "Got {} peer(s), starting llama-server with {} remote RPC endpoint(s)",
             tunnel_ports.len(),
             tunnel_ports.len()
         );
 
+        // 5a. Broadcast our tunnel map so workers can build B2B rewrite maps
+        let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
+        eprintln!("Broadcasting tunnel map ({} entries) for B2B rewriting", my_tunnel_map.len());
+        node.broadcast_tunnel_map(my_tunnel_map).await?;
+
+        // 5b. Wait for workers to send their tunnel maps, then build our rewrite map
+        // Workers broadcast after a 3s delay, so give them time
+        node.wait_for_tunnel_maps(tunnel_ports.len(), std::time::Duration::from_secs(15)).await?;
+        let remote_maps = node.all_remote_tunnel_maps().await;
+        tunnel_mgr.update_rewrite_map(&remote_maps).await;
+
+        // 5c. Launch llama-server (auto cross-registration sends REGISTER_PEER;
+        // workers rewrite endpoints to their local tunnel ports for B2B)
         launch::start_llama_server(&bin_dir, &model, http_port, &tunnel_ports, cli.tensor_split.as_deref()).await?;
         eprintln!("llama-server ready: http://localhost:{http_port}");
+    } else {
+        // Worker node: broadcast our tunnel map and listen for the orchestrator's
+        // Small delay to let tunnel ports settle
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
+        if !my_tunnel_map.is_empty() {
+            eprintln!("Broadcasting tunnel map ({} entries) for B2B", my_tunnel_map.len());
+            node.broadcast_tunnel_map(my_tunnel_map).await?;
+        }
+
+        // Spawn background task: keep updating rewrite map as new tunnel maps arrive
+        let node_bg = node.clone();
+        let tunnel_mgr_bg = tunnel_mgr.clone();
+        tokio::spawn(async move {
+            let mut last_count = 0;
+            // Keep updating until we stop receiving new maps
+            for _ in 0..30 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let remote_maps = node_bg.all_remote_tunnel_maps().await;
+                let count = remote_maps.len();
+                if count > last_count {
+                    tunnel_mgr_bg.update_rewrite_map(&remote_maps).await;
+                    last_count = count;
+                }
+            }
+        });
     }
 
     // Run until interrupted

@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, watch};
 pub const ALPN: &[u8] = b"mesh-inference/0";
 const STREAM_GOSSIP: u8 = 0x01;
 const STREAM_TUNNEL: u8 = 0x02;
+const STREAM_TUNNEL_MAP: u8 = 0x03;
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
@@ -35,6 +36,8 @@ pub struct Node {
 struct MeshState {
     peers: HashMap<EndpointId, PeerInfo>,
     connections: HashMap<EndpointId, Connection>,
+    /// Remote peers' tunnel maps: peer_endpoint_id → { target_endpoint_id → tunnel_port_on_that_peer }
+    remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>>,
 }
 
 impl Node {
@@ -64,6 +67,7 @@ impl Node {
             state: Arc::new(Mutex::new(MeshState {
                 peers: HashMap::new(),
                 connections: HashMap::new(),
+                remote_tunnel_maps: HashMap::new(),
             })),
             peer_change_tx,
             peer_change_rx,
@@ -99,6 +103,82 @@ impl Node {
     pub async fn set_tunnel_port(&self, id: EndpointId, port: u16) {
         if let Some(peer) = self.state.lock().await.peers.get_mut(&id) {
             peer.tunnel_port = Some(port);
+        }
+    }
+
+    /// Push our tunnel port map to all connected peers.
+    /// Called after tunnel ports are established.
+    pub async fn broadcast_tunnel_map(&self, my_tunnel_map: HashMap<EndpointId, u16>) -> Result<()> {
+        // Serialize: { endpoint_id_hex_string → port }
+        let serializable: HashMap<String, u16> = my_tunnel_map
+            .iter()
+            .map(|(id, port)| (hex::encode(id.as_bytes()), *port))
+            .collect();
+        let msg = serde_json::to_vec(&serializable)?;
+
+        let conns: Vec<(EndpointId, Connection)> = {
+            let state = self.state.lock().await;
+            state.connections.iter().map(|(id, c)| (*id, c.clone())).collect()
+        };
+
+        for (peer_id, conn) in conns {
+            let msg = msg.clone();
+            tokio::spawn(async move {
+                match conn.open_bi().await {
+                    Ok((mut send, _recv)) => {
+                        if send.write_all(&[STREAM_TUNNEL_MAP]).await.is_err() {
+                            return;
+                        }
+                        let len = msg.len() as u32;
+                        if send.write_all(&len.to_le_bytes()).await.is_err() {
+                            return;
+                        }
+                        if send.write_all(&msg).await.is_err() {
+                            return;
+                        }
+                        let _ = send.finish();
+                        tracing::info!("Sent tunnel map to {}", peer_id.fmt_short());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to send tunnel map to {}: {e}", peer_id.fmt_short());
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Get a peer's tunnel port map (what tunnel ports they have to other peers).
+    /// Returns None if we haven't received their map yet.
+    pub async fn get_remote_tunnel_map(&self, peer_id: &EndpointId) -> Option<HashMap<EndpointId, u16>> {
+        self.state.lock().await.remote_tunnel_maps.get(peer_id).cloned()
+    }
+
+    /// Get all remote tunnel maps: { peer_id → { target_id → tunnel_port } }
+    pub async fn all_remote_tunnel_maps(&self) -> HashMap<EndpointId, HashMap<EndpointId, u16>> {
+        self.state.lock().await.remote_tunnel_maps.clone()
+    }
+
+    /// Wait until we have tunnel maps from at least `n` peers, with timeout.
+    pub async fn wait_for_tunnel_maps(&self, n: usize, timeout: std::time::Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            {
+                let state = self.state.lock().await;
+                if state.remote_tunnel_maps.len() >= n {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let state = self.state.lock().await;
+                tracing::warn!(
+                    "Timeout waiting for tunnel maps: got {} of {} needed",
+                    state.remote_tunnel_maps.len(),
+                    n
+                );
+                return Ok(()); // Don't fail — B2B is optional optimization
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
 
@@ -181,6 +261,14 @@ impl Node {
                         tracing::warn!("Tunnel receiver dropped");
                         break;
                     }
+                }
+                STREAM_TUNNEL_MAP => {
+                    let node = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = node.handle_tunnel_map_stream(remote, recv).await {
+                            tracing::warn!("Tunnel map stream error from {}: {e}", remote.fmt_short());
+                        }
+                    });
                 }
                 other => {
                     tracing::warn!("Unknown stream type {other} from {}", remote.fmt_short());
@@ -303,6 +391,45 @@ impl Node {
                     tracing::warn!("Failed to discover peer: {e}");
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_tunnel_map_stream(
+        &self,
+        remote: EndpointId,
+        mut recv: iroh::endpoint::RecvStream,
+    ) -> Result<()> {
+        // Read length-prefixed JSON
+        let mut len_buf = [0u8; 4];
+        recv.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+
+        // Deserialize: { hex_endpoint_id → port }
+        let serialized: HashMap<String, u16> = serde_json::from_slice(&buf)?;
+        let mut tunnel_map = HashMap::new();
+        for (hex_id, port) in serialized {
+            if let Ok(bytes) = hex::decode(&hex_id) {
+                if bytes.len() == 32 {
+                    let arr: [u8; 32] = bytes.try_into().unwrap();
+                    let eid = EndpointId::from(iroh::PublicKey::from_bytes(&arr)?);
+                    tunnel_map.insert(eid, port);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Received tunnel map from {} ({} entries)",
+            remote.fmt_short(),
+            tunnel_map.len()
+        );
+
+        {
+            let mut state = self.state.lock().await;
+            state.remote_tunnel_maps.insert(remote, tunnel_map);
         }
 
         Ok(())
