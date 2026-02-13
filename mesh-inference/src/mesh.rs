@@ -1,12 +1,13 @@
 //! Mesh membership via iroh QUIC connections.
 //!
 //! Single ALPN, single connection per peer. Bi-streams multiplexed by
-//! first byte: 0x01 = gossip, 0x02 = tunnel.
+//! first byte: 0x01 = gossip, 0x02 = tunnel (RPC), 0x03 = tunnel map, 0x04 = tunnel (HTTP).
 
 use anyhow::Result;
 use base64::Engine;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh::endpoint::Connection;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,21 +17,51 @@ pub const ALPN: &[u8] = b"mesh-inference/0";
 const STREAM_GOSSIP: u8 = 0x01;
 const STREAM_TUNNEL: u8 = 0x02;
 const STREAM_TUNNEL_MAP: u8 = 0x03;
+pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
+
+/// Role a node plays in the mesh.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum NodeRole {
+    /// Provides GPU compute via rpc-server.
+    Worker,
+    /// Runs llama-server, orchestrates inference, provides HTTP API.
+    Host { http_port: u16 },
+    /// Lite client — no compute, accesses the API via tunnel.
+    Client,
+}
+
+impl Default for NodeRole {
+    fn default() -> Self {
+        NodeRole::Worker
+    }
+}
+
+/// Gossip payload — extends EndpointAddr with role metadata.
+/// Backward-compatible: old nodes that don't send role default to Worker.
+#[derive(Serialize, Deserialize)]
+struct PeerAnnouncement {
+    addr: EndpointAddr,
+    #[serde(default)]
+    role: NodeRole,
+}
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub id: EndpointId,
     pub addr: EndpointAddr,
     pub tunnel_port: Option<u16>,
+    pub role: NodeRole,
 }
 
 #[derive(Clone)]
 pub struct Node {
     endpoint: Endpoint,
     state: Arc<Mutex<MeshState>>,
+    role: Arc<Mutex<NodeRole>>,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    tunnel_http_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
 }
 
 struct MeshState {
@@ -40,8 +71,14 @@ struct MeshState {
     remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>>,
 }
 
+/// Channels returned by Node::start for inbound tunnel streams.
+pub struct TunnelChannels {
+    pub rpc: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    pub http: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+}
+
 impl Node {
-    pub async fn start() -> Result<(Self, tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>)> {
+    pub async fn start(role: NodeRole) -> Result<(Self, TunnelChannels)> {
         let secret_key = load_or_create_key().await?;
         // Configure QUIC transport for heavy RPC traffic:
         // - Allow many concurrent bi-streams (model loading opens hundreds)
@@ -61,6 +98,7 @@ impl Node {
 
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
+        let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
 
         let node = Node {
             endpoint,
@@ -69,15 +107,17 @@ impl Node {
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
             })),
+            role: Arc::new(Mutex::new(role)),
             peer_change_tx,
             peer_change_rx,
             tunnel_tx,
+            tunnel_http_tx,
         };
 
         let node2 = node.clone();
         tokio::spawn(async move { node2.accept_loop().await; });
 
-        Ok((node, tunnel_rx))
+        Ok((node, TunnelChannels { rpc: tunnel_rx, http: tunnel_http_rx }))
     }
 
     pub fn invite_token(&self) -> String {
@@ -96,8 +136,41 @@ impl Node {
     pub fn endpoint(&self) -> &Endpoint { &self.endpoint }
     pub fn id(&self) -> EndpointId { self.endpoint.id() }
 
+    pub async fn role(&self) -> NodeRole {
+        self.role.lock().await.clone()
+    }
+
+    pub async fn set_role(&self, role: NodeRole) {
+        *self.role.lock().await = role;
+    }
+
     pub async fn peers(&self) -> Vec<PeerInfo> {
         self.state.lock().await.peers.values().cloned().collect()
+    }
+
+    /// Wait for a peer with Host role to appear. Returns its PeerInfo.
+    pub async fn wait_for_host(&self) -> Result<PeerInfo> {
+        loop {
+            let peers = self.peers().await;
+            for p in &peers {
+                if matches!(p.role, NodeRole::Host { .. }) {
+                    return Ok(p.clone());
+                }
+            }
+            // Poll every 500ms
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    /// Open an HTTP tunnel bi-stream to a peer (tagged STREAM_TUNNEL_HTTP).
+    pub async fn open_http_tunnel(&self, peer_id: EndpointId) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+        let conn = {
+            self.state.lock().await.connections.get(&peer_id).cloned()
+                .ok_or_else(|| anyhow::anyhow!("No connection to {}", peer_id.fmt_short()))?
+        };
+        let (mut send, recv) = conn.open_bi().await?;
+        send.write_all(&[STREAM_TUNNEL_HTTP]).await?;
+        Ok((send, recv))
     }
 
     pub async fn set_tunnel_port(&self, id: EndpointId, port: u16) {
@@ -270,6 +343,12 @@ impl Node {
                         }
                     });
                 }
+                STREAM_TUNNEL_HTTP => {
+                    if self.tunnel_http_tx.send((send, recv)).await.is_err() {
+                        tracing::warn!("HTTP tunnel receiver dropped");
+                        break;
+                    }
+                }
                 other => {
                     tracing::warn!("Unknown stream type {other} from {}", remote.fmt_short());
                 }
@@ -319,31 +398,35 @@ impl Node {
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_GOSSIP]).await?;
 
-        // Send our peer list (length-prefixed)
-        let our_addrs = self.collect_peer_addrs().await;
-        let msg = serde_json::to_vec(&our_addrs)?;
+        // Send our peer announcements (length-prefixed JSON)
+        let our_announcements = self.collect_announcements().await;
+        let msg = serde_json::to_vec(&our_announcements)?;
         send.write_all(&(msg.len() as u32).to_le_bytes()).await?;
         send.write_all(&msg).await?;
         send.finish()?;
 
-        // Read their peer list (length-prefixed)
+        // Read their announcements
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        let their_addrs: Vec<EndpointAddr> = serde_json::from_slice(&buf)?;
+        let their_announcements: Vec<PeerAnnouncement> = serde_json::from_slice(&buf)?;
 
         // Wait for stream to fully close, then small delay for accept_bi to re-arm
         let _ = recv.read_to_end(0).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Register peer
-        self.add_peer(peer_id, addr).await;
+        // Register peer — find their own announcement for role info
+        let peer_role = their_announcements.iter()
+            .find(|a| a.addr.id == peer_id)
+            .map(|a| a.role.clone())
+            .unwrap_or_default();
+        self.add_peer(peer_id, addr, peer_role).await;
 
         // Discover new peers (don't block on failures)
-        for peer_addr in their_addrs {
-            if let Err(e) = Box::pin(self.connect_to_peer(peer_addr)).await {
+        for ann in their_announcements {
+            if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
                 tracing::warn!("Failed to discover peer: {e}");
             }
         }
@@ -359,17 +442,17 @@ impl Node {
     ) -> Result<()> {
         tracing::info!("Inbound gossip from {}", remote.fmt_short());
 
-        // Read their peer list
+        // Read their announcements
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
-        let their_addrs: Vec<EndpointAddr> = serde_json::from_slice(&buf)?;
+        let their_announcements: Vec<PeerAnnouncement> = serde_json::from_slice(&buf)?;
 
-        // Send our peer list (length-prefixed)
-        let our_addrs = self.collect_peer_addrs().await;
-        let msg = serde_json::to_vec(&our_addrs)?;
+        // Send our announcements
+        let our_announcements = self.collect_announcements().await;
+        let msg = serde_json::to_vec(&our_announcements)?;
         send.write_all(&(msg.len() as u32).to_le_bytes()).await?;
         send.write_all(&msg).await?;
         send.finish()?;
@@ -377,17 +460,17 @@ impl Node {
         // Wait for the remote to finish their send
         let _ = recv.read_to_end(0).await;
 
-        // Register peer
-        for addr in &their_addrs {
-            if addr.id == remote {
-                self.add_peer(remote, addr.clone()).await;
+        // Register peer with role
+        for ann in &their_announcements {
+            if ann.addr.id == remote {
+                self.add_peer(remote, ann.addr.clone(), ann.role.clone()).await;
             }
         }
 
         // Discover new peers (don't block on failures)
-        for addr in their_addrs {
-            if addr.id != self.endpoint.id() {
-                if let Err(e) = Box::pin(self.connect_to_peer(addr)).await {
+        for ann in their_announcements {
+            if ann.addr.id != self.endpoint.id() {
+                if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
                     tracing::warn!("Failed to discover peer: {e}");
                 }
             }
@@ -435,21 +518,35 @@ impl Node {
         Ok(())
     }
 
-    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr) {
+    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole) {
         let mut state = self.state.lock().await;
-        if state.peers.contains_key(&id) || id == self.endpoint.id() { return; }
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None });
+        if id == self.endpoint.id() { return; }
+        if let Some(existing) = state.peers.get_mut(&id) {
+            // Update role if peer already known (may have changed)
+            if existing.role != role {
+                tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, role);
+                existing.role = role;
+            }
+            return;
+        }
+        tracing::info!("Peer added: {} role={:?} (total: {})", id.fmt_short(), role, state.peers.len() + 1);
+        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role });
         let count = state.peers.len();
         drop(state);
-        tracing::info!("Peer added: {} (total: {count})", id.fmt_short());
         let _ = self.peer_change_tx.send(count);
     }
 
-    async fn collect_peer_addrs(&self) -> Vec<EndpointAddr> {
+    async fn collect_announcements(&self) -> Vec<PeerAnnouncement> {
         let state = self.state.lock().await;
-        let mut addrs: Vec<EndpointAddr> = state.peers.values().map(|p| p.addr.clone()).collect();
-        addrs.push(self.endpoint.addr());
-        addrs
+        let my_role = self.role.lock().await.clone();
+        let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
+            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone() })
+            .collect();
+        announcements.push(PeerAnnouncement {
+            addr: self.endpoint.addr(),
+            role: my_role,
+        });
+        announcements
     }
 }
 

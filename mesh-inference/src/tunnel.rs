@@ -42,10 +42,14 @@ pub struct Manager {
 
 impl Manager {
     /// Start the tunnel manager.
+    /// `rpc_port` is the local rpc-server port (for inbound RPC tunnel streams).
+    /// `http_port` is the optional local llama-server HTTP port (for inbound HTTP tunnel streams).
     pub async fn start(
         node: Node,
         rpc_port: u16,
         mut tunnel_stream_rx: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+        http_port: Option<u16>,
+        mut tunnel_http_rx: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     ) -> Result<Self> {
         let port_rewrite_map = rewrite::new_rewrite_map();
         let mgr = Manager {
@@ -61,7 +65,7 @@ impl Manager {
             mgr2.watch_peers().await;
         });
 
-        // Handle inbound tunnel streams (with REGISTER_PEER rewriting)
+        // Handle inbound RPC tunnel streams (with REGISTER_PEER rewriting)
         let rpc_port = mgr.rpc_port;
         let rewrite_map = mgr.port_rewrite_map.clone();
         tokio::spawn(async move {
@@ -69,11 +73,24 @@ impl Manager {
                 let rewrite_map = rewrite_map.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_inbound_stream(send, recv, rpc_port, rewrite_map).await {
-                        tracing::warn!("Inbound tunnel stream error: {e}");
+                        tracing::warn!("Inbound RPC tunnel stream error: {e}");
                     }
                 });
             }
         });
+
+        // Handle inbound HTTP tunnel streams (plain byte relay to llama-server)
+        if let Some(http_port) = http_port {
+            tokio::spawn(async move {
+                while let Some((send, recv)) = tunnel_http_rx.recv().await {
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_inbound_http_stream(send, recv, http_port).await {
+                            tracing::warn!("Inbound HTTP tunnel stream error: {e}");
+                        }
+                    });
+                }
+            });
+        }
 
         Ok(mgr)
     }
@@ -245,8 +262,34 @@ async fn handle_inbound_stream(
     Ok(())
 }
 
+/// Handle an inbound HTTP tunnel bi-stream: connect to local llama-server and relay.
+/// Plain byte relay — no protocol awareness needed (HTTP/SSE just flows through).
+async fn handle_inbound_http_stream(
+    quic_send: iroh::endpoint::SendStream,
+    quic_recv: iroh::endpoint::RecvStream,
+    http_port: u16,
+) -> Result<()> {
+    tracing::info!("Inbound HTTP tunnel stream → llama-server :{http_port}");
+    let tcp_stream = TcpStream::connect(format!("127.0.0.1:{http_port}")).await?;
+    tcp_stream.set_nodelay(true)?;
+
+    let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
+    relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+}
+
+/// Relay a TCP stream through a QUIC bi-stream. Used by the lite client
+/// to tunnel local HTTP requests to the remote host's llama-server.
+pub async fn relay_tcp_via_quic(
+    tcp_stream: TcpStream,
+    quic_send: iroh::endpoint::SendStream,
+    quic_recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
+    relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+}
+
 /// Bidirectional relay. When either direction finishes, abort the other.
-async fn relay_bidirectional(
+pub async fn relay_bidirectional(
     tcp_read: tokio::io::ReadHalf<TcpStream>,
     tcp_write: tokio::io::WriteHalf<TcpStream>,
     quic_send: iroh::endpoint::SendStream,
