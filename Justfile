@@ -121,6 +121,11 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     rm -rf "$DIR"
     echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"
 
+# Start a lite client — no GPU, no model, just a local HTTP proxy to the mesh host.
+# Only needs the mesh-inference binary (no llama.cpp binaries or model).
+mesh-client join="" port="8080":
+    {{mesh_bin}} --client --port {{port}} --join {{join}}
+
 # ── Utilities ──────────────────────────────────────────────────
 
 # Stop all running servers

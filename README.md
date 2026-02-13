@@ -1,170 +1,136 @@
 # Distributed LLM Inference with llama.cpp RPC
 
-Run large language models split across multiple machines using llama.cpp's RPC backend, with patches that eliminate model weight transfer and reduce per-token RPC chatter. Includes a QUIC mesh for NAT traversal and peer discovery.
+Run large language models split across multiple machines using llama.cpp's RPC backend, with patches that eliminate model weight transfer and reduce per-token RPC chatter. Includes a QUIC mesh for NAT traversal, peer discovery, and direct worker-to-worker tensor transfers.
 
 ## The Problem
 
 Stock llama.cpp RPC transfers **all model weights** from the orchestrator to every worker over TCP at startup (e.g. 17GB for GLM-4.7-Flash). Over WiFi or WAN this takes 10-15+ minutes. Then during inference, hundreds of redundant RPC round-trips per token kill throughput.
 
-## The Fix: Local GGUF Loading + Chatter Reduction
+## The Fix
 
-Our patches to `ggml-rpc.cpp` ([fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf)):
+Two things working together:
 
-1. **`SET_TENSOR_GGUF`** — worker loads tensors from its own local copy of the GGUF file. Zero bytes transferred over the network for model weights.
-2. **Skip probing for RPC backends** — eliminates hundreds of alloc/free round-trips during startup.
-3. **Cache `get_alloc_size`** — 558 → 8 round-trips per token.
-4. **Skip GGUF lookup for non-weights** — don't look up compute graph intermediates in the GGUF index.
+**llama.cpp patches** ([fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf)):
+- `SET_TENSOR_GGUF` — workers load tensors from their own local GGUF copy. Zero bytes over the network.
+- Skip probing for RPC backends — eliminates hundreds of alloc/free round-trips at startup.
+- `get_alloc_size` cache — cuts per-token RPC calls from ~290 to 7.
+- B2B direct transfers — workers push activation tensors directly to each other, bypassing the orchestrator.
+
+**mesh-inference** (Rust sidecar):
+- QUIC mesh via iroh — NAT traversal, peer discovery, gossip.
+- TCP↔QUIC tunneling — llama.cpp just sees localhost TCP sockets.
+- REGISTER_PEER rewriting — enables B2B direct transfers through the mesh.
+- `--client` lite mode — join the mesh from any machine and use the API, no GPU needed.
 
 ## Quick Start
 
-### Prerequisites
-
-Both machines need the same GGUF model file:
 ```bash
-just build            # clones fork, builds with Metal + RPC
+just build            # clones fork, builds llama.cpp + mesh-inference
 just download-model   # downloads GLM-4.7-Flash Q4_K_M (~17GB)
 ```
 
 ### Same machine (test everything works)
 ```bash
-just local            # builds, downloads model, starts worker + server
+just local            # starts worker + server on localhost
 just test             # run a test inference
 just stop             # kill everything
 ```
 
-### Two machines (raw TCP)
+### Two machines over the mesh
 
-**Worker** (big GPU machine):
-```bash
-just worker --host 0.0.0.0
-```
+Both machines need the same GGUF model file.
 
-**Orchestrator** (any machine):
-```bash
-just serve rpc=<worker-ip>:50052
-```
-
-### Two machines (QUIC mesh with NAT traversal)
-
-The `mesh-inference` binary handles peer discovery, QUIC tunneling, and process management. Same binary on every node.
-
-**Machine A** — starts mesh, waits for peers:
+**Machine A** (worker — starts first, prints invite token):
 ```bash
 just mesh-worker
-# prints an invite token
 ```
 
-**Machine B** — joins mesh and starts llama-server:
+**Machine B** (orchestrator — joins and starts llama-server):
 ```bash
 just mesh-serve join=<token-from-A>
 ```
 
-Both machines load model weights from local disk. Only activations (~10KB/token) cross the network.
+### Lite client (no GPU, no model needed)
 
-> **Firewall note**: The machine that can accept incoming UDP should start first (print the token). The firewalled machine should be the one that joins. On managed Macs with stealth mode, that machine must always be the joiner.
+Any machine can join the mesh as a lightweight API proxy:
 
-### Test
 ```bash
-curl http://localhost:8090/v1/chat/completions \
+mesh-inference --client --join <token> --port 8080
+```
+
+This exposes `http://localhost:8080` — an OpenAI-compatible API that tunnels through the QUIC mesh to the host's llama-server. Works with curl, the OpenAI Python library, or any HTTP client. SSE streaming works transparently.
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"max_tokens":50}'
+  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 ```
 
-## Configurations
+> **Firewall note**: The machine that can accept incoming UDP should start first and print the invite token. The firewalled machine should be the joiner (`--join`). On managed Macs with stealth mode, that machine must always join.
 
-### A) Big machine as orchestrator (simplest, fastest)
+## Node Roles
 
-The machine with the most VRAM runs `--serve`. It uses its local GPU directly for the bulk of compute, remote workers contribute extra VRAM via RPC.
+| Role | What it does | Flags |
+|------|-------------|-------|
+| **Worker** | Runs rpc-server, provides GPU compute | `mesh-inference --model ...` |
+| **Host** | Runs llama-server + rpc-server, orchestrates inference, serves HTTP API | `mesh-inference --serve PORT --model ...` |
+| **Client** | No GPU, no model. Proxies API requests through the mesh to a host | `mesh-inference --client --join TOKEN` |
 
-```
-┌─ M4 Max (55GB) ──────────────┐     QUIC tunnel     ┌─ Mac Mini (12GB) ────────┐
-│ mesh-inference --serve 8090   │◄──────────────────►│ mesh-inference            │
-│ llama-server (82% local Metal)│  ~10KB/token        │ rpc-server (18% Metal)   │
-│ rpc-server (unused)           │                     │                          │
-└───────────────────────────────┘                     └──────────────────────────┘
-```
+Roles are advertised via gossip — clients automatically discover which node is the host.
 
-**16 tok/s** generation. Orchestrator handles most layers locally at full speed.
+## Configurations & Benchmarks
 
-### B) Small machine as orchestrator (model doesn't fit on one machine)
+All benchmarks: M4 Max (55GB VRAM) + Mac Mini M4 (12GB VRAM), WiFi, GLM-4.7-Flash-Q4_K_M (17GB).
 
-When the model is too large for any single machine, the orchestrator can be the smaller machine. Use `--tensor-split` to control how much stays local and `--no-mmap` (automatic) prevents the full model from being memory-mapped.
-
-```
-┌─ Mac Mini (12GB) ─────────────┐     QUIC tunnel     ┌─ M4 Max (55GB) ─────────┐
-│ mesh-inference --serve 8090   │◄──────────────────►│ mesh-inference            │
-│ llama-server (15% local Metal)│  ~10KB/token        │ rpc-server (85% Metal)   │
-│ rpc-server (unused)           │                     │                          │
-│ --tensor-split 0.85,0.15      │                     │                          │
-└───────────────────────────────┘                     └──────────────────────────┘
-```
-
-**21 tok/s** generation. The bulk compute (85%) runs on M4 Max with zero network cost. Mini handles 15% locally. `--no-mmap` ensures only 2.6GB is allocated on Mini's Metal (not the full 17GB model).
-
-### C) All remote compute (orchestrator has no GPU)
-
-With `GGML_METAL_DEVICES=0`, the orchestrator contributes zero GPU compute. Everything goes through RPC. Only useful when the orchestrator truly has no GPU.
-
-**2.5 tok/s** — every operation serializes through the network. Avoid this if possible.
-
-## Benchmarks
-
-### Model Loading (17GB GLM-4.7-Flash, WiFi)
+### Model Loading
 | | Stock RPC | Patched |
 |---|---|---|
 | Data over network | 16.88 GB | **0 bytes** |
 | Time to load | 14+ minutes | **~9 seconds** |
 
-### Inference (M4 Max + Mac Mini, WiFi, QUIC mesh)
-| Configuration | Prompt eval | Generation |
-|---|---|---|
-| Config A: M4 Max orchestrator (82% local + 18% remote) | 25 tok/s | **16 tok/s** |
-| Config B: Mini orchestrator (15% local + 85% remote) | 27 tok/s | **21 tok/s** |
-| Config C: Mini orchestrator, no local GPU | 3 tok/s | 2.5 tok/s |
-| Local only (M4 Max, no mesh) | 160 tok/s | 68 tok/s |
+### Inference
+| Configuration | Generation |
+|---|---|
+| Mini orchestrator, 85% remote on M4 Max (`--tensor-split 0.85,0.15`) | **21 tok/s** |
+| M4 Max orchestrator, 82% local + 18% remote | **16 tok/s** |
+| 3-node: Mini orchestrator + 2 workers (40/40/20 split) | **12-13 tok/s** |
+| Local only (M4 Max, no mesh) | 68 tok/s |
 
-### Latency Simulation (single-machine, raw TCP)
-| Nodes | Latency | tok/s |
-|-------|---------|------:|
-| 3     | 0ms     | 60.2  |
-| 3     | 5ms     | 30.1  |
-| 3     | 10ms    | 21.4  |
-| 3     | 20ms    | 12.6  |
+QUIC mesh adds zero measurable overhead vs raw TCP.
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Orchestrator                                        │
-│  llama-server --rpc <tunnel>:port --model model.gguf │
-│  - Reads GGUF metadata, assigns layers to backends   │
-│  - Sends SET_TENSOR_GGUF (tensor name only, no data) │
-│  - Workers load weights from their own local GGUF    │
-│  - Dispatches GRAPH_COMPUTE per token                │
+│  Host (orchestrator)                                 │
+│  llama-server --rpc <tunnels> --model model.gguf     │
+│  - Assigns layers to backends, dispatches compute    │
+│  - Workers load weights from local GGUF (no transfer)│
+│  - Only activations (~10KB/token) cross the network  │
 └──────────────────────┬──────────────────────────────┘
-                       │ QUIC tunnel (only activations, ~10KB/token)
+                       │ QUIC tunnel
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │  Worker                                              │
 │  rpc-server --gguf model.gguf -d MTL0               │
-│  - Receives tensor name via SET_TENSOR_GGUF          │
-│  - Looks up in local GGUF index → reads from NVMe   │
-│  - Executes GRAPH_COMPUTE on Metal GPU               │
-│  - Returns activations/logits                        │
+│  - Loads weights from local GGUF                     │
+│  - Computes assigned layers on Metal GPU             │
+│  - B2B: pushes activations directly to next worker   │
 └─────────────────────────────────────────────────────┘
 
-mesh-inference handles:
-  - Peer discovery via iroh QUIC + gossip
-  - NAT traversal (direct UDP or relay fallback)
-  - TCP↔QUIC tunneling for RPC connections
-  - Process management (rpc-server, llama-server)
+┌─────────────────────────────────────────────────────┐
+│  Lite Client                                         │
+│  mesh-inference --client --join <token>              │
+│  - No GPU, no model                                  │
+│  - localhost:8080 → QUIC → host's llama-server       │
+│  - Full OpenAI-compatible API (including SSE)        │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## Files
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC patches |
-| `mesh-inference/` | Rust binary: QUIC mesh, tunneling, process management |
+| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC patches (SET_TENSOR_GGUF, chatter reduction, B2B) |
+| `mesh-inference/` | Rust sidecar: QUIC mesh, tunneling, B2B rewriting, lite client proxy |
 | `Justfile` | Build and run tasks |
-| `PLAN.md` | Design analysis and detailed benchmark data |

@@ -1,171 +1,89 @@
-# Distributed LLM Inference — Plan & Results
+# Distributed LLM Inference — Design Notes & Results
 
-## What We Learned
+Historical notes from development. See README.md for current usage.
 
-### Transport benchmarks (same LAN, WiFi)
+## Transport Benchmarks (same LAN, WiFi)
+
 | Transport | Ping (median) | Throughput | Notes |
 |-----------|--------------|------------|-------|
-| Raw ICMP ping | ~30-80ms | n/a | WiFi baseline — jittery |
-| Raw TCP (python) | n/a | **30 MB/s** | WiFi ceiling |
-| WebRTC (p2p-llm) | ~48ms | **~15 MB/s** | Works both directions, survives stealth mode |
-| iroh QUIC direct | ~10-14ms | **3-5 MB/s** echo | Only works one direction (firewall), 10MB stalls |
+| Raw ICMP ping | ~30-80ms | n/a | WiFi baseline, jittery |
+| Raw TCP | n/a | **30 MB/s** | WiFi ceiling |
+| iroh QUIC direct | ~10-14ms | **3-5 MB/s** | Only works one direction with macOS stealth mode |
 | iroh QUIC relay | ~400ms | **2 MB/s** | Rate-limited, unusable for model data |
 
-### Key findings
-1. **iroh is unsuitable** — QUIC multipath holepunching is fragile, throughput is 6x worse than raw TCP even when direct works, 10MB transfers stall, and it can't penetrate macOS stealth mode in both directions. WebRTC ICE handles stealth mode fine.
-2. **The transport isn't the real problem** — even at 30 MB/s, loading a 13GB model takes 7+ minutes. The real fix is **not transferring model weights over the network at all**.
-3. **llama.cpp RPC is designed wrong for distributed** — it treats remote GPU like a dumb buffer. The orchestrator reads the GGUF, allocates remote buffers, then sends tensor data over TCP. Every `SET_TENSOR` is a synchronous round-trip. The `SET_TENSOR_HASH` + cache optimization exists but requires first-time transfer + cache warmup.
-4. **The `-fit` probing issue**: `weight_buft_supported()` calls `ggml_backend_buft_alloc_buffer(buft, 0)` to test op support. For RPC backends, this means: for every tensor × every possible op, it does `ALLOC_BUFFER(0 bytes)` + `supports_op` round-trips. With ~400ms RTT through relay, hundreds of probes = minutes of waiting. `-fit off` skips this.
+### Key finding
 
-## The Right Architecture
+iroh QUIC throughput is lower than raw TCP, but for the actual inference workload (activations are ~10KB/token, not GB) it doesn't matter. **QUIC mesh adds zero measurable overhead to inference tok/s** vs raw TCP — confirmed by back-to-back testing of all configurations.
 
-### Core insight: Both machines have the model file on disk
+The real bottleneck was always per-token RPC round-trip latency over WiFi (~40ms × 2 RTTs = ~80ms/token network cost), not throughput.
 
-If every node has the GGUF file locally (or can download it from e.g. HuggingFace), there is **zero need to transfer tensor weights over the network**. The orchestrator tells the worker "load tensor X from your local GGUF at offset Y, size Z" and the worker reads it from its own disk at NVMe speed.
+## The Core Insight
 
-### What needs to go over the network
-1. **Control plane** (~KB): "load this model", "here's the compute graph", "here's the result"
-2. **Activations** (~MB per token): intermediate results flowing between layers during inference
-3. **NOT weights** (~GB): these come from local disk
+Both machines have the model file on disk. There is **zero need to transfer model weights over the network**. The worker loads tensors from its own local GGUF at NVMe speed.
 
-### Design: Custom RPC protocol
+### What crosses the network
+- **Control plane** (~KB): graph compute commands, tensor metadata
+- **Activations** (~10KB/token): intermediate results at graph split boundaries
+- **NOT weights** (~17GB): these come from local disk
 
-Replace llama.cpp's `ggml-rpc` with a new protocol designed for distributed inference:
+## llama.cpp Patches
 
-#### Phase 1: Model Loading (zero network transfer)
-```
-Orchestrator                           Worker
-    |                                     |
-    |-- LOAD_MODEL(gguf_path, layers) --> |
-    |                                     | (reads GGUF from local disk)
-    |                                     | (allocates GPU buffers)
-    |                                     | (loads tensors into GPU)
-    |<-- MODEL_READY(layer_info) -------- |
-```
+Branch: `rpc-local-gguf` in `michaelneale/llama.cpp`
 
-- Worker loads its assigned layers from its own local copy of the GGUF
-- Model metadata (layer count, dimensions, vocab) is tiny — send once
-- No probing, no supports_op round-trips, no fit calculation
-- Load time: seconds (NVMe read speed), not minutes
+### 1. SET_TENSOR_GGUF (zero-transfer weight loading)
+- Client sends tensor name instead of tensor data
+- Server looks up tensor in its local GGUF index, reads from disk
+- **Result**: 17GB model loads in ~9s (NVMe) vs 14+ min (WiFi transfer)
 
-#### Phase 2: Inference (pipeline parallelism)
-```
-Orchestrator (layers 0-15)             Worker (layers 16-30)
-    |                                     |
-    | [compute layers 0-15]               |
-    |-- ACTIVATIONS(hidden_state) ------> |
-    |                                     | [compute layers 16-30]
-    |<-- ACTIVATIONS(output) ------------ |
-    | [sample token]                      |
-```
+### 2. Probing skip for RPC backends
+- `weight_buft_supported()` short-circuits for "RPC" prefix buffers
+- Eliminates hundreds of alloc/free probing round-trips at startup
 
-- Only activations cross the network: `hidden_dim × batch_size × sizeof(f16)`
-- For a 4096-dim model: 4096 × 1 × 2 = **8 KB per layer transition per token**
-- Even at 15 MB/s WiFi throughput: 8KB takes **0.5ms** — negligible
+### 3. get_alloc_size cache + non-weight GGUF skip
+- FNV hash cache for `get_alloc_size` responses: 558 → 8 calls per token
+- Skip GGUF lookup for intermediate tensors (only weights have GGUF entries)
+- **Result**: 2-18x improvement in tok/s from eliminating ~550 wasted RPC round-trips
 
-#### Phase 3: The actual implementation approach
+### 4. B2B direct server-to-server transfers
+- `REGISTER_PEER`: orchestrator tells workers about each other
+- `PUSH_TENSOR_TO_PEER`: source worker pushes activation data directly to destination worker
+- `PEER_TENSOR_DATA`: the actual data transfer (reuses SET_TENSOR wire format)
+- Threaded client handling in rpc-server (needed for concurrent peer connections)
+- **Result**: activation tensors at graph split boundaries flow directly worker→worker, bypassing orchestrator
 
-Rather than rewriting llama.cpp's backend system from scratch, we have two options:
+## Inference Benchmarks
 
-**Option A: Patch ggml-rpc to support local loading**
-- Add `RPC_CMD_LOAD_GGUF` command: worker loads tensors from local GGUF file
-- Skip `SET_TENSOR` entirely for weights — only use it for activations  
-- Keep the rest of the RPC protocol for `GRAPH_COMPUTE`, etc.
-- Pros: Minimal changes to llama.cpp, still uses its backend scheduler
-- Cons: Still limited by the orchestrator-centric model
+### 2-node mesh (M4 Max + Mac Mini, WiFi, GLM-4.7-Flash 17GB)
 
-**Option B: Split-brain architecture (preferred)**
-- Each node runs llama-server with its assigned layers
-- A lightweight coordinator routes requests through the pipeline
-- Each node loads its own layers from its own GGUF copy
-- Inter-node communication is just activation tensors
-- Pros: Each node is fully autonomous, no complex RPC
-- Cons: Need to implement layer splitting logic
+| Configuration | Prompt eval | Generation |
+|---|---|---|
+| Mini orchestrator (15% local + 85% remote, `--tensor-split 0.85,0.15`) | 27 tok/s | **21 tok/s** |
+| M4 Max orchestrator (82% local + 18% remote) | 25 tok/s | **16 tok/s** |
+| Mini orchestrator, all remote (`GGML_METAL_DEVICES=0`) | 3 tok/s | 2.5 tok/s |
+| Local only (M4 Max, no mesh) | 160 tok/s | 68 tok/s |
 
-**Option C: Patch ggml-rpc with "GGUF-aware set_tensor"**
-- Keep llama.cpp's orchestrator model but intercept `SET_TENSOR`
-- When the orchestrator tries to send tensor data, instead send the tensor name + GGUF file path
-- Worker looks up the tensor in its local GGUF and loads from disk
-- This is essentially making the `SET_TENSOR_HASH` + cache path work without first-time transfer
-- Pros: Simplest to implement, minimal llama.cpp changes
-- Cons: Orchestrator still does the scheduling
+### 3-node mesh (Mini orchestrator + 2 M4 Max workers, 40/40/20 split)
 
-### Recommended: Option C (simplest, biggest bang for buck)
+| Configuration | Generation |
+|---|---|
+| 3-node with B2B | **12-13 tok/s** |
+| 3-node without B2B | 12 tok/s |
 
-#### Implementation:
-1. **New RPC command**: `RPC_CMD_SET_TENSOR_GGUF`
-   - Request: `{ tensor_name, gguf_path, offset_in_file, size }`
-   - Worker opens the GGUF file, seeks to offset, reads data into GPU buffer
-   - Falls back to regular `SET_TENSOR` if file not found locally
+B2B shows no improvement in this test because both workers are on the same machine (the transfers are already localhost). The benefit appears when workers are on separate machines.
 
-2. **Orchestrator-side change**: In `ggml_backend_rpc_buffer_set_tensor()`:
-   - Before sending tensor data, try `SET_TENSOR_GGUF` with the tensor name
-   - If worker has the file → instant load, skip network transfer
-   - If worker doesn't have the file → fall back to `SET_TENSOR` (regular network transfer)
+### Per-token steady state
+- 7 RPC calls per token (down from ~290 before chatter reduction)
+- 2 blocking network round-trips per token (irreducible with current protocol)
+- WiFi ~40ms RTT × 2 = ~80ms network cost per token
 
-3. **Skip fit probing**: Always use `-fit off` equivalent — the orchestrator should know the split ahead of time based on declared memory, not probing
+## Key Design Decisions
 
-4. **Transport**: Use WebRTC (from p2p-llm) or plain TCP (for LAN). iroh is out.
-
-### Data flow with Option C:
-```
-Time to load 13GB model:
-  Current: 13GB / 15 MB/s = 14 minutes (network transfer)
-  With Option C: 13GB / 3 GB/s = 4 seconds (local NVMe read)
-  
-Time per inference token (activation transfer):
-  Hidden state: 4096 × 2 bytes = 8 KB
-  Network: 8KB / 15 MB/s = 0.5ms
-  Compute: ~20-50ms per layer
-  Network overhead: ~1-2% of compute time
-```
-
-## Results — Option C Implemented ✅
-
-Branch: `rpc-local-gguf` in `llama.cpp/`
-
-### Changes (197 lines, 4 files)
-- `ggml/src/ggml-rpc/ggml-rpc.cpp` — new `RPC_CMD_SET_TENSOR_GGUF` command + server handler
-- `ggml/include/ggml-rpc.h` — `ggml_backend_rpc_start_server_with_gguf()` API
-- `tools/rpc/rpc-server.cpp` — `--gguf PATH` CLI flag
-- `src/llama-model.cpp` — skip probing round-trips for RPC backends
-
-### Same-machine test (localhost TCP)
-- **Before:** 111s to load 17GB model (transferring 11.8GB over TCP)
-- **After:** 5s to load (zero network transfer, local NVMe reads)
-- 427 tensors / 8.3 GB loaded from GGUF, 0 via wire
-
-### Cross-machine test (M4 Max worker ↔ Mac Mini orchestrator, WiFi)
-- **Worker:** M4 Max (192.168.86.250), `rpc-server --gguf` on port 50052
-- **Orchestrator:** Mac Mini (192.168.86.60), `llama-server --rpc`
-- **843 tensors / 16.88 GB loaded from local GGUF on worker — zero bytes over WiFi**
-- **0 tensors transferred over network**
-- Model ready in ~30s (buffer alloc + disk reads + warmup), vs 14+ min before
-- Inference: ~2 tok/s (WiFi GRAPH_COMPUTE round-trip latency ~480ms/token)
-
-### Inference benchmarks (cross-machine WiFi, warmed up)
-
-**Before chatter reduction:**
-| Run | Prompt eval | Generation | Notes |
-|-----|-------------|------------|-------|
-| Cold | 2.4 tok/s | 1.3 tok/s | ~558 get_alloc_size + 20 wasted GGUF lookups per token |
-| Warm | 6.7-7.2 tok/s | 7.2-8.7 tok/s | Prompt cache hit |
-| New prompt, 50 tok | 1.4 tok/s | 4.0 tok/s | |
-| New prompt, 100 tok | 1.5 tok/s | 5.5 tok/s | |
-
-**After chatter reduction (cached get_alloc_size + skip GGUF for non-weights):**
-| Run | Prompt eval | Generation | Notes |
-|-----|-------------|------------|-------|
-| Cold | 14.0 tok/s | **24.2 tok/s** | |
-| Warm | 13-15 tok/s | **17-19 tok/s** | |
-| New prompt, 50 tok | **59 tok/s** | **18.5 tok/s** | |
-| New prompt, 100 tok | **36 tok/s** | **9.4 tok/s** | |
-
-**2-18x improvement** from eliminating 550+ wasted RPC round-trips per token.
-
-## Next Steps
-
-1. **Reduce inference round-trip cost** — see analysis below
-2. **Upstream PR** — clean up the patch and submit to llama.cpp upstream. The `SET_TENSOR_GGUF` + probing skip are fully backward compatible.
-3. **Mesh/discovery** — integrate with mesh-inference or p2p-llm for NAT traversal and auto-discovery.
-4. **Model distribution** — auto-download GGUF from HuggingFace on workers that don't have it yet.
+- **iroh over libp2p**: simpler API, built-in NAT traversal
+- **Same binary everywhere**: worker/host/client role determined by flags
+- **Single ALPN + single QUIC connection per peer**: multiplexed by first byte (gossip/tunnel/map/http)
+- **Model weights never transfer over the network**: both sides have the GGUF locally
+- **`--no-mmap` always used**: prevents full-file mmap crash on unified memory Macs with less VRAM than model size
+- **Orchestrator uses local GPU directly**: not through a local rpc-server (avoids redundant RPC overhead)
+- **Mini as orchestrator is faster than M4 Max as orchestrator**: because the bulk compute (85%) runs on M4 Max with zero network cost
+- **B2B via tunnel rewriting**: each worker's sidecar intercepts REGISTER_PEER and rewrites endpoints to local tunnel ports, enabling direct worker-to-worker transfers through the mesh
+- **Lite client via raw byte relay**: HTTP and SSE streaming work transparently through the QUIC tunnel with no protocol awareness
