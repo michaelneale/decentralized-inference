@@ -2,10 +2,11 @@
 
 llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
+mesh_dir := "mesh-inference"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
-# Clone and build the patched llama.cpp fork
+# Clone and build the patched llama.cpp fork + mesh-inference
 build:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -16,6 +17,11 @@ build:
     cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON
     cmake --build "{{build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
     echo "Build complete: {{build_dir}}/bin/"
+    if [ -d "{{mesh_dir}}" ]; then
+        echo "Building mesh-inference..."
+        cd "{{mesh_dir}}" && cargo build --release
+        echo "Mesh binary: {{mesh_dir}}/target/release/mesh-inference"
+    fi
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
@@ -29,6 +35,8 @@ download-model:
         curl -L -o "{{model}}" \
             "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf"
     fi
+
+# ── Raw TCP (no mesh) ──────────────────────────────────────────
 
 # Start rpc-server (worker) with local GGUF loading
 worker host="0.0.0.0" port="50052" device="MTL0" gguf=model:
@@ -67,18 +75,67 @@ local: build download-model
     echo "Press Ctrl+C to stop"
     wait
 
+# ── QUIC Mesh ──────────────────────────────────────────────────
+
+mesh_bin := mesh_dir / "target/release/mesh-inference"
+
+# Start a mesh worker (no llama-server, just rpc-server + mesh)
+# Prints an invite token for other nodes to join.
+mesh-worker gguf=model:
+    {{mesh_bin}} --model {{gguf}} --bin-dir {{build_dir}}/bin
+
+# Start a mesh orchestrator — joins a peer and launches llama-server.
+# The orchestrator uses its local GPU + remote workers via QUIC tunnel.
+mesh-serve join="" port="8090" gguf=model split="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ARGS="--model {{gguf}} --bin-dir {{build_dir}}/bin --serve {{port}}"
+    if [ -n "{{join}}" ]; then
+        ARGS="$ARGS --join {{join}}"
+    fi
+    if [ -n "{{split}}" ]; then
+        ARGS="$ARGS --tensor-split {{split}}"
+    fi
+    echo "Starting mesh orchestrator on port {{port}}..."
+    exec {{mesh_bin}} $ARGS
+
+# Create a portable tarball with all binaries for deployment to another machine
+bundle output="/tmp/mesh-bundle.tar.gz":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR=$(mktemp -d)
+    BUNDLE="$DIR/mesh-bundle"
+    mkdir -p "$BUNDLE"
+    cp {{mesh_bin}} "$BUNDLE/"
+    cp {{build_dir}}/bin/rpc-server "$BUNDLE/"
+    cp {{build_dir}}/bin/llama-server "$BUNDLE/"
+    for lib in {{build_dir}}/bin/*.dylib; do
+        cp "$lib" "$BUNDLE/" 2>/dev/null || true
+    done
+    # Fix rpaths for portability
+    for bin in "$BUNDLE/mesh-inference" "$BUNDLE/rpc-server" "$BUNDLE/llama-server"; do
+        [ -f "$bin" ] || continue
+        install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
+    done
+    tar czf {{output}} -C "$DIR" mesh-bundle/
+    rm -rf "$DIR"
+    echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"
+
+# ── Utilities ──────────────────────────────────────────────────
+
 # Stop all running servers
 stop:
+    pkill -f "mesh-inference" 2>/dev/null || true
     pkill -f "rpc-server" 2>/dev/null || true
     pkill -f "llama-server" 2>/dev/null || true
     echo "Stopped"
 
-# Quick test inference
-test:
-    curl -s http://localhost:8080/v1/chat/completions \
+# Quick test inference (works with any running server on 8080 or 8090)
+test port="8090":
+    curl -s http://localhost:{{port}}/v1/chat/completions \
         -H 'Content-Type: application/json' \
-        -d '{"model":"test","messages":[{"role":"user","content":"Hello! Say hi in one word."}],"max_tokens":10}' \
-        | python3 -m json.tool
+        -d '{"model":"test","messages":[{"role":"user","content":"Hello! Write a haiku about distributed computing."}],"max_tokens":50}' \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); t=d['timings']; print(d['choices'][0]['message'].get('content','')[:200]); print(f\"  prompt: {t['prompt_per_second']:.1f} tok/s  gen: {t['predicted_per_second']:.1f} tok/s ({t['predicted_n']} tok)\")"
 
 # Show the diff from upstream llama.cpp
 diff:
