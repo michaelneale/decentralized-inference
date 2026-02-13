@@ -37,6 +37,12 @@ struct Cli {
     /// Device for rpc-server (e.g. MTL0, CPU). Default: auto-detect.
     #[arg(long)]
     device: Option<String>,
+
+    /// Tensor split ratios for llama-server (e.g. "0.8,0.2").
+    /// Controls how model layers are distributed across GPU backends.
+    /// Order: remote RPC backends first, then local GPU (if available).
+    #[arg(long)]
+    tensor_split: Option<String>,
 }
 
 #[tokio::main]
@@ -124,7 +130,7 @@ async fn main() -> Result<()> {
             tunnel_ports.len()
         );
 
-        launch::start_llama_server(&bin_dir, &model, http_port, &tunnel_ports).await?;
+        launch::start_llama_server(&bin_dir, &model, http_port, &tunnel_ports, cli.tensor_split.as_deref()).await?;
         eprintln!("llama-server ready: http://localhost:{http_port}");
     }
 
