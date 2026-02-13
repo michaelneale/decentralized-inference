@@ -114,17 +114,17 @@ async fn main() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let tunnel_ports = tunnel_mgr.peer_ports().await;
-        // Include local rpc-server + all remote tunnel ports
-        let mut all_rpc_ports = vec![rpc_port];
-        all_rpc_ports.extend_from_slice(&tunnel_ports);
+        // Only use remote tunnel ports as RPC backends.
+        // The orchestrator uses its own GPU directly (local Metal / CUDA) — much faster
+        // than going through a local rpc-server since it avoids the RPC round-trip overhead.
+        // Remote workers contribute their GPUs via the QUIC tunnel.
         eprintln!(
-            "Got {} peer(s), starting llama-server with {} RPC endpoints (1 local + {} tunnels)",
+            "Got {} peer(s), starting llama-server with {} remote RPC endpoint(s)",
             tunnel_ports.len(),
-            all_rpc_ports.len(),
             tunnel_ports.len()
         );
 
-        launch::start_llama_server(&bin_dir, &model, http_port, &all_rpc_ports).await?;
+        launch::start_llama_server(&bin_dir, &model, http_port, &tunnel_ports).await?;
         eprintln!("llama-server ready: http://localhost:{http_port}");
     }
 
