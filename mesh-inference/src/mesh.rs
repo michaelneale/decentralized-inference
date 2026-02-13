@@ -43,6 +43,9 @@ struct PeerAnnouncement {
     addr: EndpointAddr,
     #[serde(default)]
     role: NodeRole,
+    /// GGUF model names available on this node (e.g. ["GLM-4.7-Flash-Q4_K_M"])
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,7 @@ pub struct PeerInfo {
     pub addr: EndpointAddr,
     pub tunnel_port: Option<u16>,
     pub role: NodeRole,
+    pub models: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -58,6 +62,7 @@ pub struct Node {
     endpoint: Endpoint,
     state: Arc<Mutex<MeshState>>,
     role: Arc<Mutex<NodeRole>>,
+    models: Arc<Mutex<Vec<String>>>,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
@@ -108,6 +113,7 @@ impl Node {
                 remote_tunnel_maps: HashMap::new(),
             })),
             role: Arc::new(Mutex::new(role)),
+            models: Arc::new(Mutex::new(Vec::new())),
             peer_change_tx,
             peer_change_rx,
             tunnel_tx,
@@ -142,6 +148,10 @@ impl Node {
 
     pub async fn set_role(&self, role: NodeRole) {
         *self.role.lock().await = role;
+    }
+
+    pub async fn set_models(&self, models: Vec<String>) {
+        *self.models.lock().await = models;
     }
 
     pub async fn peers(&self) -> Vec<PeerInfo> {
@@ -417,12 +427,11 @@ impl Node {
         let _ = recv.read_to_end(0).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Register peer — find their own announcement for role info
-        let peer_role = their_announcements.iter()
-            .find(|a| a.addr.id == peer_id)
-            .map(|a| a.role.clone())
-            .unwrap_or_default();
-        self.add_peer(peer_id, addr, peer_role).await;
+        // Register peer — find their own announcement for role + models
+        let peer_ann = their_announcements.iter().find(|a| a.addr.id == peer_id);
+        let peer_role = peer_ann.map(|a| a.role.clone()).unwrap_or_default();
+        let peer_models = peer_ann.map(|a| a.models.clone()).unwrap_or_default();
+        self.add_peer(peer_id, addr, peer_role, peer_models).await;
 
         // Discover new peers (don't block on failures)
         for ann in their_announcements {
@@ -460,10 +469,10 @@ impl Node {
         // Wait for the remote to finish their send
         let _ = recv.read_to_end(0).await;
 
-        // Register peer with role
+        // Register peer with role + models
         for ann in &their_announcements {
             if ann.addr.id == remote {
-                self.add_peer(remote, ann.addr.clone(), ann.role.clone()).await;
+                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone()).await;
             }
         }
 
@@ -518,19 +527,19 @@ impl Node {
         Ok(())
     }
 
-    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole) {
+    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>) {
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
-            // Update role if peer already known (may have changed)
             if existing.role != role {
                 tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, role);
                 existing.role = role;
             }
+            existing.models = models;
             return;
         }
-        tracing::info!("Peer added: {} role={:?} (total: {})", id.fmt_short(), role, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role });
+        tracing::info!("Peer added: {} role={:?} models={:?} (total: {})", id.fmt_short(), role, models, state.peers.len() + 1);
+        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models });
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
@@ -539,12 +548,14 @@ impl Node {
     async fn collect_announcements(&self) -> Vec<PeerAnnouncement> {
         let state = self.state.lock().await;
         let my_role = self.role.lock().await.clone();
+        let my_models = self.models.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
-            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone() })
+            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone() })
             .collect();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
+            models: my_models,
         });
         announcements
     }

@@ -213,9 +213,10 @@ function render() {
   // Peers
   const peersList = document.getElementById('peersList');
   if (state.peers && state.peers.length > 0) {
-    peersList.innerHTML = state.peers.map(p =>
-      `<div class="peer-row"><span class="peer-id">${p.id}</span><span class="peer-role">${p.role}</span></div>`
-    ).join('');
+    peersList.innerHTML = state.peers.map(p => {
+      const models = p.models && p.models.length > 0 ? ` · ${p.models.join(', ')}` : '';
+      return `<div class="peer-row"><span class="peer-id">${p.id}</span><span class="peer-role">${p.role}${models}</span></div>`;
+    }).join('');
   } else {
     peersList.innerHTML = '';
   }

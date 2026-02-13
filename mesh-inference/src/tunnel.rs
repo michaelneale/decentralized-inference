@@ -16,7 +16,7 @@ use anyhow::Result;
 use iroh::EndpointId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -33,7 +33,7 @@ pub fn bytes_transferred() -> u64 {
 #[derive(Clone)]
 pub struct Manager {
     node: Node,
-    rpc_port: u16,
+    rpc_port: Arc<AtomicU16>,
     /// EndpointId → local tunnel port
     tunnel_ports: Arc<Mutex<HashMap<EndpointId, u16>>>,
     /// Port rewrite map for B2B: orchestrator tunnel port → local tunnel port
@@ -54,7 +54,7 @@ impl Manager {
         let port_rewrite_map = rewrite::new_rewrite_map();
         let mgr = Manager {
             node: node.clone(),
-            rpc_port,
+            rpc_port: Arc::new(AtomicU16::new(rpc_port)),
             tunnel_ports: Arc::new(Mutex::new(HashMap::new())),
             port_rewrite_map,
         };
@@ -66,13 +66,18 @@ impl Manager {
         });
 
         // Handle inbound RPC tunnel streams (with REGISTER_PEER rewriting)
-        let rpc_port = mgr.rpc_port;
+        let rpc_port_ref = mgr.rpc_port.clone();
         let rewrite_map = mgr.port_rewrite_map.clone();
         tokio::spawn(async move {
             while let Some((send, recv)) = tunnel_stream_rx.recv().await {
+                let port = rpc_port_ref.load(Ordering::Relaxed);
+                if port == 0 {
+                    tracing::warn!("Inbound RPC tunnel but no rpc-server running, dropping");
+                    continue;
+                }
                 let rewrite_map = rewrite_map.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_inbound_stream(send, recv, rpc_port, rewrite_map).await {
+                    if let Err(e) = handle_inbound_stream(send, recv, port, rewrite_map).await {
                         tracing::warn!("Inbound RPC tunnel stream error: {e}");
                     }
                 });
@@ -93,6 +98,13 @@ impl Manager {
         }
 
         Ok(mgr)
+    }
+
+    /// Update the local rpc-server port (for inbound tunnel streams).
+    /// Called when rpc-server starts after the tunnel manager.
+    pub fn set_rpc_port(&self, port: u16) {
+        self.rpc_port.store(port, Ordering::Relaxed);
+        tracing::info!("Tunnel manager: rpc_port updated to {port}");
     }
 
     /// Wait until we have at least `n` peers with active tunnels

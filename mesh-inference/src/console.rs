@@ -81,6 +81,7 @@ struct StatusPayload {
 struct PeerPayload {
     id: String,
     role: String,
+    models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +121,7 @@ impl ConsoleState {
                     NodeRole::Host { http_port } => format!("LLM Host (:{http_port})"),
                     NodeRole::Client => "Client".into(),
                 },
+                models: p.models,
             }).collect();
             (Some(id), Some(token), peers)
         } else {
@@ -229,24 +231,25 @@ fn detect_binaries() -> Option<PathBuf> {
 pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
     let state = ConsoleState::new();
 
-    // Start mesh node immediately (as idle — role chosen later)
+    // Start mesh node + tunnel manager once — never restart.
+    // rpc_port starts at 0 (no rpc-server yet), updated when user picks a role.
     {
         let (node, channels) = mesh::Node::start(NodeRole::Client).await?;
+        let tunnel_mgr = tunnel::Manager::start(
+            node.clone(),
+            0, // no rpc-server yet
+            channels.rpc,
+            None, // no llama-server HTTP yet
+            channels.http,
+        ).await?;
+
+        // Set available models from disk so gossip broadcasts them
+        let model_names: Vec<String> = scan_models().iter().map(|m| m.name.clone()).collect();
+        node.set_models(model_names).await;
+
         let mut inner = state.inner.lock().await;
         inner.node = Some(node.clone());
-
-        // We need a minimal tunnel channel consumer so the mesh doesn't block.
-        // These channels are drained but not used until a role is chosen.
-        tokio::spawn(async move {
-            let mut rpc_rx = channels.rpc;
-            let mut http_rx = channels.http;
-            loop {
-                tokio::select! {
-                    _ = rpc_rx.recv() => {}
-                    _ = http_rx.recv() => {}
-                }
-            }
-        });
+        inner.tunnel_mgr = Some(tunnel_mgr);
     }
 
     // Join any initial tokens
@@ -534,7 +537,6 @@ async fn download_model_task(state: &ConsoleState, dir: &std::path::Path, dest: 
 }
 
 async fn handle_share_gpu(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    // Parse model path from body
     let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let model_path = req.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if model_path.is_empty() {
@@ -548,10 +550,9 @@ async fn handle_share_gpu(stream: &mut TcpStream, state: &ConsoleState, body: &s
 
     let bin_dir = match detect_binaries() {
         Some(d) => d,
-        None => return respond_err(stream, "llama.cpp binaries (rpc-server) not found next to mesh-inference binary").await,
+        None => return respond_err(stream, "llama.cpp binaries not found").await,
     };
 
-    // Restart node with Worker role
     let mut inner = state.inner.lock().await;
     if inner.role != CurrentRole::Idle {
         return respond_err(stream, "Already running — stop first").await;
@@ -563,7 +564,12 @@ async fn handle_share_gpu(stream: &mut TcpStream, state: &ConsoleState, body: &s
         Err(e) => return respond_err(stream, &format!("Failed to start rpc-server: {e}")).await,
     };
 
-    // Update node role to Worker
+    // Update tunnel manager to forward inbound streams to rpc-server
+    if let Some(tunnel_mgr) = &inner.tunnel_mgr {
+        tunnel_mgr.set_rpc_port(rpc_port);
+    }
+
+    // Update gossip role — no node restart needed
     if let Some(node) = &inner.node {
         node.set_role(NodeRole::Worker).await;
     }
@@ -572,58 +578,6 @@ async fn handle_share_gpu(stream: &mut TcpStream, state: &ConsoleState, body: &s
     inner.model_path = Some(model);
     inner.role = CurrentRole::ShareGpu;
     drop(inner);
-
-    // Start tunnel manager for inbound streams
-    let inner = state.inner.lock().await;
-    if inner.node.is_some() {
-        let (_, channels) = {
-            // We need new channels — the old ones were consumed at startup.
-            // For now, restart the node with the right role.
-            // Actually the tunnel streams go to the channels created at Node::start.
-            // We consumed them with a dummy drain task. This is a problem.
-            // TODO: restructure so channels can be reused.
-            // For now, the inbound tunnel streams from the dummy task are lost,
-            // but outbound tunnels (peers connecting to our rpc-server) still work
-            // because peers open new QUIC streams which get dispatched.
-            drop(inner);
-            // We need to restart the node properly with tunnel support.
-            // Let's do a full restart.
-            let (new_node, new_channels) = mesh::Node::start(NodeRole::Worker).await
-                .map_err(|e| anyhow::anyhow!("Failed to restart node: {e}"))?;
-
-            // Re-join any peers the old node knew about
-            let mut inner = state.inner.lock().await;
-            if let Some(old_node) = &inner.node {
-                let old_peers = old_node.peers().await;
-                inner.node = Some(new_node.clone());
-                drop(inner);
-
-                // Re-join known peers
-                for peer in &old_peers {
-                    let addr_json = serde_json::to_vec(&peer.addr)?;
-                    let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &addr_json);
-                    let _ = new_node.join(&token).await;
-                }
-                // Also try to get old peers to find us via our new token
-                eprintln!("Node restarted as Worker. New token: {}", new_node.invite_token());
-            } else {
-                inner.node = Some(new_node.clone());
-                drop(inner);
-            }
-
-            (new_node, new_channels)
-        };
-
-        let tunnel_mgr = tunnel::Manager::start(
-            state.inner.lock().await.node.clone().unwrap(),
-            rpc_port,
-            channels.rpc,
-            None,
-            channels.http,
-        ).await?;
-
-        state.inner.lock().await.tunnel_mgr = Some(tunnel_mgr);
-    }
 
     state.push_status().await;
     respond_ok(stream, &format!("Sharing GPU — rpc-server on port {rpc_port}")).await
@@ -646,7 +600,7 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
 
     let bin_dir = match detect_binaries() {
         Some(d) => d,
-        None => return respond_err(stream, "llama.cpp binaries not found next to mesh-inference binary").await,
+        None => return respond_err(stream, "llama.cpp binaries not found").await,
     };
 
     let mut inner = state.inner.lock().await;
@@ -654,48 +608,26 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
         return respond_err(stream, "Already running — stop first").await;
     }
 
-    // Restart node as Host
-    let (new_node, new_channels) = mesh::Node::start(NodeRole::Host { http_port: llama_port }).await?;
+    // Update role on existing node — no restart
+    let node = inner.node.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?.clone();
+    let tunnel_mgr = inner.tunnel_mgr.as_ref().ok_or_else(|| anyhow::anyhow!("Tunnel manager not started"))?.clone();
+    node.set_role(NodeRole::Host { http_port: llama_port }).await;
 
-    // Re-join known peers
-    if let Some(old_node) = &inner.node {
-        let old_peers = old_node.peers().await;
-        for peer in &old_peers {
-            let addr_json = serde_json::to_vec(&peer.addr)?;
-            let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &addr_json);
-            let _ = new_node.join(&token).await;
-        }
-    }
-    inner.node = Some(new_node.clone());
     inner.model_path = Some(model.clone());
     inner.role = CurrentRole::RunLlm;
     inner.llama_port = Some(llama_port);
     drop(inner);
 
-    // Don't need local rpc-server — llama-server uses local GPU directly.
-    // Start tunnel manager with a dummy rpc port (inbound RPC tunnels won't be used).
-    let tunnel_mgr = tunnel::Manager::start(
-        new_node.clone(),
-        0, // no local rpc-server
-        new_channels.rpc,
-        Some(llama_port),
-        new_channels.http,
-    ).await?;
-
-    state.inner.lock().await.tunnel_mgr = Some(tunnel_mgr.clone());
     state.push_status().await;
-
-    // Send response immediately — llama-server startup happens in background
     respond_ok(stream, "Starting LLM...").await?;
 
-    // Start llama-server — use any existing worker peers, don't wait if none
+    // Start llama-server in background — use any existing worker peers
     let state2 = state.clone();
     tokio::spawn(async move {
-        // Brief pause to let any pending peer connections settle
-        let existing_peers = new_node.peers().await;
+        let existing_peers = node.peers().await;
         let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
         if has_workers {
-            eprintln!("Found {} worker(s) in mesh, waiting for tunnels...", existing_peers.len());
+            eprintln!("Found worker(s) in mesh, waiting for tunnels...");
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tunnel_mgr.wait_for_peers(1),
@@ -706,8 +638,8 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        // Only use tunnel ports for peers that are actually Workers
-        let worker_peers = new_node.peers().await;
+        // Only use tunnel ports for Worker peers
+        let worker_peers = node.peers().await;
         let worker_ids: Vec<_> = worker_peers.iter()
             .filter(|p| matches!(p.role, NodeRole::Worker))
             .map(|p| p.id)
@@ -720,12 +652,10 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
 
         if n_peers > 0 {
             eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
-
-            // B2B tunnel map exchange
             let my_map = tunnel_mgr.peer_ports_map().await;
-            let _ = new_node.broadcast_tunnel_map(my_map).await;
-            let _ = new_node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
-            let remote_maps = new_node.all_remote_tunnel_maps().await;
+            let _ = node.broadcast_tunnel_map(my_map).await;
+            let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
+            let remote_maps = node.all_remote_tunnel_maps().await;
             tunnel_mgr.update_rewrite_map(&remote_maps).await;
         } else {
             eprintln!("No workers found — starting llama-server with local GPU only");
