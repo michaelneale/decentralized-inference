@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mesh-inference</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 2rem; }
+  .container { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; }
+  h2 { font-size: 1.1rem; font-weight: 500; color: #888; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid #222; padding-bottom: 0.4rem; }
+  .node-id { font-family: monospace; color: #6cf; font-size: 0.9rem; }
+  .token-row { display: flex; align-items: center; gap: 0.5rem; }
+  .token-preview { font-family: monospace; font-size: 0.8rem; color: #888; }
+  .copy-btn { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0.3rem 0.6rem; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; white-space: nowrap; transition: all 0.15s; }
+  .copy-btn:hover { background: #333; border-color: #555; }
+  .copy-btn.copied { color: #6f6; border-color: #4a4; }
+
+  .choices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin: 1rem 0; }
+  .choice { background: #151515; border: 2px solid #333; border-radius: 8px; padding: 1rem; cursor: pointer; text-align: center; transition: all 0.15s; }
+  .choice:hover { border-color: #555; background: #1a1a1a; }
+  .choice.active { border-color: #6cf; background: #0c1a2a; }
+  .choice.disabled { opacity: 0.4; pointer-events: none; }
+  .choice-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+  .choice-title { font-weight: 600; font-size: 0.95rem; }
+  .choice-desc { font-size: 0.75rem; color: #888; margin-top: 0.3rem; line-height: 1.3; }
+
+  .section { background: #111; border: 1px solid #222; border-radius: 6px; padding: 1rem; margin: 0.75rem 0; }
+  .hidden { display: none !important; }
+  .section.hidden { display: none; }
+
+  .peer-row { display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a; }
+  .peer-row:last-child { border-bottom: none; }
+  .peer-id { font-family: monospace; color: #6cf; }
+  .peer-role { font-size: 0.8rem; color: #888; }
+  .no-peers { color: #555; font-size: 0.85rem; font-style: italic; }
+
+  .join-row { display: flex; gap: 0.5rem; }
+  .join-row input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.6rem; color: #e0e0e0; font-family: monospace; font-size: 0.8rem; }
+  .join-row input:focus { outline: none; border-color: #6cf; }
+
+  button, .btn { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0.4rem 0.8rem; color: #e0e0e0; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  button:hover, .btn:hover { background: #333; border-color: #555; }
+  .btn-primary { background: #1a3a5c; border-color: #2a5a8c; }
+  .btn-primary:hover { background: #2a4a6c; }
+  .btn-danger { background: #3a1a1a; border-color: #5a2a2a; }
+  .btn-danger:hover { background: #4a2a2a; }
+
+  select { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.6rem; color: #e0e0e0; font-size: 0.85rem; width: 100%; }
+  select:focus { outline: none; border-color: #6cf; }
+
+  .model-row { display: flex; justify-content: space-between; align-items: center; margin: 0.5rem 0; }
+  .model-name { font-weight: 500; }
+  .model-size { color: #888; font-size: 0.85rem; }
+
+  .status-line { display: flex; align-items: center; gap: 0.5rem; margin: 0.3rem 0; font-size: 0.9rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-green { background: #4c4; }
+  .dot-yellow { background: #cc4; }
+  .dot-red { background: #c44; }
+  .dot-blue { background: #6cf; }
+
+  .progress-bar { width: 100%; height: 6px; background: #222; border-radius: 3px; overflow: hidden; margin: 0.5rem 0; }
+  .progress-fill { height: 100%; background: #6cf; transition: width 0.3s; }
+
+  .chat-area { margin-top: 0.75rem; }
+  .chat-messages { min-height: 80px; max-height: 300px; overflow-y: auto; background: #0a0a0a; border: 1px solid #222; border-radius: 4px; padding: 0.5rem; margin-bottom: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
+  .chat-messages:empty::before { content: "Type a message below to test..."; color: #444; }
+  .chat-input { display: flex; gap: 0.5rem; }
+  .chat-input input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.5rem 0.75rem; color: #e0e0e0; font-size: 0.9rem; }
+  .chat-input input:focus { outline: none; border-color: #6cf; }
+  .msg-user { color: #6cf; }
+  .msg-assistant { color: #e0e0e0; }
+  .msg-thinking { color: #555; font-style: italic; }
+
+  .api-hint { font-family: monospace; font-size: 0.75rem; color: #666; background: #0a0a0a; border: 1px solid #222; border-radius: 4px; padding: 0.5rem; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-all; }
+
+  .warning { color: #cc4; font-size: 0.8rem; margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>mesh-inference</h1>
+  <div id="nodeInfo" class="node-id">starting...</div>
+
+  <h2>Mesh</h2>
+  <div class="section">
+    <div class="join-row">
+      <input type="text" id="joinToken" placeholder="Paste an invite token to join a mesh...">
+      <button onclick="joinMesh()" class="btn-primary">Join</button>
+    </div>
+  </div>
+
+  <div id="tokenSection" class="section hidden">
+    <div class="token-row">
+      <span style="font-size: 0.85rem; color: #888;">Your invite token:</span>
+      <span class="token-preview" id="tokenPreview"></span>
+      <button class="copy-btn" id="copyBtn" onclick="copyToken()">📋 Copy</button>
+    </div>
+    <span id="tokenFull" style="display:none;"></span>
+  </div>
+
+  <div id="peersSection">
+    <div style="display: flex; justify-content: space-between; align-items: baseline;">
+      <h2>Peers</h2>
+      <span id="peerCount" style="font-size: 0.8rem; color: #555;"></span>
+    </div>
+    <div id="peersList" class="section"><div class="no-peers">No peers yet</div></div>
+  </div>
+
+  <h2 id="roleTitle">What do you want to do?</h2>
+  <div id="choicesRow" class="choices">
+    <div class="choice" id="choiceGpu" onclick="selectRole('share_gpu')">
+      <div class="choice-icon">🖥</div>
+      <div class="choice-title">Share GPU</div>
+      <div class="choice-desc">Contribute your GPU to the mesh. Others run the LLM using your compute.</div>
+    </div>
+    <div class="choice" id="choiceLlm" onclick="selectRole('run_llm')">
+      <div class="choice-icon">🧠</div>
+      <div class="choice-title">Run LLM</div>
+      <div class="choice-desc">Run an LLM using your GPU + any mesh workers. Exposes an API.</div>
+    </div>
+    <div class="choice" id="choiceConnect" onclick="selectRole('just_connect')">
+      <div class="choice-icon">💬</div>
+      <div class="choice-title">Just Connect</div>
+      <div class="choice-desc">Use an LLM someone else is running. No GPU or model needed.</div>
+    </div>
+  </div>
+
+  <!-- Share GPU config -->
+  <div id="gpuConfig" class="section hidden">
+    <div style="margin-bottom: 0.5rem; font-weight: 500;">Select model:</div>
+    <select id="gpuModelSelect"></select>
+    <div id="gpuNoModel" class="warning hidden">No models found in ~/.models/</div>
+    <div id="gpuDownloadRow" class="hidden" style="margin-top: 0.5rem;">
+      <button onclick="downloadModel()" class="btn-primary">Download GLM-4.7-Flash (17GB)</button>
+    </div>
+    <div id="downloadProgress" class="hidden" style="margin-top: 0.5rem;">
+      <div style="font-size: 0.85rem;">Downloading...</div>
+      <div class="progress-bar"><div class="progress-fill" id="downloadFill"></div></div>
+      <div id="downloadSize" style="font-size: 0.8rem; color: #888;"></div>
+    </div>
+    <button onclick="startShareGpu()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="gpuStartBtn">Start sharing GPU</button>
+    <div id="gpuNoBins" class="warning hidden">⚠ llama.cpp binaries (rpc-server) not found next to mesh-inference</div>
+  </div>
+
+  <!-- Run LLM config -->
+  <div id="llmConfig" class="section hidden">
+    <div style="margin-bottom: 0.5rem; font-weight: 500;">Select model:</div>
+    <select id="llmModelSelect"></select>
+    <div id="llmNoModel" class="warning hidden">No models found in ~/.models/</div>
+    <div id="llmDownloadRow" class="hidden" style="margin-top: 0.5rem;">
+      <button onclick="downloadModel()" class="btn-primary">Download GLM-4.7-Flash (17GB)</button>
+    </div>
+    <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
+      <label style="font-size: 0.85rem; white-space: nowrap;">API port:</label>
+      <input type="number" id="llmPort" value="8090" style="width: 80px; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.3rem 0.5rem; color: #e0e0e0;">
+    </div>
+    <button onclick="startRunLlm()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="llmStartBtn">Start LLM</button>
+    <div id="llmNoBins" class="warning hidden">⚠ llama.cpp binaries not found next to mesh-inference</div>
+  </div>
+
+  <!-- Active status -->
+  <div id="activeStatus" class="section hidden">
+    <div id="activeRole" class="status-line"></div>
+    <div id="activeDetail" style="margin-top: 0.5rem;"></div>
+    <button onclick="stopAll()" class="btn-danger" style="margin-top: 0.75rem;">Stop</button>
+  </div>
+
+  <!-- Chat (for Run LLM and Just Connect) -->
+  <div id="chatSection" class="hidden">
+    <h2>Try it</h2>
+    <div id="apiHint" class="api-hint"></div>
+    <div class="chat-area">
+      <div class="chat-messages" id="chatMessages"></div>
+      <div class="chat-input">
+        <input type="text" id="chatInput" placeholder="Say something..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()" class="btn-primary">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let state = {};
+let selectedRole = null;
+
+// SSE for live updates
+const evtSource = new EventSource('/api/events');
+evtSource.onmessage = (e) => {
+  state = JSON.parse(e.data);
+  render();
+};
+
+function render() {
+  // Node info
+  document.getElementById('nodeInfo').textContent = state.node_id ? `Node: ${state.node_id}` : 'starting...';
+
+  // Token
+  const tokenSection = document.getElementById('tokenSection');
+  if (state.token) {
+    tokenSection.classList.remove('hidden');
+    document.getElementById('tokenFull').textContent = state.token;
+    document.getElementById('tokenPreview').textContent = state.token.slice(0, 20) + '…';
+  }
+
+  // Peers
+  const list = document.getElementById('peersList');
+  const count = document.getElementById('peerCount');
+  if (state.peers && state.peers.length > 0) {
+    count.textContent = `(${state.peers.length})`;
+    list.innerHTML = state.peers.map(p => `
+      <div class="peer-row">
+        <span class="peer-id">${p.id}</span>
+        <span class="peer-role">${p.role}</span>
+      </div>
+    `).join('');
+  } else {
+    count.textContent = '';
+    list.innerHTML = '<div class="no-peers">No peers yet — share your invite token or paste one above</div>';
+  }
+
+  // Models in selects
+  populateModelSelect('gpuModelSelect', 'gpuNoModel', 'gpuDownloadRow');
+  populateModelSelect('llmModelSelect', 'llmNoModel', 'llmDownloadRow');
+
+  // Binary warnings
+  document.getElementById('gpuNoBins').classList.toggle('hidden', state.has_binaries);
+  document.getElementById('llmNoBins').classList.toggle('hidden', state.has_binaries);
+  document.getElementById('gpuStartBtn').disabled = !state.has_binaries;
+  document.getElementById('llmStartBtn').disabled = !state.has_binaries;
+
+  // Download progress
+  const dp = document.getElementById('downloadProgress');
+  if (state.download) {
+    dp.classList.remove('hidden');
+    const pct = state.download.total ? (state.download.downloaded / state.download.total * 100) : 0;
+    document.getElementById('downloadFill').style.width = pct ? pct + '%' : '0%';
+    const mb = (state.download.downloaded / 1048576).toFixed(0);
+    document.getElementById('downloadSize').textContent = state.download.total
+      ? `${mb} MB / ${(state.download.total / 1048576).toFixed(0)} MB`
+      : `${mb} MB downloaded...`;
+  } else {
+    dp.classList.add('hidden');
+  }
+
+  // Role-dependent UI
+  const isActive = state.role !== 'idle';
+  document.getElementById('choicesRow').classList.toggle('hidden', isActive);
+  document.getElementById('roleTitle').textContent = isActive ? 'Status' : 'What do you want to do?';
+
+  // Hide config panels when active
+  if (isActive) {
+    document.getElementById('gpuConfig').classList.add('hidden');
+    document.getElementById('llmConfig').classList.add('hidden');
+  }
+
+  const activeStatus = document.getElementById('activeStatus');
+  const chatSection = document.getElementById('chatSection');
+
+  if (state.role === 'share_gpu') {
+    activeStatus.classList.remove('hidden');
+    document.getElementById('activeRole').innerHTML = '<span class="dot dot-green"></span> Sharing GPU';
+    document.getElementById('activeDetail').innerHTML = state.model_path
+      ? `Model: ${state.model_path.split('/').pop()}<br>Waiting for someone to use your compute...`
+      : 'rpc-server running';
+    chatSection.classList.add('hidden');
+  } else if (state.role === 'run_llm') {
+    activeStatus.classList.remove('hidden');
+    const port = state.llama_port || 8090;
+    if (state.llama_port) {
+      document.getElementById('activeRole').innerHTML = '<span class="dot dot-green"></span> LLM running';
+      document.getElementById('activeDetail').innerHTML = `API: <a href="http://localhost:${port}" style="color:#6cf;">http://localhost:${port}</a>`;
+      chatSection.classList.remove('hidden');
+      document.getElementById('apiHint').textContent = `curl http://localhost:${port}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'`;
+    } else {
+      document.getElementById('activeRole').innerHTML = '<span class="dot dot-yellow"></span> Starting LLM...';
+      document.getElementById('activeDetail').innerHTML = 'Loading model and waiting for workers...';
+      chatSection.classList.add('hidden');
+    }
+  } else if (state.role === 'just_connect') {
+    activeStatus.classList.remove('hidden');
+    const port = state.client_port || 8080;
+    document.getElementById('activeRole').innerHTML = '<span class="dot dot-blue"></span> Connected as client';
+    document.getElementById('activeDetail').innerHTML = `API: <a href="http://localhost:${port}" style="color:#6cf;">http://localhost:${port}</a>`;
+    chatSection.classList.remove('hidden');
+    document.getElementById('apiHint').textContent = `curl http://localhost:${port}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'`;
+  } else {
+    activeStatus.classList.add('hidden');
+    chatSection.classList.add('hidden');
+  }
+
+  // Disable "Just Connect" if no host peer
+  const hasHost = state.peers && state.peers.some(p => p.role.startsWith('Run LLM'));
+  document.getElementById('choiceConnect').classList.toggle('disabled', !hasHost);
+}
+
+function populateModelSelect(selectId, noModelId, downloadRowId) {
+  const sel = document.getElementById(selectId);
+  const noModel = document.getElementById(noModelId);
+  const dlRow = document.getElementById(downloadRowId);
+
+  if (state.models && state.models.length > 0) {
+    const prev = sel.value;
+    sel.innerHTML = state.models.map(m =>
+      `<option value="${m.path}">${m.name} (${m.size})</option>`
+    ).join('');
+    if (prev) sel.value = prev;
+    sel.classList.remove('hidden');
+    noModel.classList.add('hidden');
+    dlRow.classList.add('hidden');
+  } else {
+    sel.innerHTML = '';
+    sel.classList.add('hidden');
+    noModel.classList.remove('hidden');
+    dlRow.classList.remove('hidden');
+  }
+}
+
+function selectRole(role) {
+  selectedRole = role;
+  document.querySelectorAll('.choice').forEach(c => c.classList.remove('active'));
+
+  document.getElementById('gpuConfig').classList.add('hidden');
+  document.getElementById('llmConfig').classList.add('hidden');
+
+  if (role === 'share_gpu') {
+    document.getElementById('choiceGpu').classList.add('active');
+    document.getElementById('gpuConfig').classList.remove('hidden');
+  } else if (role === 'run_llm') {
+    document.getElementById('choiceLlm').classList.add('active');
+    document.getElementById('llmConfig').classList.remove('hidden');
+  } else if (role === 'just_connect') {
+    document.getElementById('choiceConnect').classList.add('active');
+    startJustConnect();
+  }
+}
+
+async function joinMesh() {
+  const token = document.getElementById('joinToken').value.trim();
+  if (!token) return;
+  const res = await fetch('/api/join', { method: 'POST', body: token });
+  const data = await res.json();
+  if (data.ok) {
+    document.getElementById('joinToken').value = '';
+  } else {
+    alert(data.error || 'Failed to join');
+  }
+}
+
+async function downloadModel() {
+  await fetch('/api/download-model', { method: 'POST' });
+}
+
+async function startShareGpu() {
+  const model = document.getElementById('gpuModelSelect').value;
+  if (!model) return alert('Select a model first');
+  const res = await fetch('/api/share-gpu', {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  });
+  const data = await res.json();
+  if (!data.ok) alert(data.error || 'Failed');
+}
+
+async function startRunLlm() {
+  const model = document.getElementById('llmModelSelect').value;
+  const port = parseInt(document.getElementById('llmPort').value) || 8090;
+  if (!model) return alert('Select a model first');
+  const res = await fetch('/api/run-llm', {
+    method: 'POST',
+    body: JSON.stringify({ model, port }),
+  });
+  const data = await res.json();
+  if (!data.ok) alert(data.error || 'Failed');
+}
+
+async function startJustConnect() {
+  const res = await fetch('/api/just-connect', { method: 'POST' });
+  const data = await res.json();
+  if (!data.ok) alert(data.error || 'Failed');
+}
+
+async function stopAll() {
+  await fetch('/api/stop', { method: 'POST' });
+  selectedRole = null;
+}
+
+function copyToken() {
+  const full = document.getElementById('tokenFull').textContent;
+  const btn = document.getElementById('copyBtn');
+  navigator.clipboard.writeText(full).then(() => {
+    btn.textContent = '✓ Copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+async function sendChat() {
+  const input = document.getElementById('chatInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  const messages = document.getElementById('chatMessages');
+  messages.innerHTML += `<div class="msg-user">You: ${escHtml(msg)}</div>`;
+  messages.innerHTML += `<div class="msg-thinking" id="thinking">thinking...</div>`;
+  messages.scrollTop = messages.scrollHeight;
+
+  const port = state.llama_port || state.client_port || 8090;
+  try {
+    const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'test',
+        messages: [{ role: 'user', content: msg }],
+        stream: true,
+      }),
+    });
+
+    const el = document.getElementById('thinking');
+    if (el) el.remove();
+
+    const assistantDiv = document.createElement('div');
+    assistantDiv.className = 'msg-assistant';
+    assistantDiv.textContent = '🤖 ';
+    messages.appendChild(assistantDiv);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(data);
+          const content = chunk.choices?.[0]?.delta?.content;
+          if (content) {
+            assistantDiv.textContent += content;
+            messages.scrollTop = messages.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    const el = document.getElementById('thinking');
+    if (el) el.remove();
+    messages.innerHTML += `<div style="color:#c44;">Error: ${escHtml(e.message)}</div>`;
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Initial fetch
+fetch('/api/status').then(r => r.json()).then(d => { state = d; render(); });
+</script>
+</body>
+</html>

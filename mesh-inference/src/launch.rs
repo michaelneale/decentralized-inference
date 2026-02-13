@@ -103,13 +103,18 @@ pub async fn start_llama_server(
     // llama-server splits the model proportionally based on available VRAM.
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
-        "--rpc".to_string(), rpc_arg,
+    ];
+    if !tunnel_ports.is_empty() {
+        args.push("--rpc".to_string());
+        args.push(rpc_arg);
+    }
+    args.extend_from_slice(&[
         "-ngl".to_string(), "99".to_string(),
         "-fit".to_string(), "off".to_string(),
         "--no-mmap".to_string(),
         "--host".to_string(), "0.0.0.0".to_string(),
         "--port".to_string(), http_port.to_string(),
-    ];
+    ]);
     if let Some(ts) = tensor_split {
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
