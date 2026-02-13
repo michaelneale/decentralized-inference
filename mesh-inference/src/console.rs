@@ -34,6 +34,7 @@ struct ConsoleInner {
     tunnel_mgr: Option<tunnel::Manager>,
     role: CurrentRole,
     llama_port: Option<u16>,
+    llama_ready: bool,
     client_port: Option<u16>,
     rpc_port: Option<u16>,
     model_path: Option<PathBuf>,
@@ -64,10 +65,13 @@ struct StatusPayload {
     node_id: Option<String>,
     token: Option<String>,
     role: CurrentRole,
+    role_label: String,
     peers: Vec<PeerPayload>,
     models: Vec<ModelInfo>,
     model_path: Option<String>,
+    model_name: Option<String>,
     llama_port: Option<u16>,
+    llama_ready: bool,
     client_port: Option<u16>,
     download: Option<DownloadProgress>,
     has_binaries: bool,
@@ -94,6 +98,7 @@ impl ConsoleState {
                 tunnel_mgr: None,
                 role: CurrentRole::Idle,
                 llama_port: None,
+                llama_ready: false,
                 client_port: None,
                 rpc_port: None,
                 model_path: None,
@@ -111,9 +116,9 @@ impl ConsoleState {
             let peers = node.peers().await.into_iter().map(|p| PeerPayload {
                 id: p.id.fmt_short().to_string(),
                 role: match p.role {
-                    NodeRole::Worker => "Share GPU".into(),
-                    NodeRole::Host { http_port } => format!("Run LLM (:{http_port})"),
-                    NodeRole::Client => "Just Connect".into(),
+                    NodeRole::Worker => "GPU Worker".into(),
+                    NodeRole::Host { http_port } => format!("LLM Host (:{http_port})"),
+                    NodeRole::Client => "Client".into(),
                 },
             }).collect();
             (Some(id), Some(token), peers)
@@ -121,14 +126,27 @@ impl ConsoleState {
             (None, None, Vec::new())
         };
 
+        let role_label = match &inner.role {
+            CurrentRole::Idle => "Idle".into(),
+            CurrentRole::ShareGpu => "GPU Worker".into(),
+            CurrentRole::RunLlm => if inner.llama_ready { "LLM Host".into() } else { "Starting...".into() },
+            CurrentRole::JustConnect => "Client".into(),
+        };
+        let model_name = inner.model_path.as_ref().map(|p| {
+            p.file_stem().unwrap_or_default().to_string_lossy().to_string()
+        });
+
         StatusPayload {
             node_id,
             token,
             role: inner.role.clone(),
+            role_label,
             peers,
             models: scan_models(),
             model_path: inner.model_path.as_ref().map(|p| p.display().to_string()),
+            model_name,
             llama_port: inner.llama_port,
+            llama_ready: inner.llama_ready,
             client_port: inner.client_port,
             download: inner.download_progress.clone(),
             has_binaries: detect_binaries().is_some(),
@@ -688,11 +706,20 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        let tunnel_ports = tunnel_mgr.peer_ports().await;
+        // Only use tunnel ports for peers that are actually Workers
+        let worker_peers = new_node.peers().await;
+        let worker_ids: Vec<_> = worker_peers.iter()
+            .filter(|p| matches!(p.role, NodeRole::Worker))
+            .map(|p| p.id)
+            .collect();
+        let all_ports = tunnel_mgr.peer_ports_map().await;
+        let tunnel_ports: Vec<u16> = worker_ids.iter()
+            .filter_map(|id| all_ports.get(id).copied())
+            .collect();
         let n_peers = tunnel_ports.len();
 
         if n_peers > 0 {
-            eprintln!("Got {n_peers} worker(s), starting llama-server");
+            eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
 
             // B2B tunnel map exchange
             let my_map = tunnel_mgr.peer_ports_map().await;
@@ -709,12 +736,15 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
         ).await {
             Ok(()) => {
                 eprintln!("llama-server ready: http://localhost:{llama_port}");
+                let mut inner = state2.inner.lock().await;
+                inner.llama_ready = true;
             }
             Err(e) => {
                 eprintln!("Failed to start llama-server: {e}");
                 let mut inner = state2.inner.lock().await;
                 inner.role = CurrentRole::Idle;
                 inner.llama_port = None;
+                inner.llama_ready = false;
             }
         }
         state2.push_status().await;
@@ -736,7 +766,7 @@ async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Re
     let peers = node.peers().await;
     let host = peers.iter().find(|p| matches!(p.role, NodeRole::Host { .. }));
     if host.is_none() {
-        return respond_err(stream, "No host found in the mesh — someone needs to 'Run LLM' first").await;
+        return respond_err(stream, "No host found in the mesh — someone needs to be running an LLM first").await;
     }
     let host = host.unwrap().clone();
     let host_id = host.id;
@@ -799,6 +829,7 @@ async fn handle_stop(stream: &mut TcpStream, state: &ConsoleState) -> Result<()>
     let mut inner = state.inner.lock().await;
     inner.role = CurrentRole::Idle;
     inner.llama_port = None;
+    inner.llama_ready = false;
     inner.client_port = None;
     inner.rpc_port = None;
     inner.tunnel_mgr = None;
