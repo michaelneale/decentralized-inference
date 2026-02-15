@@ -17,11 +17,40 @@ use tokio::sync::Mutex;
 
 static HTML: &str = include_str!("console.html");
 
-/// Models we know how to auto-download.
-const DEFAULT_MODEL: &str = "GLM-4.7-Flash-Q4_K_M";
-const DEFAULT_MODEL_FILE: &str = "GLM-4.7-Flash-Q4_K_M.gguf";
-const DEFAULT_MODEL_URL: &str = "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf";
-const DEFAULT_MODEL_SIZE: &str = "17GB";
+/// Catalog of models available for auto-download.
+struct CatalogModel {
+    name: &'static str,
+    file: &'static str,
+    url: &'static str,
+    size: &'static str,
+    description: &'static str,
+}
+
+const MODEL_CATALOG: &[CatalogModel] = &[
+    CatalogModel {
+        name: "Qwen2.5-3B-Instruct-Q4_K_M",
+        file: "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+        size: "2GB",
+        description: "Small & fast general chat",
+    },
+    CatalogModel {
+        name: "Qwen2.5-Coder-7B-Instruct-Q4_K_M",
+        file: "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        size: "4.7GB",
+        description: "Code generation & completion",
+    },
+    CatalogModel {
+        name: "GLM-4.7-Flash-Q4_K_M",
+        file: "GLM-4.7-Flash-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf",
+        size: "17GB",
+        description: "Large general chat with reasoning",
+    },
+];
+
+const DEFAULT_MODEL_FILE: &str = "Qwen2.5-3B-Instruct-Q4_K_M.gguf";
 
 /// Shared state for the console.
 #[derive(Clone)]
@@ -330,7 +359,18 @@ async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
             handle_join(&mut stream, &state, &body).await?;
         }
         ("POST", "/api/download-model") => {
-            handle_download_model(&mut stream, &state).await?;
+            handle_download_model(&mut stream, &state, &body).await?;
+        }
+        ("GET", "/api/catalog") => {
+            let catalog: Vec<serde_json::Value> = MODEL_CATALOG.iter().map(|m| {
+                serde_json::json!({
+                    "name": m.name,
+                    "file": m.file,
+                    "size": m.size,
+                    "description": m.description,
+                })
+            }).collect();
+            respond_json(&mut stream, &catalog).await?;
         }
         ("POST", "/api/share-gpu") => {
             handle_share_gpu(&mut stream, &state, &body).await?;
@@ -461,20 +501,41 @@ async fn handle_join(stream: &mut TcpStream, state: &ConsoleState, body: &str) -
     }
 }
 
-async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState) -> Result<()> {
+async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
+    // Accept {"model": "name"} or download default
+    let model_name = if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        v.get("model").and_then(|t| t.as_str()).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    let catalog_entry = if model_name.is_empty() {
+        MODEL_CATALOG.first()
+    } else {
+        MODEL_CATALOG.iter().find(|m| m.name == model_name)
+    };
+
+    let entry = match catalog_entry {
+        Some(e) => e,
+        None => return respond_err(stream, &format!("Unknown model: {model_name}")).await,
+    };
+
     let models_dir = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("No home directory"))?
         .join(".models");
-    let dest = models_dir.join(DEFAULT_MODEL_FILE);
+    let dest = models_dir.join(entry.file);
 
     if dest.exists() {
         return respond_ok(stream, "Model already exists").await;
     }
 
+    let url = entry.url.to_string();
+    let name = entry.name.to_string();
+
     // Start download in background
     let state2 = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = download_model_task(&state2, &models_dir, &dest).await {
+        if let Err(e) = download_model_task(&state2, &models_dir, &dest, &url, &name).await {
             eprintln!("Model download failed: {e}");
             let mut inner = state2.inner.lock().await;
             inner.download_progress = None;
@@ -482,27 +543,25 @@ async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState) -> 
         state2.push_status().await;
     });
 
-    respond_ok(stream, "Download started").await
+    respond_ok(stream, &format!("Downloading {}", entry.name)).await
 }
 
-async fn download_model_task(state: &ConsoleState, dir: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+async fn download_model_task(state: &ConsoleState, dir: &std::path::Path, dest: &std::path::Path, url: &str, name: &str) -> Result<()> {
     tokio::fs::create_dir_all(dir).await?;
     let tmp = dest.with_extension("gguf.part");
 
-    eprintln!("Downloading {DEFAULT_MODEL} from {DEFAULT_MODEL_URL}");
+    eprintln!("Downloading {name} from {url}");
 
-    // Use curl for the download (simpler than adding reqwest dependency)
     let mut child = tokio::process::Command::new("curl")
-        .args(["-L", "-o", tmp.to_str().unwrap(), "--progress-bar", DEFAULT_MODEL_URL])
+        .args(["-L", "-o", tmp.to_str().unwrap(), "--progress-bar", url])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
 
-    // Poll file size for progress
     {
         let mut inner = state.inner.lock().await;
         inner.download_progress = Some(DownloadProgress {
-            url: DEFAULT_MODEL_URL.to_string(),
+            url: url.to_string(),
             downloaded: 0,
             total: None,
         });

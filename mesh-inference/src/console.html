@@ -129,7 +129,8 @@
     <select id="gpuModelSelect"></select>
     <div id="gpuNoModel" class="warning hidden">No models found in ~/.models/</div>
     <div id="gpuDownloadRow" class="hidden" style="margin-top: 0.5rem;">
-      <button onclick="downloadModel()" class="btn-primary">Download GLM-4.7-Flash (17GB)</button>
+      <select id="gpuCatalogSelect" style="margin-right: 0.5rem;"></select>
+      <button onclick="downloadModel('gpuCatalogSelect')" class="btn-primary">Download</button>
     </div>
     <button onclick="startShareGpu()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="gpuStartBtn">Start sharing GPU</button>
     <div id="gpuNoBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
@@ -141,7 +142,8 @@
     <select id="llmModelSelect"></select>
     <div id="llmNoModel" class="warning hidden">No models found in ~/.models/</div>
     <div id="llmDownloadRow" class="hidden" style="margin-top: 0.5rem;">
-      <button onclick="downloadModel()" class="btn-primary">Download GLM-4.7-Flash (17GB)</button>
+      <select id="llmCatalogSelect" style="margin-right: 0.5rem;"></select>
+      <button onclick="downloadModel('llmCatalogSelect')" class="btn-primary">Download</button>
     </div>
     <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center;">
       <label style="font-size: 0.85rem; color: #888;">Port:</label>
@@ -347,7 +349,28 @@ async function joinMesh() {
   if (data.ok) { input.value = ''; } else { alert(data.error || 'Failed to join'); }
 }
 
-async function downloadModel() { await fetch('/api/download-model', { method: 'POST' }); }
+async function downloadModel(selectId) {
+  const sel = document.getElementById(selectId);
+  const model = sel ? sel.value : '';
+  await fetch('/api/download-model', { method: 'POST', body: JSON.stringify({ model }) });
+}
+
+// Load catalog into download selects
+async function loadCatalog() {
+  try {
+    const res = await fetch('/api/catalog');
+    const catalog = await res.json();
+    for (const id of ['gpuCatalogSelect', 'llmCatalogSelect']) {
+      const sel = document.getElementById(id);
+      if (sel) {
+        sel.innerHTML = catalog.map(m =>
+          `<option value="${m.name}">${m.name} (${m.size}) — ${m.description}</option>`
+        ).join('');
+      }
+    }
+  } catch (e) { console.error('Failed to load catalog', e); }
+}
+loadCatalog();
 
 async function startShareGpu() {
   const model = document.getElementById('gpuModelSelect').value;
