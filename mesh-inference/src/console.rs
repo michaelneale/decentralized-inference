@@ -82,6 +82,7 @@ struct PeerPayload {
     id: String,
     role: String,
     models: Vec<String>,
+    vram_gb: f64,
 }
 
 #[derive(Serialize)]
@@ -122,6 +123,7 @@ impl ConsoleState {
                     NodeRole::Client => "Client".into(),
                 },
                 models: p.models,
+                vram_gb: p.vram_bytes as f64 / 1e9,
             }).collect();
             (Some(id), Some(token), peers)
         } else {
@@ -436,7 +438,13 @@ async fn handle_sse(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
 }
 
 async fn handle_join(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    let token = body.trim().trim_matches('"');
+    // Accept either raw token string or JSON {"token": "..."}
+    let token = if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string()
+    } else {
+        body.trim().trim_matches('"').to_string()
+    };
+    let token = token.trim();
     if token.is_empty() {
         return respond_err(stream, "No token provided").await;
     }
@@ -640,10 +648,10 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
 
         // Only use tunnel ports for Worker peers
         let worker_peers = node.peers().await;
-        let worker_ids: Vec<_> = worker_peers.iter()
+        let workers: Vec<_> = worker_peers.iter()
             .filter(|p| matches!(p.role, NodeRole::Worker))
-            .map(|p| p.id)
             .collect();
+        let worker_ids: Vec<_> = workers.iter().map(|p| p.id).collect();
         let all_ports = tunnel_mgr.peer_ports_map().await;
         let tunnel_ports: Vec<u16> = worker_ids.iter()
             .filter_map(|id| all_ports.get(id).copied())
@@ -661,8 +669,34 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
             eprintln!("No workers found — starting llama-server with local GPU only");
         }
 
+        // Auto-calculate tensor split if not explicitly provided
+        let effective_split = if tensor_split.is_some() {
+            tensor_split.clone()
+        } else if n_peers > 0 {
+            let my_vram = node.vram_bytes() as f64;
+            let worker_vrams: Vec<f64> = worker_ids.iter()
+                .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
+                .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram }) // default to same as local if unknown
+                .collect();
+            let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
+            if total > 0.0 {
+                let mut parts = vec![format!("{:.2}", my_vram / total)];
+                for wv in &worker_vrams {
+                    parts.push(format!("{:.2}", wv / total));
+                }
+                let split = parts.join(",");
+                eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
+                    my_vram / 1e9, worker_vrams.len());
+                Some(split)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         match launch::start_llama_server(
-            &bin_dir, &model, llama_port, &tunnel_ports, tensor_split.as_deref(),
+            &bin_dir, &model, llama_port, &tunnel_ports, effective_split.as_deref(),
         ).await {
             Ok(()) => {
                 eprintln!("llama-server ready: http://localhost:{llama_port}");

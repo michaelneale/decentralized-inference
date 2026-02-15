@@ -46,6 +46,9 @@ struct PeerAnnouncement {
     /// GGUF model names available on this node (e.g. ["GLM-4.7-Flash-Q4_K_M"])
     #[serde(default)]
     models: Vec<String>,
+    /// Available VRAM in bytes (0 = unknown)
+    #[serde(default)]
+    vram_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,29 @@ pub struct PeerInfo {
     pub tunnel_port: Option<u16>,
     pub role: NodeRole,
     pub models: Vec<String>,
+    pub vram_bytes: u64,
+}
+
+/// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
+/// (the rest is reserved for OS/apps on unified memory).
+pub fn detect_vram_bytes() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        // sysctl hw.memsize returns total physical RAM
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    // ~75% usable for Metal on unified memory
+                    return (bytes as f64 * 0.75) as u64;
+                }
+            }
+        }
+    }
+    0
 }
 
 #[derive(Clone)]
@@ -63,6 +89,7 @@ pub struct Node {
     state: Arc<Mutex<MeshState>>,
     role: Arc<Mutex<NodeRole>>,
     models: Arc<Mutex<Vec<String>>>,
+    vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
@@ -105,6 +132,9 @@ impl Node {
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
 
+        let vram = detect_vram_bytes();
+        tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
+
         let node = Node {
             endpoint,
             state: Arc::new(Mutex::new(MeshState {
@@ -114,6 +144,7 @@ impl Node {
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
+            vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
             tunnel_tx,
@@ -152,6 +183,10 @@ impl Node {
 
     pub async fn set_models(&self, models: Vec<String>) {
         *self.models.lock().await = models;
+    }
+
+    pub fn vram_bytes(&self) -> u64 {
+        self.vram_bytes
     }
 
     pub async fn peers(&self) -> Vec<PeerInfo> {
@@ -427,11 +462,12 @@ impl Node {
         let _ = recv.read_to_end(0).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Register peer — find their own announcement for role + models
+        // Register peer — find their own announcement for role + models + vram
         let peer_ann = their_announcements.iter().find(|a| a.addr.id == peer_id);
         let peer_role = peer_ann.map(|a| a.role.clone()).unwrap_or_default();
         let peer_models = peer_ann.map(|a| a.models.clone()).unwrap_or_default();
-        self.add_peer(peer_id, addr, peer_role, peer_models).await;
+        let peer_vram = peer_ann.map(|a| a.vram_bytes).unwrap_or(0);
+        self.add_peer(peer_id, addr, peer_role, peer_models, peer_vram).await;
 
         // Discover new peers (don't block on failures)
         for ann in their_announcements {
@@ -469,10 +505,10 @@ impl Node {
         // Wait for the remote to finish their send
         let _ = recv.read_to_end(0).await;
 
-        // Register peer with role + models
+        // Register peer with role + models + vram
         for ann in &their_announcements {
             if ann.addr.id == remote {
-                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone()).await;
+                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
             }
         }
 
@@ -527,7 +563,7 @@ impl Node {
         Ok(())
     }
 
-    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>) {
+    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>, vram_bytes: u64) {
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
@@ -536,10 +572,12 @@ impl Node {
                 existing.role = role;
             }
             existing.models = models;
+            existing.vram_bytes = vram_bytes;
             return;
         }
-        tracing::info!("Peer added: {} role={:?} models={:?} (total: {})", id.fmt_short(), role, models, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models });
+        tracing::info!("Peer added: {} role={:?} vram={:.1}GB models={:?} (total: {})",
+            id.fmt_short(), role, vram_bytes as f64 / 1e9, models, state.peers.len() + 1);
+        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes });
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
@@ -550,12 +588,13 @@ impl Node {
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
-            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone() })
+            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone(), vram_bytes: p.vram_bytes })
             .collect();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
             models: my_models,
+            vram_bytes: self.vram_bytes,
         });
         announcements
     }

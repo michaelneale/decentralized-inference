@@ -215,7 +215,8 @@ function render() {
   if (state.peers && state.peers.length > 0) {
     peersList.innerHTML = state.peers.map(p => {
       const models = p.models && p.models.length > 0 ? ` · ${p.models.join(', ')}` : '';
-      return `<div class="peer-row"><span class="peer-id">${p.id}</span><span class="peer-role">${p.role}${models}</span></div>`;
+      const vram = p.vram_gb > 0 ? ` · ${p.vram_gb.toFixed(0)}GB` : '';
+      return `<div class="peer-row"><span class="peer-id">${p.id}</span><span class="peer-role">${p.role}${vram}${models}</span></div>`;
     }).join('');
   } else {
     peersList.innerHTML = '';
