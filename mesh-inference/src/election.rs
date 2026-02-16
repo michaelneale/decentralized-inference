@@ -54,6 +54,8 @@ pub async fn election_loop(
     rpc_port: u16,
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
+    draft: Option<std::path::PathBuf>,
+    draft_max: u16,
     target_tx: watch::Sender<InferenceTarget>,
     mut on_change: impl FnMut(bool, bool) + Send,
 ) {
@@ -105,7 +107,7 @@ pub async fn election_loop(
             on_change(true, false);
 
             let llama_port = match start_llama(
-                &node, &tunnel_mgr, rpc_port, &bin_dir, &model,
+                &node, &tunnel_mgr, rpc_port, &bin_dir, &model, draft.as_deref(), draft_max,
             ).await {
                 Some(port) => port,
                 None => {
@@ -163,6 +165,8 @@ async fn start_llama(
     my_rpc_port: u16,
     bin_dir: &Path,
     model: &Path,
+    draft: Option<&Path>,
+    draft_max: u16,
 ) -> Option<u16> {
     let peers = node.peers().await;
     let worker_ids: Vec<_> = peers.iter()
@@ -225,7 +229,7 @@ async fn start_llama(
     };
 
     match launch::start_llama_server(
-        bin_dir, model, llama_port, &rpc_ports, split.as_deref(),
+        bin_dir, model, llama_port, &rpc_ports, split.as_deref(), draft, draft_max,
     ).await {
         Ok(()) => Some(llama_port),
         Err(e) => {

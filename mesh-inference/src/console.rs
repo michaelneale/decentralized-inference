@@ -549,7 +549,7 @@ fn spawn_election(
     tokio::spawn(async move {
         let state2 = state.clone();
         election::election_loop(
-            node, tunnel_mgr, rpc_port, bin_dir, model, target_tx,
+            node, tunnel_mgr, rpc_port, bin_dir, model, None, 8, target_tx,
             move |is_host, llama_ready| {
                 let state3 = state2.clone();
                 tokio::spawn(async move {

@@ -1,4 +1,5 @@
 mod console;
+mod download;
 mod election;
 mod launch;
 mod mesh;
@@ -48,6 +49,15 @@ struct Cli {
     #[arg(long)]
     client: bool,
 
+    /// Path to a draft model for speculative decoding (e.g. a small quant of the same model).
+    /// Only used on the host — the draft model runs locally, not distributed.
+    #[arg(long)]
+    draft: Option<PathBuf>,
+
+    /// Max draft tokens for speculative decoding (default: 8).
+    #[arg(long, default_value = "8")]
+    draft_max: u16,
+
     /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
     /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
     #[arg(long, global = true)]
@@ -66,6 +76,14 @@ enum Command {
         #[arg(long, default_value = "3131")]
         port: u16,
     },
+    /// Download a model from the catalog
+    Download {
+        /// Model name (e.g. "Qwen2.5-32B-Instruct-Q4_K_M" or just "32b")
+        name: Option<String>,
+        /// Also download the recommended draft model for speculative decoding
+        #[arg(long)]
+        draft: bool,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +100,26 @@ async fn main() -> Result<()> {
     // Subcommand dispatch
     if let Some(Command::Console { port }) = &cli.command {
         return console::run(*port, cli.join.clone()).await;
+    }
+    if let Some(Command::Download { name, draft }) = &cli.command {
+        match name {
+            Some(query) => {
+                let model = download::find_model(query)
+                    .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-inference download` to list.", query))?;
+                download::download_model(model).await?;
+                if *draft {
+                    if let Some(draft_name) = model.draft {
+                        let draft_model = download::find_model(draft_name)
+                            .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
+                        download::download_model(draft_model).await?;
+                    } else {
+                        eprintln!("⚠ No draft model available for {}", model.name);
+                    }
+                }
+            }
+            None => download::list_models(),
+        }
+        return Ok(());
     }
 
     // --- Validation ---
@@ -176,9 +214,11 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let tunnel_mgr2 = tunnel_mgr.clone();
     let bin_dir2 = bin_dir.clone();
     let model2 = model.clone();
+    let draft2 = cli.draft.clone();
+    let draft_max = cli.draft_max;
     tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, target_tx,
+            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, draft2, draft_max, target_tx,
             move |is_host, llama_ready| {
                 if is_host && llama_ready {
                     eprintln!("  API: http://localhost:{api_port}");

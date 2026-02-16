@@ -86,6 +86,8 @@ pub async fn start_llama_server(
     http_port: u16,
     tunnel_ports: &[u16],
     tensor_split: Option<&str>,
+    draft: Option<&Path>,
+    draft_max: u16,
 ) -> Result<()> {
     let llama_server = bin_dir.join("llama-server");
     anyhow::ensure!(
@@ -136,6 +138,21 @@ pub async fn start_llama_server(
     if let Some(ts) = tensor_split {
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
+    }
+    if let Some(draft_path) = draft {
+        if draft_path.exists() {
+            args.push("-md".to_string());
+            args.push(draft_path.to_string_lossy().to_string());
+            args.push("-ngld".to_string());
+            args.push("99".to_string());
+            args.push("--device-draft".to_string());
+            args.push("MTL0".to_string());
+            args.push("--draft-max".to_string());
+            args.push(draft_max.to_string());
+            tracing::info!("Speculative decoding: draft={}, draft-max={}", draft_path.display(), draft_max);
+        } else {
+            tracing::warn!("Draft model not found at {}, skipping speculative decoding", draft_path.display());
+        }
     }
     let mut child = Command::new(&llama_server)
         .args(&args)
