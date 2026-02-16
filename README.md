@@ -65,6 +65,8 @@ The mesh auto-elects a host (highest VRAM wins). The host runs llama-server with
 
 When a node joins or leaves, llama-server is killed and restarted with the new configuration. No manual intervention needed.
 
+Both machines can query `localhost:9337` simultaneously — llama-server handles concurrent requests with its built-in request queue. This lets you share one distributed inference cluster across multiple users or applications.
+
 ### Lite client (no GPU, no model)
 
 Join the mesh from any machine as a lightweight API proxy:
@@ -172,6 +174,12 @@ Calculated automatically from VRAM:
 2 nodes: 103GB + 51GB = 154GB total
 Split: 0.67, 0.33
 ```
+
+### Running models larger than one machine
+
+The mesh lets you run models that wouldn't fit on a single machine by pooling VRAM across nodes. However, the first node to start will attempt to load the model solo before any peers have joined. If the model is too large for that machine, it will fail or OOM.
+
+To work around this, start the machine with the most VRAM first — it will load the model solo, then when peers join, the mesh re-elects and restarts with the full tensor split across all nodes.
 
 ## CLI Reference
 
