@@ -1,289 +1,181 @@
 # Distributed LLM Inference with llama.cpp RPC
 
-Run large language models split across multiple machines using llama.cpp's RPC backend, with patches that eliminate model weight transfer and reduce per-token RPC chatter. Includes a QUIC mesh for NAT traversal, peer discovery, auto host election, and direct worker-to-worker tensor transfers.
-
-## The Problem
-
-Stock llama.cpp RPC transfers **all model weights** from the orchestrator to every worker over TCP at startup (e.g. 17GB for GLM-4.7-Flash). Over WiFi or WAN this takes 10-15+ minutes. Then during inference, hundreds of redundant RPC round-trips per token kill throughput.
-
-## The Fix
-
-**llama.cpp patches** ([fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf)):
-- `SET_TENSOR_GGUF` — workers load tensors from their own local GGUF copy. Zero bytes over the network.
-- Skip probing for RPC backends — eliminates hundreds of alloc/free round-trips at startup.
-- `get_alloc_size` cache — cuts per-token RPC calls from ~290 to 7.
-- B2B direct transfers — workers push activation tensors directly to each other, bypassing the orchestrator.
-
-**mesh-inference** (Rust sidecar):
-- QUIC mesh via iroh — NAT traversal, peer discovery, gossip.
-- TCP↔QUIC tunneling — llama.cpp just sees localhost TCP sockets.
-- Auto host election — highest-VRAM node becomes the host automatically.
-- Auto tensor-split — VRAM-proportional layer distribution, no manual config.
-- Dynamic membership — workers join/leave, llama-server auto-restarts.
-- `--client` lite mode — join the mesh from any machine and use the API, no GPU needed.
-- Web console — browser UI for managing mesh, no CLI knowledge needed.
+Split LLM inference across multiple machines over QUIC. Workers load model weights from their own local GGUF — nothing transfers over the network. The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
 
 ## Quick Start
 
+### Build
+
 ```bash
-just build            # clones fork, builds llama.cpp + mesh-inference
-just download-model   # downloads GLM-4.7-Flash Q4_K_M (~17GB)
+just build            # clones llama.cpp fork, builds rpc-server + llama-server + mesh-inference
+just download-model   # downloads GLM-4.7-Flash Q4_K_M (~17GB) to ~/.models/
 ```
 
-### Same machine (test everything works)
+### Deploy to another machine
+
+```bash
+just bundle           # creates /tmp/mesh-bundle.tar.gz with all binaries + dylibs
+scp /tmp/mesh-bundle.tar.gz user@remote:~/
+ssh user@remote "tar xzf mesh-bundle.tar.gz && mv mesh-bundle ~/bin"
+```
+
+For `--client` mode only the `mesh-inference` binary is needed.
+
+### Test locally
+
 ```bash
 just local            # starts worker + server on localhost
-just test             # run a test inference
+just test             # run inference
 just stop             # kill everything
 ```
 
-### Two machines over the mesh (CLI)
+## Mesh Usage
 
-Both machines need the same GGUF model file in `~/.models/`.
+Both machines need the same GGUF model file. Each loads weights from its own local copy.
 
-**Machine A** (starts first, prints invite token):
+**Machine A** (starts first):
 ```bash
 mesh-inference --model ~/.models/model.gguf
 # Prints: Invite token: eyJ...
 ```
 
-**Machine B** (joins Machine A):
+**Machine B** (joins):
 ```bash
-mesh-inference --model ~/.models/model.gguf --join <token-from-A>
+mesh-inference --model ~/.models/model.gguf --join <token>
 ```
 
-The mesh auto-elects a host (highest VRAM) and starts llama-server. The other machine becomes a worker. Tensor split is calculated automatically based on VRAM.
+Highest VRAM becomes the host automatically. The other machine contributes GPU as a worker.
 
-If a worker joins or leaves later, llama-server restarts automatically with the new configuration.
-
-### Two machines over the mesh (Web Console)
-
-The web console provides a browser UI — no CLI knowledge needed.
-
-**Machine A:**
-```bash
-mesh-inference console
-# Opens http://localhost:3131
-```
-
-**Machine B:**
-```bash
-mesh-inference console
-# Open http://localhost:3131, paste Machine A's invite token, click Join
-```
-
-On both machines: click **Start**, select a model. The mesh auto-elects a host and starts inference. Models can be downloaded directly from the console UI.
-
-### Lite client (no GPU, no model needed)
-
-Any machine can join the mesh as a lightweight API proxy:
+### Lite client (no GPU, no model)
 
 ```bash
 mesh-inference --client --join <token> --port 8080
-```
-
-This exposes `http://localhost:8080` — an OpenAI-compatible API tunneled through QUIC to the host's llama-server. SSE streaming works transparently.
-
-```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-## How It Works
-
-Every node with a model runs `rpc-server` (contributes GPU to the mesh). The mesh gossips VRAM, models, and roles. The node with the most VRAM automatically becomes the host, runs `llama-server`, and uses all other nodes as workers.
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Elected Host                                        │
-│  rpc-server + llama-server --rpc <tunnels>           │
-│  - Highest VRAM → auto-elected                       │
-│  - Uses all workers via QUIC tunnels                 │
-│  - Auto tensor-split proportional to VRAM            │
-│  - Workers load weights from local GGUF (0 transfer) │
-└──────────────────────┬──────────────────────────────┘
-                       │ QUIC mesh
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  Worker (every other node with a model)              │
-│  rpc-server --gguf model.gguf -d MTL0               │
-│  - Loads weights from local GGUF                     │
-│  - Computes assigned layers on Metal GPU             │
-│  - B2B: pushes activations directly to next worker   │
-└─────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────┐
-│  Lite Client                                         │
-│  mesh-inference --client --join <token>              │
-│  - No GPU, no model                                  │
-│  - localhost:8080 → QUIC → host's llama-server       │
-│  - Full OpenAI-compatible API (including SSE)        │
-└─────────────────────────────────────────────────────┘
-```
-
-### Dynamic Mesh
-
-- **Worker joins**: Host detects new peer, restarts llama-server with updated `--rpc` list and recalculated tensor-split.
-- **Worker leaves/crashes**: Detected in ~40s via QUIC timeout. Host restarts with remaining workers (or local-only if none left).
-- **Host leaves**: Next highest-VRAM node auto-promotes to host.
-- **All automatic** — no manual intervention needed.
-
-### Auto Host Election
-
-Election is deterministic from gossip state — no consensus protocol:
-1. If an existing host is in the mesh, everyone else stays as worker (stability).
-2. If no host exists, highest VRAM wins. Tie-break: highest node ID.
-3. Re-election only happens when the current host disappears.
-
-### VRAM-Proportional Tensor Split
-
-Each node reports its available VRAM via gossip. The host calculates `--tensor-split` automatically:
-
-```
-3 nodes: 64GB + 16GB + 8GB = 88GB total
-Split: 0.73, 0.18, 0.09
-```
-
-No manual `--tensor-split` needed (but you can override it).
-
-## Web Console
+### Web console
 
 ```bash
-mesh-inference console [--port 3131]
+mesh-inference console    # opens http://localhost:3131
 ```
 
-The console serves a single-page dashboard at `http://localhost:3131`:
-- **Join mesh** — paste a token from another node
-- **Start** — select a model, start rpc-server, enter auto-election
-- **Just Connect** — lite client mode (no GPU)
-- **Live peer list** — shows each peer's role, VRAM, and models
-- **Model catalog** — download models directly from Hugging Face
-- **Built-in chat** — test the LLM right from the browser
+Browser UI for joining meshes, selecting models, downloading from HuggingFace, and chatting.
 
-Available models in the built-in catalog:
-| Model | Size | Description |
-|---|---|---|
-| Qwen2.5-3B-Instruct | 2GB | Small & fast general chat |
-| Qwen2.5-Coder-7B-Instruct | 4.7GB | Code generation & completion |
-| GLM-4.7-Flash | 17GB | Large general chat with reasoning |
+## Networking
 
-Or place any GGUF file in `~/.models/` and it appears in the model selector.
+Connections use [iroh](https://iroh.computer) QUIC. By default iroh handles NAT traversal via relay servers and STUN. Direct UDP is preferred (lowest latency), relays are fallback.
+
+### WAN with port forwarding
+
+For the best latency, forward a **UDP** port on the router to the machine that starts first:
+
+```bash
+# Machine with port forwarding (e.g. UDP 7842 forwarded on router)
+mesh-inference --model ~/.models/model.gguf --bind-port 7842
+```
+
+`--bind-port` does two things:
+1. Pins the QUIC endpoint to a fixed UDP port (otherwise iroh picks a random port each run)
+2. Triggers a STUN lookup to discover the public IP, so the invite token includes it
+
+The joining machine doesn't need port forwarding — it connects outbound.
+
+### Relay override
+
+If iroh's default relays are unreachable (DNS sinkhole, corporate firewall):
+
+```bash
+mesh-inference --relay https://staging-use1-1.relay.iroh.network./ --model ...
+```
+
+### Connection order
+
+Most of the time **order doesn't matter** — iroh handles NAT traversal via STUN and UDP hole punching, and two nodes behind normal NAT can connect in either direction.
+
+Order matters when one side has a restrictive network:
+- **Symmetric NAT** (mapped port changes per destination, so hole punching fails)
+- **Firewall dropping unsolicited inbound UDP** (e.g. macOS stealth mode)
+- **DNS sinkhole** blocking iroh's relay/STUN servers
+
+In these cases, the **reachable** node should start first (print the token) and the restricted node should join (`--join`). Once the QUIC connection is established it's fully bidirectional — the host can open streams back through the existing connection regardless of NAT.
+
+- **Both sides normal NAT** → either order works
+- **One side restricted** → reachable side starts first, restricted side joins
+- **Neither side reachable** → falls back to iroh relay (~200ms RTT vs ~20ms direct)
 
 ## CLI Reference
-
-### mesh-inference (main)
 
 ```
 mesh-inference [OPTIONS]
 
---model PATH         GGUF model file
---serve PORT         Run llama-server on this HTTP port (forces this node to be host)
---client             Run as lite client (no GPU, no model, no rpc-server)
---join TOKEN         Join mesh via invite token (repeatable)
---port PORT          Local HTTP port for --client mode (default: 8080)
---min-peers N        Wait for N peers before starting llama-server (default: 1)
---tensor-split R,R   Layer distribution ratios (e.g. "0.85,0.15")
---bin-dir PATH       Directory with rpc-server + llama-server binaries
---device DEV         GPU device for rpc-server (default: MTL0 on macOS)
-```
+  --model PATH         GGUF model file. Starts rpc-server, enters auto-election.
+  --client             Lite client — no GPU, no model, API proxy only.
+  --join TOKEN         Join mesh via invite token (repeatable).
+  --port PORT          HTTP port for client proxy or auto-elected host (default: 8080/8090).
+  --bind-port PORT     Pin QUIC to a fixed UDP port (for router port forwarding).
+  --relay URL          Override iroh relay URLs (repeatable).
+  --serve PORT         Force host on this port (skip auto-election).
+  --tensor-split R,R   Manual layer split ratios (e.g. "0.85,0.15").
+  --bin-dir PATH       Directory with rpc-server + llama-server binaries.
+  --device DEV         GPU device for rpc-server (default: MTL0).
+  --min-peers N        Wait for N peers before starting (--serve mode only).
 
-### mesh-inference console
-
-```
 mesh-inference console [--port PORT]
 
---port PORT          HTTP port for the web console (default: 3131)
-```
-
-The console starts a mesh node and manages everything via the browser. No other flags needed.
-
-Console API endpoints (for scripting):
-```bash
-# Status
-curl http://localhost:3131/api/status
-
-# Join a mesh
-curl -X POST http://localhost:3131/api/join -d '{"token":"eyJ..."}'
-
-# Start (rpc-server + election)
-curl -X POST http://localhost:3131/api/start -d '{"model":"/path/to/model.gguf"}'
-
-# Stop everything
-curl -X POST http://localhost:3131/api/stop
-
-# Download a model from the catalog
-curl -X POST http://localhost:3131/api/download-model -d '{"model":"Qwen2.5-3B-Instruct-Q4_K_M"}'
-
-# List available models in the catalog
-curl http://localhost:3131/api/catalog
-
-# SSE stream of status updates
-curl http://localhost:3131/api/events
+  --port PORT          Web console port (default: 3131).
 ```
 
 ## Benchmarks
 
-All benchmarks: M4 Max (55GB VRAM) + Mac Mini M4 (12GB VRAM), WiFi, GLM-4.7-Flash-Q4_K_M (17GB).
+M4 Max + Mac Mini M4, WiFi, GLM-4.7-Flash-Q4_K_M (17GB).
 
-### Model Loading
 | | Stock RPC | Patched |
 |---|---|---|
-| Data over network | 16.88 GB | **0 bytes** |
-| Time to load | 14+ minutes | **~9 seconds** |
+| Weight transfer | 16.88 GB | **0 bytes** |
+| Load time | 14+ min | **~9 seconds** |
 
-### Inference
-| Configuration | Generation |
+| Configuration | tok/s |
 |---|---|
-| Mini orchestrator, 85% remote on M4 Max | **21 tok/s** |
-| M4 Max orchestrator, 82% local + 18% remote | **16 tok/s** |
-| 3-node: Mini orchestrator + 2 workers (40/40/20 split) | **12-13 tok/s** |
-| Local only (M4 Max, no mesh) | 68 tok/s |
+| Mini orchestrator, 85% on M4 Max | **21** |
+| M4 Max orchestrator, 82% local | **16** |
+| 3-node (40/40/20) | **12-13** |
+| Local only (no mesh) | 68 |
 
-QUIC mesh adds zero measurable overhead vs raw TCP.
+See [PLAN.md](PLAN.md) for detailed notes.
 
-## Firewall Notes
+## Justfile
 
-- The machine that can accept incoming UDP should start first (print the invite token)
-- The firewalled machine should be the joiner (`--join`)
-- macOS stealth mode drops incoming UDP — that machine must always join, never listen
-- iroh provides relay fallback if direct UDP fails, but relay is rate-limited
-
-## Deploying to Another Machine
-
-```bash
-just bundle    # creates /tmp/mesh-bundle.tar.gz with all binaries + dylibs
-scp /tmp/mesh-bundle.tar.gz user@remote:/tmp/
-ssh user@remote "cd /tmp && tar xzf mesh-bundle.tar.gz"
-# Then: /tmp/mesh-bundle/mesh-inference --model ... (or --client --join ...)
-```
-
-For `--client` mode, only the `mesh-inference` binary is needed.
-
-## Justfile Targets
-
-Requires [just](https://github.com/casey/just). All targets run from the project root.
+### Build & Deploy
 
 | Target | Description |
 |---|---|
-| `just build` | Clone fork + build llama.cpp and mesh-inference |
-| `just download-model` | Download GLM-4.7-Flash Q4_K_M (~17GB) |
-| `just local` | Build + start worker + server on localhost for testing |
-| `just test` | Quick inference test against a running server |
-| `just stop` | Kill all running processes |
-| `just mesh-worker` | Start a mesh worker (prints invite token) |
-| `just mesh-serve join=TOKEN` | Start mesh host (orchestrator + llama-server) |
-| `just mesh-client join=TOKEN` | Start lite client (local HTTP proxy, no GPU) |
-| `just bundle` | Create portable tarball for deployment to another machine |
-| `just worker` | Start raw TCP rpc-server (no mesh) |
-| `just serve rpc=HOST:PORT` | Start raw TCP llama-server (no mesh) |
-| `just diff` | Show fork patches vs upstream |
+| `just build` | Clone fork + build everything |
+| `just download-model` | Download default model to `~/.models/` |
+| `just bundle` | Portable tarball with all binaries for another machine |
 
-## Files
+### Run
+
+| Target | Description |
+|---|---|
+| `just mesh-worker` | Start mesh node (auto-election) |
+| `just mesh-serve join=TOKEN` | Manual host mode |
+| `just mesh-client join=TOKEN` | Lite client |
+
+### Dev
+
+| Target | Description |
+|---|---|
+| `just local` | Worker + server on localhost |
+| `just test` | Quick inference test |
+| `just stop` | Kill all processes |
+| `just diff` | Show llama.cpp fork patches |
+
+## Project Structure
 
 | Path | Purpose |
 |---|---|
-| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC patches (SET_TENSOR_GGUF, chatter reduction, B2B) |
-| `mesh-inference/` | Rust sidecar: QUIC mesh, tunneling, election, B2B rewriting, console ([details](mesh-inference/README.md)) |
-| `Justfile` | Build and run targets (see above) |
-| `PLAN.md` | Historical design notes and benchmark data |
+| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC patches |
+| `mesh-inference/` | Rust QUIC mesh sidecar ([details](mesh-inference/README.md), [design](mesh-inference/DESIGN.md)) |
+| `PLAN.md` | Design notes, benchmarks, WAN testing notes |

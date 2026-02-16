@@ -83,9 +83,90 @@ pub fn detect_vram_bytes() -> u64 {
     0
 }
 
+/// Discover our public IP via STUN, then pair it with the given port.
+/// We can't send STUN from the bound port (iroh owns it), but we only need
+/// the public IP — the port is known from --bind-port + router forwarding.
+async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> {
+    use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+
+    let stun_servers = [
+        "stun.l.google.com:19302",
+        "stun.cloudflare.com:3478",
+        "stun.stunprotocol.org:3478",
+    ];
+
+    // Bind to ephemeral port — we only care about the IP, not the mapped port.
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
+
+    for server in &stun_servers {
+        // STUN Binding Request: type=0x0001, len=0, magic=0x2112A442, txn=random
+        let mut req = [0u8; 20];
+        req[0] = 0x00; req[1] = 0x01; // Binding Request
+        // length = 0
+        req[4] = 0x21; req[5] = 0x12; req[6] = 0xA4; req[7] = 0x42; // Magic Cookie
+        rand::fill(&mut req[8..20]);
+
+        let dest: SocketAddr = match tokio::net::lookup_host(server).await {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => a,
+                None => continue,
+            },
+            Err(_) => continue,
+        };
+
+        if sock.send_to(&req, dest).await.is_err() { continue; }
+
+        let mut buf = [0u8; 256];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sock.recv_from(&mut buf),
+        ).await {
+            Ok(Ok((len, _))) if len >= 20 => {
+                // Parse STUN response for XOR-MAPPED-ADDRESS (0x0020)
+                // or MAPPED-ADDRESS (0x0001)
+                let magic = &req[4..8];
+                let txn = &req[8..20];
+                let mut i = 20;
+                while i + 4 <= len {
+                    let attr_type = u16::from_be_bytes([buf[i], buf[i + 1]]);
+                    let attr_len = u16::from_be_bytes([buf[i + 2], buf[i + 3]]) as usize;
+                    if i + 4 + attr_len > len { break; }
+                    let val = &buf[i + 4..i + 4 + attr_len];
+
+                    if attr_type == 0x0020 && attr_len >= 8 && val[1] == 0x01 {
+                        // XOR-MAPPED-ADDRESS, IPv4 — extract IP only
+                        let ip = Ipv4Addr::new(
+                            val[4] ^ magic[0], val[5] ^ magic[1],
+                            val[6] ^ magic[2], val[7] ^ magic[3],
+                        );
+                        let addr = SocketAddr::V4(SocketAddrV4::new(ip, advertised_port));
+                        tracing::info!("STUN discovered public address: {addr}");
+                        return Some(addr);
+                    }
+                    if attr_type == 0x0001 && attr_len >= 8 && val[1] == 0x01 {
+                        // MAPPED-ADDRESS, IPv4 — extract IP only
+                        let ip = Ipv4Addr::new(val[4], val[5], val[6], val[7]);
+                        let addr = SocketAddr::V4(SocketAddrV4::new(ip, advertised_port));
+                        tracing::info!("STUN discovered public address: {addr}");
+                        return Some(addr);
+                    }
+
+                    // Attributes are padded to 4-byte boundary
+                    i += 4 + (attr_len + 3) & !3;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    tracing::warn!("STUN: could not discover public address");
+    None
+}
+
 #[derive(Clone)]
 pub struct Node {
     endpoint: Endpoint,
+    public_addr: Option<std::net::SocketAddr>,
     state: Arc<Mutex<MeshState>>,
     role: Arc<Mutex<NodeRole>>,
     models: Arc<Mutex<Vec<String>>>,
@@ -110,7 +191,7 @@ pub struct TunnelChannels {
 }
 
 impl Node {
-    pub async fn start(role: NodeRole) -> Result<(Self, TunnelChannels)> {
+    pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>) -> Result<(Self, TunnelChannels)> {
         let secret_key = load_or_create_key().await?;
         // Configure QUIC transport for heavy RPC traffic:
         // - Allow many concurrent bi-streams (model loading opens hundreds)
@@ -121,13 +202,39 @@ impl Node {
             .max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?))
             .keep_alive_interval(std::time::Duration::from_secs(10))
             .build();
-        let endpoint = Endpoint::builder()
+        let mut builder = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![ALPN.to_vec()])
-            .transport_config(transport_config)
-            .bind()
-            .await?;
-        endpoint.online().await;
+            .transport_config(transport_config);
+
+        if !relay_urls.is_empty() {
+            use iroh::{RelayConfig, RelayMap};
+            let configs: Vec<RelayConfig> = relay_urls.iter().map(|url| {
+                RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
+            }).collect();
+            let relay_map = RelayMap::from_iter(configs);
+            tracing::info!("Using custom relay URLs: {:?}", relay_urls);
+            builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map));
+        }
+        if let Some(port) = bind_port {
+            tracing::info!("Binding QUIC to UDP port {port}");
+            builder = builder.bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))?;
+        }
+        let endpoint = builder.bind().await?;
+        // Don't block on relay connection — direct UDP works without it.
+        // online() waits for a relay home, which hangs on sinkholed networks.
+        tokio::spawn({
+            let ep = endpoint.clone();
+            async move { ep.online().await; }
+        });
+
+        // If we bound to a fixed port, discover our public IP via STUN so the
+        // invite token includes it. Relay STUN may not work on sinkholed networks.
+        let public_addr = if let Some(port) = bind_port {
+            stun_public_addr(port).await
+        } else {
+            None
+        };
 
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
@@ -138,6 +245,7 @@ impl Node {
 
         let node = Node {
             endpoint,
+            public_addr,
             state: Arc::new(Mutex::new(MeshState {
                 peers: HashMap::new(),
                 connections: HashMap::new(),
@@ -159,7 +267,23 @@ impl Node {
     }
 
     pub fn invite_token(&self) -> String {
-        let addr = self.endpoint.addr();
+        let mut addr = self.endpoint.addr();
+        // Inject STUN-discovered public address if relay STUN didn't provide one.
+        if let Some(pub_addr) = self.public_addr {
+            use iroh::TransportAddr;
+            let has_public = addr.addrs.iter().any(|a| match a {
+                TransportAddr::Ip(sock) => {
+                    match sock.ip() {
+                        std::net::IpAddr::V4(v4) => !v4.is_private() && !v4.is_loopback(),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            });
+            if !has_public {
+                addr.addrs.insert(TransportAddr::Ip(pub_addr));
+            }
+        }
         let json = serde_json::to_vec(&addr).expect("serializable");
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json)
     }
@@ -416,17 +540,15 @@ impl Node {
 
         tracing::info!("Connecting to peer {}...", peer_id.fmt_short());
         let conn = match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(15),
             self.endpoint.connect(addr.clone(), ALPN),
         ).await {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
-                tracing::warn!("Failed to connect to {}: {e}", peer_id.fmt_short());
-                return Ok(());
+                anyhow::bail!("Failed to connect to {}: {e}", peer_id.fmt_short());
             }
             Err(_) => {
-                tracing::warn!("Timeout connecting to {} (10s)", peer_id.fmt_short());
-                return Ok(());
+                anyhow::bail!("Timeout connecting to {} (15s)", peer_id.fmt_short());
             }
         };
 

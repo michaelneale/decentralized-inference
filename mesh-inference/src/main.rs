@@ -1,4 +1,5 @@
 mod console;
+mod election;
 mod launch;
 mod mesh;
 mod rewrite;
@@ -20,17 +21,23 @@ struct Cli {
     #[arg(long, short, global = true)]
     join: Vec<String>,
 
-    /// Start llama-server and expose an OpenAI-compatible HTTP API on this port.
-    /// Requires --model. Waits for at least --min-peers peers before starting.
+    /// Force this node to be the host on a specific HTTP port.
+    /// Without this flag, the mesh auto-elects a host based on VRAM.
     #[arg(long)]
     serve: Option<u16>,
 
-    /// Path to GGUF model file. Required with --serve.
-    /// If provided without --serve, the local rpc-server uses it for zero-transfer loading.
+    /// Path to GGUF model file. Starts rpc-server and enters auto-election.
+    /// Both workers and the elected host need this.
     #[arg(long)]
     model: Option<PathBuf>,
 
-    /// Minimum number of peers to wait for before starting llama-server (default: 1)
+    /// HTTP port for llama-server when elected as host (default: 8090).
+    /// Only used in auto-election mode (--model without --serve).
+    #[arg(long, default_value = "8090")]
+    port: u16,
+
+    /// Minimum number of peers to wait for before starting llama-server.
+    /// Only used with --serve (manual host mode).
     #[arg(long, default_value = "1")]
     min_peers: usize,
 
@@ -44,6 +51,7 @@ struct Cli {
     device: Option<String>,
 
     /// Tensor split ratios for llama-server (e.g. "0.8,0.2").
+    /// Without this, split is auto-calculated from VRAM.
     #[arg(long)]
     tensor_split: Option<String>,
 
@@ -51,10 +59,14 @@ struct Cli {
     #[arg(long)]
     client: bool,
 
-    /// Local port for the lite client's HTTP endpoint (default: 8080).
-    /// Only used with --client.
-    #[arg(long, default_value = "8080")]
-    port: u16,
+    /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
+    /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
+    #[arg(long, global = true)]
+    relay: Vec<String>,
+
+    /// Bind QUIC to a fixed UDP port (for NAT port forwarding).
+    #[arg(long, global = true)]
+    bind_port: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -83,8 +95,7 @@ async fn main() -> Result<()> {
         return console::run(*port, cli.join.clone()).await;
     }
 
-    // --- Original CLI behavior below ---
-
+    // --- Validation ---
     if cli.serve.is_some() && cli.model.is_none() {
         anyhow::bail!("--model is required when using --serve");
     }
@@ -94,46 +105,64 @@ async fn main() -> Result<()> {
     if cli.client && cli.join.is_empty() {
         anyhow::bail!("--client requires --join to connect to a mesh");
     }
-
-    let role = if cli.client {
-        NodeRole::Client
-    } else if let Some(http_port) = cli.serve {
-        NodeRole::Host { http_port }
-    } else {
-        NodeRole::Worker
-    };
-
-    if cli.client {
-        return run_client(cli, role).await;
+    if cli.client && cli.model.is_some() {
+        anyhow::bail!("--client and --model are mutually exclusive");
     }
 
-    let bin_dir = match cli.bin_dir {
-        Some(d) => d,
-        None => std::env::current_exe()
-            .context("Failed to determine own binary path")?
-            .parent()
-            .context("Binary has no parent directory")?
-            .to_path_buf(),
+    // --- Lite client mode ---
+    if cli.client {
+        return run_client(cli).await;
+    }
+
+    // --- Need a model for worker or host ---
+    let model = match &cli.model {
+        Some(m) => m.clone(),
+        None => anyhow::bail!("--model is required (or use --client for lite mode)"),
     };
 
+    let bin_dir = match &cli.bin_dir {
+        Some(d) => d.clone(),
+        None => detect_bin_dir()?,
+    };
+
+    if cli.serve.is_some() {
+        // Legacy manual host mode: --serve PORT
+        run_manual_host(cli, model, bin_dir).await
+    } else {
+        // Auto-election mode: --model (with optional --join)
+        run_auto(cli, model, bin_dir).await
+    }
+}
+
+/// Auto-election mode: start rpc-server, join mesh, auto-elect host.
+async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
+    let llama_port = cli.port;
+
+    // Start rpc-server — every node contributes GPU
     let rpc_port = launch::start_rpc_server(
-        &bin_dir,
-        cli.device.as_deref(),
-        cli.model.as_deref(),
+        &bin_dir, cli.device.as_deref(), Some(&model),
     ).await?;
     eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
 
-    let (node, channels) = mesh::Node::start(role.clone()).await?;
+    // Start mesh node as Worker (election may promote to Host)
+    let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port).await?;
     let token = node.invite_token();
 
-    let http_port = if let NodeRole::Host { http_port } = &role { Some(*http_port) } else { None };
     let tunnel_mgr = tunnel::Manager::start(
-        node.clone(), rpc_port, channels.rpc, http_port, channels.http,
+        node.clone(), rpc_port, channels.rpc, Some(llama_port), channels.http,
     ).await?;
 
+    // Advertise local models
+    let model_name = model.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    node.set_models(vec![model_name]).await;
+
+    // Join mesh or print token
     if cli.join.is_empty() {
         eprintln!("Invite token: {token}");
-        eprintln!("Waiting for inbound connections...");
+        eprintln!("Waiting for peers to join...");
     } else {
         let mut joined = false;
         for t in &cli.join {
@@ -143,9 +172,69 @@ async fn main() -> Result<()> {
                     joined = true;
                     break;
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to join via token: {e}");
+                Err(e) => tracing::warn!("Failed to join via token: {e}"),
+            }
+        }
+        if !joined {
+            eprintln!("Failed to join any peer — running standalone");
+        }
+        eprintln!("This node's token (for others to join): {token}");
+    }
+
+    // Enter election loop — blocks until ctrl-c
+    eprintln!("Entering auto-election (highest VRAM becomes host)...");
+
+    let node2 = node.clone();
+    let tunnel_mgr2 = tunnel_mgr.clone();
+    let bin_dir2 = bin_dir.clone();
+    let model2 = model.clone();
+    tokio::spawn(async move {
+        election::election_loop(
+            node2, tunnel_mgr2, bin_dir2, model2, llama_port,
+            |is_host, llama_ready| {
+                if is_host && llama_ready {
+                    eprintln!("✅ This node is HOST — llama-server ready on port {llama_port}");
+                } else if is_host {
+                    eprintln!("⏳ This node is HOST — llama-server starting...");
+                } else {
+                    eprintln!("📡 This node is WORKER — contributing GPU to the mesh");
                 }
+            },
+        ).await;
+    });
+
+    tokio::signal::ctrl_c().await?;
+    eprintln!("\nShutting down...");
+    launch::kill_llama_server();
+    Ok(())
+}
+
+/// Legacy manual host mode: --serve PORT forces this node to be host.
+async fn run_manual_host(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
+    let http_port = cli.serve.unwrap();
+
+    let rpc_port = launch::start_rpc_server(
+        &bin_dir, cli.device.as_deref(), Some(&model),
+    ).await?;
+    eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
+
+    let role = NodeRole::Host { http_port };
+    let (node, channels) = mesh::Node::start(role.clone(), &cli.relay, cli.bind_port).await?;
+    let token = node.invite_token();
+
+    let tunnel_mgr = tunnel::Manager::start(
+        node.clone(), rpc_port, channels.rpc, Some(http_port), channels.http,
+    ).await?;
+
+    if cli.join.is_empty() {
+        eprintln!("Invite token: {token}");
+        eprintln!("Waiting for inbound connections...");
+    } else {
+        let mut joined = false;
+        for t in &cli.join {
+            match node.join(t).await {
+                Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
+                Err(e) => tracing::warn!("Failed to join via token: {e}"),
             }
         }
         if !joined {
@@ -154,80 +243,46 @@ async fn main() -> Result<()> {
         eprintln!("This node's token (for others to join): {token}");
     }
 
-    if let Some(http_port) = cli.serve {
-        let model = cli.model.unwrap();
-        eprintln!("Waiting for {} peer(s) with active tunnels...", cli.min_peers);
-        tunnel_mgr.wait_for_peers(cli.min_peers).await?;
+    eprintln!("Waiting for {} peer(s) with active tunnels...", cli.min_peers);
+    tunnel_mgr.wait_for_peers(cli.min_peers).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let tunnel_ports = tunnel_mgr.peer_ports().await;
+    eprintln!(
+        "Got {} peer(s), starting llama-server with {} remote RPC endpoint(s)",
+        tunnel_ports.len(), tunnel_ports.len()
+    );
 
-        let tunnel_ports = tunnel_mgr.peer_ports().await;
-        eprintln!(
-            "Got {} peer(s), starting llama-server with {} remote RPC endpoint(s)",
-            tunnel_ports.len(),
-            tunnel_ports.len()
-        );
+    let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
+    eprintln!("Broadcasting tunnel map ({} entries) for B2B rewriting", my_tunnel_map.len());
+    node.broadcast_tunnel_map(my_tunnel_map).await?;
+    node.wait_for_tunnel_maps(tunnel_ports.len(), std::time::Duration::from_secs(15)).await?;
+    let remote_maps = node.all_remote_tunnel_maps().await;
+    tunnel_mgr.update_rewrite_map(&remote_maps).await;
 
-        let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
-        eprintln!("Broadcasting tunnel map ({} entries) for B2B rewriting", my_tunnel_map.len());
-        node.broadcast_tunnel_map(my_tunnel_map).await?;
-
-        node.wait_for_tunnel_maps(tunnel_ports.len(), std::time::Duration::from_secs(15)).await?;
-        let remote_maps = node.all_remote_tunnel_maps().await;
-        tunnel_mgr.update_rewrite_map(&remote_maps).await;
-
-        launch::start_llama_server(&bin_dir, &model, http_port, &tunnel_ports, cli.tensor_split.as_deref()).await?;
-        eprintln!("llama-server ready: http://localhost:{http_port}");
-    } else {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
-        if !my_tunnel_map.is_empty() {
-            eprintln!("Broadcasting tunnel map ({} entries) for B2B", my_tunnel_map.len());
-            node.broadcast_tunnel_map(my_tunnel_map).await?;
-        }
-
-        let node_bg = node.clone();
-        let tunnel_mgr_bg = tunnel_mgr.clone();
-        tokio::spawn(async move {
-            let mut last_count = 0;
-            for _ in 0..30 {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let remote_maps = node_bg.all_remote_tunnel_maps().await;
-                let count = remote_maps.len();
-                if count > last_count {
-                    tunnel_mgr_bg.update_rewrite_map(&remote_maps).await;
-                    last_count = count;
-                }
-            }
-        });
-    }
+    launch::start_llama_server(
+        &bin_dir, &model, http_port, &tunnel_ports, cli.tensor_split.as_deref(),
+    ).await?;
+    eprintln!("llama-server ready: http://localhost:{http_port}");
 
     eprintln!("Running. Ctrl-C to stop.");
     tokio::signal::ctrl_c().await?;
     eprintln!("\nShutting down...");
-
     Ok(())
 }
 
 /// Run as a lite client: join mesh, find host, expose local HTTP proxy.
-async fn run_client(cli: Cli, role: NodeRole) -> Result<()> {
+async fn run_client(cli: Cli) -> Result<()> {
     let local_port = cli.port;
 
-    let (node, _channels) = mesh::Node::start(role).await?;
+    let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port).await?;
     let token = node.invite_token();
 
     let mut joined = false;
     for t in &cli.join {
         match node.join(t).await {
-            Ok(()) => {
-                eprintln!("Joined mesh");
-                joined = true;
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to join via token: {e}");
-            }
+            Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
+            Err(e) => tracing::warn!("Failed to join via token: {e}"),
         }
     }
     if !joined {
@@ -251,9 +306,6 @@ async fn run_client(cli: Cli, role: NodeRole) -> Result<()> {
     eprintln!();
     eprintln!("Use it like any OpenAI-compatible API:");
     eprintln!("  curl http://localhost:{local_port}/v1/models");
-    eprintln!("  curl http://localhost:{local_port}/v1/chat/completions \\");
-    eprintln!("    -H 'Content-Type: application/json' \\");
-    eprintln!("    -d '{{\"model\":\"test\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hello!\"}}]}}'");
 
     loop {
         tokio::select! {
@@ -261,7 +313,6 @@ async fn run_client(cli: Cli, role: NodeRole) -> Result<()> {
                 let (tcp_stream, addr) = accept_result?;
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Client connection from {addr}");
-
                 let node = node.clone();
                 tokio::spawn(async move {
                     match node.open_http_tunnel(host_id).await {
@@ -270,9 +321,7 @@ async fn run_client(cli: Cli, role: NodeRole) -> Result<()> {
                                 tracing::debug!("HTTP tunnel relay ended: {e}");
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to open HTTP tunnel to host: {e}");
-                        }
+                        Err(e) => tracing::warn!("Failed to open HTTP tunnel to host: {e}"),
                     }
                 });
             }
@@ -284,4 +333,28 @@ async fn run_client(cli: Cli, role: NodeRole) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn detect_bin_dir() -> Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .context("Failed to determine own binary path")?;
+    let dir = exe.parent()
+        .context("Binary has no parent directory")?;
+
+    // Same directory (bundle layout)
+    if dir.join("rpc-server").exists() && dir.join("llama-server").exists() {
+        return Ok(dir.to_path_buf());
+    }
+    // Dev layout: ../llama.cpp/build/bin/
+    let dev = dir.join("../llama.cpp/build/bin");
+    if dev.join("rpc-server").exists() && dev.join("llama-server").exists() {
+        return Ok(dev.canonicalize()?);
+    }
+    // Cargo target/release/ layout
+    let cargo = dir.join("../../../llama.cpp/build/bin");
+    if cargo.join("rpc-server").exists() && cargo.join("llama-server").exists() {
+        return Ok(cargo.canonicalize()?);
+    }
+
+    Ok(dir.to_path_buf())
 }
