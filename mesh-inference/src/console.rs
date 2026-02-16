@@ -2,7 +2,7 @@
 //!
 //! Serves a single-page dashboard at http://localhost:PORT with:
 //! - Live mesh status via SSE
-//! - Join mesh, download model, choose role
+//! - Join mesh, select model, auto-elect host
 //! - Built-in chat to test the LLM
 
 use crate::{launch, mesh, tunnel};
@@ -50,8 +50,6 @@ const MODEL_CATALOG: &[CatalogModel] = &[
     },
 ];
 
-const DEFAULT_MODEL_FILE: &str = "Qwen2.5-3B-Instruct-Q4_K_M.gguf";
-
 /// Shared state for the console.
 #[derive(Clone)]
 struct ConsoleState {
@@ -62,13 +60,14 @@ struct ConsoleInner {
     node: Option<mesh::Node>,
     tunnel_mgr: Option<tunnel::Manager>,
     role: CurrentRole,
+    /// True if this node is currently the elected host
+    is_host: bool,
     llama_port: Option<u16>,
     llama_ready: bool,
     client_port: Option<u16>,
     rpc_port: Option<u16>,
     model_path: Option<PathBuf>,
     download_progress: Option<DownloadProgress>,
-    /// SSE subscribers — each gets a sender
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -76,8 +75,9 @@ struct ConsoleInner {
 #[serde(rename_all = "snake_case")]
 enum CurrentRole {
     Idle,
-    ShareGpu,
-    RunLlm,
+    /// Node is active: rpc-server running, participating in election
+    Active,
+    /// Lite client — no GPU, no model
     JustConnect,
 }
 
@@ -95,6 +95,7 @@ struct StatusPayload {
     token: Option<String>,
     role: CurrentRole,
     role_label: String,
+    is_host: bool,
     peers: Vec<PeerPayload>,
     models: Vec<ModelInfo>,
     model_path: Option<String>,
@@ -128,6 +129,7 @@ impl ConsoleState {
                 node: None,
                 tunnel_mgr: None,
                 role: CurrentRole::Idle,
+                is_host: false,
                 llama_port: None,
                 llama_ready: false,
                 client_port: None,
@@ -159,11 +161,11 @@ impl ConsoleState {
             (None, None, Vec::new())
         };
 
-        let role_label = match &inner.role {
-            CurrentRole::Idle => "Idle".into(),
-            CurrentRole::ShareGpu => "GPU Worker".into(),
-            CurrentRole::RunLlm => if inner.llama_ready { "LLM Host".into() } else { "Starting...".into() },
-            CurrentRole::JustConnect => "Client".into(),
+        let role_label = match (&inner.role, inner.is_host) {
+            (CurrentRole::Idle, _) => "Idle".into(),
+            (CurrentRole::Active, true) => if inner.llama_ready { "Host (LLM ready)".into() } else { "Host (starting...)".into() },
+            (CurrentRole::Active, false) => "Worker".into(),
+            (CurrentRole::JustConnect, _) => "Client".into(),
         };
         let model_name = inner.model_path.as_ref().map(|p| {
             p.file_stem().unwrap_or_default().to_string_lossy().to_string()
@@ -174,6 +176,7 @@ impl ConsoleState {
             token,
             role: inner.role.clone(),
             role_label,
+            is_host: inner.is_host,
             peers,
             models: scan_models(),
             model_path: inner.model_path.as_ref().map(|p| p.display().to_string()),
@@ -231,50 +234,80 @@ fn scan_models() -> Vec<ModelInfo> {
     models
 }
 
-/// Find llama.cpp binaries. Checks:
-/// 1. Next to the mesh-inference binary (bundle/deploy layout)
-/// 2. ../llama.cpp/build/bin/ relative to the binary (dev layout)
-/// 3. ../../llama.cpp/build/bin/ relative to the binary (cargo target/release/ layout)
+/// Find llama.cpp binaries.
 fn detect_binaries() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-
-    // 1. Same directory (bundle)
     if dir.join("rpc-server").exists() && dir.join("llama-server").exists() {
         return Some(dir.to_path_buf());
     }
-
-    // 2. Relative to binary: ../llama.cpp/build/bin/
     let dev = dir.join("../llama.cpp/build/bin");
     if dev.join("rpc-server").exists() && dev.join("llama-server").exists() {
         return Some(dev.canonicalize().ok()?);
     }
-
-    // 3. From cargo target/release/: ../../../llama.cpp/build/bin/
     let cargo = dir.join("../../../llama.cpp/build/bin");
     if cargo.join("rpc-server").exists() && cargo.join("llama-server").exists() {
         return Some(cargo.canonicalize().ok()?);
     }
-
     None
 }
+
+// ─── Election ───────────────────────────────────────────────────────
+
+/// Determine if this node should be host.
+/// Rules:
+/// 1. If another peer is already Host → I should not be host (stability)
+/// 2. If no peer is Host → highest VRAM wins, tie-break by node ID
+/// 3. If I'm already Host (checked by caller) → I stay host
+async fn should_be_host(node: &mesh::Node) -> bool {
+    let my_id = node.id();
+    let my_vram = node.vram_bytes();
+    let my_role = node.role().await;
+    let peers = node.peers().await;
+
+    // If another peer is already Host, I shouldn't take over
+    let other_host = peers.iter().find(|p| matches!(p.role, NodeRole::Host { .. }));
+    if other_host.is_some() {
+        return false;
+    }
+
+    // If I'm already Host, stay host (stability)
+    if matches!(my_role, NodeRole::Host { .. }) {
+        return true;
+    }
+
+    // No host exists anywhere. Elect by VRAM (highest wins), tie-break by ID.
+    // Only consider Active peers (Workers), not Clients.
+    for peer in &peers {
+        if !matches!(peer.role, NodeRole::Worker | NodeRole::Host { .. }) {
+            continue;
+        }
+        if peer.vram_bytes > my_vram {
+            return false;
+        }
+        if peer.vram_bytes == my_vram && peer.id > my_id {
+            return false;
+        }
+    }
+    true
+}
+
+// ─── Main entry ─────────────────────────────────────────────────────
 
 pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
     let state = ConsoleState::new();
 
     // Start mesh node + tunnel manager once — never restart.
-    // rpc_port starts at 0 (no rpc-server yet), updated when user picks a role.
     {
         let (node, channels) = mesh::Node::start(NodeRole::Client).await?;
         let tunnel_mgr = tunnel::Manager::start(
             node.clone(),
             0, // no rpc-server yet
             channels.rpc,
-            None, // no llama-server HTTP yet
+            None,
             channels.http,
         ).await?;
 
-        // Set available models from disk so gossip broadcasts them
         let model_names: Vec<String> = scan_models().iter().map(|m| m.name.clone()).collect();
         node.set_models(model_names).await;
 
@@ -283,7 +316,6 @@ pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
         inner.tunnel_mgr = Some(tunnel_mgr);
     }
 
-    // Join any initial tokens
     for token in &initial_join {
         let inner = state.inner.lock().await;
         if let Some(node) = &inner.node {
@@ -302,7 +334,6 @@ pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
     eprintln!("│  http://localhost:{port:<21}│", port = port);
     eprintln!("└─────────────────────────────────────────┘");
 
-    // Background: push status updates every 2s
     let state_bg = state.clone();
     tokio::spawn(async move {
         loop {
@@ -332,7 +363,8 @@ pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Parse an HTTP request and route it.
+// ─── HTTP routing ───────────────────────────────────────────────────
+
 async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await?;
@@ -340,8 +372,6 @@ async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
 
     let first_line = request.lines().next().unwrap_or("");
     let (method, path) = parse_request_line(first_line);
-
-    // Extract body for POST requests
     let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
     match (method.as_str(), path.as_str()) {
@@ -372,11 +402,8 @@ async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
             }).collect();
             respond_json(&mut stream, &catalog).await?;
         }
-        ("POST", "/api/share-gpu") => {
-            handle_share_gpu(&mut stream, &state, &body).await?;
-        }
-        ("POST", "/api/run-llm") => {
-            handle_run_llm(&mut stream, &state, &body).await?;
+        ("POST", "/api/start") => {
+            handle_start(&mut stream, &state, &body).await?;
         }
         ("POST", "/api/just-connect") => {
             handle_just_connect(&mut stream, &state).await?;
@@ -405,8 +432,7 @@ fn parse_request_line(line: &str) -> (String, String) {
 async fn respond_html(stream: &mut TcpStream, html: &str) -> Result<()> {
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-        html.len(),
-        html
+        html.len(), html
     );
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
@@ -416,8 +442,7 @@ async fn respond_json<T: Serialize>(stream: &mut TcpStream, data: &T) -> Result<
     let json = serde_json::to_string(data)?;
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-        json.len(),
-        json
+        json.len(), json
     );
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
@@ -433,19 +458,18 @@ async fn respond_err(stream: &mut TcpStream, msg: &str) -> Result<()> {
     let body = serde_json::to_string(&json)?;
     let resp = format!(
         "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
+        body.len(), body
     );
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
 }
 
-/// SSE: keep connection open, push status events.
+// ─── SSE ────────────────────────────────────────────────────────────
+
 async fn handle_sse(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
     let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
     stream.write_all(header.as_bytes()).await?;
 
-    // Send initial status
     let status = state.status().await;
     if let Ok(json) = serde_json::to_string(&status) {
         stream.write_all(format!("data: {json}\n\n").as_bytes()).await?;
@@ -457,19 +481,13 @@ async fn handle_sse(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
         inner.sse_clients.push(tx);
     }
 
-    // Stream events until client disconnects
     loop {
         tokio::select! {
             Some(event) = rx.recv() => {
-                if stream.write_all(event.as_bytes()).await.is_err() {
-                    break;
-                }
+                if stream.write_all(event.as_bytes()).await.is_err() { break; }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                // Keep-alive
-                if stream.write_all(b": keepalive\n\n").await.is_err() {
-                    break;
-                }
+                if stream.write_all(b": keepalive\n\n").await.is_err() { break; }
             }
         }
     }
@@ -477,8 +495,9 @@ async fn handle_sse(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
     Ok(())
 }
 
+// ─── Handlers ───────────────────────────────────────────────────────
+
 async fn handle_join(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    // Accept either raw token string or JSON {"token": "..."}
     let token = if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string()
     } else {
@@ -501,8 +520,241 @@ async fn handle_join(stream: &mut TcpStream, state: &ConsoleState, body: &str) -
     }
 }
 
+/// POST /api/start — select model, start rpc-server, enter election loop.
+async fn handle_start(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
+    let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let model_path = req.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let llama_port: u16 = req.get("port").and_then(|v| v.as_u64()).unwrap_or(8090) as u16;
+
+    if model_path.is_empty() {
+        return respond_err(stream, "No model selected").await;
+    }
+
+    let model = PathBuf::from(model_path);
+    if !model.exists() {
+        return respond_err(stream, "Model file not found").await;
+    }
+
+    let bin_dir = match detect_binaries() {
+        Some(d) => d,
+        None => return respond_err(stream, "llama.cpp binaries not found").await,
+    };
+
+    let mut inner = state.inner.lock().await;
+    if inner.role != CurrentRole::Idle {
+        return respond_err(stream, "Already running — stop first").await;
+    }
+
+    let node = inner.node.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?.clone();
+    let tunnel_mgr = inner.tunnel_mgr.as_ref().ok_or_else(|| anyhow::anyhow!("Tunnel manager not started"))?.clone();
+
+    // Start rpc-server — every active node contributes GPU
+    let rpc_port = match launch::start_rpc_server(&bin_dir, None, Some(&model)).await {
+        Ok(p) => p,
+        Err(e) => return respond_err(stream, &format!("Failed to start rpc-server: {e}")).await,
+    };
+    tunnel_mgr.set_rpc_port(rpc_port);
+
+    // Start as Worker; election will promote to Host if appropriate
+    node.set_role(NodeRole::Worker).await;
+
+    inner.rpc_port = Some(rpc_port);
+    inner.model_path = Some(model.clone());
+    inner.role = CurrentRole::Active;
+    inner.llama_port = Some(llama_port);
+    drop(inner);
+
+    state.push_status().await;
+    respond_ok(stream, &format!("Started — rpc-server on port {rpc_port}, entering election")).await?;
+
+    // Spawn the election loop
+    let state2 = state.clone();
+    tokio::spawn(async move {
+        election_loop(node, tunnel_mgr, bin_dir, model, llama_port, state2).await;
+    });
+
+    Ok(())
+}
+
+/// Background task: watches peer changes and runs election.
+/// If elected host: start llama-server. If not: just be a worker.
+/// Re-runs on every mesh membership change.
+async fn election_loop(
+    node: mesh::Node,
+    tunnel_mgr: tunnel::Manager,
+    bin_dir: PathBuf,
+    model: PathBuf,
+    llama_port: u16,
+    state: ConsoleState,
+) {
+    let mut peer_rx = node.peer_change_rx.clone();
+    let mut currently_host = false;
+    let mut last_worker_count: usize = 0;
+
+    // Initial election after a brief settle
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    loop {
+        // Check if still active
+        {
+            let inner = state.inner.lock().await;
+            if inner.role != CurrentRole::Active {
+                break;
+            }
+        }
+
+        let want_host = should_be_host(&node).await;
+        let worker_count = count_workers(&node).await;
+
+        if want_host && !currently_host {
+            // Promote to host
+            eprintln!("🗳 Elected as host — starting llama-server");
+            node.set_role(NodeRole::Host { http_port: llama_port }).await;
+            {
+                let mut inner = state.inner.lock().await;
+                inner.is_host = true;
+                inner.llama_ready = false;
+            }
+            state.push_status().await;
+
+            launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state).await;
+            currently_host = true;
+            last_worker_count = count_workers(&node).await;
+
+        } else if !want_host && currently_host {
+            // Another node is now host — demote
+            eprintln!("🗳 Another node is now host — demoting to worker");
+            launch::kill_llama_server();
+            node.set_role(NodeRole::Worker).await;
+            {
+                let mut inner = state.inner.lock().await;
+                inner.is_host = false;
+                inner.llama_ready = false;
+            }
+            state.push_status().await;
+            currently_host = false;
+
+        } else if currently_host && worker_count != last_worker_count {
+            // Worker count changed while we're host — restart with new split
+            eprintln!("⚡ Worker count changed: {} → {}. Restarting llama-server...",
+                last_worker_count, worker_count);
+            launch::kill_llama_server();
+            {
+                let mut inner = state.inner.lock().await;
+                inner.llama_ready = false;
+            }
+            state.push_status().await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state).await;
+            last_worker_count = count_workers(&node).await;
+        }
+
+        // Wait for next peer change
+        if peer_rx.changed().await.is_err() {
+            break;
+        }
+
+        // Debounce — wait for mesh to settle
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// Count Worker peers in the mesh.
+async fn count_workers(node: &mesh::Node) -> usize {
+    node.peers().await.iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker))
+        .count()
+}
+
+/// Calculate tensor split and launch llama-server for the current mesh state.
+async fn launch_llama_for_current_mesh(
+    node: &mesh::Node,
+    tunnel_mgr: &tunnel::Manager,
+    bin_dir: &Path,
+    model: &Path,
+    llama_port: u16,
+    state: &ConsoleState,
+) {
+    let existing_peers = node.peers().await;
+    let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
+    if has_workers {
+        eprintln!("Found worker(s) in mesh, waiting for tunnels...");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tunnel_mgr.wait_for_peers(1),
+        ).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    } else {
+        eprintln!("No workers in mesh — starting with local GPU only");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    let worker_peers = node.peers().await;
+    let worker_ids: Vec<_> = worker_peers.iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker))
+        .map(|p| p.id)
+        .collect();
+    let all_ports = tunnel_mgr.peer_ports_map().await;
+    let tunnel_ports: Vec<u16> = worker_ids.iter()
+        .filter_map(|id| all_ports.get(id).copied())
+        .collect();
+    let n_peers = tunnel_ports.len();
+
+    if n_peers > 0 {
+        eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
+        let my_map = tunnel_mgr.peer_ports_map().await;
+        let _ = node.broadcast_tunnel_map(my_map).await;
+        let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
+        let remote_maps = node.all_remote_tunnel_maps().await;
+        tunnel_mgr.update_rewrite_map(&remote_maps).await;
+    } else {
+        eprintln!("No workers found — starting llama-server with local GPU only");
+    }
+
+    let effective_split = if n_peers > 0 {
+        let my_vram = node.vram_bytes() as f64;
+        let worker_vrams: Vec<f64> = worker_ids.iter()
+            .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
+            .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram })
+            .collect();
+        let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
+        if total > 0.0 {
+            let mut parts = vec![format!("{:.2}", my_vram / total)];
+            for wv in &worker_vrams {
+                parts.push(format!("{:.2}", wv / total));
+            }
+            let split = parts.join(",");
+            eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
+                my_vram / 1e9, worker_vrams.len());
+            Some(split)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match launch::start_llama_server(
+        bin_dir, model, llama_port, &tunnel_ports, effective_split.as_deref(),
+    ).await {
+        Ok(()) => {
+            eprintln!("llama-server ready: http://localhost:{llama_port}");
+            let mut inner = state.inner.lock().await;
+            inner.llama_ready = true;
+        }
+        Err(e) => {
+            eprintln!("Failed to start llama-server: {e}");
+            let mut inner = state.inner.lock().await;
+            inner.llama_ready = false;
+        }
+    }
+    state.push_status().await;
+}
+
+// ─── Download ───────────────────────────────────────────────────────
+
 async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    // Accept {"model": "name"} or download default
     let model_name = if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         v.get("model").and_then(|t| t.as_str()).unwrap_or("").to_string()
     } else {
@@ -532,7 +784,6 @@ async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState, bod
     let url = entry.url.to_string();
     let name = entry.name.to_string();
 
-    // Start download in background
     let state2 = state.clone();
     tokio::spawn(async move {
         if let Err(e) = download_model_task(&state2, &models_dir, &dest, &url, &name).await {
@@ -599,265 +850,27 @@ async fn download_model_task(state: &ConsoleState, dir: &std::path::Path, dest: 
         inner.download_progress = None;
     }
     state.push_status().await;
-
     Ok(())
 }
 
-async fn handle_share_gpu(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let model_path = req.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    if model_path.is_empty() {
-        return respond_err(stream, "No model selected").await;
-    }
-
-    let model = PathBuf::from(model_path);
-    if !model.exists() {
-        return respond_err(stream, "Model file not found").await;
-    }
-
-    let bin_dir = match detect_binaries() {
-        Some(d) => d,
-        None => return respond_err(stream, "llama.cpp binaries not found").await,
-    };
-
-    let mut inner = state.inner.lock().await;
-    if inner.role != CurrentRole::Idle {
-        return respond_err(stream, "Already running — stop first").await;
-    }
-
-    // Start rpc-server
-    let rpc_port = match launch::start_rpc_server(&bin_dir, None, Some(&model)).await {
-        Ok(p) => p,
-        Err(e) => return respond_err(stream, &format!("Failed to start rpc-server: {e}")).await,
-    };
-
-    // Update tunnel manager to forward inbound streams to rpc-server
-    if let Some(tunnel_mgr) = &inner.tunnel_mgr {
-        tunnel_mgr.set_rpc_port(rpc_port);
-    }
-
-    // Update gossip role — no node restart needed
-    if let Some(node) = &inner.node {
-        node.set_role(NodeRole::Worker).await;
-    }
-
-    inner.rpc_port = Some(rpc_port);
-    inner.model_path = Some(model);
-    inner.role = CurrentRole::ShareGpu;
-    drop(inner);
-
-    state.push_status().await;
-    respond_ok(stream, &format!("Sharing GPU — rpc-server on port {rpc_port}")).await
-}
-
-async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let model_path = req.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let llama_port: u16 = req.get("port").and_then(|v| v.as_u64()).unwrap_or(8090) as u16;
-    let tensor_split = req.get("tensor_split").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-    if model_path.is_empty() {
-        return respond_err(stream, "No model selected").await;
-    }
-
-    let model = PathBuf::from(model_path);
-    if !model.exists() {
-        return respond_err(stream, "Model file not found").await;
-    }
-
-    let bin_dir = match detect_binaries() {
-        Some(d) => d,
-        None => return respond_err(stream, "llama.cpp binaries not found").await,
-    };
-
-    let mut inner = state.inner.lock().await;
-    if inner.role != CurrentRole::Idle {
-        return respond_err(stream, "Already running — stop first").await;
-    }
-
-    // Update role on existing node — no restart
-    let node = inner.node.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?.clone();
-    let tunnel_mgr = inner.tunnel_mgr.as_ref().ok_or_else(|| anyhow::anyhow!("Tunnel manager not started"))?.clone();
-    node.set_role(NodeRole::Host { http_port: llama_port }).await;
-
-    inner.model_path = Some(model.clone());
-    inner.role = CurrentRole::RunLlm;
-    inner.llama_port = Some(llama_port);
-    drop(inner);
-
-    state.push_status().await;
-    respond_ok(stream, "Starting LLM...").await?;
-
-    // Start llama-server in background, then watch for mesh changes
-    let state2 = state.clone();
-    tokio::spawn(async move {
-        launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state2).await;
-
-        // Watch for worker changes and auto-restart
-        let mut peer_rx = node.peer_change_rx.clone();
-        let mut last_worker_count = count_workers(&node).await;
-
-        loop {
-            // Wait for any peer change
-            if peer_rx.changed().await.is_err() {
-                break; // channel closed
-            }
-
-            // Check if we're still in RunLlm mode
-            {
-                let inner = state2.inner.lock().await;
-                if inner.role != CurrentRole::RunLlm {
-                    break;
-                }
-            }
-
-            // Debounce — wait for mesh to settle
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-            let new_worker_count = count_workers(&node).await;
-            if new_worker_count == last_worker_count {
-                continue; // no actual worker change
-            }
-
-            eprintln!(
-                "⚡ Mesh changed: {} → {} workers. Restarting llama-server...",
-                last_worker_count, new_worker_count
-            );
-            last_worker_count = new_worker_count;
-
-            // Kill existing llama-server
-            launch::kill_llama_server();
-            {
-                let mut inner = state2.inner.lock().await;
-                inner.llama_ready = false;
-            }
-            state2.push_status().await;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-            // Relaunch with updated worker list
-            launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state2).await;
-        }
-    });
-
-    Ok(())
-}
-
-/// Count Worker peers in the mesh.
-async fn count_workers(node: &mesh::Node) -> usize {
-    node.peers().await.iter()
-        .filter(|p| matches!(p.role, NodeRole::Worker))
-        .count()
-}
-
-/// Calculate tensor split and launch llama-server for the current mesh state.
-async fn launch_llama_for_current_mesh(
-    node: &mesh::Node,
-    tunnel_mgr: &tunnel::Manager,
-    bin_dir: &Path,
-    model: &Path,
-    llama_port: u16,
-    state: &ConsoleState,
-) {
-    let existing_peers = node.peers().await;
-    let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
-    if has_workers {
-        eprintln!("Found worker(s) in mesh, waiting for tunnels...");
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tunnel_mgr.wait_for_peers(1),
-        ).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    } else {
-        eprintln!("No workers in mesh — starting with local GPU only");
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    // Only use tunnel ports for Worker peers
-    let worker_peers = node.peers().await;
-    let worker_ids: Vec<_> = worker_peers.iter()
-        .filter(|p| matches!(p.role, NodeRole::Worker))
-        .map(|p| p.id)
-        .collect();
-    let all_ports = tunnel_mgr.peer_ports_map().await;
-    let tunnel_ports: Vec<u16> = worker_ids.iter()
-        .filter_map(|id| all_ports.get(id).copied())
-        .collect();
-    let n_peers = tunnel_ports.len();
-
-    if n_peers > 0 {
-        eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
-        let my_map = tunnel_mgr.peer_ports_map().await;
-        let _ = node.broadcast_tunnel_map(my_map).await;
-        let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
-        let remote_maps = node.all_remote_tunnel_maps().await;
-        tunnel_mgr.update_rewrite_map(&remote_maps).await;
-    } else {
-        eprintln!("No workers found — starting llama-server with local GPU only");
-    }
-
-    // Auto-calculate tensor split proportional to VRAM
-    let effective_split = if n_peers > 0 {
-        let my_vram = node.vram_bytes() as f64;
-        let worker_vrams: Vec<f64> = worker_ids.iter()
-            .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
-            .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram })
-            .collect();
-        let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
-        if total > 0.0 {
-            let mut parts = vec![format!("{:.2}", my_vram / total)];
-            for wv in &worker_vrams {
-                parts.push(format!("{:.2}", wv / total));
-            }
-            let split = parts.join(",");
-            eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
-                my_vram / 1e9, worker_vrams.len());
-            Some(split)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    match launch::start_llama_server(
-        bin_dir, model, llama_port, &tunnel_ports, effective_split.as_deref(),
-    ).await {
-        Ok(()) => {
-            eprintln!("llama-server ready: http://localhost:{llama_port}");
-            let mut inner = state.inner.lock().await;
-            inner.llama_ready = true;
-        }
-        Err(e) => {
-            eprintln!("Failed to start llama-server: {e}");
-            let mut inner = state.inner.lock().await;
-            inner.role = CurrentRole::Idle;
-            inner.llama_port = None;
-            inner.llama_ready = false;
-        }
-    }
-    state.push_status().await;
-}
+// ─── Just Connect (lite client) ─────────────────────────────────────
 
 async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Result<()> {
     let inner = state.inner.lock().await;
-    let node = inner.node.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?;
-    let node = node.clone();
+    let node = inner.node.as_ref().ok_or_else(|| anyhow::anyhow!("Node not started"))?.clone();
 
     if inner.role != CurrentRole::Idle {
         return respond_err(stream, "Already running — stop first").await;
     }
 
-    // Check if there's a host in the mesh
     let peers = node.peers().await;
     let host = peers.iter().find(|p| matches!(p.role, NodeRole::Host { .. }));
     if host.is_none() {
-        return respond_err(stream, "No host found in the mesh — someone needs to be running an LLM first").await;
+        return respond_err(stream, "No host found in the mesh yet").await;
     }
-    let host = host.unwrap().clone();
-    let host_id = host.id;
+    let host_id = host.unwrap().id;
     drop(inner);
 
-    // Bind local proxy port
     let local_port = 8080u16;
     let listener = match TcpListener::bind(format!("127.0.0.1:{local_port}")).await {
         Ok(l) => l,
@@ -872,7 +885,6 @@ async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Re
     }
     state.push_status().await;
 
-    // Start tunnel proxy in background
     let node2 = node.clone();
     tokio::spawn(async move {
         loop {
@@ -902,28 +914,27 @@ async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Re
     respond_ok(stream, &format!("Connected! API at http://localhost:{actual_port}")).await
 }
 
+// ─── Stop ───────────────────────────────────────────────────────────
+
 async fn handle_stop(stream: &mut TcpStream, state: &ConsoleState) -> Result<()> {
-    // Kill child processes
     let _ = tokio::process::Command::new("pkill")
         .args(["-f", "rpc-server"])
         .output().await;
     launch::kill_llama_server();
 
-    // Reset rpc_port on tunnel manager so inbound tunnels are dropped
     let mut inner = state.inner.lock().await;
     if let Some(tunnel_mgr) = &inner.tunnel_mgr {
         tunnel_mgr.set_rpc_port(0);
     }
-    // Reset role to idle — node + tunnel_mgr stay alive
     if let Some(node) = &inner.node {
         node.set_role(NodeRole::Client).await;
     }
     inner.role = CurrentRole::Idle;
+    inner.is_host = false;
     inner.llama_port = None;
     inner.llama_ready = false;
     inner.client_port = None;
     inner.rpc_port = None;
-    // Keep node and tunnel_mgr — don't destroy the mesh
     drop(inner);
 
     state.push_status().await;

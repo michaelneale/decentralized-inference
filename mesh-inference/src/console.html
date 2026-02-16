@@ -31,9 +31,8 @@
   .peer-row + .peer-row { border-top: 1px solid #1a1a1a; }
   .peer-id { font-family: monospace; color: #6cf; font-size: 0.85rem; }
   .peer-role { font-size: 0.8rem; color: #888; }
-  .no-peers { color: #444; font-size: 0.85rem; }
 
-  .choices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin: 0.75rem 0; }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 0.75rem 0; }
   .choice { background: #111; border: 2px solid #222; border-radius: 8px; padding: 1rem 0.75rem; cursor: pointer; text-align: center; transition: all 0.15s; }
   .choice:hover { border-color: #444; background: #151515; }
   .choice.active { border-color: #6cf; background: #0c1a2a; }
@@ -70,7 +69,6 @@
   .msg-user { color: #6cf; margin-bottom: 0.25rem; }
   .msg-bot { color: #ccc; margin-bottom: 0.5rem; white-space: pre-wrap; }
   .msg-err { color: #c66; font-size: 0.8rem; margin-bottom: 0.5rem; }
-  .msg-thinking { color: #555; font-style: italic; }
 
   .api-hint { font-family: monospace; font-size: 0.7rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.4rem 0.5rem; margin-bottom: 0.5rem; white-space: pre-wrap; word-break: break-all; }
   .warning { color: #cc4; font-size: 0.8rem; margin: 0.3rem 0; }
@@ -83,7 +81,7 @@
   <h1>mesh-inference</h1>
   <div class="subtitle" id="nodeInfo">starting...</div>
 
-  <!-- Mesh: join + token + peers — always visible -->
+  <!-- Mesh: join + token + peers -->
   <div class="section" id="meshSection">
     <div class="join-row">
       <input type="text" id="joinToken" placeholder="Paste an invite token to join...">
@@ -101,21 +99,16 @@
     </div>
   </div>
 
-  <!-- Role selection (hidden when active) -->
-  <div id="roleSection">
+  <!-- Mode selection (hidden when active) -->
+  <div id="modeSection">
     <h2>What do you want to do?</h2>
     <div class="choices">
-      <div class="choice" id="choiceGpu" onclick="selectRole('share_gpu')">
+      <div class="choice" id="choiceStart" onclick="selectMode('start')">
         <div class="choice-icon">🖥</div>
-        <div class="choice-title">Share GPU</div>
-        <div class="choice-desc">Contribute compute to the mesh. Needs model file.</div>
+        <div class="choice-title">Start</div>
+        <div class="choice-desc">Share your GPU and use the LLM. Needs model file. Mesh auto-elects a host.</div>
       </div>
-      <div class="choice" id="choiceLlm" onclick="selectRole('run_llm')">
-        <div class="choice-icon">🧠</div>
-        <div class="choice-title">Run LLM</div>
-        <div class="choice-desc">Run an LLM on your GPU (+ mesh workers). Serves an API.</div>
-      </div>
-      <div class="choice" id="choiceConnect" onclick="selectRole('just_connect')">
+      <div class="choice" id="choiceConnect" onclick="selectMode('connect')">
         <div class="choice-icon">💬</div>
         <div class="choice-title">Just Connect</div>
         <div class="choice-desc">Use someone else's LLM. No GPU or model needed.</div>
@@ -123,37 +116,20 @@
     </div>
   </div>
 
-  <!-- Share GPU config -->
-  <div id="gpuConfig" class="section hidden">
+  <!-- Start config -->
+  <div id="startConfig" class="section hidden">
     <div style="margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem;">Select model:</div>
-    <select id="gpuModelSelect"></select>
-    <div id="gpuNoModel" class="warning hidden">No models found in ~/.models/</div>
-    <div id="gpuDownloadRow" class="hidden" style="margin-top: 0.5rem;">
-      <select id="gpuCatalogSelect" style="margin-right: 0.5rem;"></select>
-      <button onclick="downloadModel('gpuCatalogSelect')" class="btn-primary">Download</button>
+    <select id="modelSelect"></select>
+    <div id="noModel" class="warning hidden">No models found in ~/.models/</div>
+    <div id="downloadRow" class="hidden" style="margin-top: 0.5rem;">
+      <select id="catalogSelect" style="margin-right: 0.5rem;"></select>
+      <button onclick="downloadModel()" class="btn-primary">Download</button>
     </div>
-    <button onclick="startShareGpu()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="gpuStartBtn">Start sharing GPU</button>
-    <div id="gpuNoBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
+    <button onclick="doStart()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="startBtn">Start</button>
+    <div id="noBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
   </div>
 
-  <!-- Run LLM config -->
-  <div id="llmConfig" class="section hidden">
-    <div style="margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem;">Select model:</div>
-    <select id="llmModelSelect"></select>
-    <div id="llmNoModel" class="warning hidden">No models found in ~/.models/</div>
-    <div id="llmDownloadRow" class="hidden" style="margin-top: 0.5rem;">
-      <select id="llmCatalogSelect" style="margin-right: 0.5rem;"></select>
-      <button onclick="downloadModel('llmCatalogSelect')" class="btn-primary">Download</button>
-    </div>
-    <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center;">
-      <label style="font-size: 0.85rem; color: #888;">Port:</label>
-      <input type="number" id="llmPort" value="8090" style="width: 70px; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.3rem 0.5rem; color: #e0e0e0; font-size: 0.85rem;">
-    </div>
-    <button onclick="startRunLlm()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="llmStartBtn">Start LLM</button>
-    <div id="llmNoBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
-  </div>
-
-  <!-- Download progress (shared) -->
+  <!-- Download progress -->
   <div id="downloadProgress" class="section hidden">
     <div style="font-size: 0.85rem;">Downloading model...</div>
     <div class="progress-bar"><div class="progress-fill" id="downloadFill"></div></div>
@@ -171,7 +147,7 @@
     <div class="detail" id="statusDetail"></div>
   </div>
 
-  <!-- Chat (for Run LLM and Just Connect) -->
+  <!-- Chat -->
   <div id="chatSection" class="hidden">
     <h2>Try it</h2>
     <div id="apiHint" class="api-hint"></div>
@@ -187,13 +163,12 @@
 
 <script>
 let state = {};
-let selectedRole = null;
+let selectedMode = null;
 
 const evtSource = new EventSource('/api/events');
 evtSource.onmessage = (e) => { state = JSON.parse(e.data); render(); };
 
 function render() {
-  // Node info
   const info = document.getElementById('nodeInfo');
   info.textContent = state.node_id ? `node ${state.node_id}` : 'starting...';
 
@@ -224,15 +199,12 @@ function render() {
     peersList.innerHTML = '';
   }
 
-  // Model selects
-  populateModelSelect('gpuModelSelect', 'gpuNoModel', 'gpuDownloadRow');
-  populateModelSelect('llmModelSelect', 'llmNoModel', 'llmDownloadRow');
+  // Model select
+  populateModelSelect();
 
-  // Binary warnings
-  document.getElementById('gpuNoBins').classList.toggle('hidden', !!state.has_binaries);
-  document.getElementById('llmNoBins').classList.toggle('hidden', !!state.has_binaries);
-  document.getElementById('gpuStartBtn').disabled = !state.has_binaries;
-  document.getElementById('llmStartBtn').disabled = !state.has_binaries;
+  // Binary warning
+  document.getElementById('noBins').classList.toggle('hidden', !!state.has_binaries);
+  document.getElementById('startBtn').disabled = !state.has_binaries;
 
   // Download progress
   const dp = document.getElementById('downloadProgress');
@@ -246,11 +218,10 @@ function render() {
     dp.classList.add('hidden');
   }
 
-  // Active state
+  // Show/hide sections based on state
   const isActive = state.role && state.role !== 'idle';
-  document.getElementById('roleSection').classList.toggle('hidden', isActive);
-  document.getElementById('gpuConfig').classList.toggle('hidden', isActive || selectedRole !== 'share_gpu');
-  document.getElementById('llmConfig').classList.toggle('hidden', isActive || selectedRole !== 'run_llm');
+  document.getElementById('modeSection').classList.toggle('hidden', isActive);
+  document.getElementById('startConfig').classList.toggle('hidden', isActive || selectedMode !== 'start');
 
   const activeEl = document.getElementById('activeStatus');
   const chatEl = document.getElementById('chatSection');
@@ -258,29 +229,27 @@ function render() {
   const text = document.getElementById('statusText');
   const detail = document.getElementById('statusDetail');
 
-  if (state.role === 'share_gpu') {
+  if (state.role === 'active') {
     activeEl.classList.remove('hidden');
-    dot.className = 'dot dot-green';
-    text.textContent = 'Sharing GPU';
-    const model = state.model_path ? state.model_path.split('/').pop() : '';
-    detail.innerHTML = model ? `Model: ${model}<br>Waiting for someone to orchestrate...` : 'rpc-server running';
-    chatEl.classList.add('hidden');
+    const model = state.model_name || '';
 
-  } else if (state.role === 'run_llm') {
-    activeEl.classList.remove('hidden');
-    if (state.llama_ready) {
+    if (state.is_host && state.llama_ready) {
       dot.className = 'dot dot-green';
-      text.textContent = 'LLM running';
+      text.textContent = '🗳 Elected host — LLM running';
       const port = state.llama_port || 8090;
-      const model = state.model_name ? `${state.model_name} · ` : '';
-      detail.innerHTML = `${model}<a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
+      detail.innerHTML = `${model} · <a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
       chatEl.classList.remove('hidden');
       document.getElementById('apiHint').textContent =
         `curl http://localhost:${port}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'`;
-    } else {
+    } else if (state.is_host) {
       dot.className = 'dot dot-yellow';
-      text.textContent = 'Loading model...';
-      detail.textContent = 'Starting llama-server, this takes a few seconds...';
+      text.textContent = '🗳 Elected host — loading model...';
+      detail.textContent = model;
+      chatEl.classList.add('hidden');
+    } else {
+      dot.className = 'dot dot-green';
+      text.textContent = 'Worker — sharing GPU';
+      detail.textContent = model ? `${model} · Waiting for host election` : 'rpc-server running';
       chatEl.classList.add('hidden');
     }
 
@@ -300,14 +269,14 @@ function render() {
   }
 
   // "Just Connect" only if a host exists
-  const hasHost = state.peers && state.peers.some(p => p.role.includes('Host'));
+  const hasHost = (state.peers && state.peers.some(p => p.role.includes('Host'))) || (state.is_host && state.llama_ready);
   document.getElementById('choiceConnect').classList.toggle('disabled', !hasHost);
 }
 
-function populateModelSelect(selectId, noModelId, downloadRowId) {
-  const sel = document.getElementById(selectId);
-  const noModel = document.getElementById(noModelId);
-  const dlRow = document.getElementById(downloadRowId);
+function populateModelSelect() {
+  const sel = document.getElementById('modelSelect');
+  const noModel = document.getElementById('noModel');
+  const dlRow = document.getElementById('downloadRow');
   if (state.models && state.models.length > 0) {
     const prev = sel.value;
     sel.innerHTML = state.models.map(m =>
@@ -325,14 +294,12 @@ function populateModelSelect(selectId, noModelId, downloadRowId) {
   }
 }
 
-function selectRole(role) {
-  selectedRole = role;
+function selectMode(mode) {
+  selectedMode = mode;
   document.querySelectorAll('.choice').forEach(c => c.classList.remove('active'));
-  if (role === 'share_gpu') {
-    document.getElementById('choiceGpu').classList.add('active');
-  } else if (role === 'run_llm') {
-    document.getElementById('choiceLlm').classList.add('active');
-  } else if (role === 'just_connect') {
+  if (mode === 'start') {
+    document.getElementById('choiceStart').classList.add('active');
+  } else if (mode === 'connect') {
     document.getElementById('choiceConnect').classList.add('active');
     startJustConnect();
     return;
@@ -344,47 +311,35 @@ async function joinMesh() {
   const input = document.getElementById('joinToken');
   const token = input.value.trim();
   if (!token) return;
-  const res = await fetch('/api/join', { method: 'POST', body: token });
+  const res = await fetch('/api/join', { method: 'POST', body: JSON.stringify({ token }) });
   const data = await res.json();
   if (data.ok) { input.value = ''; } else { alert(data.error || 'Failed to join'); }
 }
 
-async function downloadModel(selectId) {
-  const sel = document.getElementById(selectId);
+async function downloadModel() {
+  const sel = document.getElementById('catalogSelect');
   const model = sel ? sel.value : '';
   await fetch('/api/download-model', { method: 'POST', body: JSON.stringify({ model }) });
 }
 
-// Load catalog into download selects
 async function loadCatalog() {
   try {
     const res = await fetch('/api/catalog');
     const catalog = await res.json();
-    for (const id of ['gpuCatalogSelect', 'llmCatalogSelect']) {
-      const sel = document.getElementById(id);
-      if (sel) {
-        sel.innerHTML = catalog.map(m =>
-          `<option value="${m.name}">${m.name} (${m.size}) — ${m.description}</option>`
-        ).join('');
-      }
+    const sel = document.getElementById('catalogSelect');
+    if (sel) {
+      sel.innerHTML = catalog.map(m =>
+        `<option value="${m.name}">${m.name} (${m.size}) — ${m.description}</option>`
+      ).join('');
     }
   } catch (e) { console.error('Failed to load catalog', e); }
 }
 loadCatalog();
 
-async function startShareGpu() {
-  const model = document.getElementById('gpuModelSelect').value;
+async function doStart() {
+  const model = document.getElementById('modelSelect').value;
   if (!model) return alert('Select a model first');
-  const res = await fetch('/api/share-gpu', { method: 'POST', body: JSON.stringify({ model }) });
-  const data = await res.json();
-  if (!data.ok) alert(data.error || 'Failed');
-}
-
-async function startRunLlm() {
-  const model = document.getElementById('llmModelSelect').value;
-  const port = parseInt(document.getElementById('llmPort').value) || 8090;
-  if (!model) return alert('Select a model first');
-  const res = await fetch('/api/run-llm', { method: 'POST', body: JSON.stringify({ model, port }) });
+  const res = await fetch('/api/start', { method: 'POST', body: JSON.stringify({ model }) });
   const data = await res.json();
   if (!data.ok) alert(data.error || 'Failed');
 }
@@ -392,12 +347,12 @@ async function startRunLlm() {
 async function startJustConnect() {
   const res = await fetch('/api/just-connect', { method: 'POST' });
   const data = await res.json();
-  if (!data.ok) { alert(data.error || 'Failed'); selectedRole = null; render(); }
+  if (!data.ok) { alert(data.error || 'Failed'); selectedMode = null; render(); }
 }
 
 async function stopAll() {
   await fetch('/api/stop', { method: 'POST' });
-  selectedRole = null;
+  selectedMode = null;
   document.getElementById('chatMessages').innerHTML = '';
 }
 
@@ -453,7 +408,6 @@ async function sendChat() {
         try {
           const chunk = JSON.parse(d);
           const delta = chunk.choices?.[0]?.delta;
-          // GLM puts thinking in reasoning_content, answer in content
           const text = delta?.content || delta?.reasoning_content || '';
           if (text) {
             botDiv.textContent += text;
