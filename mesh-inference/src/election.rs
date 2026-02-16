@@ -7,7 +7,7 @@
 use crate::{launch, mesh, tunnel};
 use mesh::NodeRole;
 use std::path::Path;
-use std::sync::Arc;
+
 use tokio::sync::watch;
 
 /// Determine if this node should be host.

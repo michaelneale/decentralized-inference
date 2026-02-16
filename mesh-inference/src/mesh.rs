@@ -10,7 +10,7 @@ use iroh::endpoint::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use tokio::sync::{Mutex, watch};
 
 pub const ALPN: &[u8] = b"mesh-inference/0";
@@ -125,7 +125,7 @@ async fn stun_public_addr(advertised_port: u16) -> Option<std::net::SocketAddr> 
                 // Parse STUN response for XOR-MAPPED-ADDRESS (0x0020)
                 // or MAPPED-ADDRESS (0x0001)
                 let magic = &req[4..8];
-                let txn = &req[8..20];
+                let _txn = &req[8..20];
                 let mut i = 20;
                 while i + 4 <= len {
                     let attr_type = u16::from_be_bytes([buf[i], buf[i + 1]]);
@@ -389,12 +389,6 @@ impl Node {
             });
         }
         Ok(())
-    }
-
-    /// Get a peer's tunnel port map (what tunnel ports they have to other peers).
-    /// Returns None if we haven't received their map yet.
-    pub async fn get_remote_tunnel_map(&self, peer_id: &EndpointId) -> Option<HashMap<EndpointId, u16>> {
-        self.state.lock().await.remote_tunnel_maps.get(peer_id).cloned()
     }
 
     /// Get all remote tunnel maps: { peer_id → { target_id → tunnel_port } }

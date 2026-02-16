@@ -14,6 +14,7 @@ pub struct CatalogModel {
 }
 
 pub const MODEL_CATALOG: &[CatalogModel] = &[
+    // --- Small (single machine) ---
     CatalogModel {
         name: "Qwen2.5-3B-Instruct-Q4_K_M",
         file: "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
@@ -38,29 +39,95 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         description: "Strong general chat",
         draft: Some("Qwen2.5-0.5B-Instruct-Q4_K_M"),
     },
+    // --- Medium (1-2 machines, good for distributed) ---
     CatalogModel {
         name: "Qwen2.5-32B-Instruct-Q4_K_M",
         file: "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
         url: "https://huggingface.co/bartowski/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf",
         size: "20GB",
-        description: "Large general chat, good for distributed",
+        description: "Strong general chat, good for distributed",
         draft: Some("Qwen2.5-0.5B-Instruct-Q4_K_M"),
+    },
+    CatalogModel {
+        name: "Qwen2.5-Coder-32B-Instruct-Q4_K_M",
+        file: "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct-GGUF/resolve/main/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+        size: "20GB",
+        description: "Top-tier code generation, matches GPT-4o on code",
+        draft: Some("Qwen2.5-0.5B-Instruct-Q4_K_M"),
+    },
+    CatalogModel {
+        name: "Qwen3-32B-Q4_K_M",
+        file: "Qwen3-32B-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3-32B-GGUF/resolve/main/Qwen3-32B-Q4_K_M.gguf",
+        size: "20GB",
+        description: "Latest Qwen3, thinking/non-thinking modes",
+        draft: Some("Qwen3-0.6B-Q4_K_M"),
+    },
+    CatalogModel {
+        name: "Gemma-3-27B-it-Q4_K_M",
+        file: "Gemma-3-27B-it-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/google_gemma-3-27b-it-GGUF/resolve/main/google_gemma-3-27b-it-Q4_K_M.gguf",
+        size: "17GB",
+        description: "Google Gemma 3 27B, strong reasoning",
+        draft: Some("Gemma-3-1B-it-Q4_K_M"),
     },
     CatalogModel {
         name: "GLM-4.7-Flash-Q4_K_M",
         file: "GLM-4.7-Flash-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf",
         size: "17GB",
-        description: "Large general chat with reasoning (MoE)",
-        draft: None, // No small GLM model available
+        description: "General chat with reasoning (MoE, no draft available)",
+        draft: None,
     },
-    // Draft models
+    // --- Large (2-3 machines) ---
+    CatalogModel {
+        name: "Qwen2.5-72B-Instruct-Q4_K_M",
+        file: "Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/Qwen2.5-72B-Instruct-GGUF/resolve/main/Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+        size: "47GB",
+        description: "Flagship Qwen2.5, needs 2+ machines",
+        draft: Some("Qwen2.5-0.5B-Instruct-Q4_K_M"),
+    },
+    CatalogModel {
+        name: "Llama-3.3-70B-Instruct-Q4_K_M",
+        file: "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+        size: "43GB",
+        description: "Meta Llama 3.3 70B, strong all-around, needs 2+ machines",
+        draft: Some("Llama-3.2-1B-Instruct-Q4_K_M"),
+    },
+    // --- Draft models ---
     CatalogModel {
         name: "Qwen2.5-0.5B-Instruct-Q4_K_M",
         file: "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
         url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
         size: "491MB",
-        description: "Draft model for Qwen2.5 speculative decoding",
+        description: "Draft model for all Qwen2.5 models",
+        draft: None,
+    },
+    CatalogModel {
+        name: "Qwen3-0.6B-Q4_K_M",
+        file: "Qwen3-0.6B-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf",
+        size: "397MB",
+        description: "Draft model for Qwen3 models",
+        draft: None,
+    },
+    CatalogModel {
+        name: "Llama-3.2-1B-Instruct-Q4_K_M",
+        file: "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        size: "760MB",
+        description: "Draft model for Llama 3.x models",
+        draft: None,
+    },
+    CatalogModel {
+        name: "Gemma-3-1B-it-Q4_K_M",
+        file: "Gemma-3-1B-it-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
+        size: "780MB",
+        description: "Draft model for Gemma 3 models",
         draft: None,
     },
 ];
@@ -101,12 +168,17 @@ pub async fn download_model(model: &CatalogModel) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Download any URL to a destination path with resume support.
+pub async fn download_url(url: &str, dest: &Path) -> Result<()> {
+    download_with_resume(dest, url).await
+}
+
 /// Download with resume support, retrying up to 5 times.
 async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
     let tmp = dest.with_extension("gguf.part");
 
     for attempt in 1..=5 {
-        let mut args = vec![
+        let args = vec![
             "-L".to_string(),
             "-C".to_string(), "-".to_string(),  // resume
             "-o".to_string(), tmp.to_string_lossy().to_string(),

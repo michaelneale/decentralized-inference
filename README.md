@@ -82,7 +82,14 @@ Start mesh-inference in any mode (solo, distributed, or lite client), then selec
 mesh-inference console    # opens http://localhost:3131
 ```
 
-Browser UI for joining meshes, selecting models, and chatting. Can search and download models from HuggingFace directly.
+Browser dashboard for managing everything without the CLI:
+
+- **Download models** from the catalog (with optional draft model)
+- **Join a mesh** by pasting an invite token
+- **Start as a GPU worker** — pick a model, auto-elect host, serve the LLM
+- **Connect as a lite client** — no GPU needed, proxy to a mesh host
+- **Chat** to test the API with streaming responses
+- **Live status** — see peers, roles, VRAM, election state via SSE
 
 ## How It Works
 
@@ -142,10 +149,59 @@ mesh-inference [OPTIONS]
   --tensor-split R,R   Manual split ratios
   --bin-dir PATH       Directory with rpc-server + llama-server
   --device DEV         GPU device (default: MTL0)
+  --draft PATH         Draft model for speculative decoding (auto-detected from catalog)
+  --draft-max N        Max draft tokens per speculation (default: 8)
+  --no-draft           Disable auto draft detection
 
-mesh-inference console
-  --port PORT          Console port (default: 3131)
+mesh-inference download [NAME] [--draft]
+mesh-inference console [--port PORT]
 ```
+
+## Speculative Decoding
+
+A small "draft" model runs on the host GPU and proposes candidate tokens. The distributed
+main model verifies them in one batched forward pass, accepting multiple tokens per
+network round-trip. This helps most for code generation and when network latency is high.
+
+Draft models are auto-detected from the catalog — if you download a model with `--draft`,
+the draft model is found automatically on launch:
+
+```bash
+mesh-inference download 32b --draft    # downloads Qwen2.5-32B + 0.5B draft
+mesh-inference --model ~/.models/Qwen2.5-32B-Instruct-Q4_K_M.gguf
+# Auto-detected draft model: ~/.models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+```
+
+Or specify explicitly: `--draft <path>`, `--draft-max N`, `--no-draft`.
+
+**Benchmarks** (Qwen2.5-32B, 2 nodes, 0.67/0.33 split, 20ms RTT):
+
+| Task | Baseline | With draft | Improvement |
+|------|----------|------------|-------------|
+| Prose (200 tok) | 5.3 tok/s | 6.2 tok/s (56% accept) | +17% |
+| Code (1000 tok) | 5.3 tok/s | 7.3 tok/s (75% accept) | +38% |
+
+Code has higher acceptance because it's more predictable. The draft model (491MB) costs
+almost nothing and is purely local — no extra network traffic.
+
+### Model catalog
+
+```bash
+mesh-inference download           # list all models
+mesh-inference download 72b       # download Qwen2.5-72B (47GB, needs 2+ machines)
+mesh-inference download 72b --draft  # also download the paired draft model
+```
+
+Models with tested draft pairings:
+
+| Model | Size | Draft | Draft size |
+|-------|------|-------|------------|
+| Qwen2.5 (3B/7B/14B/32B/72B) | 2-47GB | Qwen2.5-0.5B | 491MB |
+| Qwen2.5-Coder-32B | 20GB | Qwen2.5-0.5B | 491MB |
+| Qwen3-32B | 20GB | Qwen3-0.6B | 397MB |
+| Llama-3.3-70B | 43GB | Llama-3.2-1B | 760MB |
+| Gemma-3-27B | 17GB | Gemma-3-1B | 780MB |
+| GLM-4.7-Flash (MoE) | 17GB | — | No compatible draft |
 
 ## Building
 

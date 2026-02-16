@@ -123,7 +123,8 @@
     <div id="noModel" class="warning hidden">No models found in ~/.models/</div>
     <div id="downloadRow" class="hidden" style="margin-top: 0.5rem;">
       <select id="catalogSelect" style="margin-right: 0.5rem;"></select>
-      <button onclick="downloadModel()" class="btn-primary">Download</button>
+      <label style="font-size: 0.8rem; color: #888; margin-left: 0.3rem;"><input type="checkbox" id="downloadDraft" checked> + draft model</label>
+      <button onclick="downloadModel()" class="btn-primary" style="margin-left: 0.5rem;">Download</button>
     </div>
     <button onclick="doStart()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="startBtn">Start</button>
     <div id="noBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
@@ -236,7 +237,7 @@ function render() {
     if (state.is_host && state.llama_ready) {
       dot.className = 'dot dot-green';
       text.textContent = '🗳 Elected host — LLM running';
-      const port = state.llama_port || 8090;
+      const port = state.llama_port || 9337;
       detail.innerHTML = `${model} · <a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
       chatEl.classList.remove('hidden');
       document.getElementById('apiHint').textContent =
@@ -255,7 +256,7 @@ function render() {
 
   } else if (state.role === 'just_connect') {
     activeEl.classList.remove('hidden');
-    const port = state.client_port || 8080;
+    const port = state.client_port || 9337;
     dot.className = 'dot dot-blue';
     text.textContent = 'Connected';
     detail.innerHTML = `<a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
@@ -268,25 +269,32 @@ function render() {
     chatEl.classList.add('hidden');
   }
 
-  // "Just Connect" only if a host exists
+  // "Just Connect" hint — dim if no host yet, but still clickable
   const hasHost = (state.peers && state.peers.some(p => p.role.includes('Host'))) || (state.is_host && state.llama_ready);
-  document.getElementById('choiceConnect').classList.toggle('disabled', !hasHost);
+  document.getElementById('choiceConnect').style.opacity = hasHost ? '1' : '0.6';
 }
 
+let lastModelKeys = '';
 function populateModelSelect() {
   const sel = document.getElementById('modelSelect');
   const noModel = document.getElementById('noModel');
   const dlRow = document.getElementById('downloadRow');
   if (state.models && state.models.length > 0) {
-    const prev = sel.value;
-    sel.innerHTML = state.models.map(m =>
-      `<option value="${m.path}">${m.name} (${m.size})</option>`
-    ).join('');
-    if (prev) sel.value = prev;
+    // Only rebuild if the list actually changed
+    const keys = state.models.map(m => m.path).join('|');
+    if (keys !== lastModelKeys) {
+      lastModelKeys = keys;
+      const prev = sel.value;
+      sel.innerHTML = state.models.map(m =>
+        `<option value="${m.path}">${m.name} (${m.size})</option>`
+      ).join('');
+      if (prev) sel.value = prev;
+    }
     sel.classList.remove('hidden');
     noModel.classList.add('hidden');
     dlRow.classList.add('hidden');
   } else {
+    lastModelKeys = '';
     sel.innerHTML = '';
     sel.classList.add('hidden');
     noModel.classList.remove('hidden');
@@ -319,7 +327,8 @@ async function joinMesh() {
 async function downloadModel() {
   const sel = document.getElementById('catalogSelect');
   const model = sel ? sel.value : '';
-  await fetch('/api/download-model', { method: 'POST', body: JSON.stringify({ model }) });
+  const draft = document.getElementById('downloadDraft')?.checked || false;
+  await fetch('/api/download-model', { method: 'POST', body: JSON.stringify({ model, draft }) });
 }
 
 async function loadCatalog() {
@@ -328,9 +337,10 @@ async function loadCatalog() {
     const catalog = await res.json();
     const sel = document.getElementById('catalogSelect');
     if (sel) {
-      sel.innerHTML = catalog.map(m =>
-        `<option value="${m.name}">${m.name} (${m.size}) — ${m.description}</option>`
-      ).join('');
+      sel.innerHTML = catalog.map(m => {
+        const draft = m.draft ? ' +draft' : '';
+        return `<option value="${m.name}">${m.name} (${m.size}${draft}) — ${m.description}</option>`;
+      }).join('');
     }
   } catch (e) { console.error('Failed to load catalog', e); }
 }
@@ -372,7 +382,6 @@ async function sendChat() {
   if (!msg) return;
   input.value = '';
 
-  const port = state.llama_port || state.client_port || 8090;
   const messages = document.getElementById('chatMessages');
   messages.innerHTML += `<div class="msg-user">› ${escHtml(msg)}</div>`;
 
@@ -383,7 +392,7 @@ async function sendChat() {
   messages.scrollTop = messages.scrollHeight;
 
   try {
-    const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+    const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: msg }], stream: true }),

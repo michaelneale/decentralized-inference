@@ -5,7 +5,7 @@
 //! - Join mesh, select model, auto-elect host
 //! - Built-in chat to test the LLM
 
-use crate::{election, launch, mesh, tunnel};
+use crate::{download, election, launch, mesh, tunnel};
 use anyhow::{Context, Result};
 use mesh::NodeRole;
 use serde::Serialize;
@@ -16,39 +16,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 static HTML: &str = include_str!("console.html");
-
-/// Catalog of models available for auto-download.
-struct CatalogModel {
-    name: &'static str,
-    file: &'static str,
-    url: &'static str,
-    size: &'static str,
-    description: &'static str,
-}
-
-const MODEL_CATALOG: &[CatalogModel] = &[
-    CatalogModel {
-        name: "Qwen2.5-3B-Instruct-Q4_K_M",
-        file: "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-        size: "2GB",
-        description: "Small & fast general chat",
-    },
-    CatalogModel {
-        name: "Qwen2.5-Coder-7B-Instruct-Q4_K_M",
-        file: "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-        size: "4.7GB",
-        description: "Code generation & completion",
-    },
-    CatalogModel {
-        name: "GLM-4.7-Flash-Q4_K_M",
-        file: "GLM-4.7-Flash-Q4_K_M.gguf",
-        url: "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf",
-        size: "17GB",
-        description: "Large general chat with reasoning",
-    },
-];
 
 /// Shared state for the console.
 #[derive(Clone)]
@@ -216,21 +183,26 @@ fn scan_models() -> Vec<ModelInfo> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                // Skip tiny files (draft models under 1GB, partial downloads, etc.)
+                if bytes < 1_000_000_000 {
+                    continue;
+                }
                 let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                let size = std::fs::metadata(&path)
-                    .map(|m| {
-                        let gb = m.len() as f64 / (1024.0 * 1024.0 * 1024.0);
-                        format!("{gb:.1}GB")
-                    })
-                    .unwrap_or_default();
+                let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                 models.push(ModelInfo {
                     name,
                     path: path.display().to_string(),
-                    size,
+                    size: format!("{gb:.1}GB"),
                 });
             }
         }
     }
+    // Sort largest first by actual file size
+    models.sort_by(|a, b| {
+        let parse_gb = |s: &str| s.trim_end_matches("GB").parse::<f64>().unwrap_or(0.0);
+        parse_gb(&b.size).partial_cmp(&parse_gb(&a.size)).unwrap_or(std::cmp::Ordering::Equal)
+    });
     models
 }
 
@@ -353,14 +325,17 @@ async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
             handle_download_model(&mut stream, &state, &body).await?;
         }
         ("GET", "/api/catalog") => {
-            let catalog: Vec<serde_json::Value> = MODEL_CATALOG.iter().map(|m| {
-                serde_json::json!({
-                    "name": m.name,
-                    "file": m.file,
-                    "size": m.size,
-                    "description": m.description,
-                })
-            }).collect();
+            let catalog: Vec<serde_json::Value> = download::MODEL_CATALOG.iter()
+                .filter(|m| m.draft.is_some() || m.size.contains("GB")) // skip draft-only models from main list
+                .map(|m| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "file": m.file,
+                        "size": m.size,
+                        "description": m.description,
+                        "draft": m.draft,
+                    })
+                }).collect();
             respond_json(&mut stream, &catalog).await?;
         }
         ("POST", "/api/start") => {
@@ -371,6 +346,9 @@ async fn handle_http(mut stream: TcpStream, state: ConsoleState) -> Result<()> {
         }
         ("POST", "/api/stop") => {
             handle_stop(&mut stream, &state).await?;
+        }
+        ("POST", "/api/chat") => {
+            handle_chat_proxy(&mut stream, &state, &body).await?;
         }
         _ => {
             let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
@@ -485,8 +463,6 @@ async fn handle_join(stream: &mut TcpStream, state: &ConsoleState, body: &str) -
 async fn handle_start(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
     let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let model_path = req.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let llama_port: u16 = req.get("port").and_then(|v| v.as_u64()).unwrap_or(8090) as u16;
-
     if model_path.is_empty() {
         return respond_err(stream, "No model selected").await;
     }
@@ -522,7 +498,6 @@ async fn handle_start(stream: &mut TcpStream, state: &ConsoleState, body: &str) 
     inner.rpc_port = Some(rpc_port);
     inner.model_path = Some(model.clone());
     inner.role = CurrentRole::Active;
-    inner.llama_port = Some(llama_port);
     drop(inner);
 
     state.push_status().await;
@@ -544,12 +519,35 @@ fn spawn_election(
     model: PathBuf,
     state: ConsoleState,
 ) {
-    let (target_tx, _target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
-    // TODO: console should use target_rx for its own API proxying
+    // Auto-detect draft model from catalog
+    let draft = crate::auto_detect_draft(&model);
+    if let Some(ref d) = draft {
+        eprintln!("Auto-detected draft model: {}", d.display());
+    }
+
+    let (target_tx, target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
+
+    // Watch target changes to update llama_port for chat proxy
+    let state_watch = state.clone();
+    let mut rx = target_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            if rx.changed().await.is_err() { break; }
+            let target = rx.borrow().clone();
+            let mut inner = state_watch.inner.lock().await;
+            match target {
+                election::InferenceTarget::Local(port) => {
+                    inner.llama_port = Some(port);
+                }
+                _ => {}
+            }
+        }
+    });
+
     tokio::spawn(async move {
         let state2 = state.clone();
         election::election_loop(
-            node, tunnel_mgr, rpc_port, bin_dir, model, None, 8, target_tx,
+            node, tunnel_mgr, rpc_port, bin_dir, model, draft, 8, target_tx,
             move |is_host, llama_ready| {
                 let state3 = state2.clone();
                 tokio::spawn(async move {
@@ -568,34 +566,52 @@ fn spawn_election(
 // ─── Download ───────────────────────────────────────────────────────
 
 async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
-    let model_name = if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        v.get("model").and_then(|t| t.as_str()).unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
+    let req: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let model_name = req.get("model").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let also_draft = req.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let catalog_entry = if model_name.is_empty() {
-        MODEL_CATALOG.first()
-    } else {
-        MODEL_CATALOG.iter().find(|m| m.name == model_name)
-    };
+    if model_name.is_empty() {
+        return respond_err(stream, "No model specified").await;
+    }
 
-    let entry = match catalog_entry {
+    let entry = match download::find_model(&model_name) {
         Some(e) => e,
         None => return respond_err(stream, &format!("Unknown model: {model_name}")).await,
     };
 
-    let models_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("No home directory"))?
-        .join(".models");
+    let models_dir = download::models_dir();
     let dest = models_dir.join(entry.file);
 
     if dest.exists() {
-        return respond_ok(stream, "Model already exists").await;
+        let size = tokio::fs::metadata(&dest).await.map(|m| m.len()).unwrap_or(0);
+        if size > 1_000_000 {
+            if also_draft {
+                if let Some(draft_name) = entry.draft {
+                    if let Some(draft_entry) = download::find_model(draft_name) {
+                        let draft_dest = models_dir.join(draft_entry.file);
+                        if !draft_dest.exists() {
+                            let state2 = state.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = download_model_task(&state2, &models_dir, &draft_dest, draft_entry.url, draft_entry.name).await {
+                                    eprintln!("Draft download failed: {e}");
+                                }
+                                let mut inner = state2.inner.lock().await;
+                                inner.download_progress = None;
+                                drop(inner);
+                                state2.push_status().await;
+                            });
+                            return respond_ok(stream, &format!("Model exists, downloading draft {}", draft_entry.name)).await;
+                        }
+                    }
+                }
+            }
+            return respond_ok(stream, "Model already exists").await;
+        }
     }
 
     let url = entry.url.to_string();
     let name = entry.name.to_string();
+    let draft_info = if also_draft { entry.draft.map(|d| d.to_string()) } else { None };
 
     let state2 = state.clone();
     tokio::spawn(async move {
@@ -603,7 +619,24 @@ async fn handle_download_model(stream: &mut TcpStream, state: &ConsoleState, bod
             eprintln!("Model download failed: {e}");
             let mut inner = state2.inner.lock().await;
             inner.download_progress = None;
+            drop(inner);
+            state2.push_status().await;
+            return;
         }
+        // Also download draft if requested
+        if let Some(draft_name) = draft_info {
+            if let Some(draft_entry) = download::find_model(&draft_name) {
+                let draft_dest = models_dir.join(draft_entry.file);
+                if !draft_dest.exists() {
+                    if let Err(e) = download_model_task(&state2, &models_dir, &draft_dest, draft_entry.url, draft_entry.name).await {
+                        eprintln!("Draft download failed: {e}");
+                    }
+                }
+            }
+        }
+        let mut inner = state2.inner.lock().await;
+        inner.download_progress = None;
+        drop(inner);
         state2.push_status().await;
     });
 
@@ -684,7 +717,7 @@ async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Re
     let host_id = host.unwrap().id;
     drop(inner);
 
-    let local_port = 8080u16;
+    let local_port = 9337u16;
     let listener = match TcpListener::bind(format!("127.0.0.1:{local_port}")).await {
         Ok(l) => l,
         Err(_) => TcpListener::bind("127.0.0.1:0").await?,
@@ -725,6 +758,57 @@ async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Re
     });
 
     respond_ok(stream, &format!("Connected! API at http://localhost:{actual_port}")).await
+}
+
+// ─── Chat proxy ─────────────────────────────────────────────────────
+
+async fn handle_chat_proxy(stream: &mut TcpStream, state: &ConsoleState, body: &str) -> Result<()> {
+    let inner = state.inner.lock().await;
+    let llama_port = inner.llama_port;
+    let client_port = inner.client_port;
+    let role = inner.role.clone();
+    drop(inner);
+
+    let target_port = match role {
+        CurrentRole::Active => llama_port,
+        CurrentRole::JustConnect => client_port,
+        _ => None,
+    };
+
+    let port = match target_port {
+        Some(p) => p,
+        None => return respond_err(stream, "LLM not ready").await,
+    };
+
+    // Connect to llama-server and proxy the chat completions request
+    let mut upstream = match tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+        Ok(s) => s,
+        Err(e) => return respond_err(stream, &format!("Can't reach LLM: {e}")).await,
+    };
+
+    // Build HTTP request to llama-server
+    let req = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+    upstream.write_all(req.as_bytes()).await?;
+
+    // Relay the full response (headers + body) back to the browser
+    let mut buf = vec![0u8; 8192];
+    loop {
+        let n = upstream.read(&mut buf).await?;
+        if n == 0 { break; }
+        stream.write_all(&buf[..n]).await?;
+    }
+
+    Ok(())
 }
 
 // ─── Stop ───────────────────────────────────────────────────────────

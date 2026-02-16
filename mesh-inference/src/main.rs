@@ -51,12 +51,17 @@ struct Cli {
 
     /// Path to a draft model for speculative decoding (e.g. a small quant of the same model).
     /// Only used on the host — the draft model runs locally, not distributed.
+    /// If omitted, auto-detected from catalog when the main model has a known draft pairing.
     #[arg(long)]
     draft: Option<PathBuf>,
 
     /// Max draft tokens for speculative decoding (default: 8).
     #[arg(long, default_value = "8")]
     draft_max: u16,
+
+    /// Disable automatic draft model detection from catalog.
+    #[arg(long)]
+    no_draft: bool,
 
     /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
     /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
@@ -95,7 +100,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     // Subcommand dispatch
     if let Some(Command::Console { port }) = &cli.command {
@@ -137,7 +142,7 @@ async fn main() -> Result<()> {
 
     // --- Need a model for worker or host ---
     let model = match &cli.model {
-        Some(m) => m.clone(),
+        Some(m) => resolve_model(m).await?,
         None => anyhow::bail!("--model is required (or use --client for lite mode)"),
     };
 
@@ -146,7 +151,108 @@ async fn main() -> Result<()> {
         None => detect_bin_dir()?,
     };
 
+    // Auto-detect draft model from catalog if not explicitly set
+    if cli.draft.is_none() && !cli.no_draft {
+        if let Some(draft_path) = auto_detect_draft(&model) {
+            eprintln!("Auto-detected draft model: {}", draft_path.display());
+            cli.draft = Some(draft_path);
+        }
+    }
+
     run_auto(cli, model, bin_dir).await
+}
+
+/// Resolve a model path: local file, catalog name, or HuggingFace URL.
+///
+/// - If it's an existing file path, use it directly.
+/// - If it matches a catalog entry name, download if needed.
+/// - If it looks like a HF URL (https://huggingface.co/...), download to ~/.models/.
+/// - If it looks like a HF repo shorthand (org/repo/file.gguf), construct URL and download.
+async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
+    let s = input.to_string_lossy();
+
+    // Already a local file
+    if input.exists() {
+        return Ok(input.to_path_buf());
+    }
+
+    // Check ~/.models/ for just a filename
+    if !s.contains('/') {
+        let in_models = download::models_dir().join(input);
+        if in_models.exists() {
+            return Ok(in_models);
+        }
+        // Try catalog match
+        if let Some(entry) = download::find_model(&s) {
+            return download::download_model(entry).await;
+        }
+        // Try as bare filename in ~/.models/
+        anyhow::bail!(
+            "Model not found: {}\nNot a local file, not in ~/.models/, not in catalog.\n\
+             Use a path, a catalog name (run `mesh-inference download` to list), or a HuggingFace URL.",
+            s
+        );
+    }
+
+    // HuggingFace URL
+    if s.starts_with("https://huggingface.co/") || s.starts_with("http://huggingface.co/") {
+        let filename = s.rsplit('/').next()
+            .ok_or_else(|| anyhow::anyhow!("Can't extract filename from URL: {}", s))?;
+        let dest = download::models_dir().join(filename);
+        if dest.exists() {
+            let size = tokio::fs::metadata(&dest).await?.len();
+            if size > 1_000_000 {
+                eprintln!("✅ {} already exists ({:.1}GB)", filename, size as f64 / 1e9);
+                return Ok(dest);
+            }
+        }
+        eprintln!("📥 Downloading {}...", filename);
+        download::download_url(&s, &dest).await?;
+        return Ok(dest);
+    }
+
+    // HF shorthand: org/repo/file.gguf or org/repo/resolve/main/file.gguf
+    if s.contains('/') && s.ends_with(".gguf") {
+        let url = if s.contains("/resolve/") {
+            format!("https://huggingface.co/{}", s)
+        } else {
+            // org/repo/file.gguf -> https://huggingface.co/org/repo/resolve/main/file.gguf
+            let parts: Vec<&str> = s.splitn(3, '/').collect();
+            if parts.len() == 3 {
+                format!("https://huggingface.co/{}/{}/resolve/main/{}", parts[0], parts[1], parts[2])
+            } else {
+                anyhow::bail!("Can't parse HF shorthand: {}. Use org/repo/file.gguf", s);
+            }
+        };
+        let filename = s.rsplit('/').next().unwrap();
+        let dest = download::models_dir().join(filename);
+        if dest.exists() {
+            let size = tokio::fs::metadata(&dest).await?.len();
+            if size > 1_000_000 {
+                eprintln!("✅ {} already exists ({:.1}GB)", filename, size as f64 / 1e9);
+                return Ok(dest);
+            }
+        }
+        eprintln!("📥 Downloading {}...", filename);
+        download::download_url(&url, &dest).await?;
+        return Ok(dest);
+    }
+
+    anyhow::bail!("Model not found: {}", s);
+}
+
+/// Look up the model filename in the catalog and check if its draft model exists on disk.
+pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
+    let filename = model.file_name()?.to_str()?;
+    let catalog_entry = download::MODEL_CATALOG.iter().find(|m| m.file == filename)?;
+    let draft_name = catalog_entry.draft?;
+    let draft_entry = download::MODEL_CATALOG.iter().find(|m| m.name == draft_name)?;
+    let draft_path = download::models_dir().join(draft_entry.file);
+    if draft_path.exists() {
+        Some(draft_path)
+    } else {
+        None
+    }
 }
 
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.

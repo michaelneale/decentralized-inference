@@ -50,7 +50,6 @@ pub async fn relay_with_rewrite(
     mut tcp_write: tokio::io::WriteHalf<tokio::net::TcpStream>,
     port_map: PortRewriteMap,
 ) -> Result<()> {
-    use tokio::io::AsyncReadExt;
 
     loop {
         // Read command byte

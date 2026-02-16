@@ -130,12 +130,6 @@ impl Manager {
         }
     }
 
-    /// Get the current list of tunnel ports
-    pub async fn peer_ports(&self) -> Vec<u16> {
-        let ports = self.tunnel_ports.lock().await;
-        ports.values().copied().collect()
-    }
-
     /// Get the full mapping of EndpointId → local tunnel port
     pub async fn peer_ports_map(&self) -> HashMap<EndpointId, u16> {
         self.tunnel_ports.lock().await.clone()
