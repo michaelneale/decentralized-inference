@@ -9,7 +9,7 @@ use crate::{launch, mesh, tunnel};
 use anyhow::{Context, Result};
 use mesh::NodeRole;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -688,92 +688,154 @@ async fn handle_run_llm(stream: &mut TcpStream, state: &ConsoleState, body: &str
     state.push_status().await;
     respond_ok(stream, "Starting LLM...").await?;
 
-    // Start llama-server in background — use any existing worker peers
+    // Start llama-server in background, then watch for mesh changes
     let state2 = state.clone();
     tokio::spawn(async move {
-        let existing_peers = node.peers().await;
-        let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
-        if has_workers {
-            eprintln!("Found worker(s) in mesh, waiting for tunnels...");
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tunnel_mgr.wait_for_peers(1),
-            ).await;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        } else {
-            eprintln!("No workers in mesh — starting with local GPU only");
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
+        launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state2).await;
 
-        // Only use tunnel ports for Worker peers
-        let worker_peers = node.peers().await;
-        let workers: Vec<_> = worker_peers.iter()
-            .filter(|p| matches!(p.role, NodeRole::Worker))
-            .collect();
-        let worker_ids: Vec<_> = workers.iter().map(|p| p.id).collect();
-        let all_ports = tunnel_mgr.peer_ports_map().await;
-        let tunnel_ports: Vec<u16> = worker_ids.iter()
-            .filter_map(|id| all_ports.get(id).copied())
-            .collect();
-        let n_peers = tunnel_ports.len();
+        // Watch for worker changes and auto-restart
+        let mut peer_rx = node.peer_change_rx.clone();
+        let mut last_worker_count = count_workers(&node).await;
 
-        if n_peers > 0 {
-            eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
-            let my_map = tunnel_mgr.peer_ports_map().await;
-            let _ = node.broadcast_tunnel_map(my_map).await;
-            let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
-            let remote_maps = node.all_remote_tunnel_maps().await;
-            tunnel_mgr.update_rewrite_map(&remote_maps).await;
-        } else {
-            eprintln!("No workers found — starting llama-server with local GPU only");
-        }
+        loop {
+            // Wait for any peer change
+            if peer_rx.changed().await.is_err() {
+                break; // channel closed
+            }
 
-        // Auto-calculate tensor split if not explicitly provided
-        let effective_split = if tensor_split.is_some() {
-            tensor_split.clone()
-        } else if n_peers > 0 {
-            let my_vram = node.vram_bytes() as f64;
-            let worker_vrams: Vec<f64> = worker_ids.iter()
-                .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
-                .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram }) // default to same as local if unknown
-                .collect();
-            let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
-            if total > 0.0 {
-                let mut parts = vec![format!("{:.2}", my_vram / total)];
-                for wv in &worker_vrams {
-                    parts.push(format!("{:.2}", wv / total));
+            // Check if we're still in RunLlm mode
+            {
+                let inner = state2.inner.lock().await;
+                if inner.role != CurrentRole::RunLlm {
+                    break;
                 }
-                let split = parts.join(",");
-                eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
-                    my_vram / 1e9, worker_vrams.len());
-                Some(split)
-            } else {
-                None
             }
-        } else {
-            None
-        };
 
-        match launch::start_llama_server(
-            &bin_dir, &model, llama_port, &tunnel_ports, effective_split.as_deref(),
-        ).await {
-            Ok(()) => {
-                eprintln!("llama-server ready: http://localhost:{llama_port}");
-                let mut inner = state2.inner.lock().await;
-                inner.llama_ready = true;
+            // Debounce — wait for mesh to settle
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            let new_worker_count = count_workers(&node).await;
+            if new_worker_count == last_worker_count {
+                continue; // no actual worker change
             }
-            Err(e) => {
-                eprintln!("Failed to start llama-server: {e}");
+
+            eprintln!(
+                "⚡ Mesh changed: {} → {} workers. Restarting llama-server...",
+                last_worker_count, new_worker_count
+            );
+            last_worker_count = new_worker_count;
+
+            // Kill existing llama-server
+            launch::kill_llama_server();
+            {
                 let mut inner = state2.inner.lock().await;
-                inner.role = CurrentRole::Idle;
-                inner.llama_port = None;
                 inner.llama_ready = false;
             }
+            state2.push_status().await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // Relaunch with updated worker list
+            launch_llama_for_current_mesh(&node, &tunnel_mgr, &bin_dir, &model, llama_port, &state2).await;
         }
-        state2.push_status().await;
     });
 
     Ok(())
+}
+
+/// Count Worker peers in the mesh.
+async fn count_workers(node: &mesh::Node) -> usize {
+    node.peers().await.iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker))
+        .count()
+}
+
+/// Calculate tensor split and launch llama-server for the current mesh state.
+async fn launch_llama_for_current_mesh(
+    node: &mesh::Node,
+    tunnel_mgr: &tunnel::Manager,
+    bin_dir: &Path,
+    model: &Path,
+    llama_port: u16,
+    state: &ConsoleState,
+) {
+    let existing_peers = node.peers().await;
+    let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
+    if has_workers {
+        eprintln!("Found worker(s) in mesh, waiting for tunnels...");
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tunnel_mgr.wait_for_peers(1),
+        ).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    } else {
+        eprintln!("No workers in mesh — starting with local GPU only");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Only use tunnel ports for Worker peers
+    let worker_peers = node.peers().await;
+    let worker_ids: Vec<_> = worker_peers.iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker))
+        .map(|p| p.id)
+        .collect();
+    let all_ports = tunnel_mgr.peer_ports_map().await;
+    let tunnel_ports: Vec<u16> = worker_ids.iter()
+        .filter_map(|id| all_ports.get(id).copied())
+        .collect();
+    let n_peers = tunnel_ports.len();
+
+    if n_peers > 0 {
+        eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
+        let my_map = tunnel_mgr.peer_ports_map().await;
+        let _ = node.broadcast_tunnel_map(my_map).await;
+        let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
+        let remote_maps = node.all_remote_tunnel_maps().await;
+        tunnel_mgr.update_rewrite_map(&remote_maps).await;
+    } else {
+        eprintln!("No workers found — starting llama-server with local GPU only");
+    }
+
+    // Auto-calculate tensor split proportional to VRAM
+    let effective_split = if n_peers > 0 {
+        let my_vram = node.vram_bytes() as f64;
+        let worker_vrams: Vec<f64> = worker_ids.iter()
+            .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
+            .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram })
+            .collect();
+        let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
+        if total > 0.0 {
+            let mut parts = vec![format!("{:.2}", my_vram / total)];
+            for wv in &worker_vrams {
+                parts.push(format!("{:.2}", wv / total));
+            }
+            let split = parts.join(",");
+            eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
+                my_vram / 1e9, worker_vrams.len());
+            Some(split)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match launch::start_llama_server(
+        bin_dir, model, llama_port, &tunnel_ports, effective_split.as_deref(),
+    ).await {
+        Ok(()) => {
+            eprintln!("llama-server ready: http://localhost:{llama_port}");
+            let mut inner = state.inner.lock().await;
+            inner.llama_ready = true;
+        }
+        Err(e) => {
+            eprintln!("Failed to start llama-server: {e}");
+            let mut inner = state.inner.lock().await;
+            inner.role = CurrentRole::Idle;
+            inner.llama_port = None;
+            inner.llama_ready = false;
+        }
+    }
+    state.push_status().await;
 }
 
 async fn handle_just_connect(stream: &mut TcpStream, state: &ConsoleState) -> Result<()> {
@@ -845,17 +907,23 @@ async fn handle_stop(stream: &mut TcpStream, state: &ConsoleState) -> Result<()>
     let _ = tokio::process::Command::new("pkill")
         .args(["-f", "rpc-server"])
         .output().await;
-    let _ = tokio::process::Command::new("pkill")
-        .args(["-f", "llama-server"])
-        .output().await;
+    launch::kill_llama_server();
 
+    // Reset rpc_port on tunnel manager so inbound tunnels are dropped
     let mut inner = state.inner.lock().await;
+    if let Some(tunnel_mgr) = &inner.tunnel_mgr {
+        tunnel_mgr.set_rpc_port(0);
+    }
+    // Reset role to idle — node + tunnel_mgr stay alive
+    if let Some(node) = &inner.node {
+        node.set_role(NodeRole::Client).await;
+    }
     inner.role = CurrentRole::Idle;
     inner.llama_port = None;
     inner.llama_ready = false;
     inner.client_port = None;
     inner.rpc_port = None;
-    inner.tunnel_mgr = None;
+    // Keep node and tunnel_mgr — don't destroy the mesh
     drop(inner);
 
     state.push_status().await;

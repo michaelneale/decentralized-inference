@@ -60,6 +60,12 @@ pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>, gguf_path: O
     anyhow::bail!("rpc-server failed to start on port {port} within 15s");
 }
 
+/// Kill all running llama-server processes.
+pub fn kill_llama_server() {
+    // pkill is the simplest cross-platform approach
+    let _ = std::process::Command::new("pkill").args(["-f", "llama-server"]).status();
+}
+
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
 pub async fn start_llama_server(
     bin_dir: &Path,

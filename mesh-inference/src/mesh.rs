@@ -118,7 +118,8 @@ impl Node {
         use iroh::endpoint::QuicTransportConfig;
         let transport_config = QuicTransportConfig::builder()
             .max_concurrent_bidi_streams(1024u32.into())
-            .max_idle_timeout(Some(std::time::Duration::from_secs(300).try_into()?))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?))
+            .keep_alive_interval(std::time::Duration::from_secs(10))
             .build();
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
@@ -356,6 +357,7 @@ impl Node {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::info!("Connection to {} closed: {e}", remote.fmt_short());
+                    self.remove_peer(remote).await;
                     break;
                 }
             };
@@ -561,6 +563,16 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    async fn remove_peer(&self, id: EndpointId) {
+        let mut state = self.state.lock().await;
+        if state.peers.remove(&id).is_some() {
+            tracing::info!("Peer removed: {} (total: {})", id.fmt_short(), state.peers.len());
+            let count = state.peers.len();
+            drop(state);
+            let _ = self.peer_change_tx.send(count);
+        }
     }
 
     async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>, vram_bytes: u64) {
