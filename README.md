@@ -236,6 +236,48 @@ M4 Max + Mac Mini M4, WiFi, GLM-4.7-Flash-Q4_K_M (17GB).
 | `just stop` | Kill all processes |
 | `just diff` | Show llama.cpp fork patches |
 
+## Using with pi
+
+mesh-inference serves an OpenAI-compatible API, so any tool that speaks that protocol can use it. To use it as a model provider in [pi](https://github.com/mariozechner/pi-coding-agent), add a `mesh` provider to `~/.pi/agent/models.json`:
+
+```json
+"mesh": {
+  "baseUrl": "http://localhost:9337/v1",
+  "api": "openai-completions",
+  "apiKey": "none",
+  "models": [
+    {
+      "id": "GLM-4.7-Flash-Q4_K_M.gguf",
+      "name": "GLM 4.7 Flash (Mesh)",
+      "reasoning": false,
+      "input": ["text"],
+      "contextWindow": 202752,
+      "maxTokens": 32768,
+      "compat": {
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false
+      }
+    }
+  ]
+}
+```
+
+Then start mesh-inference (solo or distributed) and select the model in pi's model picker:
+
+```bash
+# Solo
+mesh-inference --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf
+
+# Or distributed with a remote machine
+mesh-inference --model ~/.models/GLM-4.7-Flash-Q4_K_M.gguf --join <token>
+
+# Or lite client (no GPU, proxies to a remote mesh)
+mesh-inference --client --join <token>
+```
+
+All three modes serve the same API on `localhost:9337`.
+
 ## Project Structure
 
 | Path | Purpose |
