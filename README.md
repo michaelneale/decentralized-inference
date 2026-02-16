@@ -177,9 +177,15 @@ Split: 0.67, 0.33
 
 ### Running models larger than one machine
 
-The mesh lets you run models that wouldn't fit on a single machine by pooling VRAM across nodes. However, the first node to start will attempt to load the model solo before any peers have joined. If the model is too large for that machine, it will fail or OOM.
+The mesh pools VRAM across nodes, so you can run models that wouldn't fit on any single machine. Before starting llama-server, the elected host checks that total mesh VRAM exceeds the model size. If not, it waits for more peers to join:
 
-To work around this, start the machine with the most VRAM first — it will load the model solo, then when peers join, the mesh re-elects and restarts with the full tensor split across all nodes.
+```
+⏳ Waiting for more peers — need 55.0GB VRAM for model, have 51.5GB
+# ... another machine joins ...
+🗳 Elected as host (154.6GB VRAM available for 50.0GB model)
+```
+
+No single node needs to fit the entire model. Each node loads only its assigned layers from its local GGUF copy (`--no-mmap` prevents unified memory from trying to mmap the entire file).
 
 ## CLI Reference
 

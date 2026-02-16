@@ -78,8 +78,30 @@ pub async fn election_loop(
         let i_am_host = should_be_host(node.id(), node.vram_bytes(), &peers);
 
         if i_am_host {
-            // Step 3: Start llama-server with --rpc for ALL nodes (including self)
-            eprintln!("🗳 Elected as host");
+            // Check if total mesh VRAM is enough for the model.
+            // Model needs roughly file_size * 1.1 for weights + KV cache overhead.
+            let model_bytes = std::fs::metadata(&model).map(|m| m.len()).unwrap_or(0);
+            let min_vram = (model_bytes as f64 * 1.1) as u64;
+            let my_vram = node.vram_bytes();
+            let peer_vram: u64 = peers.iter()
+                .filter(|p| !matches!(p.role, NodeRole::Client))
+                .map(|p| p.vram_bytes)
+                .sum();
+            let total_vram = my_vram + peer_vram;
+
+            if total_vram < min_vram {
+                eprintln!("⏳ Waiting for more peers — need {:.1}GB VRAM for model, have {:.1}GB",
+                    min_vram as f64 / 1e9, total_vram as f64 / 1e9);
+                target_tx.send_replace(InferenceTarget::None);
+                on_change(false, false);
+                // Wait for next peer change (someone joining with more VRAM)
+                if peer_rx.changed().await.is_err() { break; }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+
+            eprintln!("🗳 Elected as host ({:.1}GB VRAM available for {:.1}GB model)",
+                total_vram as f64 / 1e9, model_bytes as f64 / 1e9);
             on_change(true, false);
 
             let llama_port = match start_llama(
