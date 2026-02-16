@@ -1,39 +1,22 @@
 //! Automatic host election and dynamic mesh management.
 //!
-//! Shared between CLI and console modes. Every Active node (with rpc-server)
-//! participates in election. Highest VRAM wins host. Worker count changes
-//! trigger llama-server restart with updated tensor-split.
+//! Every mesh change: kill llama-server, re-elect, winner starts fresh.
+//! llama-server always uses --rpc (even solo — host's own rpc-server is in the list).
+//! mesh-inference owns :8080 and proxies to llama-server (local or remote).
 
 use crate::{launch, mesh, tunnel};
 use mesh::NodeRole;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// Determine if this node should be host.
-/// Rules:
-/// 1. If another peer is already Host → I should not be host (stability)
-/// 2. If I'm already Host → I stay host (stability)
-/// 3. If no host exists → highest VRAM wins, tie-break by node ID
-pub async fn should_be_host(node: &mesh::Node) -> bool {
-    let my_id = node.id();
-    let my_vram = node.vram_bytes();
-    let my_role = node.role().await;
-    let peers = node.peers().await;
-
-    // If another peer is already Host, I shouldn't take over
-    let other_host = peers.iter().find(|p| matches!(p.role, NodeRole::Host { .. }));
-    if other_host.is_some() {
-        return false;
-    }
-
-    // If I'm already Host, stay host (stability)
-    if matches!(my_role, NodeRole::Host { .. }) {
-        return true;
-    }
-
-    // No host exists anywhere. Elect by VRAM (highest wins), tie-break by ID.
-    // Only consider Active peers (Workers), not Clients.
-    for peer in &peers {
-        if !matches!(peer.role, NodeRole::Worker | NodeRole::Host { .. }) {
+/// Deterministic from gossip state — every node computes the same answer.
+/// Highest VRAM wins. Tie-break: highest node ID.
+pub fn should_be_host(my_id: iroh::EndpointId, my_vram: u64, peers: &[mesh::PeerInfo]) -> bool {
+    for peer in peers {
+        // Only consider active nodes (workers), not clients
+        if matches!(peer.role, NodeRole::Client) {
             continue;
         }
         if peer.vram_bytes > my_vram {
@@ -46,152 +29,97 @@ pub async fn should_be_host(node: &mesh::Node) -> bool {
     true
 }
 
-/// Count Worker peers in the mesh.
-pub async fn count_workers(node: &mesh::Node) -> usize {
-    node.peers().await.iter()
-        .filter(|p| matches!(p.role, NodeRole::Worker))
-        .count()
+/// The current state of llama-server as managed by the election loop.
+/// The API proxy reads this to know where to forward requests.
+#[derive(Clone, Debug)]
+pub enum InferenceTarget {
+    /// No llama-server running anywhere (election in progress, mesh empty, etc.)
+    None,
+    /// We are host — llama-server is on this local port.
+    Local(u16),
+    /// Another node is host — proxy via QUIC to this peer.
+    Remote(iroh::EndpointId),
 }
 
-/// Calculate tensor split and launch llama-server for the current mesh state.
-/// Returns true if llama-server started successfully.
-pub async fn launch_llama_for_current_mesh(
-    node: &mesh::Node,
-    tunnel_mgr: &tunnel::Manager,
-    bin_dir: &Path,
-    model: &Path,
-    llama_port: u16,
-) -> bool {
-    let existing_peers = node.peers().await;
-    let has_workers = existing_peers.iter().any(|p| matches!(p.role, NodeRole::Worker));
-    if has_workers {
-        eprintln!("Found worker(s) in mesh, waiting for tunnels...");
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tunnel_mgr.wait_for_peers(1),
-        ).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    } else {
-        eprintln!("No workers in mesh — starting with local GPU only");
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    let worker_peers = node.peers().await;
-    let worker_ids: Vec<_> = worker_peers.iter()
-        .filter(|p| matches!(p.role, NodeRole::Worker))
-        .map(|p| p.id)
-        .collect();
-    let all_ports = tunnel_mgr.peer_ports_map().await;
-    let tunnel_ports: Vec<u16> = worker_ids.iter()
-        .filter_map(|id| all_ports.get(id).copied())
-        .collect();
-    let n_peers = tunnel_ports.len();
-
-    if n_peers > 0 {
-        eprintln!("Got {n_peers} GPU worker(s), starting llama-server");
-        let my_map = tunnel_mgr.peer_ports_map().await;
-        let _ = node.broadcast_tunnel_map(my_map).await;
-        let _ = node.wait_for_tunnel_maps(n_peers, std::time::Duration::from_secs(15)).await;
-        let remote_maps = node.all_remote_tunnel_maps().await;
-        tunnel_mgr.update_rewrite_map(&remote_maps).await;
-    } else {
-        eprintln!("No workers found — starting llama-server with local GPU only");
-    }
-
-    let effective_split = if n_peers > 0 {
-        let my_vram = node.vram_bytes() as f64;
-        let worker_vrams: Vec<f64> = worker_ids.iter()
-            .filter_map(|id| worker_peers.iter().find(|p| p.id == *id))
-            .map(|p| if p.vram_bytes > 0 { p.vram_bytes as f64 } else { my_vram })
-            .collect();
-        let total: f64 = my_vram + worker_vrams.iter().sum::<f64>();
-        if total > 0.0 {
-            let mut parts = vec![format!("{:.2}", my_vram / total)];
-            for wv in &worker_vrams {
-                parts.push(format!("{:.2}", wv / total));
-            }
-            let split = parts.join(",");
-            eprintln!("Auto tensor-split: {split} (local {:.1}GB + {} worker(s))",
-                my_vram / 1e9, worker_vrams.len());
-            Some(split)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    match launch::start_llama_server(
-        bin_dir, model, llama_port, &tunnel_ports, effective_split.as_deref(),
-    ).await {
-        Ok(()) => {
-            eprintln!("llama-server ready: http://localhost:{llama_port}");
-            true
-        }
-        Err(e) => {
-            eprintln!("Failed to start llama-server: {e}");
-            false
-        }
-    }
-}
-
-/// Background election loop. Watches peer changes and manages host promotion/demotion.
-/// Calls `on_host_change(is_host, llama_ready)` on every state change.
-pub async fn election_loop<F>(
+/// Background election loop. On every mesh change:
+/// 1. Kill llama-server (if we're running it)
+/// 2. Re-elect (deterministic — highest VRAM wins)
+/// 3. Winner starts llama-server with --rpc pointing at all nodes
+///
+/// Publishes the current InferenceTarget via the watch channel so the
+/// API proxy knows where to forward requests.
+pub async fn election_loop(
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
+    rpc_port: u16,
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
-    llama_port: u16,
-    mut on_change: F,
-) where
-    F: FnMut(bool, bool) + Send,
-{
+    target_tx: watch::Sender<InferenceTarget>,
+    mut on_change: impl FnMut(bool, bool) + Send,
+) {
     let mut peer_rx = node.peer_change_rx.clone();
-    let mut currently_host = false;
-    let mut last_worker_count: usize = 0;
 
-    // Initial election after a brief settle
+    // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     loop {
-        let want_host = should_be_host(&node).await;
-        let worker_count = count_workers(&node).await;
-
-        if want_host && !currently_host {
-            // Promote to host
-            eprintln!("🗳 Elected as host — starting llama-server");
-            node.set_role(NodeRole::Host { http_port: llama_port }).await;
-            on_change(true, false);
-
-            let ok = launch_llama_for_current_mesh(
-                &node, &tunnel_mgr, &bin_dir, &model, llama_port,
-            ).await;
-            currently_host = true;
-            last_worker_count = count_workers(&node).await;
-            on_change(true, ok);
-
-        } else if !want_host && currently_host {
-            // Another node is now host — demote
-            eprintln!("🗳 Another node is now host — demoting to worker");
-            launch::kill_llama_server();
+        // Step 1: Kill llama-server if we're running it
+        let was_host = matches!(node.role().await, NodeRole::Host { .. });
+        if was_host {
+            launch::kill_llama_server().await;
+            tunnel_mgr.set_http_port(0);
             node.set_role(NodeRole::Worker).await;
-            currently_host = false;
+            target_tx.send_replace(InferenceTarget::None);
             on_change(false, false);
+        }
 
-        } else if currently_host && worker_count != last_worker_count {
-            // Worker count changed while we're host — restart with new split
-            eprintln!("⚡ Worker count changed: {} → {}. Restarting llama-server...",
-                last_worker_count, worker_count);
-            launch::kill_llama_server();
+        // Step 2: Elect
+        let peers = node.peers().await;
+        let i_am_host = should_be_host(node.id(), node.vram_bytes(), &peers);
+
+        if i_am_host {
+            // Step 3: Start llama-server with --rpc for ALL nodes (including self)
+            eprintln!("🗳 Elected as host");
             on_change(true, false);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let ok = launch_llama_for_current_mesh(
-                &node, &tunnel_mgr, &bin_dir, &model, llama_port,
-            ).await;
-            last_worker_count = count_workers(&node).await;
-            on_change(true, ok);
+            let llama_port = match start_llama(
+                &node, &tunnel_mgr, rpc_port, &bin_dir, &model,
+            ).await {
+                Some(port) => port,
+                None => {
+                    on_change(true, false);
+                    // Wait for next mesh change and retry
+                    let _ = peer_rx.changed().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+
+            node.set_role(NodeRole::Host { http_port: llama_port }).await;
+            tunnel_mgr.set_http_port(llama_port);
+            target_tx.send_replace(InferenceTarget::Local(llama_port));
+            on_change(true, true);
+            eprintln!("✅ llama-server ready on internal port {llama_port}");
+        } else {
+            // We're a worker. Find who the host is.
+            node.set_role(NodeRole::Worker).await;
+
+            // The host might not have announced yet — look for highest VRAM peer
+            let host_peer = peers.iter()
+                .filter(|p| !matches!(p.role, NodeRole::Client))
+                .max_by_key(|p| (p.vram_bytes, p.id));
+
+            if let Some(host) = host_peer {
+                if should_be_host(host.id, host.vram_bytes, &peers) {
+                    target_tx.send_replace(InferenceTarget::Remote(host.id));
+                    eprintln!("📡 Worker — host is {}", host.id.fmt_short());
+                } else {
+                    target_tx.send_replace(InferenceTarget::None);
+                }
+            } else {
+                target_tx.send_replace(InferenceTarget::None);
+            }
+            on_change(false, false);
         }
 
         // Wait for next peer change
@@ -200,6 +128,94 @@ pub async fn election_loop<F>(
         }
 
         // Debounce — wait for mesh to settle
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        eprintln!("⚡ Mesh changed — re-electing...");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
+}
+
+/// Start llama-server with --rpc pointing at all nodes (self + workers).
+/// Returns the ephemeral port llama-server is listening on, or None on failure.
+async fn start_llama(
+    node: &mesh::Node,
+    tunnel_mgr: &tunnel::Manager,
+    my_rpc_port: u16,
+    bin_dir: &Path,
+    model: &Path,
+) -> Option<u16> {
+    let peers = node.peers().await;
+    let worker_ids: Vec<_> = peers.iter()
+        .filter(|p| matches!(p.role, NodeRole::Worker))
+        .map(|p| p.id)
+        .collect();
+
+    // Wait for tunnels to workers
+    if !worker_ids.is_empty() {
+        eprintln!("  Waiting for tunnels to {} worker(s)...", worker_ids.len());
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tunnel_mgr.wait_for_peers(worker_ids.len()),
+        ).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // B2B tunnel map exchange
+        let my_map = tunnel_mgr.peer_ports_map().await;
+        let _ = node.broadcast_tunnel_map(my_map).await;
+        let _ = node.wait_for_tunnel_maps(worker_ids.len(), std::time::Duration::from_secs(10)).await;
+        let remote_maps = node.all_remote_tunnel_maps().await;
+        tunnel_mgr.update_rewrite_map(&remote_maps).await;
+    }
+
+    // Build --rpc list: self first, then remote workers
+    let all_ports = tunnel_mgr.peer_ports_map().await;
+    let mut rpc_ports = vec![my_rpc_port]; // always include self
+    for id in &worker_ids {
+        if let Some(&port) = all_ports.get(id) {
+            rpc_ports.push(port);
+        }
+    }
+
+    // Calculate tensor split from VRAM
+    let my_vram = node.vram_bytes() as f64;
+    let mut all_vrams = vec![my_vram];
+    for id in &worker_ids {
+        if let Some(peer) = peers.iter().find(|p| p.id == *id) {
+            all_vrams.push(if peer.vram_bytes > 0 { peer.vram_bytes as f64 } else { my_vram });
+        }
+    }
+    let total: f64 = all_vrams.iter().sum();
+    let split = if total > 0.0 && rpc_ports.len() > 1 {
+        let s: Vec<String> = all_vrams.iter().map(|v| format!("{:.2}", v / total)).collect();
+        let split_str = s.join(",");
+        eprintln!("  Tensor split: {split_str} ({} node(s), {:.0}GB total)", rpc_ports.len(), total / 1e9);
+        Some(split_str)
+    } else {
+        eprintln!("  Solo mode ({:.0}GB)", my_vram / 1e9);
+        None
+    };
+
+    // Launch on ephemeral port
+    let llama_port = match find_free_port().await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  Failed to find free port: {e}");
+            return None;
+        }
+    };
+
+    match launch::start_llama_server(
+        bin_dir, model, llama_port, &rpc_ports, split.as_deref(),
+    ).await {
+        Ok(()) => Some(llama_port),
+        Err(e) => {
+            eprintln!("  Failed to start llama-server: {e}");
+            None
+        }
+    }
+}
+
+async fn find_free_port() -> anyhow::Result<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
 }

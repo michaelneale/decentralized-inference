@@ -266,7 +266,6 @@ pub async fn run(port: u16, initial_join: Vec<String>) -> Result<()> {
             node.clone(),
             0, // no rpc-server yet
             channels.rpc,
-            None,
             channels.http,
         ).await?;
 
@@ -530,7 +529,7 @@ async fn handle_start(stream: &mut TcpStream, state: &ConsoleState, body: &str) 
     respond_ok(stream, &format!("Started — rpc-server on port {rpc_port}, entering election")).await?;
 
     // Spawn the election loop
-    spawn_election(node, tunnel_mgr, bin_dir, model, llama_port, state.clone());
+    spawn_election(node, tunnel_mgr, rpc_port, bin_dir, model, state.clone());
 
     Ok(())
 }
@@ -540,18 +539,19 @@ async fn handle_start(stream: &mut TcpStream, state: &ConsoleState, body: &str) 
 fn spawn_election(
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
+    rpc_port: u16,
     bin_dir: PathBuf,
     model: PathBuf,
-    llama_port: u16,
     state: ConsoleState,
 ) {
+    let (target_tx, _target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
+    // TODO: console should use target_rx for its own API proxying
     tokio::spawn(async move {
         let state2 = state.clone();
         election::election_loop(
-            node, tunnel_mgr, bin_dir, model, llama_port,
+            node, tunnel_mgr, rpc_port, bin_dir, model, target_tx,
             move |is_host, llama_ready| {
                 let state3 = state2.clone();
-                // Fire-and-forget async update
                 tokio::spawn(async move {
                     {
                         let mut inner = state3.inner.lock().await;
@@ -733,7 +733,7 @@ async fn handle_stop(stream: &mut TcpStream, state: &ConsoleState) -> Result<()>
     let _ = tokio::process::Command::new("pkill")
         .args(["-f", "rpc-server"])
         .output().await;
-    launch::kill_llama_server();
+    launch::kill_llama_server().await;
 
     let mut inner = state.inner.lock().await;
     if let Some(tunnel_mgr) = &inner.tunnel_mgr {

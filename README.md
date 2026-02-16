@@ -29,31 +29,56 @@ just test             # run inference
 just stop             # kill everything
 ```
 
-## Mesh Usage
+## Usage
 
-Both machines need the same GGUF model file. Each loads weights from its own local copy.
+### Solo (single machine)
+
+Run on one machine with a model — it elects itself as host and starts serving:
+
+```bash
+mesh-inference --model ~/.models/model.gguf
+# API ready at http://localhost:9337
+
+curl http://localhost:9337/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+### Two machines (distributed inference)
+
+Both machines need the same GGUF model file. Each loads weights from its own local copy — nothing transfers over the network.
 
 **Machine A** (starts first):
 ```bash
 mesh-inference --model ~/.models/model.gguf
 # Prints: Invite token: eyJ...
+# API ready at http://localhost:9337
 ```
 
 **Machine B** (joins):
 ```bash
 mesh-inference --model ~/.models/model.gguf --join <token>
+# API ready at http://localhost:9337
 ```
 
-Highest VRAM becomes the host automatically. The other machine contributes GPU as a worker.
+The mesh auto-elects a host (highest VRAM wins). The host runs llama-server with `--rpc` pointing at all nodes. Tensor split is calculated from VRAM automatically. Both machines can `curl localhost:9337` — the host serves directly, the worker proxies to the host.
+
+When a node joins or leaves, llama-server is killed and restarted with the new configuration. No manual intervention needed.
 
 ### Lite client (no GPU, no model)
 
+Join the mesh from any machine as a lightweight API proxy:
+
 ```bash
-mesh-inference --client --join <token> --port 8080
-curl http://localhost:8080/v1/chat/completions \
+mesh-inference --client --join <token> --port 9337
+# API ready at http://localhost:9337
+
+curl http://localhost:9337/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 ```
+
+Only the `mesh-inference` binary is needed — no llama.cpp binaries, no model file.
 
 ### Web console
 
@@ -69,7 +94,7 @@ Connections use [iroh](https://iroh.computer) QUIC. By default iroh handles NAT 
 
 ### WAN with port forwarding
 
-For the best latency, forward a **UDP** port on the router to the machine that starts first:
+For the best latency, forward a **UDP** port on the router to the machine that will accept incoming connections:
 
 ```bash
 # Machine with port forwarding (e.g. UDP 7842 forwarded on router)
@@ -105,6 +130,49 @@ In these cases, the **reachable** node should start first (print the token) and 
 - **One side restricted** → reachable side starts first, restricted side joins
 - **Neither side reachable** → falls back to iroh relay (~200ms RTT vs ~20ms direct)
 
+## How It Works
+
+Every node with a model runs `rpc-server` (contributes GPU). The mesh gossips VRAM and roles. On every mesh change:
+
+1. llama-server is killed (wherever it's running)
+2. Election runs (deterministic — highest VRAM wins, every node computes the same answer)
+3. Winner starts llama-server with `--rpc` pointing at all nodes (including itself)
+4. mesh-inference owns `:9337` on every node — host proxies to local llama-server, workers proxy via QUIC to the host
+
+```
+┌────────────────────────────────────────────────────────┐
+│  Elected Host (highest VRAM)                            │
+│  rpc-server (GPU) + llama-server --rpc <all nodes>      │
+│  :9337 → local llama-server (ephemeral port)            │
+└──────────────────────┬─────────────────────────────────┘
+                       │ QUIC mesh
+                       ▼
+┌────────────────────────────────────────────────────────┐
+│  Worker (every other node with a model)                 │
+│  rpc-server (GPU)                                       │
+│  :9337 → QUIC tunnel → host's llama-server              │
+└────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────┐
+│  Lite Client (--client, no GPU/model needed)            │
+│  :9337 → QUIC tunnel → host's llama-server              │
+└────────────────────────────────────────────────────────┘
+```
+
+### Election rules
+
+1. Highest VRAM wins. Tie-break: highest node ID.
+2. Deterministic — no consensus protocol, every node computes the same answer from gossip.
+3. Re-election on every mesh change (join/leave).
+
+### Tensor split
+
+Calculated automatically from VRAM:
+```
+2 nodes: 103GB + 51GB = 154GB total
+Split: 0.67, 0.33
+```
+
 ## CLI Reference
 
 ```
@@ -113,14 +181,12 @@ mesh-inference [OPTIONS]
   --model PATH         GGUF model file. Starts rpc-server, enters auto-election.
   --client             Lite client — no GPU, no model, API proxy only.
   --join TOKEN         Join mesh via invite token (repeatable).
-  --port PORT          HTTP port for client proxy or auto-elected host (default: 8080/8090).
+  --port PORT          Local API port (default: 9337).
   --bind-port PORT     Pin QUIC to a fixed UDP port (for router port forwarding).
   --relay URL          Override iroh relay URLs (repeatable).
-  --serve PORT         Force host on this port (skip auto-election).
   --tensor-split R,R   Manual layer split ratios (e.g. "0.85,0.15").
   --bin-dir PATH       Directory with rpc-server + llama-server binaries.
   --device DEV         GPU device for rpc-server (default: MTL0).
-  --min-peers N        Wait for N peers before starting (--serve mode only).
 
 mesh-inference console [--port PORT]
 
@@ -143,8 +209,6 @@ M4 Max + Mac Mini M4, WiFi, GLM-4.7-Flash-Q4_K_M (17GB).
 | 3-node (40/40/20) | **12-13** |
 | Local only (no mesh) | 68 |
 
-See [PLAN.md](PLAN.md) for detailed notes.
-
 ## Justfile
 
 ### Build & Deploy
@@ -159,9 +223,9 @@ See [PLAN.md](PLAN.md) for detailed notes.
 
 | Target | Description |
 |---|---|
-| `just mesh-worker` | Start mesh node (auto-election) |
-| `just mesh-serve join=TOKEN` | Manual host mode |
-| `just mesh-client join=TOKEN` | Lite client |
+| `just mesh-worker` | Start mesh node (auto-election, prints invite token) |
+| `just mesh-join join=TOKEN` | Join mesh (auto-election) |
+| `just mesh-client join=TOKEN` | Lite client (no GPU) |
 
 ### Dev
 

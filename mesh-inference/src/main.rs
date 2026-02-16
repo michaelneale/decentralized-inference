@@ -21,25 +21,14 @@ struct Cli {
     #[arg(long, short, global = true)]
     join: Vec<String>,
 
-    /// Force this node to be the host on a specific HTTP port.
-    /// Without this flag, the mesh auto-elects a host based on VRAM.
-    #[arg(long)]
-    serve: Option<u16>,
-
     /// Path to GGUF model file. Starts rpc-server and enters auto-election.
-    /// Both workers and the elected host need this.
     #[arg(long)]
     model: Option<PathBuf>,
 
-    /// HTTP port for llama-server when elected as host (default: 8090).
-    /// Only used in auto-election mode (--model without --serve).
-    #[arg(long, default_value = "8090")]
+    /// Local HTTP port for the API (default: 9337).
+    /// The elected host runs llama-server here; workers proxy to the host.
+    #[arg(long, default_value = "9337")]
     port: u16,
-
-    /// Minimum number of peers to wait for before starting llama-server.
-    /// Only used with --serve (manual host mode).
-    #[arg(long, default_value = "1")]
-    min_peers: usize,
 
     /// Path to directory containing rpc-server and llama-server binaries.
     /// Defaults to the same directory as the mesh-inference binary itself.
@@ -96,12 +85,6 @@ async fn main() -> Result<()> {
     }
 
     // --- Validation ---
-    if cli.serve.is_some() && cli.model.is_none() {
-        anyhow::bail!("--model is required when using --serve");
-    }
-    if cli.client && cli.serve.is_some() {
-        anyhow::bail!("--client and --serve are mutually exclusive");
-    }
     if cli.client && cli.join.is_empty() {
         anyhow::bail!("--client requires --join to connect to a mesh");
     }
@@ -125,18 +108,13 @@ async fn main() -> Result<()> {
         None => detect_bin_dir()?,
     };
 
-    if cli.serve.is_some() {
-        // Legacy manual host mode: --serve PORT
-        run_manual_host(cli, model, bin_dir).await
-    } else {
-        // Auto-election mode: --model (with optional --join)
-        run_auto(cli, model, bin_dir).await
-    }
+    run_auto(cli, model, bin_dir).await
 }
 
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
+/// mesh-inference owns :port and proxies to llama-server (local or remote).
 async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
-    let llama_port = cli.port;
+    let api_port = cli.port;
 
     // Start rpc-server — every node contributes GPU
     let rpc_port = launch::start_rpc_server(
@@ -148,8 +126,9 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port).await?;
     let token = node.invite_token();
 
+    // Pass None for http_port — we'll handle HTTP proxying ourselves
     let tunnel_mgr = tunnel::Manager::start(
-        node.clone(), rpc_port, channels.rpc, Some(llama_port), channels.http,
+        node.clone(), rpc_port, channels.rpc, channels.http,
     ).await?;
 
     // Advertise local models
@@ -181,23 +160,32 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
         eprintln!("This node's token (for others to join): {token}");
     }
 
-    // Enter election loop — blocks until ctrl-c
-    eprintln!("Entering auto-election (highest VRAM becomes host)...");
+    // Election publishes where llama-server is via this channel
+    let (target_tx, target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
 
+    // API proxy: mesh-inference owns :api_port, forwards to wherever llama-server is
+    let proxy_node = node.clone();
+    let proxy_rx = target_rx.clone();
+    tokio::spawn(async move {
+        api_proxy(proxy_node, api_port, proxy_rx).await;
+    });
+
+    // Election loop
+    eprintln!("Entering auto-election (highest VRAM becomes host)...");
     let node2 = node.clone();
     let tunnel_mgr2 = tunnel_mgr.clone();
     let bin_dir2 = bin_dir.clone();
     let model2 = model.clone();
     tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, bin_dir2, model2, llama_port,
-            |is_host, llama_ready| {
+            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, target_tx,
+            move |is_host, llama_ready| {
                 if is_host && llama_ready {
-                    eprintln!("✅ This node is HOST — llama-server ready on port {llama_port}");
+                    eprintln!("  API: http://localhost:{api_port}");
                 } else if is_host {
-                    eprintln!("⏳ This node is HOST — llama-server starting...");
+                    eprintln!("⏳ Starting llama-server...");
                 } else {
-                    eprintln!("📡 This node is WORKER — contributing GPU to the mesh");
+                    eprintln!("  API: http://localhost:{api_port} (proxied to host)");
                 }
             },
         ).await;
@@ -205,69 +193,7 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
 
     tokio::signal::ctrl_c().await?;
     eprintln!("\nShutting down...");
-    launch::kill_llama_server();
-    Ok(())
-}
-
-/// Legacy manual host mode: --serve PORT forces this node to be host.
-async fn run_manual_host(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
-    let http_port = cli.serve.unwrap();
-
-    let rpc_port = launch::start_rpc_server(
-        &bin_dir, cli.device.as_deref(), Some(&model),
-    ).await?;
-    eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
-
-    let role = NodeRole::Host { http_port };
-    let (node, channels) = mesh::Node::start(role.clone(), &cli.relay, cli.bind_port).await?;
-    let token = node.invite_token();
-
-    let tunnel_mgr = tunnel::Manager::start(
-        node.clone(), rpc_port, channels.rpc, Some(http_port), channels.http,
-    ).await?;
-
-    if cli.join.is_empty() {
-        eprintln!("Invite token: {token}");
-        eprintln!("Waiting for inbound connections...");
-    } else {
-        let mut joined = false;
-        for t in &cli.join {
-            match node.join(t).await {
-                Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
-                Err(e) => tracing::warn!("Failed to join via token: {e}"),
-            }
-        }
-        if !joined {
-            eprintln!("Failed to join any peer, running standalone");
-        }
-        eprintln!("This node's token (for others to join): {token}");
-    }
-
-    eprintln!("Waiting for {} peer(s) with active tunnels...", cli.min_peers);
-    tunnel_mgr.wait_for_peers(cli.min_peers).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let tunnel_ports = tunnel_mgr.peer_ports().await;
-    eprintln!(
-        "Got {} peer(s), starting llama-server with {} remote RPC endpoint(s)",
-        tunnel_ports.len(), tunnel_ports.len()
-    );
-
-    let my_tunnel_map = tunnel_mgr.peer_ports_map().await;
-    eprintln!("Broadcasting tunnel map ({} entries) for B2B rewriting", my_tunnel_map.len());
-    node.broadcast_tunnel_map(my_tunnel_map).await?;
-    node.wait_for_tunnel_maps(tunnel_ports.len(), std::time::Duration::from_secs(15)).await?;
-    let remote_maps = node.all_remote_tunnel_maps().await;
-    tunnel_mgr.update_rewrite_map(&remote_maps).await;
-
-    launch::start_llama_server(
-        &bin_dir, &model, http_port, &tunnel_ports, cli.tensor_split.as_deref(),
-    ).await?;
-    eprintln!("llama-server ready: http://localhost:{http_port}");
-
-    eprintln!("Running. Ctrl-C to stop.");
-    tokio::signal::ctrl_c().await?;
-    eprintln!("\nShutting down...");
+    launch::kill_llama_server().await;
     Ok(())
 }
 
@@ -332,6 +258,81 @@ async fn run_client(cli: Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Unified API proxy. mesh-inference owns :port and forwards every request
+/// to wherever llama-server is running, based on the election target.
+///   - Local(port): llama-server on this machine → TCP proxy to localhost:port
+///   - Remote(peer): llama-server on another node → QUIC HTTP tunnel
+///   - None: no server yet → 503
+async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::InferenceTarget>) {
+    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind API proxy to port {port}: {e}");
+            return;
+        }
+    };
+
+    loop {
+        let (tcp_stream, _addr) = match listener.accept().await {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        let _ = tcp_stream.set_nodelay(true);
+
+        let target = target_rx.borrow().clone();
+        let node = node.clone();
+
+        tokio::spawn(async move {
+            match target {
+                election::InferenceTarget::Local(llama_port) => {
+                    // Proxy to local llama-server
+                    match tokio::net::TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
+                        Ok(upstream) => {
+                            let _ = upstream.set_nodelay(true);
+                            if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
+                                tracing::debug!("API proxy (local) ended: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("API proxy: can't reach local llama-server on {llama_port}: {e}");
+                            let _ = send_503(tcp_stream).await;
+                        }
+                    }
+                }
+                election::InferenceTarget::Remote(host_id) => {
+                    // Proxy via QUIC tunnel to remote host
+                    match node.open_http_tunnel(host_id).await {
+                        Ok((quic_send, quic_recv)) => {
+                            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
+                                tracing::debug!("API proxy (remote) ended: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("API proxy: can't tunnel to host {}: {e}", host_id.fmt_short());
+                            let _ = send_503(tcp_stream).await;
+                        }
+                    }
+                }
+                election::InferenceTarget::None => {
+                    let _ = send_503(tcp_stream).await;
+                }
+            }
+        });
+    }
+}
+
+async fn send_503(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = r#"{"error":"No inference server available — election in progress"}"#;
+    let resp = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
     Ok(())
 }
 

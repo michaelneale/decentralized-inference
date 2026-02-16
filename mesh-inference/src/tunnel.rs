@@ -34,6 +34,7 @@ pub fn bytes_transferred() -> u64 {
 pub struct Manager {
     node: Node,
     rpc_port: Arc<AtomicU16>,
+    http_port: Arc<AtomicU16>,
     /// EndpointId → local tunnel port
     tunnel_ports: Arc<Mutex<HashMap<EndpointId, u16>>>,
     /// Port rewrite map for B2B: orchestrator tunnel port → local tunnel port
@@ -43,18 +44,18 @@ pub struct Manager {
 impl Manager {
     /// Start the tunnel manager.
     /// `rpc_port` is the local rpc-server port (for inbound RPC tunnel streams).
-    /// `http_port` is the optional local llama-server HTTP port (for inbound HTTP tunnel streams).
+    /// HTTP port for inbound tunnels is set dynamically via `set_http_port()`.
     pub async fn start(
         node: Node,
         rpc_port: u16,
         mut tunnel_stream_rx: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
-        http_port: Option<u16>,
         mut tunnel_http_rx: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     ) -> Result<Self> {
         let port_rewrite_map = rewrite::new_rewrite_map();
         let mgr = Manager {
             node: node.clone(),
             rpc_port: Arc::new(AtomicU16::new(rpc_port)),
+            http_port: Arc::new(AtomicU16::new(0)),
             tunnel_ports: Arc::new(Mutex::new(HashMap::new())),
             port_rewrite_map,
         };
@@ -85,26 +86,36 @@ impl Manager {
         });
 
         // Handle inbound HTTP tunnel streams (plain byte relay to llama-server)
-        if let Some(http_port) = http_port {
-            tokio::spawn(async move {
-                while let Some((send, recv)) = tunnel_http_rx.recv().await {
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_inbound_http_stream(send, recv, http_port).await {
-                            tracing::warn!("Inbound HTTP tunnel stream error: {e}");
-                        }
-                    });
+        let http_port_ref = mgr.http_port.clone();
+        tokio::spawn(async move {
+            while let Some((send, recv)) = tunnel_http_rx.recv().await {
+                let port = http_port_ref.load(Ordering::Relaxed);
+                if port == 0 {
+                    tracing::warn!("Inbound HTTP tunnel but no llama-server running, dropping");
+                    continue;
                 }
-            });
-        }
+                tokio::spawn(async move {
+                    if let Err(e) = handle_inbound_http_stream(send, recv, port).await {
+                        tracing::warn!("Inbound HTTP tunnel stream error: {e}");
+                    }
+                });
+            }
+        });
 
         Ok(mgr)
     }
 
     /// Update the local rpc-server port (for inbound tunnel streams).
-    /// Called when rpc-server starts after the tunnel manager.
     pub fn set_rpc_port(&self, port: u16) {
         self.rpc_port.store(port, Ordering::Relaxed);
         tracing::info!("Tunnel manager: rpc_port updated to {port}");
+    }
+
+    /// Update the local llama-server HTTP port (for inbound HTTP tunnel streams).
+    /// Set to 0 to disable (no llama-server running).
+    pub fn set_http_port(&self, port: u16) {
+        self.http_port.store(port, Ordering::Relaxed);
+        tracing::info!("Tunnel manager: http_port updated to {port}");
     }
 
     /// Wait until we have at least `n` peers with active tunnels
@@ -291,6 +302,22 @@ async fn handle_inbound_http_stream(
 
 /// Relay a TCP stream through a QUIC bi-stream. Used by the lite client
 /// to tunnel local HTTP requests to the remote host's llama-server.
+/// Relay between two TCP streams (for local proxying).
+pub async fn relay_tcp_streams(
+    a: TcpStream,
+    b: TcpStream,
+) -> Result<()> {
+    let (a_read, mut a_write) = tokio::io::split(a);
+    let (b_read, mut b_write) = tokio::io::split(b);
+    let mut t1 = tokio::spawn(async move { tokio::io::copy(&mut tokio::io::BufReader::new(a_read), &mut b_write).await });
+    let mut t2 = tokio::spawn(async move { tokio::io::copy(&mut tokio::io::BufReader::new(b_read), &mut a_write).await });
+    tokio::select! {
+        _ = &mut t1 => { t2.abort(); }
+        _ = &mut t2 => { t1.abort(); }
+    }
+    Ok(())
+}
+
 pub async fn relay_tcp_via_quic(
     tcp_stream: TcpStream,
     quic_send: iroh::endpoint::SendStream,

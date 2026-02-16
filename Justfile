@@ -84,19 +84,17 @@ mesh_bin := mesh_dir / "target/release/mesh-inference"
 mesh-worker gguf=model:
     {{mesh_bin}} --model {{gguf}} --bin-dir {{build_dir}}/bin
 
-# Start a mesh orchestrator — joins a peer and launches llama-server.
-# The orchestrator uses its local GPU + remote workers via QUIC tunnel.
-mesh-serve join="" port="8090" gguf=model split="":
+# Join an existing mesh. Auto-elects host, starts llama-server or contributes as worker.
+mesh-join join="" port="9337" gguf=model split="":
     #!/usr/bin/env bash
     set -euo pipefail
-    ARGS="--model {{gguf}} --bin-dir {{build_dir}}/bin --serve {{port}}"
+    ARGS="--model {{gguf}} --bin-dir {{build_dir}}/bin --port {{port}}"
     if [ -n "{{join}}" ]; then
         ARGS="$ARGS --join {{join}}"
     fi
     if [ -n "{{split}}" ]; then
         ARGS="$ARGS --tensor-split {{split}}"
     fi
-    echo "Starting mesh orchestrator on port {{port}}..."
     exec {{mesh_bin}} $ARGS
 
 # Create a portable tarball with all binaries for deployment to another machine
@@ -123,7 +121,7 @@ bundle output="/tmp/mesh-bundle.tar.gz":
 
 # Start a lite client — no GPU, no model, just a local HTTP proxy to the mesh host.
 # Only needs the mesh-inference binary (no llama.cpp binaries or model).
-mesh-client join="" port="8080":
+mesh-client join="" port="9337":
     {{mesh_bin}} --client --port {{port}} --join {{join}}
 
 # ── Utilities ──────────────────────────────────────────────────
@@ -136,7 +134,7 @@ stop:
     echo "Stopped"
 
 # Quick test inference (works with any running server on 8080 or 8090)
-test port="8090":
+test port="9337":
     curl -s http://localhost:{{port}}/v1/chat/completions \
         -H 'Content-Type: application/json' \
         -d '{"model":"test","messages":[{"role":"user","content":"Hello! Write a haiku about distributed computing."}],"max_tokens":50}' \

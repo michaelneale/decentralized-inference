@@ -59,7 +59,9 @@ Branch: `rpc-local-gguf` in `michaelneale/llama.cpp`
 - **Single ALPN + single QUIC connection per peer**: multiplexed by first byte
 - **Model weights never transfer**: both sides have the GGUF locally
 - **`--no-mmap` always**: prevents mmap crash on unified memory Macs with less VRAM than model
-- **Orchestrator uses local GPU directly**: not through a local rpc-server
+- **llama-server always uses --rpc**: even solo, host's own rpc-server is always in the list. Same code path always.
+- **mesh-inference owns the API port**: llama-server on ephemeral ports, no port conflicts on restart
+- **Every mesh change = kill + re-elect + fresh start**: no special restart/rebalance logic
 - **Mini as orchestrator > M4 Max as orchestrator**: bulk compute (85%) runs on M4 Max with zero network cost
 - **STUN fallback for public IP discovery**: if iroh relay STUN doesn't work (DNS sinkhole etc), raw STUN to Google/Cloudflare discovers the public IP for the invite token
 - **`--bind-port` for NAT port forwarding**: pins QUIC to a fixed UDP port so router rules work
@@ -74,4 +76,11 @@ Tested: MacBook Pro M4 Max (local, symmetric NAT) ↔ Mac Studio M4 Max 128GB (r
 - STUN discovers public IP automatically, invite token includes it
 - Direct UDP at ~20ms RTT, inference works end-to-end
 
-Test script: `mesh-inference/test-mesh.sh` — starts remote, grabs token, connects locally, validates `/v1/models` and `/v1/chat/completions`.
+Verified scenarios:
+- Brad solo → `localhost:9337` works (solo inference, llama-server uses own rpc-server)
+- Local solo → `localhost:9337` works
+- Brad host + local worker → both `localhost:9337` work (distributed, tensor split 0.67/0.33, 12 tok/s gen)
+- Brad host + local lite client → `localhost:9337` works (proxied via QUIC)
+- Mesh change (local joins) → brad kills llama-server, re-elects, restarts with updated --rpc and tensor split
+
+Test script: `mesh-inference/test-mesh.sh`

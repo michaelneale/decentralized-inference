@@ -61,9 +61,22 @@ pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>, gguf_path: O
 }
 
 /// Kill all running llama-server processes.
-pub fn kill_llama_server() {
-    // pkill is the simplest cross-platform approach
+pub async fn kill_llama_server() {
     let _ = std::process::Command::new("pkill").args(["-f", "llama-server"]).status();
+    // Wait for the process to actually exit and release the port
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        // Check if any llama-server is still running
+        let output = std::process::Command::new("pgrep").args(["-f", "llama-server"]).output();
+        if let Ok(o) = output {
+            if o.stdout.is_empty() { return; }
+        } else {
+            return;
+        }
+    }
+    // Force kill if still alive after 5s
+    let _ = std::process::Command::new("pkill").args(["-9", "-f", "llama-server"]).status();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
@@ -104,9 +117,8 @@ pub async fn start_llama_server(
         .context("Failed to create llama-server log file")?;
     let log_file2 = log_file.try_clone()?;
 
-    // The orchestrator uses its own GPU directly for maximum performance.
-    // Remote workers contribute their GPUs via RPC tunnel ports.
-    // llama-server splits the model proportionally based on available VRAM.
+    // llama-server always uses --rpc, even solo.
+    // The host's own rpc-server is always in the list.
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
     ];
