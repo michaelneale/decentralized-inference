@@ -199,7 +199,7 @@ impl Node {
         use iroh::endpoint::QuicTransportConfig;
         let transport_config = QuicTransportConfig::builder()
             .max_concurrent_bidi_streams(1024u32.into())
-            .max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into()?))
             .keep_alive_interval(std::time::Duration::from_secs(10))
             .build();
         let mut builder = Endpoint::builder()
@@ -460,6 +460,15 @@ impl Node {
             state.connections.insert(remote, conn.clone());
         }
 
+        // Initiate gossip exchange so we (re-)learn their role/VRAM
+        let node = self.clone();
+        let gossip_conn = conn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = node.initiate_gossip(gossip_conn, remote).await {
+                tracing::debug!("Gossip on inbound connection to {}: {e}", remote.fmt_short());
+            }
+        });
+
         self.dispatch_streams(conn, remote).await;
         Ok(())
     }
@@ -475,7 +484,51 @@ impl Node {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::info!("Connection to {} closed: {e}", remote.fmt_short());
-                    self.remove_peer(remote).await;
+                    // Remove the stale connection
+                    {
+                        let mut state = self.state.lock().await;
+                        state.connections.remove(&remote);
+                    }
+                    // Try to reconnect — if the peer is still alive, re-learn their role
+                    let addr = {
+                        let state = self.state.lock().await;
+                        state.peers.get(&remote).map(|p| p.addr.clone())
+                    };
+                    if let Some(addr) = addr {
+                        tracing::info!("Attempting reconnect to {}...", remote.fmt_short());
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            self.endpoint.connect(addr, ALPN),
+                        ).await {
+                            Ok(Ok(new_conn)) => {
+                                tracing::info!("Reconnected to {}", remote.fmt_short());
+                                {
+                                    let mut state = self.state.lock().await;
+                                    state.connections.insert(remote, new_conn.clone());
+                                }
+                                // Gossip to re-learn role
+                                let node = self.clone();
+                                let gc = new_conn.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = node.initiate_gossip(gc, remote).await {
+                                        tracing::debug!("Reconnect gossip failed: {e}");
+                                    }
+                                });
+                                // Continue dispatching on the new connection
+                                let node = self.clone();
+                                tokio::spawn(async move {
+                                    node.dispatch_streams(new_conn, remote).await;
+                                });
+                            }
+                            _ => {
+                                tracing::info!("Reconnect to {} failed — removing peer", remote.fmt_short());
+                                self.remove_peer(remote).await;
+                            }
+                        }
+                    } else {
+                        // No address on file, can't reconnect
+                        self.remove_peer(remote).await;
+                    }
                     break;
                 }
             };
@@ -557,7 +610,13 @@ impl Node {
             node_for_dispatch.dispatch_streams(conn_for_dispatch, peer_id).await;
         });
 
-        // Open gossip stream
+        // Gossip exchange to learn peer's role/VRAM and announce ourselves
+        self.initiate_gossip(conn, peer_id).await?;
+        Ok(())
+    }
+
+    /// Open a gossip stream on an existing connection to exchange peer info.
+    async fn initiate_gossip(&self, conn: Connection, remote: EndpointId) -> Result<()> {
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_GOSSIP]).await?;
 
@@ -581,16 +640,17 @@ impl Node {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Register peer — find their own announcement for role + models + vram
-        let peer_ann = their_announcements.iter().find(|a| a.addr.id == peer_id);
-        let peer_role = peer_ann.map(|a| a.role.clone()).unwrap_or_default();
-        let peer_models = peer_ann.map(|a| a.models.clone()).unwrap_or_default();
-        let peer_vram = peer_ann.map(|a| a.vram_bytes).unwrap_or(0);
-        self.add_peer(peer_id, addr, peer_role, peer_models, peer_vram).await;
+        let peer_ann = their_announcements.iter().find(|a| a.addr.id == remote);
+        if let Some(ann) = peer_ann {
+            self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
+        }
 
         // Discover new peers (don't block on failures)
         for ann in their_announcements {
-            if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
-                tracing::warn!("Failed to discover peer: {e}");
+            if ann.addr.id != self.endpoint.id() {
+                if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
+                    tracing::warn!("Failed to discover peer: {e}");
+                }
             }
         }
 
@@ -695,12 +755,18 @@ impl Node {
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
-            if existing.role != role {
+            let role_changed = existing.role != role;
+            if role_changed {
                 tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, role);
                 existing.role = role;
             }
             existing.models = models;
             existing.vram_bytes = vram_bytes;
+            if role_changed {
+                let count = state.peers.len();
+                drop(state);
+                let _ = self.peer_change_tx.send(count);
+            }
             return;
         }
         tracing::info!("Peer added: {} role={:?} vram={:.1}GB models={:?} (total: {})",

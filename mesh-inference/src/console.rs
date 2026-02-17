@@ -24,6 +24,7 @@ pub struct ConsoleState {
 struct ConsoleInner {
     node: mesh::Node,
     is_host: bool,
+    is_client: bool,
     llama_ready: bool,
     llama_port: Option<u16>,
     model_name: String,
@@ -37,6 +38,7 @@ struct StatusPayload {
     node_id: String,
     token: String,
     is_host: bool,
+    is_client: bool,
     llama_ready: bool,
     model_name: String,
     draft_name: Option<String>,
@@ -61,6 +63,7 @@ impl ConsoleState {
             inner: Arc::new(Mutex::new(ConsoleInner {
                 node,
                 is_host: false,
+                is_client: false,
                 llama_ready: false,
                 llama_port: None,
                 model_name,
@@ -73,6 +76,10 @@ impl ConsoleState {
 
     pub async fn set_draft_name(&self, name: String) {
         self.inner.lock().await.draft_name = Some(name);
+    }
+
+    pub async fn set_client(&self, is_client: bool) {
+        self.inner.lock().await.is_client = is_client;
     }
 
     pub async fn update(&self, is_host: bool, llama_ready: bool) {
@@ -119,6 +126,7 @@ impl ConsoleState {
             node_id,
             token,
             is_host: inner.is_host,
+            is_client: inner.is_client,
             llama_ready: inner.llama_ready,
             model_name: inner.model_name.clone(),
             draft_name: inner.draft_name.clone(),

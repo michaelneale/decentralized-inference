@@ -166,20 +166,22 @@ function renderMeta() {
 function renderDiagram() {
   const el = $('diagram');
   const nodes = [];
-  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host });
-  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false }));
+  const isClient = S.is_client;
+  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient });
+  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false, client: p.role === 'Client' }));
   if (!nodes.length) { el.innerHTML = ''; return; }
 
   // Infer host from VRAM (gossip bug workaround)
   if (nodes.length > 1) {
-    const max = Math.max(...nodes.map(n => n.vram));
+    const gpuNodes = nodes.filter(n => !n.client);
+    const max = gpuNodes.length ? Math.max(...gpuNodes.map(n => n.vram)) : 0;
     if (S.is_host) nodes.forEach(n => n.host = n.self);
-    else { const h = nodes.find(n => n.vram === max); if (h) h.host = true; }
+    else { const h = gpuNodes.find(n => n.vram === max); if (h) h.host = true; }
   } else {
     nodes[0].host = true;
   }
 
-  const total = nodes.reduce((s,n) => s + n.vram, 0);
+  const total = nodes.filter(n => !n.client).reduce((s,n) => s + n.vram, 0);
   const ok = S.llama_ready;
   const W = 320, nW = 140, nH = 68;
 
@@ -212,7 +214,8 @@ function renderDiagram() {
       out += `<circle r="2" fill="#6cf" opacity="0.5"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x2},${y2} L${x1},${y1}"/></circle>`;
     }
 
-    out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">QUIC · RPC</text>`;
+    const linkLabel = w.client ? 'QUIC · HTTP' : 'QUIC · RPC';
+    out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">${linkLabel}</text>`;
   });
 
   out += nBox(hX, hY, host, total, ok);
@@ -224,14 +227,14 @@ function renderDiagram() {
 }
 
 function nBox(x, y, n, total, ok) {
-  const pct = total > 0 ? Math.round(n.vram / total * 100) : 100;
+  const pct = n.client ? 0 : (total > 0 ? Math.round(n.vram / total * 100) : 100);
   const fill = n.self ? '#0d1a26' : '#10101c';
-  const stroke = ok ? (n.host ? '#2a5a2a' : '#1a3a5c') : '#1c1c1c';
+  const stroke = ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c';
   const sw = ok ? '1.5' : '1';
   const label = n.self ? `${n.id} (you)` : n.id;
-  const role = n.host ? 'HOST' : 'WORKER';
-  const rc = n.host ? '#4c4' : '#6cf';
-  const svc = n.host ? 'llama-server · rpc' : 'rpc-server';
+  const role = n.client ? 'CLIENT' : (n.host ? 'HOST' : 'WORKER');
+  const rc = n.client ? '#888' : (n.host ? '#4c4' : '#6cf');
+  const svc = n.client ? 'API tunnel' : (n.host ? 'llama-server · rpc' : 'rpc-server');
   const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
   const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
 
@@ -266,8 +269,9 @@ function renderStatus() {
   const model = S.model_name || '';
   if (S.llama_ready) {
     const n = peers + 1;
-    const total = ((S.my_vram_gb||0) + (S.peers||[]).reduce((s,p)=>s+p.vram_gb,0)).toFixed(0);
-    el.innerHTML = `<div class="status-line ok">✓ Running${n>1?` · ${n} nodes · ${total} GB`:''}</div>`;
+    const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
+    const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB` : '';
+    el.innerHTML = `<div class="status-line ok">✓ Running${n>1?` · ${n} nodes${vramStr}`:''}</div>`;
   } else if (S.is_host) {
     el.innerHTML = `<div class="status-line">Loading ${esc(model)}…</div>`;
   } else if (peers > 0) {

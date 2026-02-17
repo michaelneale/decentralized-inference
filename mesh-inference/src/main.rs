@@ -410,6 +410,20 @@ async fn run_client(cli: Cli) -> Result<()> {
     eprintln!("Launch with goose:");
     eprintln!("  GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:{local_port} OPENAI_API_KEY=mesh goose session");
 
+    // Console (optional)
+    if let Some(cport) = cli.console {
+        let model_name = host.models.first().cloned().unwrap_or_default();
+        let cs = console::ConsoleState::new(node.clone(), model_name, local_port);
+        cs.set_client(true).await;
+        cs.update(false, true).await; // not host, but ready (tunneling to host)
+        tokio::spawn(async move {
+            let (_tx, rx) = tokio::sync::watch::channel(
+                election::InferenceTarget::Remote(host_id)
+            );
+            console::start(cport, cs, rx).await;
+        });
+    }
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
