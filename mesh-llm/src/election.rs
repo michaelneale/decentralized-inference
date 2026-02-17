@@ -56,6 +56,7 @@ pub async fn election_loop(
     model: std::path::PathBuf,
     draft: Option<std::path::PathBuf>,
     draft_max: u16,
+    force_split: bool,
     target_tx: watch::Sender<InferenceTarget>,
     mut on_change: impl FnMut(bool, bool) + Send,
 ) {
@@ -107,7 +108,7 @@ pub async fn election_loop(
             on_change(true, false);
 
             let llama_port = match start_llama(
-                &node, &tunnel_mgr, rpc_port, &bin_dir, &model, draft.as_deref(), draft_max,
+                &node, &tunnel_mgr, rpc_port, &bin_dir, &model, draft.as_deref(), draft_max, force_split,
             ).await {
                 Some(port) => port,
                 None => {
@@ -167,12 +168,30 @@ async fn start_llama(
     model: &Path,
     draft: Option<&Path>,
     draft_max: u16,
+    force_split: bool,
 ) -> Option<u16> {
     let peers = node.peers().await;
-    let worker_ids: Vec<_> = peers.iter()
-        .filter(|p| matches!(p.role, NodeRole::Worker))
-        .map(|p| p.id)
-        .collect();
+    let my_vram = node.vram_bytes();
+    let model_bytes = std::fs::metadata(model).map(|m| m.len()).unwrap_or(0);
+    let min_vram = (model_bytes as f64 * 1.1) as u64;
+
+    // Decide whether to split: only if model doesn't fit on host alone, or --split forced
+    let need_split = force_split || my_vram < min_vram;
+
+    let worker_ids: Vec<_> = if need_split {
+        peers.iter()
+            .filter(|p| matches!(p.role, NodeRole::Worker))
+            .map(|p| p.id)
+            .collect()
+    } else {
+        let worker_count = peers.iter().filter(|p| matches!(p.role, NodeRole::Worker)).count();
+        if worker_count > 0 {
+            eprintln!("  Model fits on host ({:.1}GB VRAM for {:.1}GB model) — loading solo",
+                my_vram as f64 / 1e9, model_bytes as f64 / 1e9);
+            eprintln!("  Use --split to force distributed mode");
+        }
+        vec![]
+    };
 
     // Wait for tunnels to workers
     if !worker_ids.is_empty() {
@@ -201,11 +220,11 @@ async fn start_llama(
     }
 
     // Calculate tensor split from VRAM
-    let my_vram = node.vram_bytes() as f64;
-    let mut all_vrams = vec![my_vram];
+    let my_vram_f = my_vram as f64;
+    let mut all_vrams = vec![my_vram_f];
     for id in &worker_ids {
         if let Some(peer) = peers.iter().find(|p| p.id == *id) {
-            all_vrams.push(if peer.vram_bytes > 0 { peer.vram_bytes as f64 } else { my_vram });
+            all_vrams.push(if peer.vram_bytes > 0 { peer.vram_bytes as f64 } else { my_vram_f });
         }
     }
     let total: f64 = all_vrams.iter().sum();
@@ -215,7 +234,7 @@ async fn start_llama(
         eprintln!("  Tensor split: {split_str} ({} node(s), {:.0}GB total)", rpc_ports.len(), total / 1e9);
         Some(split_str)
     } else {
-        eprintln!("  Solo mode ({:.0}GB)", my_vram / 1e9);
+        eprintln!("  Solo mode ({:.0}GB)", my_vram_f / 1e9);
         None
     };
 

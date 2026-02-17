@@ -63,6 +63,11 @@ struct Cli {
     #[arg(long)]
     no_draft: bool,
 
+    /// Force tensor split across all GPU nodes even if the model fits on the host.
+    /// Without this, the host loads solo when it has enough VRAM.
+    #[arg(long)]
+    split: bool,
+
     /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
     /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
     #[arg(long, global = true)]
@@ -337,10 +342,11 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let model2 = model.clone();
     let draft2 = cli.draft.clone();
     let draft_max = cli.draft_max;
+    let force_split = cli.split;
     let model_name_for_cb = model_name_str.clone();
     tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, draft2, draft_max, target_tx,
+            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, draft2, draft_max, force_split, target_tx,
             move |is_host, llama_ready| {
                 if is_host && llama_ready {
                     let url = format!("http://localhost:{api_port}");
