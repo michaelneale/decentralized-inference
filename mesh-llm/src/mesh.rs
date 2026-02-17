@@ -59,6 +59,7 @@ pub struct PeerInfo {
     pub role: NodeRole,
     pub models: Vec<String>,
     pub vram_bytes: u64,
+    pub rtt_ms: Option<u32>,
 }
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
@@ -191,7 +192,7 @@ pub struct TunnelChannels {
 }
 
 impl Node {
-    pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>) -> Result<(Self, TunnelChannels)> {
+    pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>, max_vram_gb: Option<f64>) -> Result<(Self, TunnelChannels)> {
         let secret_key = load_or_create_key().await?;
         // Configure QUIC transport for heavy RPC traffic:
         // - Allow many concurrent bi-streams (model loading opens hundreds)
@@ -240,8 +241,18 @@ impl Node {
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
 
-        let vram = detect_vram_bytes();
-        tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
+        let mut vram = detect_vram_bytes();
+        if let Some(max_gb) = max_vram_gb {
+            let max_bytes = (max_gb * 1e9) as u64;
+            if max_bytes < vram {
+                tracing::info!("Detected VRAM: {:.1} GB, capped to {:.1} GB (--max-vram)", vram as f64 / 1e9, max_gb);
+                vram = max_bytes;
+            } else {
+                tracing::info!("Detected VRAM: {:.1} GB (--max-vram {:.1} has no effect)", vram as f64 / 1e9, max_gb);
+            }
+        } else {
+            tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
+        }
 
         let node = Node {
             endpoint,
@@ -617,6 +628,7 @@ impl Node {
 
     /// Open a gossip stream on an existing connection to exchange peer info.
     async fn initiate_gossip(&self, conn: Connection, remote: EndpointId) -> Result<()> {
+        let t0 = std::time::Instant::now();
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_GOSSIP]).await?;
 
@@ -630,6 +642,7 @@ impl Node {
         // Read their announcements
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
+        let rtt_ms = t0.elapsed().as_millis() as u32;
         let len = u32::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
@@ -643,6 +656,12 @@ impl Node {
         let peer_ann = their_announcements.iter().find(|a| a.addr.id == remote);
         if let Some(ann) = peer_ann {
             self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
+            // Store RTT
+            let mut state = self.state.lock().await;
+            if let Some(peer) = state.peers.get_mut(&remote) {
+                peer.rtt_ms = Some(rtt_ms);
+                tracing::info!("Peer {} RTT: {}ms", remote.fmt_short(), rtt_ms);
+            }
         }
 
         // Discover new peers (don't block on failures)
@@ -687,6 +706,29 @@ impl Node {
         for ann in &their_announcements {
             if ann.addr.id == remote {
                 self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
+            }
+        }
+
+        // Measure RTT from QUIC connection stats
+        {
+            let conn = self.state.lock().await.connections.get(&remote).cloned();
+            if let Some(conn) = conn {
+                let mut paths = conn.paths();
+                let path_list = iroh::Watcher::get(&mut paths);
+                for path_info in path_list {
+                    if path_info.is_selected() {
+                        let rtt = path_info.rtt();
+                        let rtt_ms = rtt.as_millis() as u32;
+                        if rtt_ms > 0 {
+                            let mut state = self.state.lock().await;
+                            if let Some(peer) = state.peers.get_mut(&remote) {
+                                peer.rtt_ms = Some(rtt_ms);
+                                tracing::info!("Peer {} RTT: {}ms (QUIC)", remote.fmt_short(), rtt_ms);
+                            }
+                        }
+                        break;
+                    }
+                }
             }
         }
 
@@ -771,7 +813,7 @@ impl Node {
         }
         tracing::info!("Peer added: {} role={:?} vram={:.1}GB models={:?} (total: {})",
             id.fmt_short(), role, vram_bytes as f64 / 1e9, models, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes });
+        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes, rtt_ms: None });
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);

@@ -201,9 +201,21 @@ async fn start_llama(
     // Decide whether to split: only if model doesn't fit on host alone, or --split forced
     let need_split = force_split || my_vram < min_vram;
 
+    const MAX_RTT_MS: u32 = 80;
+
     let worker_ids: Vec<_> = if need_split {
         peers.iter()
             .filter(|p| matches!(p.role, NodeRole::Worker))
+            .filter(|p| {
+                match p.rtt_ms {
+                    Some(rtt) if rtt > MAX_RTT_MS => {
+                        eprintln!("  ⚠ Skipping {} — RTT {}ms exceeds {}ms limit",
+                            p.id.fmt_short(), rtt, MAX_RTT_MS);
+                        false
+                    }
+                    _ => true,
+                }
+            })
             .map(|p| p.id)
             .collect()
     } else {

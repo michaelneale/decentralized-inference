@@ -68,6 +68,11 @@ struct Cli {
     #[arg(long)]
     split: bool,
 
+    /// Limit VRAM advertised to the mesh (in GB). Other nodes will see this
+    /// instead of your actual VRAM, capping how much work gets split to you.
+    #[arg(long)]
+    max_vram: Option<f64>,
+
     /// Override iroh relay URLs (e.g. --relay https://staging-use1-1.relay.iroh.network./).
     /// Can be specified multiple times. Without this, iroh uses its built-in defaults.
     #[arg(long, global = true)]
@@ -268,7 +273,7 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
 
     // Start mesh node as Worker (election may promote to Host)
-    let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port).await?;
+    let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
     let token = node.invite_token();
 
     // Pass None for http_port — we'll handle HTTP proxying ourselves
@@ -381,7 +386,7 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
 async fn run_client(cli: Cli) -> Result<()> {
     let local_port = cli.port;
 
-    let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port).await?;
+    let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
     let token = node.invite_token();
 
     let mut joined = false;

@@ -116,6 +116,8 @@ Shows the live state of the running process:
 - **Models larger than one machine**: the tensor split assigns layers across nodes. Each rpc-server only loads its slice. A 72B model (47GB) can run across two 32GB machines — neither needs to fit it alone.
 - **Election**: highest VRAM wins, deterministic, re-runs on every mesh change
 - **Tensor split**: auto from VRAM (e.g. 103GB + 51GB → 0.67, 0.33)
+- **RTT gating**: peers with >80ms round-trip are skipped for tensor split (stay in mesh as API clients). Measured during gossip exchange.
+- **VRAM cap**: `--max-vram 10` advertises 10GB to the mesh regardless of actual VRAM — limits how much work gets split to you
 - **Concurrent queries**: both ends can query simultaneously (llama-server request queue)
 
 ## Networking
@@ -151,6 +153,8 @@ mesh-llm [OPTIONS]
   --join TOKEN         Join mesh via invite token
   --port PORT          API port (default: 9337)
   --bind-port PORT     Pin QUIC to fixed UDP port
+  --max-vram GB        Cap VRAM advertised to mesh (limits work split to you)
+  --split              Force tensor split even if model fits on host
   --relay URL          Override relay URLs
   --tensor-split R,R   Manual split ratios
   --bin-dir PATH       Directory with rpc-server + llama-server
@@ -253,3 +257,22 @@ For `--client` mode only the `mesh-llm` binary is needed.
 |---|---|
 | `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC local-GGUF patches |
 | `mesh-llm/` | Rust QUIC mesh ([details](mesh-llm/README.md), [design](mesh-llm/DESIGN.md)) |
+
+<details>
+<summary>Future ideas</summary>
+
+### Multi-model mesh
+Each mesh currently runs one model. Multiple models would need separate llama-server instances, per-model VRAM allocation, and API routing by model name. Essentially multiple independent meshes sharing a QUIC overlay. Significant redesign.
+
+### Mesh-propagated models
+The mesh already shares model names via gossip. This could go further:
+
+- **Auto-download on join**: new node learns the model name from peers, checks `~/.models/`, downloads from HF catalog or from peers over QUIC if missing. `--model` becomes optional when joining.
+- **P2P model transfer**: nodes that already have the model serve chunks over QUIC to new joiners. Faster than HF on LAN, doesn't depend on the catalog, works for any GGUF.
+- **Model survives host death**: any node with the model can re-elect as host. The model propagates through the mesh — after enough nodes join, no single node is critical.
+- **Deferred join**: node joins as client, learns model, downloads, starts rpc-server, promotes to worker. Different startup flow but not a huge refactor.
+
+### 405B-class models
+Tested Hermes-3-Llama-3.1-405B IQ2_M (137GB, 4 split files) across 2× M4 Max nodes. The mesh handled it correctly — auto-split, VRAM gating, split GGUF loading, no mmap. But generation was 0.04 tok/s (27s per token). The bottleneck is raw compute, not network — 405B parameters through 126 transformer layers is too much for 2 Apple Silicon chips. Would need 4+ high-end nodes or wait for faster hardware.
+
+</details>
