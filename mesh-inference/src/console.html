@@ -298,7 +298,12 @@ function renderJoin() {
   const peers = (S.peers||[]).length;
   if (peers > 0 && !S.llama_ready) { el.innerHTML = ''; return; }
   el.innerHTML = `<details class="join-details"><summary>Add a node</summary>
-    <div class="cmd-sm" style="user-select:all;margin-top:0.2rem">mesh-inference --model ${esc(model)} --join ${esc(token)}</div>
+    <div style="margin-top:0.2rem">
+      <div class="cfg-label">GPU node (contributes VRAM)</div>
+      <div class="cmd-sm" style="user-select:all">mesh-inference --model ${esc(model)} --join ${esc(token)}</div>
+      <div class="cfg-label" style="margin-top:0.3rem">Lite node (API access only, no GPU needed)</div>
+      <div class="cmd-sm" style="user-select:all">mesh-inference --client --join ${esc(token)}</div>
+    </div>
   </details>`;
 }
 
