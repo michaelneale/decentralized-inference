@@ -49,6 +49,11 @@
   .agent-name { font-size: 0.6rem; font-weight: 600; color: #555; min-width: 36px; flex-shrink: 0; }
   .cmd-sm { font-family: monospace; font-size: 0.55rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 3px; padding: 0.2rem 0.35rem; cursor: text; word-break: break-all; line-height: 1.4; }
 
+  /* Join expand */
+  .join-details { margin-top: 0.4rem; }
+  .join-details > summary { font-size: 0.6rem; color: #444; cursor: pointer; }
+  .join-details > summary:hover { color: #888; }
+
   /* Config */
   details.cfg { border-top: 1px solid #1a1a1a; margin-top: 0.5rem; padding-top: 0.4rem; flex-shrink: 0; }
   details.cfg > summary { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; cursor: pointer; }
@@ -103,7 +108,7 @@
     <div id="status"></div>
     <div id="agents"></div>
     <div id="joinHint"></div>
-    <details class="cfg" id="cfg"><summary>More</summary><div id="cfgBody"></div></details>
+    <details class="cfg" id="cfg"><summary>Use with agents</summary><div id="cfgBody"></div></details>
   </div>
   <div class="right">
     <div class="chat-hdr">
@@ -274,20 +279,16 @@ function renderStatus() {
   }
 }
 
-// ── Agent commands (directly visible when ready) ──
+// ── Agent commands (visible inline: API endpoint only) ──
 
 function renderAgents() {
   const el = $('agents');
   if (!S.llama_ready) { el.innerHTML = ''; return; }
-  const m = S.model_name||'model', p = S.api_port||9337;
-  el.innerHTML = `<div class="section-label">Use with agents</div>
-    <div class="agent-row"><span class="agent-name">API</span><div class="cmd-sm" style="user-select:all">http://localhost:${p}/v1</div></div>
-    <div class="agent-row"><span class="agent-name">pi</span><div class="cmd-sm" style="user-select:all">${esc(S.launch_pi || `pi --provider mesh --model ${m}`)}</div></div>
-    <div class="agent-row"><span class="agent-name">goose</span><div class="cmd-sm" style="user-select:all">${esc(S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`)}</div></div>
-    <div class="agent-row"><span class="agent-name">curl</span><div class="cmd-sm" style="user-select:all">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>`;
+  const p = S.api_port||9337;
+  el.innerHTML = `<div class="agent-row"><span class="agent-name">API</span><div class="cmd-sm" style="user-select:all">http://localhost:${p}/v1</div></div>`;
 }
 
-// ── Join hint (compact) ──
+// ── Join hint (tiny, expands) ──
 
 function renderJoin() {
   const el = $('joinHint');
@@ -296,26 +297,32 @@ function renderJoin() {
   if (!token) { el.innerHTML = ''; return; }
   const peers = (S.peers||[]).length;
   if (peers > 0 && !S.llama_ready) { el.innerHTML = ''; return; }
-  el.innerHTML = `<div class="section-label">Add a node</div>
-    <div class="cmd-sm" style="user-select:all">mesh-inference --model ${esc(model)} --join ${esc(token)}</div>`;
+  el.innerHTML = `<details class="join-details"><summary>Add a node</summary>
+    <div class="cmd-sm" style="user-select:all;margin-top:0.2rem">mesh-inference --model ${esc(model)} --join ${esc(token)}</div>
+  </details>`;
 }
 
-// ── More (collapsed: token, models.json) ──
+// ── Use with agents (collapsed: pi, goose, curl, models.json, token) ──
 
 function renderMore() {
   const el = $('cfgBody');
   let h = '';
   if (S.llama_ready) {
     const m = S.model_name||'model', p = S.api_port||9337;
+    const pi = S.launch_pi || `pi --provider mesh --model ${m}`;
+    const goose = S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`;
     const json = JSON.stringify({
       mesh:{baseUrl:`http://localhost:${p}/v1`,api:"openai-completions",apiKey:"mesh",
         models:[{id:m,name:m,reasoning:false,input:["text"],contextWindow:32768,maxTokens:8192,
           compat:{supportsUsageInStreaming:false,maxTokensField:"max_tokens",supportsDeveloperRole:false}}]}
     },null,2);
-    h += `<div class="cfg-row"><div class="cfg-label">~/.pi/agent/models.json</div><pre class="cfg-pre">${esc(json)}</pre></div>`;
+    h += `<div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div></div>
+    <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
+    <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>
+    <details class="cfg-inner"><summary>~/.pi/agent/models.json</summary><pre class="cfg-pre">${esc(json)}</pre></details>`;
   }
   if (S.token) {
-    h += `<div class="cfg-row"><div class="cfg-label">Invite token</div><div class="cfg-tok">${esc(S.token)}</div></div>`;
+    h += `<div class="cfg-row" style="margin-top:0.3rem"><div class="cfg-label">Invite token</div><div class="cfg-tok">${esc(S.token)}</div></div>`;
   }
   el.innerHTML = h;
 }
