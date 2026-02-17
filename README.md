@@ -1,6 +1,28 @@
-# Distributed LLM Inference with llama.cpp RPC
+# Mesh LLM - a new kind of LLM
+
+Donate or pool your spare capacity so you can run LLMs at larger scale. 
 
 Split LLM inference across multiple machines over QUIC. Models can be larger than any single machine's VRAM — each node only loads the layers assigned to it by the tensor split. Weights are read from each node's own local GGUF copy (zero network transfer for model loading). The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
+
+## How it works
+A common question is around latency and networks, there are a few ways that are addressed.
+This uses mesh tech (quic) to distribute inference workload: 
+
+* use UDP to establish a mesh
+* Zero-transfer GGUF loading (SET_TENSOR_GGUF) — Instead of sending model weights over the network, the RPC server reads them
+ directly from a local copy of the GGUF file on disk. Dropped model load time from 111s → 5s on localhost. Also skips unnecessary
+ op-support probing for RPC backends.
+* RPC round-trip reduction — Caches get_alloc_size responses (deterministic for a given tensor shape/op) and skips GGUF lookups
+ for tiny intermediate compute tensors. Reduced per-token round-trips from 558 → 8, boosting generation from ~3 tok/s to ~15
+ tok/s over WiFi.
+* Direct server-to-server tensor transfers — When a model is split across multiple RPC servers, intermediate tensors are
+ pushed directly between servers via TCP instead of relaying through the client. Adds REGISTER_PEER, PUSH_TENSOR_TO_PEER, and
+ PEER_TENSOR_DATA protocol commands, with automatic fallback to the old client-relay path if the remote server doesn't support* 
+* draft/predictive models are used from the host so that in parallel many completions are evaluated reducing potential round trips when it guesses correctly (a bit like branch prediction but for LLMs!) - for some repetitive tasks (ie code!) that hit rate is 85%!
+* The mesh is automatically rebalanced, and a "host" is elected to run the head instance to distribute the work. 
+
+Limitations: the more spread and the higher latency, the lower the enumber of tok/s. Nearby (city) and networks that are friendly work best, and minimal nodes. It will use just one node to serve if it can fit that model in comfortably.
+
 
 ## Usage
 
