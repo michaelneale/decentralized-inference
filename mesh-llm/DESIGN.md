@@ -1,4 +1,4 @@
-# mesh-inference
+# mesh-llm
 
 A Rust sidecar that turns llama.cpp RPC into a peer-to-peer mesh. Nodes find
 each other over QUIC (via [iroh](https://iroh.computer)), form a full mesh of
@@ -12,7 +12,7 @@ just see local TCP sockets.
 │  Worker / Host node                                                  │
 │                                                                      │
 │  ┌────────────┐         ┌──────────────────────────────────────┐     │
-│  │ rpc-server │◄──TCP──▶│          mesh-inference              │     │
+│  │ rpc-server │◄──TCP──▶│          mesh-llm              │     │
 │  │ (localhost) │         │                                      │     │
 │  └────────────┘         │  - iroh QUIC endpoint (NodeId)       │     │
 │                          │  - full mesh of peer connections     │     │
@@ -24,14 +24,14 @@ just see local TCP sockets.
 │         ▼                          │   │   │  QUIC                   │
 │  http://localhost:8090             │   │   │                         │
 │  (OpenAI-compatible API)           ▼   ▼   ▼                         │
-│                              other mesh-inference nodes               │
+│                              other mesh-llm nodes               │
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Lite client node                                                    │
 │                                                                      │
 │  ┌──────────────────┐    ┌──────────────────────────────────────┐    │
-│  │ localhost:8080    │    │          mesh-inference --client     │    │
+│  │ localhost:8080    │    │          mesh-llm --client     │    │
 │  │ (your apps talk  │◄──▶│                                      │    │
 │  │  to this)        │    │  - discovers host via gossip         │    │
 │  └──────────────────┘    │  - tunnels HTTP to host via QUIC    │    │
@@ -115,7 +115,7 @@ relay just moves bytes.
 ## Architecture
 
 ```
-mesh-inference/
+mesh-llm/
 ├── Cargo.toml
 ├── DESIGN.md              ← this file
 ├── README.md

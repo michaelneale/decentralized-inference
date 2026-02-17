@@ -7,7 +7,7 @@ Split LLM inference across multiple machines over QUIC. Models can be larger tha
 ### Solo
 
 ```bash
-mesh-inference --model ~/.models/model.gguf
+mesh-llm --model ~/.models/model.gguf
 # API ready at http://localhost:9337
 ```
 
@@ -17,11 +17,11 @@ Both machines need the same GGUF file locally.
 
 ```bash
 # Machine A
-mesh-inference --model ~/.models/model.gguf
+mesh-llm --model ~/.models/model.gguf
 # Prints: Invite token: eyJ...
 
 # Machine B
-mesh-inference --model ~/.models/model.gguf --join <token>
+mesh-llm --model ~/.models/model.gguf --join <token>
 ```
 
 Both get `localhost:9337`. The host (highest VRAM) runs llama-server with `--rpc` across all nodes. Tensor split is automatic. When nodes join or leave, the mesh re-elects and restarts.
@@ -29,7 +29,7 @@ Both get `localhost:9337`. The host (highest VRAM) runs llama-server with `--rpc
 ### Lite client (no GPU needed)
 
 ```bash
-mesh-inference --client --join <token>
+mesh-llm --client --join <token>
 # API ready at http://localhost:9337
 ```
 
@@ -49,7 +49,7 @@ No single node needs to fit the entire model. Each loads only its assigned layer
 
 ## Using with agents
 
-mesh-inference prints launch commands when the LLM is ready (and shows them in `--console`):
+mesh-llm prints launch commands when the LLM is ready (and shows them in `--console`):
 
 ```
 pi:    pi --provider mesh --model Qwen2.5-32B-Instruct-Q4_K_M
@@ -63,8 +63,8 @@ goose: GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:9337 OPENAI_API_KEY=me
 Add `--console` to any run to open a browser dashboard on `:3131`:
 
 ```bash
-mesh-inference --model ~/.models/model.gguf --console
-mesh-inference --model ~/.models/model.gguf --join <token> --console
+mesh-llm --model ~/.models/model.gguf --console
+mesh-llm --model ~/.models/model.gguf --join <token> --console
 ```
 
 Shows the live state of the running process:
@@ -102,7 +102,7 @@ Connections use [iroh](https://iroh.computer) QUIC with NAT traversal via STUN +
 
 For WAN with port forwarding (best latency):
 ```bash
-mesh-inference --model model.gguf --bind-port 7842  # pins QUIC to fixed UDP port
+mesh-llm --model model.gguf --bind-port 7842  # pins QUIC to fixed UDP port
 ```
 
 The joining side doesn't need port forwarding. If relays are blocked: `--relay <url>`.
@@ -123,7 +123,7 @@ Stock llama.cpp RPC transfers 16.88GB of weights on connect (14+ min). This fork
 ## CLI Reference
 
 ```
-mesh-inference [OPTIONS]
+mesh-llm [OPTIONS]
   --model PATH         GGUF model file
   --client             Lite client (no GPU/model)
   --join TOKEN         Join mesh via invite token
@@ -138,7 +138,7 @@ mesh-inference [OPTIONS]
   --no-draft           Disable auto draft detection
   --console [PORT]     Web dashboard (default: 3131)
 
-mesh-inference download [NAME] [--draft]
+mesh-llm download [NAME] [--draft]
 ```
 
 ## Speculative Decoding
@@ -151,8 +151,8 @@ Draft models are auto-detected from the catalog — if you download a model with
 the draft model is found automatically on launch:
 
 ```bash
-mesh-inference download 32b --draft    # downloads Qwen2.5-32B + 0.5B draft
-mesh-inference --model ~/.models/Qwen2.5-32B-Instruct-Q4_K_M.gguf
+mesh-llm download 32b --draft    # downloads Qwen2.5-32B + 0.5B draft
+mesh-llm --model ~/.models/Qwen2.5-32B-Instruct-Q4_K_M.gguf
 # Auto-detected draft model: ~/.models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
 ```
 
@@ -171,9 +171,9 @@ almost nothing and is purely local — no extra network traffic.
 ### Model catalog
 
 ```bash
-mesh-inference download           # list all models
-mesh-inference download 72b       # download Qwen2.5-72B (47GB, needs 2+ machines)
-mesh-inference download 72b --draft  # also download the paired draft model
+mesh-llm download           # list all models
+mesh-llm download 72b       # download Qwen2.5-72B (47GB, needs 2+ machines)
+mesh-llm download 72b --draft  # also download the paired draft model
 ```
 
 Models with tested draft pairings:
@@ -200,18 +200,18 @@ On the remote machine:
 
 ```bash
 mkdir -p ~/bin && tar xzf mesh-bundle.tar.gz -C ~/bin --strip-components=1
-# Installs: mesh-inference, rpc-server, llama-server, *.dylib into ~/bin/
+# Installs: mesh-llm, rpc-server, llama-server, *.dylib into ~/bin/
 ```
 
 Download a model and start:
 
 ```bash
-~/bin/mesh-inference download 32b --draft   # downloads to ~/.models/
-~/bin/mesh-inference --model Qwen2.5-32B --bind-port 7842
+~/bin/mesh-llm download 32b --draft   # downloads to ~/.models/
+~/bin/mesh-llm --model Qwen2.5-32B --bind-port 7842
 # Prints invite token — paste on the joining machine
 ```
 
-**Requirements**: same architecture (arm64 macOS → arm64 macOS). The bundle includes all llama.cpp dylibs. Models go in `~/.models/` by convention. `--bin-dir` defaults to the directory containing the `mesh-inference` binary.
+**Requirements**: same architecture (arm64 macOS → arm64 macOS). The bundle includes all llama.cpp dylibs. Models go in `~/.models/` by convention. `--bin-dir` defaults to the directory containing the `mesh-llm` binary.
 
 For WAN: forward the `--bind-port` UDP port on the router. Only one side needs port forwarding.
 
@@ -223,11 +223,11 @@ just download-model   # downloads GLM-4.7-Flash Q4_K_M (~17GB)
 just bundle           # portable tarball for another machine
 ```
 
-For `--client` mode only the `mesh-inference` binary is needed.
+For `--client` mode only the `mesh-llm` binary is needed.
 
 ## Project Structure
 
 | Path | Purpose |
 |---|---|
 | `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC local-GGUF patches |
-| `mesh-inference/` | Rust QUIC mesh ([details](mesh-inference/README.md), [design](mesh-inference/DESIGN.md)) |
+| `mesh-llm/` | Rust QUIC mesh ([details](mesh-llm/README.md), [design](mesh-llm/DESIGN.md)) |

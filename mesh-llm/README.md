@@ -1,4 +1,4 @@
-# mesh-inference
+# mesh-llm
 
 Rust sidecar for distributed llama.cpp inference over QUIC. See the [project README](../README.md) for usage.
 
@@ -18,7 +18,7 @@ src/
 
 ## Key design
 
-- **mesh-inference owns the API port** (:9337) — never llama-server directly
+- **mesh-llm owns the API port** (:9337) — never llama-server directly
 - **llama-server always uses --rpc** — even solo, the host's own rpc-server is in the list
 - **Ephemeral ports for llama-server** — no port conflicts on restart
 - **Every mesh change = kill + re-elect + fresh start** — no special restart logic

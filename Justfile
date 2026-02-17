@@ -2,11 +2,11 @@
 
 llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
-mesh_dir := "mesh-inference"
+mesh_dir := "mesh-llm"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
-# Clone and build the patched llama.cpp fork + mesh-inference
+# Clone and build the patched llama.cpp fork + mesh-llm
 build:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -14,13 +14,13 @@ build:
         echo "Cloning michaelneale/llama.cpp (rpc-local-gguf branch)..."
         git clone -b rpc-local-gguf https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
     fi
-    cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON
+    cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF
     cmake --build "{{build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
     echo "Build complete: {{build_dir}}/bin/"
     if [ -d "{{mesh_dir}}" ]; then
-        echo "Building mesh-inference..."
+        echo "Building mesh-llm..."
         cd "{{mesh_dir}}" && cargo build --release
-        echo "Mesh binary: {{mesh_dir}}/target/release/mesh-inference"
+        echo "Mesh binary: {{mesh_dir}}/target/release/mesh-llm"
     fi
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
@@ -77,7 +77,7 @@ local: build download-model
 
 # ── QUIC Mesh ──────────────────────────────────────────────────
 
-mesh_bin := mesh_dir / "target/release/mesh-inference"
+mesh_bin := mesh_dir / "target/release/mesh-llm"
 
 # Start a mesh worker (no llama-server, just rpc-server + mesh)
 # Prints an invite token for other nodes to join.
@@ -111,7 +111,7 @@ bundle output="/tmp/mesh-bundle.tar.gz":
         cp "$lib" "$BUNDLE/" 2>/dev/null || true
     done
     # Fix rpaths for portability
-    for bin in "$BUNDLE/mesh-inference" "$BUNDLE/rpc-server" "$BUNDLE/llama-server"; do
+    for bin in "$BUNDLE/mesh-llm" "$BUNDLE/rpc-server" "$BUNDLE/llama-server"; do
         [ -f "$bin" ] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done
@@ -120,7 +120,7 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"
 
 # Start a lite client — no GPU, no model, just a local HTTP proxy to the mesh host.
-# Only needs the mesh-inference binary (no llama.cpp binaries or model).
+# Only needs the mesh-llm binary (no llama.cpp binaries or model).
 mesh-client join="" port="9337":
     {{mesh_bin}} --client --port {{port}} --join {{join}}
 
@@ -128,7 +128,7 @@ mesh-client join="" port="9337":
 
 # Stop all running servers
 stop:
-    pkill -f "mesh-inference" 2>/dev/null || true
+    pkill -f "mesh-llm" 2>/dev/null || true
     pkill -f "rpc-server" 2>/dev/null || true
     pkill -f "llama-server" 2>/dev/null || true
     echo "Stopped"

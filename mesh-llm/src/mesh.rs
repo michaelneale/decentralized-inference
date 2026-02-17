@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, watch};
 
-pub const ALPN: &[u8] = b"mesh-inference/0";
+pub const ALPN: &[u8] = b"mesh-llm/0";
 const STREAM_GOSSIP: u8 = 0x01;
 const STREAM_TUNNEL: u8 = 0x02;
 const STREAM_TUNNEL_MAP: u8 = 0x03;
@@ -794,12 +794,21 @@ impl Node {
     }
 }
 
-/// Load secret key from ~/.mesh-inference/key, or create a new one and save it.
+/// Load secret key from ~/.mesh-llm/key, or create a new one and save it.
+/// Migrates from ~/.mesh-inference/key if it exists.
 async fn load_or_create_key() -> Result<SecretKey> {
-    let dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-        .join(".mesh-inference");
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let dir = home.join(".mesh-llm");
     let key_path = dir.join("key");
+
+    // Migrate from old name
+    let old_key = home.join(".mesh-inference").join("key");
+    if !key_path.exists() && old_key.exists() {
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::copy(&old_key, &key_path).await?;
+        tracing::info!("Migrated key from {}", old_key.display());
+    }
 
     if key_path.exists() {
         let hex = tokio::fs::read_to_string(&key_path).await?;

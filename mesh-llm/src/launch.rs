@@ -26,7 +26,7 @@ pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>, gguf_path: O
 
     tracing::info!("Starting rpc-server on :{port} (device: {device})");
 
-    let rpc_log = format!("/tmp/mesh-inference-rpc-{port}.log");
+    let rpc_log = format!("/tmp/mesh-llm-rpc-{port}.log");
     let rpc_log_file = std::fs::File::create(&rpc_log)
         .with_context(|| format!("Failed to create rpc-server log file {rpc_log}"))?;
     let rpc_log_file2 = rpc_log_file.try_clone()?;
@@ -115,7 +115,7 @@ pub async fn start_llama_server(
         rpc_arg
     );
 
-    let log_file = std::fs::File::create("/tmp/mesh-inference-llama-server.log")
+    let log_file = std::fs::File::create("/tmp/mesh-llm-llama-server.log")
         .context("Failed to create llama-server log file")?;
     let log_file2 = log_file.try_clone()?;
 

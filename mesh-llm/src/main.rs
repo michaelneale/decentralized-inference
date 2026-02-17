@@ -12,7 +12,7 @@ use mesh::NodeRole;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "mesh-inference", about = "P2P mesh for distributed llama.cpp inference over QUIC")]
+#[command(name = "mesh-llm", about = "P2P mesh for distributed llama.cpp inference over QUIC")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -32,7 +32,7 @@ struct Cli {
     port: u16,
 
     /// Path to directory containing rpc-server and llama-server binaries.
-    /// Defaults to the same directory as the mesh-inference binary itself.
+    /// Defaults to the same directory as the mesh-llm binary itself.
     #[arg(long)]
     bin_dir: Option<PathBuf>,
 
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
         match name {
             Some(query) => {
                 let model = download::find_model(query)
-                    .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-inference download` to list.", query))?;
+                    .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
                 download::download_model(model).await?;
                 if *draft {
                     if let Some(draft_name) = model.draft {
@@ -184,7 +184,7 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
         // Try as bare filename in ~/.models/
         anyhow::bail!(
             "Model not found: {}\nNot a local file, not in ~/.models/, not in catalog.\n\
-             Use a path, a catalog name (run `mesh-inference download` to list), or a HuggingFace URL.",
+             Use a path, a catalog name (run `mesh-llm download` to list), or a HuggingFace URL.",
             s
         );
     }
@@ -251,7 +251,7 @@ pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
-/// mesh-inference owns :port and proxies to llama-server (local or remote).
+/// mesh-llm owns :port and proxies to llama-server (local or remote).
 async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
     let console_port = cli.console;
@@ -303,7 +303,7 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     // Election publishes where llama-server is via this channel
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
 
-    // API proxy: mesh-inference owns :api_port, forwards to wherever llama-server is
+    // API proxy: mesh-llm owns :api_port, forwards to wherever llama-server is
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
@@ -452,7 +452,7 @@ async fn run_client(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Unified API proxy. mesh-inference owns :port and forwards every request
+/// Unified API proxy. mesh-llm owns :port and forwards every request
 /// to wherever llama-server is running, based on the election target.
 ///   - Local(port): llama-server on this machine → TCP proxy to localhost:port
 ///   - Remote(peer): llama-server on another node → QUIC HTTP tunnel

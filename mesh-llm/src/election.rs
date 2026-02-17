@@ -2,7 +2,7 @@
 //!
 //! Every mesh change: kill llama-server, re-elect, winner starts fresh.
 //! llama-server always uses --rpc (even solo — host's own rpc-server is in the list).
-//! mesh-inference owns :8080 and proxies to llama-server (local or remote).
+//! mesh-llm owns :8080 and proxies to llama-server (local or remote).
 
 use crate::{launch, mesh, tunnel};
 use mesh::NodeRole;

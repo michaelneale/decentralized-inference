@@ -8,9 +8,9 @@ set -euo pipefail
 MODE="${1:-client}"
 REMOTE="mic@home.dwyer.au"
 REMOTE_PORT=23632
-LOCAL_BIN="$(dirname "$0")/target/release/mesh-inference"
+LOCAL_BIN="$(dirname "$0")/target/release/mesh-llm"
 LOCAL_BIN_DIR="$(dirname "$0")/../llama.cpp/build/bin"
-REMOTE_BIN="~/bin/mesh-inference"
+REMOTE_BIN="~/bin/mesh-llm"
 MODEL_NAME="Qwen2.5-3B-Instruct-Q4_K_M.gguf"
 REMOTE_MODEL="~/.models/$MODEL_NAME"
 LOCAL_MODEL="$HOME/.models/$MODEL_NAME"
@@ -21,7 +21,7 @@ LOCAL_LOG="/tmp/mesh-test-local.log"
 cleanup() {
     echo "Cleaning up..."
     [ -n "${LOCAL_PID:-}" ] && kill $LOCAL_PID 2>/dev/null || true
-    ssh -p $REMOTE_PORT $REMOTE "pkill -f mesh-inference; pkill -f rpc-server; pkill -f llama-server" 2>/dev/null || true
+    ssh -p $REMOTE_PORT $REMOTE "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server" 2>/dev/null || true
     # Also kill local llama processes if distributed mode
     pkill -f "rpc-server.*50052" 2>/dev/null || true
     pkill -f "llama-server.*$LOCAL_HTTP" 2>/dev/null || true
@@ -30,13 +30,13 @@ trap cleanup EXIT
 
 echo "=== Mode: $MODE ==="
 echo "=== Killing old processes ==="
-ssh -p $REMOTE_PORT $REMOTE "pkill -f mesh-inference; pkill -f rpc-server; pkill -f llama-server" 2>/dev/null || true
-pkill -f "mesh-inference" 2>/dev/null || true
+ssh -p $REMOTE_PORT $REMOTE "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server" 2>/dev/null || true
+pkill -f "mesh-llm" 2>/dev/null || true
 pkill -f "rpc-server" 2>/dev/null || true
 sleep 1
 
 echo "=== Starting remote (brad) ==="
-ssh -p $REMOTE_PORT $REMOTE "cd ~/bin && RUST_LOG=info nohup ./mesh-inference \
+ssh -p $REMOTE_PORT $REMOTE "cd ~/bin && RUST_LOG=info nohup ./mesh-llm \
   --model $REMOTE_MODEL --bin-dir ~/bin --bind-port 7842 \
   > $REMOTE_LOG 2>&1 &"
 
