@@ -106,6 +106,7 @@ impl Manager {
     }
 
     /// Update the local rpc-server port (for inbound tunnel streams).
+    #[allow(dead_code)]
     pub fn set_rpc_port(&self, port: u16) {
         self.rpc_port.store(port, Ordering::Relaxed);
         tracing::info!("Tunnel manager: rpc_port updated to {port}");

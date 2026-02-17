@@ -6,157 +6,107 @@
 <title>mesh-inference</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 2rem; }
-  .container { max-width: 640px; margin: 0 auto; }
-  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
-  .subtitle { font-size: 0.8rem; color: #555; margin-bottom: 1rem; }
-  h2 { font-size: 1rem; font-weight: 500; color: #888; margin: 1.5rem 0 0.5rem; }
-  .hidden { display: none !important; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 1.5rem; }
+  .container { max-width: 720px; margin: 0 auto; }
 
-  .node-id { font-family: monospace; color: #6cf; font-size: 0.85rem; }
-  .token-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.3rem; }
-  .token-label { font-size: 0.8rem; color: #666; }
-  .token-preview { font-family: monospace; font-size: 0.75rem; color: #555; }
-  .copy-btn { background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 0.2rem 0.5rem; color: #aaa; cursor: pointer; font-size: 0.75rem; white-space: nowrap; }
-  .copy-btn:hover { background: #222; color: #e0e0e0; }
-  .copy-btn.copied { color: #6f6; border-color: #4a4; }
+  h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.15rem; }
+  .subtitle { font-size: 0.75rem; color: #555; margin-bottom: 1.2rem; }
+  h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; margin: 1.2rem 0 0.4rem; }
 
-  .section { background: #111; border: 1px solid #222; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
+  /* Cluster bar */
+  .cluster-bar { display: flex; height: 60px; border-radius: 6px; overflow: hidden; border: 1px solid #222; }
+  .cluster-node { display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 0.25rem 0.5rem; min-width: 80px; transition: flex 0.3s; }
+  .cluster-node:not(:last-child) { border-right: 1px solid #222; }
+  .node-self { background: #12202e; }
+  .node-peer { background: #161622; }
+  .node-empty { background: #111; flex: 1; }
+  .cluster-id { font-family: monospace; font-size: 0.65rem; color: #6cf; }
+  .cluster-vram { font-size: 0.6rem; color: #666; }
+  .cluster-pct { font-size: 0.9rem; font-weight: 600; color: #e0e0e0; }
 
-  .join-row { display: flex; gap: 0.5rem; }
-  .join-row input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.6rem; color: #e0e0e0; font-family: monospace; font-size: 0.8rem; }
-  .join-row input:focus { outline: none; border-color: #6cf; }
+  /* Info row */
+  .info-row { display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; gap: 0.3rem; }
+  .info-items { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+  .info-item { font-size: 0.8rem; color: #666; }
+  .info-item span { color: #ccc; }
+  .badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 10px; }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .badge-green { background: #0a1a0a; color: #4c4; }
+  .badge-green .dot { background: #4c4; }
+  .badge-yellow { background: #1a1a0a; color: #cc4; }
+  .badge-yellow .dot { background: #cc4; }
+  .badge-gray { background: #151515; color: #666; }
+  .badge-gray .dot { background: #555; }
 
-  .peer-row { display: flex; justify-content: space-between; align-items: center; padding: 0.3rem 0; }
-  .peer-row + .peer-row { border-top: 1px solid #1a1a1a; }
-  .peer-id { font-family: monospace; color: #6cf; font-size: 0.85rem; }
-  .peer-role { font-size: 0.8rem; color: #888; }
+  /* Token */
+  .token { font-family: monospace; font-size: 0.65rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; user-select: all; cursor: text; margin-top: 0.3rem; word-break: break-all; }
 
-  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 0.75rem 0; }
-  .choice { background: #111; border: 2px solid #222; border-radius: 8px; padding: 1rem 0.75rem; cursor: pointer; text-align: center; transition: all 0.15s; }
-  .choice:hover { border-color: #444; background: #151515; }
-  .choice.active { border-color: #6cf; background: #0c1a2a; }
-  .choice.disabled { opacity: 0.35; pointer-events: none; }
-  .choice-icon { font-size: 1.8rem; margin-bottom: 0.4rem; }
-  .choice-title { font-weight: 600; font-size: 0.9rem; }
-  .choice-desc { font-size: 0.7rem; color: #666; margin-top: 0.3rem; line-height: 1.3; }
+  /* Agent commands */
+  .agent-row { margin-bottom: 0.4rem; }
+  .agent-label { font-size: 0.7rem; font-weight: 600; color: #555; margin-bottom: 0.1rem; }
+  .agent-cmd { font-family: monospace; font-size: 0.65rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; user-select: all; cursor: text; word-break: break-all; }
+  .agent-json { font-family: monospace; font-size: 0.55rem; color: #555; margin-top: 0.2rem; }
+  .agent-json summary { cursor: pointer; color: #444; }
+  .agent-json summary:hover { color: #888; }
+  .agent-json pre { background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-top: 0.2rem; user-select: all; cursor: text; white-space: pre-wrap; }
 
-  button { background: #222; border: 1px solid #444; border-radius: 4px; padding: 0.4rem 0.8rem; color: #e0e0e0; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
-  button:hover { background: #333; }
-  button:disabled { opacity: 0.4; cursor: default; }
-  .btn-primary { background: #1a3a5c; border-color: #2a5a8c; }
-  .btn-primary:hover:not(:disabled) { background: #2a4a6c; }
-  .btn-stop { background: #2a1515; border-color: #442222; color: #c88; font-size: 0.8rem; padding: 0.3rem 0.6rem; }
-  .btn-stop:hover { background: #3a2020; }
-
-  select { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.4rem 0.6rem; color: #e0e0e0; font-size: 0.85rem; width: 100%; }
-
-  .status-line { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-  .dot-green { background: #4c4; }
-  .dot-yellow { background: #cc4; }
-  .dot-blue { background: #6cf; }
-
-  .progress-bar { width: 100%; height: 4px; background: #222; border-radius: 2px; overflow: hidden; margin: 0.4rem 0; }
-  .progress-fill { height: 100%; background: #6cf; transition: width 0.3s; }
-
+  /* Chat */
   .chat-area { margin-top: 0.5rem; }
-  .chat-messages { min-height: 60px; max-height: 300px; overflow-y: auto; background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.5rem; margin-bottom: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
-  .chat-messages:empty::before { content: "Type a message to test the API..."; color: #333; font-style: italic; }
-  .chat-input { display: flex; gap: 0.5rem; }
-  .chat-input input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.5rem 0.75rem; color: #e0e0e0; font-size: 0.9rem; }
+  .chat-messages { min-height: 60px; max-height: 350px; overflow-y: auto; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
+  .chat-messages:empty::before { content: "Type a message..."; color: #333; font-style: italic; }
+  .chat-input { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+  .chat-input input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.45rem 0.6rem; color: #e0e0e0; font-size: 0.85rem; }
   .chat-input input:focus { outline: none; border-color: #6cf; }
+  .chat-input button { background: #1a3a5c; border: 1px solid #2a5a8c; border-radius: 4px; padding: 0.45rem 0.8rem; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; }
+  .chat-input button:hover { background: #2a4a6c; }
   .msg-user { color: #6cf; margin-bottom: 0.25rem; }
   .msg-bot { color: #ccc; margin-bottom: 0.5rem; white-space: pre-wrap; }
   .msg-err { color: #c66; font-size: 0.8rem; margin-bottom: 0.5rem; }
-
-  .api-hint { font-family: monospace; font-size: 0.7rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.4rem 0.5rem; margin-bottom: 0.5rem; white-space: pre-wrap; word-break: break-all; }
-  .warning { color: #cc4; font-size: 0.8rem; margin: 0.3rem 0; }
-  .detail { font-size: 0.85rem; color: #888; margin-top: 0.4rem; line-height: 1.6; }
-  .detail a { color: #6cf; text-decoration: none; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>mesh-inference</h1>
-  <div class="subtitle" id="nodeInfo">starting...</div>
+  <div class="subtitle" id="nodeInfo">connecting...</div>
 
-  <!-- Mesh: join + token + peers -->
-  <div class="section" id="meshSection">
-    <div class="join-row">
-      <input type="text" id="joinToken" placeholder="Paste an invite token to join...">
-      <button onclick="joinMesh()" class="btn-primary">Join</button>
+  <div class="cluster-bar" id="clusterBar">
+    <div class="node-empty" style="flex:1"><span style="color:#333;font-size:0.8rem"></span></div>
+  </div>
+
+  <div class="info-row">
+    <div class="info-items" id="infoItems"></div>
+    <div id="badge"></div>
+  </div>
+
+  <div id="tokenSection" class="hidden">
+    <h2>Invite token</h2>
+    <div class="token" id="tokenText"></div>
+  </div>
+
+  <div id="agentSection" class="hidden">
+    <h2>Use in agents</h2>
+    <div class="agent-row">
+      <div class="agent-label">pi</div>
+      <div class="agent-cmd" id="piCmd"></div>
+      <details class="agent-json">
+        <summary>~/.pi/agent/models.json snippet</summary>
+        <pre id="piJson"></pre>
+      </details>
     </div>
-    <div id="tokenRow" class="token-row hidden">
-      <span class="token-label">Your token:</span>
-      <span class="token-preview" id="tokenPreview"></span>
-      <button class="copy-btn" id="copyBtn" onclick="copyToken()">📋 Copy</button>
-      <span id="tokenFull" style="display:none;"></span>
-    </div>
-    <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #1a1a1a;">
-      <div id="thisNode" class="peer-row" style="opacity: 0.6;"></div>
-      <div id="peersList"></div>
+    <div class="agent-row">
+      <div class="agent-label">goose</div>
+      <div class="agent-cmd" id="gooseCmd"></div>
     </div>
   </div>
 
-  <!-- Mode selection (hidden when active) -->
-  <div id="modeSection">
-    <h2>What do you want to do?</h2>
-    <div class="choices">
-      <div class="choice" id="choiceStart" onclick="selectMode('start')">
-        <div class="choice-icon">🖥</div>
-        <div class="choice-title">Start</div>
-        <div class="choice-desc">Share your GPU and use the LLM. Needs model file. Mesh auto-elects a host.</div>
-      </div>
-      <div class="choice" id="choiceConnect" onclick="selectMode('connect')">
-        <div class="choice-icon">💬</div>
-        <div class="choice-title">Just Connect</div>
-        <div class="choice-desc">Use someone else's LLM. No GPU or model needed.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Start config -->
-  <div id="startConfig" class="section hidden">
-    <div style="margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem;">Select model:</div>
-    <select id="modelSelect"></select>
-    <div id="noModel" class="warning hidden">No models found in ~/.models/</div>
-    <div id="downloadRow" class="hidden" style="margin-top: 0.5rem;">
-      <select id="catalogSelect" style="margin-right: 0.5rem;"></select>
-      <label style="font-size: 0.8rem; color: #888; margin-left: 0.3rem;"><input type="checkbox" id="downloadDraft" checked> + draft model</label>
-      <button onclick="downloadModel()" class="btn-primary" style="margin-left: 0.5rem;">Download</button>
-    </div>
-    <button onclick="doStart()" class="btn-primary" style="margin-top: 0.75rem; width: 100%;" id="startBtn">Start</button>
-    <div id="noBins" class="warning hidden">⚠ llama.cpp binaries not found</div>
-  </div>
-
-  <!-- Download progress -->
-  <div id="downloadProgress" class="section hidden">
-    <div style="font-size: 0.85rem;">Downloading model...</div>
-    <div class="progress-bar"><div class="progress-fill" id="downloadFill"></div></div>
-    <div id="downloadSize" style="font-size: 0.8rem; color: #666;"></div>
-  </div>
-
-  <!-- Active status -->
-  <div id="activeStatus" class="section hidden">
-    <div class="status-line">
-      <span class="dot" id="statusDot"></span>
-      <span id="statusText"></span>
-      <span style="flex:1"></span>
-      <button class="btn-stop" onclick="stopAll()">Stop</button>
-    </div>
-    <div class="detail" id="statusDetail"></div>
-  </div>
-
-  <!-- Chat -->
   <div id="chatSection" class="hidden">
-    <h2>Try it</h2>
-    <div id="apiHint" class="api-hint"></div>
+    <h2>Chat</h2>
     <div class="chat-area">
       <div class="chat-messages" id="chatMessages"></div>
       <div class="chat-input">
         <input type="text" id="chatInput" placeholder="Say something..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()" class="btn-primary" id="chatSendBtn">Send</button>
+        <button onclick="sendChat()">Send</button>
       </div>
     </div>
   </div>
@@ -164,216 +114,95 @@
 
 <script>
 let state = {};
-let selectedMode = null;
-
 const evtSource = new EventSource('/api/events');
 evtSource.onmessage = (e) => { state = JSON.parse(e.data); render(); };
 
 function render() {
-  const info = document.getElementById('nodeInfo');
-  info.textContent = state.node_id ? `node ${state.node_id}` : 'starting...';
+  document.getElementById('nodeInfo').textContent = state.node_id
+    ? `node ${state.node_id}` : 'connecting...';
+
+  renderCluster();
+  renderInfo();
+  renderBadge();
 
   // Token
-  const tokenRow = document.getElementById('tokenRow');
+  const tok = document.getElementById('tokenSection');
   if (state.token) {
-    tokenRow.classList.remove('hidden');
-    document.getElementById('tokenFull').textContent = state.token;
-    document.getElementById('tokenPreview').textContent = state.token.slice(0, 16) + '…';
+    tok.classList.remove('hidden');
+    document.getElementById('tokenText').textContent = state.token;
+  } else {
+    tok.classList.add('hidden');
   }
 
-  // This node
-  const thisNode = document.getElementById('thisNode');
+  // Agents + chat only when ready
+  const ready = state.llama_ready;
+  document.getElementById('agentSection').classList.toggle('hidden', !ready);
+  document.getElementById('chatSection').classList.toggle('hidden', !ready);
+  if (ready) renderAgents();
+}
+
+function renderCluster() {
+  const bar = document.getElementById('clusterBar');
+  const nodes = [];
   if (state.node_id) {
-    const model = state.model_name ? ` · ${state.model_name}` : '';
-    thisNode.innerHTML = `<span class="peer-id">${state.node_id} (you)</span><span class="peer-role">${state.role_label}${model}</span>`;
+    nodes.push({ id: state.node_id, vram: state.my_vram_gb || 0, self: true });
   }
-
-  // Peers
-  const peersList = document.getElementById('peersList');
-  if (state.peers && state.peers.length > 0) {
-    peersList.innerHTML = state.peers.map(p => {
-      const models = p.models && p.models.length > 0 ? ` · ${p.models.join(', ')}` : '';
-      const vram = p.vram_gb > 0 ? ` · ${p.vram_gb.toFixed(0)}GB` : '';
-      return `<div class="peer-row"><span class="peer-id">${p.id}</span><span class="peer-role">${p.role}${vram}${models}</span></div>`;
-    }).join('');
-  } else {
-    peersList.innerHTML = '';
-  }
-
-  // Model select
-  populateModelSelect();
-
-  // Binary warning
-  document.getElementById('noBins').classList.toggle('hidden', !!state.has_binaries);
-  document.getElementById('startBtn').disabled = !state.has_binaries;
-
-  // Download progress
-  const dp = document.getElementById('downloadProgress');
-  if (state.download) {
-    dp.classList.remove('hidden');
-    const mb = (state.download.downloaded / 1048576).toFixed(0);
-    document.getElementById('downloadFill').style.width = state.download.total
-      ? (state.download.downloaded / state.download.total * 100) + '%' : '0%';
-    document.getElementById('downloadSize').textContent = `${mb} MB downloaded...`;
-  } else {
-    dp.classList.add('hidden');
-  }
-
-  // Show/hide sections based on state
-  const isActive = state.role && state.role !== 'idle';
-  document.getElementById('modeSection').classList.toggle('hidden', isActive);
-  document.getElementById('startConfig').classList.toggle('hidden', isActive || selectedMode !== 'start');
-
-  const activeEl = document.getElementById('activeStatus');
-  const chatEl = document.getElementById('chatSection');
-  const dot = document.getElementById('statusDot');
-  const text = document.getElementById('statusText');
-  const detail = document.getElementById('statusDetail');
-
-  if (state.role === 'active') {
-    activeEl.classList.remove('hidden');
-    const model = state.model_name || '';
-
-    if (state.is_host && state.llama_ready) {
-      dot.className = 'dot dot-green';
-      text.textContent = '🗳 Elected host — LLM running';
-      const port = state.llama_port || 9337;
-      detail.innerHTML = `${model} · <a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
-      chatEl.classList.remove('hidden');
-      document.getElementById('apiHint').textContent =
-        `curl http://localhost:${port}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'`;
-    } else if (state.is_host) {
-      dot.className = 'dot dot-yellow';
-      text.textContent = '🗳 Elected host — loading model...';
-      detail.textContent = model;
-      chatEl.classList.add('hidden');
-    } else {
-      dot.className = 'dot dot-green';
-      text.textContent = 'Worker — sharing GPU';
-      detail.textContent = model ? `${model} · Waiting for host election` : 'rpc-server running';
-      chatEl.classList.add('hidden');
-    }
-
-  } else if (state.role === 'just_connect') {
-    activeEl.classList.remove('hidden');
-    const port = state.client_port || 9337;
-    dot.className = 'dot dot-blue';
-    text.textContent = 'Connected';
-    detail.innerHTML = `<a href="http://localhost:${port}" target="_blank">http://localhost:${port}</a>`;
-    chatEl.classList.remove('hidden');
-    document.getElementById('apiHint').textContent =
-      `curl http://localhost:${port}/v1/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -d '{"model":"test","messages":[{"role":"user","content":"Hello!"}]}'`;
-
-  } else {
-    activeEl.classList.add('hidden');
-    chatEl.classList.add('hidden');
-  }
-
-  // "Just Connect" hint — dim if no host yet, but still clickable
-  const hasHost = (state.peers && state.peers.some(p => p.role.includes('Host'))) || (state.is_host && state.llama_ready);
-  document.getElementById('choiceConnect').style.opacity = hasHost ? '1' : '0.6';
-}
-
-let lastModelKeys = '';
-function populateModelSelect() {
-  const sel = document.getElementById('modelSelect');
-  const noModel = document.getElementById('noModel');
-  const dlRow = document.getElementById('downloadRow');
-  if (state.models && state.models.length > 0) {
-    // Only rebuild if the list actually changed
-    const keys = state.models.map(m => m.path).join('|');
-    if (keys !== lastModelKeys) {
-      lastModelKeys = keys;
-      const prev = sel.value;
-      sel.innerHTML = state.models.map(m =>
-        `<option value="${m.path}">${m.name} (${m.size})</option>`
-      ).join('');
-      if (prev) sel.value = prev;
-    }
-    sel.classList.remove('hidden');
-    noModel.classList.add('hidden');
-    dlRow.classList.add('hidden');
-  } else {
-    lastModelKeys = '';
-    sel.innerHTML = '';
-    sel.classList.add('hidden');
-    noModel.classList.remove('hidden');
-    dlRow.classList.remove('hidden');
-  }
-}
-
-function selectMode(mode) {
-  selectedMode = mode;
-  document.querySelectorAll('.choice').forEach(c => c.classList.remove('active'));
-  if (mode === 'start') {
-    document.getElementById('choiceStart').classList.add('active');
-  } else if (mode === 'connect') {
-    document.getElementById('choiceConnect').classList.add('active');
-    startJustConnect();
+  (state.peers || []).forEach(p => {
+    nodes.push({ id: p.id, vram: p.vram_gb, self: false, role: p.role });
+  });
+  if (!nodes.length) {
+    bar.innerHTML = '<div class="node-empty" style="flex:1"></div>';
     return;
   }
-  render();
+  const total = nodes.reduce((s, n) => s + n.vram, 0);
+  bar.innerHTML = nodes.map(n => {
+    const pct = total > 0 ? Math.round(n.vram / total * 100) : Math.round(100 / nodes.length);
+    const cls = n.self ? 'node-self' : 'node-peer';
+    const label = n.self ? `${n.id} (you)` : n.id;
+    const pctText = nodes.length > 1 ? `${pct}%` : '';
+    return `<div class="cluster-node ${cls}" style="flex:${Math.max(n.vram, 1)}">
+      <div class="cluster-pct">${pctText}</div>
+      <div class="cluster-id">${esc(label)}</div>
+      <div class="cluster-vram">${n.vram > 0 ? n.vram.toFixed(0) + ' GB' : ''}</div>
+    </div>`;
+  }).join('');
 }
 
-async function joinMesh() {
-  const input = document.getElementById('joinToken');
-  const token = input.value.trim();
-  if (!token) return;
-  const res = await fetch('/api/join', { method: 'POST', body: JSON.stringify({ token }) });
-  const data = await res.json();
-  if (data.ok) { input.value = ''; } else { alert(data.error || 'Failed to join'); }
+function renderInfo() {
+  const el = document.getElementById('infoItems');
+  const parts = [];
+  if (state.model_name) parts.push(`<span class="info-item">Model <span>${esc(state.model_name)}</span></span>`);
+  if (state.draft_name) parts.push(`<span class="info-item">Draft <span>${esc(state.draft_name)}</span></span>`);
+  const total = (state.my_vram_gb || 0) + (state.peers || []).reduce((s, p) => s + p.vram_gb, 0);
+  if (total > 0) parts.push(`<span class="info-item">Total <span>${total.toFixed(0)} GB</span></span>`);
+  if (state.llama_ready) {
+    parts.push(`<span class="info-item">API <span><a href="http://localhost:${state.api_port}" style="color:#6cf;text-decoration:none">:${state.api_port}</a></span></span>`);
+  }
+  el.innerHTML = parts.join('');
 }
 
-async function downloadModel() {
-  const sel = document.getElementById('catalogSelect');
-  const model = sel ? sel.value : '';
-  const draft = document.getElementById('downloadDraft')?.checked || false;
-  await fetch('/api/download-model', { method: 'POST', body: JSON.stringify({ model, draft }) });
+function renderBadge() {
+  const el = document.getElementById('badge');
+  if (state.llama_ready) {
+    const label = state.is_host ? 'Host' : 'Connected';
+    el.innerHTML = `<span class="badge badge-green"><span class="dot"></span>${label}</span>`;
+  } else if (state.is_host) {
+    el.innerHTML = '<span class="badge badge-yellow"><span class="dot"></span>Loading</span>';
+  } else {
+    el.innerHTML = '<span class="badge badge-gray"><span class="dot"></span>Waiting</span>';
+  }
 }
 
-async function loadCatalog() {
-  try {
-    const res = await fetch('/api/catalog');
-    const catalog = await res.json();
-    const sel = document.getElementById('catalogSelect');
-    if (sel) {
-      sel.innerHTML = catalog.map(m => {
-        const draft = m.draft ? ' +draft' : '';
-        return `<option value="${m.name}">${m.name} (${m.size}${draft}) — ${m.description}</option>`;
-      }).join('');
-    }
-  } catch (e) { console.error('Failed to load catalog', e); }
-}
-loadCatalog();
-
-async function doStart() {
-  const model = document.getElementById('modelSelect').value;
-  if (!model) return alert('Select a model first');
-  const res = await fetch('/api/start', { method: 'POST', body: JSON.stringify({ model }) });
-  const data = await res.json();
-  if (!data.ok) alert(data.error || 'Failed');
-}
-
-async function startJustConnect() {
-  const res = await fetch('/api/just-connect', { method: 'POST' });
-  const data = await res.json();
-  if (!data.ok) { alert(data.error || 'Failed'); selectedMode = null; render(); }
-}
-
-async function stopAll() {
-  await fetch('/api/stop', { method: 'POST' });
-  selectedMode = null;
-  document.getElementById('chatMessages').innerHTML = '';
-}
-
-function copyToken() {
-  const full = document.getElementById('tokenFull').textContent;
-  const btn = document.getElementById('copyBtn');
-  navigator.clipboard.writeText(full).then(() => {
-    btn.textContent = '✓ Copied';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2000);
-  });
+function renderAgents() {
+  const model = state.model_name || 'model';
+  const port = state.api_port || 9337;
+  document.getElementById('piCmd').textContent = state.launch_pi || `pi --provider mesh --model ${model}`;
+  document.getElementById('gooseCmd').textContent = state.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${port} OPENAI_API_KEY=mesh GOOSE_MODEL=${model} goose session`;
+  document.getElementById('piJson').textContent = JSON.stringify({
+    mesh: { baseUrl: `http://localhost:${port}/v1`, api: "openai-completions", apiKey: "mesh",
+      models: [{ id: model, name: model, reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 8192,
+        compat: { supportsUsageInStreaming: false, maxTokensField: "max_tokens", supportsDeveloperRole: false } }] }
+  }, null, 2);
 }
 
 async function sendChat() {
@@ -381,29 +210,22 @@ async function sendChat() {
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
-
   const messages = document.getElementById('chatMessages');
-  messages.innerHTML += `<div class="msg-user">› ${escHtml(msg)}</div>`;
-
+  messages.innerHTML += `<div class="msg-user">› ${esc(msg)}</div>`;
   const botDiv = document.createElement('div');
   botDiv.className = 'msg-bot';
-  botDiv.textContent = '';
   messages.appendChild(botDiv);
   messages.scrollTop = messages.scrollHeight;
-
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: msg }], stream: true }),
     });
-
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -416,24 +238,20 @@ async function sendChat() {
         if (d === '[DONE]') continue;
         try {
           const chunk = JSON.parse(d);
-          const delta = chunk.choices?.[0]?.delta;
-          const text = delta?.content || delta?.reasoning_content || '';
-          if (text) {
-            botDiv.textContent += text;
-            messages.scrollTop = messages.scrollHeight;
-          }
+          const text = chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.reasoning_content || '';
+          if (text) { botDiv.textContent += text; messages.scrollTop = messages.scrollHeight; }
         } catch {}
       }
     }
     if (!botDiv.textContent) botDiv.textContent = '(empty response)';
   } catch (e) {
     botDiv.remove();
-    messages.innerHTML += `<div class="msg-err">Error: ${escHtml(e.message)}</div>`;
+    messages.innerHTML += `<div class="msg-err">Error: ${esc(e.message)}</div>`;
   }
   messages.scrollTop = messages.scrollHeight;
 }
 
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 fetch('/api/status').then(r => r.json()).then(d => { state = d; render(); });
 </script>

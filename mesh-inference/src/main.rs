@@ -71,16 +71,14 @@ struct Cli {
     /// Bind QUIC to a fixed UDP port (for NAT port forwarding).
     #[arg(long, global = true)]
     bind_port: Option<u16>,
+
+    /// Start the web console on this port (default: 3131 if flag is present).
+    #[arg(long, default_missing_value = "3131", num_args = 0..=1)]
+    console: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Launch the web console for interactive mesh management
-    Console {
-        /// Port for the web console (default: 3131)
-        #[arg(long, default_value = "3131")]
-        port: u16,
-    },
     /// Download a model from the catalog
     Download {
         /// Model name (e.g. "Qwen2.5-32B-Instruct-Q4_K_M" or just "32b")
@@ -103,9 +101,6 @@ async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
     // Subcommand dispatch
-    if let Some(Command::Console { port }) = &cli.command {
-        return console::run(*port, cli.join.clone()).await;
-    }
     if let Some(Command::Download { name, draft }) = &cli.command {
         match name {
             Some(query) => {
@@ -259,6 +254,7 @@ pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
 /// mesh-inference owns :port and proxies to llama-server (local or remote).
 async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
+    let console_port = cli.console;
 
     // Start rpc-server — every node contributes GPU
     let rpc_port = launch::start_rpc_server(
@@ -314,6 +310,25 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
         api_proxy(proxy_node, api_port, proxy_rx).await;
     });
 
+    // Console (optional)
+    let model_name_str = model.file_stem()
+        .unwrap_or_default().to_string_lossy().to_string();
+    let console_state = if let Some(cport) = console_port {
+        let cs = console::ConsoleState::new(node.clone(), model_name_str.clone(), api_port);
+        if let Some(draft) = &cli.draft {
+            let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            cs.set_draft_name(dn).await;
+        }
+        let cs2 = cs.clone();
+        let console_rx = target_rx.clone();
+        tokio::spawn(async move {
+            console::start(cport, cs2, console_rx).await;
+        });
+        Some(cs)
+    } else {
+        None
+    };
+
     // Election loop
     eprintln!("Entering auto-election (highest VRAM becomes host)...");
     let node2 = node.clone();
@@ -322,16 +337,29 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
     let model2 = model.clone();
     let draft2 = cli.draft.clone();
     let draft_max = cli.draft_max;
+    let model_name_for_cb = model_name_str.clone();
     tokio::spawn(async move {
         election::election_loop(
             node2, tunnel_mgr2, rpc_port, bin_dir2, model2, draft2, draft_max, target_tx,
             move |is_host, llama_ready| {
                 if is_host && llama_ready {
-                    eprintln!("  API: http://localhost:{api_port}");
+                    let url = format!("http://localhost:{api_port}");
+                    eprintln!("  API: {url}");
+                    update_pi_models_json(&model_name_for_cb, api_port);
+                    eprintln!();
+                    eprintln!("  pi:    pi --provider mesh --model {model_name_for_cb}");
+                    eprintln!("  goose: GOOSE_PROVIDER=openai OPENAI_HOST={url} OPENAI_API_KEY=mesh GOOSE_MODEL={model_name_for_cb} goose session");
                 } else if is_host {
                     eprintln!("⏳ Starting llama-server...");
                 } else {
                     eprintln!("  API: http://localhost:{api_port} (proxied to host)");
+                }
+                // Update console if running
+                if let Some(ref cs) = console_state {
+                    let cs = cs.clone();
+                    tokio::spawn(async move {
+                        cs.update(is_host, llama_ready).await;
+                    });
                 }
             },
         ).await;
@@ -376,8 +404,11 @@ async fn run_client(cli: Cli) -> Result<()> {
     eprintln!("Lite client ready: http://localhost:{local_port}");
     eprintln!("  → tunneling to host {}", host_id.fmt_short());
     eprintln!();
-    eprintln!("Use it like any OpenAI-compatible API:");
-    eprintln!("  curl http://localhost:{local_port}/v1/models");
+    eprintln!("Launch with pi:");
+    eprintln!("  OPENAI_API_KEY=mesh OPENAI_BASE_URL=http://localhost:{local_port}/v1 pi --provider openai");
+    eprintln!();
+    eprintln!("Launch with goose:");
+    eprintln!("  GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:{local_port} OPENAI_API_KEY=mesh goose session");
 
     loop {
         tokio::select! {
@@ -504,4 +535,59 @@ fn detect_bin_dir() -> Result<PathBuf> {
     }
 
     Ok(dir.to_path_buf())
+}
+
+/// Update ~/.pi/agent/models.json to include a "mesh" provider pointing at localhost.
+/// Creates the file if it doesn't exist, or updates the mesh provider's model list.
+fn update_pi_models_json(model_id: &str, port: u16) {
+    let Some(home) = dirs::home_dir() else { return };
+    let models_path = home.join(".pi/agent/models.json");
+
+    let mut root: serde_json::Value = if models_path.exists() {
+        match std::fs::read_to_string(&models_path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+            Err(_) => serde_json::json!({}),
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let providers = root.as_object_mut()
+        .and_then(|r| {
+            r.entry("providers").or_insert_with(|| serde_json::json!({}));
+            r.get_mut("providers")?.as_object_mut()
+        });
+    let Some(providers) = providers else { return };
+
+    // Build the mesh provider entry
+    let mesh = serde_json::json!({
+        "baseUrl": format!("http://localhost:{port}/v1"),
+        "api": "openai-completions",
+        "apiKey": "mesh",
+        "models": [{
+            "id": model_id,
+            "name": model_id,
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 32768,
+            "maxTokens": 8192,
+            "compat": {
+                "supportsUsageInStreaming": false,
+                "maxTokensField": "max_tokens",
+                "supportsDeveloperRole": false
+            }
+        }]
+    });
+
+    providers.insert("mesh".to_string(), mesh);
+
+    // Write back
+    if let Some(parent) = models_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&root) {
+        if let Err(e) = std::fs::write(&models_path, json) {
+            tracing::warn!("Failed to update {}: {e}", models_path.display());
+        }
+    }
 }
