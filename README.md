@@ -4,6 +4,31 @@ Donate or pool your spare capacity so you can run LLMs at larger scale.
 
 Split LLM inference across multiple machines over QUIC. Models can be larger than any single machine's VRAM — each node only loads the layers assigned to it by the tensor split. Weights are read from each node's own local GGUF copy (zero network transfer for model loading). The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
 
+## Quick start (macOS Apple Silicon)
+
+```bash
+# Download and install
+curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv mesh-bundle/* /usr/local/bin/
+
+# Download a model and run
+mesh-llm download 32b        # Qwen2.5-32B (~20GB)
+mesh-llm --model Qwen2.5-32B
+# API ready at http://localhost:9337
+```
+
+To add another machine to the mesh:
+```bash
+# On the second machine (same install steps above, then):
+mesh-llm --model Qwen2.5-32B --join <token>
+# Token is printed by the first machine
+```
+
+Or join without a GPU:
+```bash
+mesh-llm --client --join <token>
+```
+
 ## How it works
 A common question is around latency and networks, there are a few ways that are addressed.
 This uses mesh tech (quic) to distribute inference workload: 
