@@ -1,6 +1,6 @@
 # Distributed LLM Inference with llama.cpp RPC
 
-Split LLM inference across multiple machines over QUIC. Each machine loads model weights from its own local GGUF — nothing transfers over the network. The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
+Split LLM inference across multiple machines over QUIC. Models can be larger than any single machine's VRAM — each node only loads the layers assigned to it by the tensor split. Weights are read from each node's own local GGUF copy (zero network transfer for model loading). The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
 
 ## Usage
 
@@ -90,10 +90,11 @@ Shows the live state of the running process:
 └──────────────────────────────────┴───────────────────┘
 ```
 
+- **Zero-transfer model loading**: each rpc-server loads its assigned layers from its own local GGUF file (`--gguf` flag on our llama.cpp fork). The host's llama-server sends a small `SET_TENSOR_GGUF` command (tensor name + offset, no weight data). Stock llama.cpp transfers the full model over RPC (~17GB for a 32B model); this fork transfers 0 bytes.
+- **Models larger than one machine**: the tensor split assigns layers across nodes. Each rpc-server only loads its slice. A 72B model (47GB) can run across two 32GB machines — neither needs to fit it alone.
 - **Election**: highest VRAM wins, deterministic, re-runs on every mesh change
 - **Tensor split**: auto from VRAM (e.g. 103GB + 51GB → 0.67, 0.33)
 - **Concurrent queries**: both ends can query simultaneously (llama-server request queue)
-- **llama-server always uses --rpc**: even solo — same code path always
 
 ## Networking
 
@@ -185,6 +186,34 @@ Models with tested draft pairings:
 | Llama-3.3-70B | 43GB | Llama-3.2-1B | 760MB |
 | Gemma-3-27B | 17GB | Gemma-3-1B | 780MB |
 | GLM-4.7-Flash (MoE) | 17GB | — | No compatible draft |
+
+## Deploying to a remote node
+
+Build locally and copy the bundle:
+
+```bash
+just bundle                          # creates /tmp/mesh-bundle.tar.gz
+scp /tmp/mesh-bundle.tar.gz user@remote:
+```
+
+On the remote machine:
+
+```bash
+mkdir -p ~/bin && tar xzf mesh-bundle.tar.gz -C ~/bin --strip-components=1
+# Installs: mesh-inference, rpc-server, llama-server, *.dylib into ~/bin/
+```
+
+Download a model and start:
+
+```bash
+~/bin/mesh-inference download 32b --draft   # downloads to ~/.models/
+~/bin/mesh-inference --model Qwen2.5-32B --bind-port 7842
+# Prints invite token — paste on the joining machine
+```
+
+**Requirements**: same architecture (arm64 macOS → arm64 macOS). The bundle includes all llama.cpp dylibs. Models go in `~/.models/` by convention. `--bin-dir` defaults to the directory containing the `mesh-inference` binary.
+
+For WAN: forward the `--bind-port` UDP port on the router. Only one side needs port forwarding.
 
 ## Building
 

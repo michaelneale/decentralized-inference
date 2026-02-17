@@ -6,286 +6,346 @@
 <title>mesh-inference</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 1.5rem; }
-  .container { max-width: 720px; margin: 0 auto; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+  a { color: #6cf; text-decoration: none; } a:hover { text-decoration: underline; }
 
-  h1 { font-size: 1.2rem; font-weight: 600; display: inline; }
-  .header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.15rem; }
-  .subtitle { font-size: 0.75rem; color: #555; margin-bottom: 1rem; }
-  h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; margin: 1rem 0 0.4rem; }
+  .top-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1.25rem; border-bottom: 1px solid #1a1a1a; }
+  .top-bar h1 { font-size: 1rem; font-weight: 600; }
+  .badge { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.65rem; padding: 0.12rem 0.45rem; border-radius: 10px; }
+  .badge .dot { width: 5px; height: 5px; border-radius: 50%; }
+  .b-green { background: #0a1a0a; color: #4c4; } .b-green .dot { background: #4c4; }
+  .b-yellow { background: #1a1a0a; color: #cc4; } .b-yellow .dot { background: #cc4; }
+  .b-gray { background: #151515; color: #666; } .b-gray .dot { background: #555; }
+  .top-right { margin-left: auto; font-size: 0.65rem; color: #555; display: flex; gap: 0.8rem; align-items: center; }
+  .top-right span { color: #888; }
 
-  /* Cluster bar */
-  .cluster-bar { display: flex; height: 60px; border-radius: 6px; overflow: hidden; border: 1px solid #222; }
-  .cluster-node { display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 0.25rem 0.5rem; min-width: 80px; transition: flex 0.3s; }
-  .cluster-node:not(:last-child) { border-right: 1px solid #222; }
-  .node-self { background: #12202e; }
-  .node-peer { background: #161622; }
-  .node-empty { background: #111; flex: 1; }
-  .cluster-id { font-family: monospace; font-size: 0.65rem; color: #6cf; }
-  .cluster-vram { font-size: 0.6rem; color: #666; }
-  .cluster-pct { font-size: 0.9rem; font-weight: 600; color: #e0e0e0; }
+  /* Layout */
+  .main { display: flex; height: calc(100vh - 38px); }
 
-  /* Info row */
-  .info-row { display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; gap: 0.3rem; }
-  .info-items { display: flex; gap: 1.2rem; flex-wrap: wrap; }
-  .info-item { font-size: 0.8rem; color: #666; }
-  .info-item span { color: #ccc; }
-  .badge { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 10px; }
-  .badge .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .badge-green { background: #0a1a0a; color: #4c4; }
-  .badge-green .dot { background: #4c4; }
-  .badge-yellow { background: #1a1a0a; color: #cc4; }
-  .badge-yellow .dot { background: #cc4; }
-  .badge-gray { background: #151515; color: #666; }
-  .badge-gray .dot { background: #555; }
+  /* Left panel — collapsible */
+  .left { width: 30%; flex-shrink: 0; padding: 1rem 1.25rem; overflow-y: auto; border-right: 1px solid #1a1a1a; display: flex; flex-direction: column; transition: width 0.25s ease, padding 0.25s ease, opacity 0.2s ease; }
+  .left.collapsed { width: 0; padding: 0; overflow: hidden; opacity: 0; border-right: none; }
 
-  /* Token (compact inline) */
-  .token-row { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; }
-  .token-preview { font-family: monospace; color: #444; font-size: 0.65rem; }
-  .copy-btn { background: #1a1a1a; border: 1px solid #333; border-radius: 3px; padding: 0.1rem 0.35rem; color: #888; cursor: pointer; font-size: 0.6rem; }
-  .copy-btn:hover { background: #222; color: #ccc; }
+  /* Toggle button */
+  .toggle-btn { background: none; border: 1px solid #333; border-radius: 4px; color: #666; cursor: pointer; font-size: 0.65rem; padding: 0.15rem 0.4rem; }
+  .toggle-btn:hover { color: #ccc; border-color: #666; }
 
-  /* Config panel (collapsible) */
-  .config-panel { margin-top: 0.75rem; }
-  .config-panel summary { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; cursor: pointer; padding: 0.3rem 0; }
-  .config-panel summary:hover { color: #888; }
-  .config-panel[open] summary { color: #666; }
-  .config-body { padding-top: 0.4rem; }
+  /* Chat — takes remaining space */
+  .right { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #060606; }
 
-  /* Agent commands */
-  .agent-row { margin-bottom: 0.4rem; }
-  .agent-label { font-size: 0.7rem; font-weight: 600; color: #555; margin-bottom: 0.1rem; }
-  .agent-cmd { font-family: monospace; font-size: 0.65rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; user-select: all; cursor: text; word-break: break-all; }
-  .agent-json { font-family: monospace; font-size: 0.55rem; color: #555; margin-top: 0.2rem; }
-  .agent-json summary { cursor: pointer; color: #444; text-transform: none; letter-spacing: normal; }
-  .agent-json summary:hover { color: #888; }
-  .agent-json pre { background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-top: 0.2rem; user-select: all; cursor: text; white-space: pre-wrap; }
+  /* Diagram */
+  .diagram { flex-shrink: 0; margin-bottom: 0.75rem; }
+  .diagram svg { width: 100%; display: block; }
+
+  /* Cards */
+  .cards { flex: 1; overflow-y: auto; }
+  .card { background: #111; border: 1px solid #1a1a1a; border-radius: 6px; padding: 0.6rem 0.8rem; margin-bottom: 0.5rem; }
+  .card h3 { font-size: 0.75rem; font-weight: 600; color: #ccc; margin-bottom: 0.25rem; }
+  .card p { font-size: 0.7rem; color: #888; line-height: 1.5; }
+  .card code { font-family: monospace; background: #080808; border: 1px solid #222; border-radius: 3px; padding: 0.05rem 0.25rem; font-size: 0.65rem; color: #aaa; }
+  .cmd { font-family: monospace; font-size: 0.6rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.35rem 0.5rem; margin-top: 0.3rem; user-select: all; cursor: text; word-break: break-all; white-space: pre-wrap; line-height: 1.5; }
+  .dim { color: #555; }
+
+  /* Config */
+  details.cfg { border-top: 1px solid #1a1a1a; margin-top: 0.5rem; padding-top: 0.4rem; flex-shrink: 0; }
+  details.cfg > summary { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; cursor: pointer; }
+  details.cfg > summary:hover { color: #888; }
+  details.cfg[open] > summary { color: #666; margin-bottom: 0.4rem; }
+  .cfg-row { margin-bottom: 0.4rem; }
+  .cfg-label { font-size: 0.6rem; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.1rem; }
+  .cfg-val { font-family: monospace; font-size: 0.6rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; user-select: all; cursor: text; word-break: break-all; }
+  details.cfg-inner > summary { font-size: 0.55rem; color: #444; cursor: pointer; margin-top: 0.1rem; }
+  details.cfg-inner pre { font-family: monospace; font-size: 0.5rem; color: #555; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; margin-top: 0.1rem; user-select: all; cursor: text; white-space: pre-wrap; }
+  .cfg-tok { font-family: monospace; font-size: 0.5rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; user-select: all; cursor: text; word-break: break-all; max-height: 2.5rem; overflow-y: auto; }
 
   /* Chat */
-  .chat-area { margin-top: 0.5rem; }
-  .chat-messages { min-height: 80px; max-height: 400px; overflow-y: auto; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
-  .chat-messages:empty::before { content: "Type a message..."; color: #333; font-style: italic; }
-  .chat-input { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
-  .chat-input input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.45rem 0.6rem; color: #e0e0e0; font-size: 0.85rem; }
-  .chat-input input:focus { outline: none; border-color: #6cf; }
-  .chat-input button { background: #1a3a5c; border: 1px solid #2a5a8c; border-radius: 4px; padding: 0.45rem 0.8rem; color: #e0e0e0; cursor: pointer; font-size: 0.8rem; }
-  .chat-input button:hover { background: #2a4a6c; }
-  .msg-user { color: #6cf; margin-bottom: 0.25rem; }
-  .msg-bot { color: #ccc; margin-bottom: 0.5rem; white-space: pre-wrap; }
-  .msg-err { color: #c66; font-size: 0.8rem; margin-bottom: 0.5rem; }
+  .chat-hdr { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1a1a1a; font-size: 0.7rem; color: #555; flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
+  .chat-hdr-title { flex: 1; }
+  .chat-msgs { flex: 1; overflow-y: auto; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; }
+  .chat-msgs:empty::before { content: "Send a message to test the model…"; color: #222; font-style: italic; font-size: 0.85rem; }
+  .chat-msgs.off:empty::before { content: "Waiting for model to load…"; }
+  .chat-in { display: flex; gap: 0.5rem; padding: 0.6rem 0.75rem; border-top: 1px solid #1a1a1a; flex-shrink: 0; }
+  .chat-in input { flex: 1; background: #0a0a0a; border: 1px solid #222; border-radius: 6px; padding: 0.5rem 0.75rem; color: #e0e0e0; font-size: 0.9rem; }
+  .chat-in input:focus { outline: none; border-color: #6cf; }
+  .chat-in input:disabled { opacity: 0.3; }
+  .chat-in button { background: #1a3a5c; border: 1px solid #2a5a8c; border-radius: 6px; padding: 0.5rem 0.9rem; color: #e0e0e0; cursor: pointer; font-size: 0.85rem; }
+  .chat-in button:hover { background: #2a4a6c; }
+  .chat-in button:disabled { opacity: 0.3; cursor: default; }
+  .mu { color: #6cf; margin-bottom: 0.15rem; }
+  .mb { color: #ccc; margin-bottom: 0.6rem; white-space: pre-wrap; }
+  .me { color: #c66; font-size: 0.75rem; margin-bottom: 0.6rem; }
+
   .hidden { display: none !important; }
+
+  @media (max-width: 720px) {
+    .main { flex-direction: column; height: auto; }
+    .left { width: 100% !important; border-right: none; border-bottom: 1px solid #1a1a1a; max-height: 50vh; }
+    .left.collapsed { max-height: 0; }
+    .right { width: 100%; min-height: 50vh; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <h1>mesh-inference</h1>
-    <span id="badge"></span>
-    <span id="tokenInline" class="token-row hidden"></span>
-  </div>
-  <div class="subtitle" id="nodeInfo">connecting...</div>
 
-  <div class="cluster-bar" id="clusterBar">
-    <div class="node-empty" style="flex:1"></div>
-  </div>
+<div class="top-bar">
+  <h1>mesh-inference</h1>
+  <span id="badge"></span>
+  <div class="top-right" id="meta"></div>
+</div>
 
-  <div class="info-row">
-    <div class="info-items" id="infoItems"></div>
+<div class="main">
+  <div class="left" id="leftPanel">
+    <div class="diagram" id="diagram"></div>
+    <div class="cards" id="cards"></div>
+    <details class="cfg" id="cfg"><summary>Setup &amp; config</summary><div id="cfgBody"></div></details>
   </div>
-
-  <div id="chatSection" class="hidden">
-    <h2>Chat</h2>
-    <div class="chat-area">
-      <div class="chat-messages" id="chatMessages"></div>
-      <div class="chat-input">
-        <input type="text" id="chatInput" placeholder="Say something..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()">Send</button>
-      </div>
+  <div class="right">
+    <div class="chat-hdr">
+      <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
+      <span class="chat-hdr-title" id="chatHdr">Chat</span>
+    </div>
+    <div class="chat-msgs" id="msgs"></div>
+    <div class="chat-in">
+      <input type="text" id="inp" placeholder="Say something…" onkeydown="if(event.key==='Enter')send()" disabled>
+      <button id="btn" onclick="send()" disabled>Send</button>
     </div>
   </div>
-
-  <details class="config-panel" id="configPanel">
-    <summary>Config & setup ▾</summary>
-    <div class="config-body">
-      <div id="agentSection" class="hidden">
-        <h2>Use in agents</h2>
-        <div class="agent-row">
-          <div class="agent-label">pi</div>
-          <div class="agent-cmd" id="piCmd"></div>
-          <details class="agent-json">
-            <summary>~/.pi/agent/models.json snippet</summary>
-            <pre id="piJson"></pre>
-          </details>
-        </div>
-        <div class="agent-row">
-          <div class="agent-label">goose</div>
-          <div class="agent-cmd" id="gooseCmd"></div>
-        </div>
-      </div>
-
-      <div id="tokenSection" class="hidden">
-        <h2>Invite token</h2>
-        <div style="font-family:monospace; font-size:0.6rem; color:#444; background:#080808; border:1px solid #1a1a1a; border-radius:4px; padding:0.3rem 0.5rem; user-select:all; cursor:text; word-break:break-all;" id="tokenFull"></div>
-      </div>
-    </div>
-  </details>
 </div>
 
 <script>
-let state = {};
-const evtSource = new EventSource('/api/events');
-evtSource.onmessage = (e) => { state = JSON.parse(e.data); render(); };
+const $ = id => document.getElementById(id);
+let S = {};
+let panelOpen = true;
+const sse = new EventSource('/api/events');
+sse.onmessage = e => { S = JSON.parse(e.data); render(); };
+
+function togglePanel() {
+  panelOpen = !panelOpen;
+  $('leftPanel').classList.toggle('collapsed', !panelOpen);
+  $('toggleBtn').textContent = panelOpen ? '◀ Mesh' : '▶ Mesh';
+}
 
 function render() {
-  document.getElementById('nodeInfo').textContent = state.node_id
-    ? `node ${state.node_id}` : 'connecting...';
-
-  renderCluster();
-  renderInfo();
-  renderBadge();
-  renderToken();
-
-  const ready = state.llama_ready;
-  document.getElementById('agentSection').classList.toggle('hidden', !ready);
-  document.getElementById('chatSection').classList.toggle('hidden', !ready);
-  if (ready) renderAgents();
-}
-
-function renderCluster() {
-  const bar = document.getElementById('clusterBar');
-  const nodes = [];
-  if (state.node_id) {
-    nodes.push({ id: state.node_id, vram: state.my_vram_gb || 0, self: true });
-  }
-  (state.peers || []).forEach(p => {
-    nodes.push({ id: p.id, vram: p.vram_gb, self: false, role: p.role });
-  });
-  if (!nodes.length) {
-    bar.innerHTML = '<div class="node-empty" style="flex:1"></div>';
-    return;
-  }
-  const total = nodes.reduce((s, n) => s + n.vram, 0);
-  bar.innerHTML = nodes.map(n => {
-    const pct = total > 0 ? Math.round(n.vram / total * 100) : Math.round(100 / nodes.length);
-    const cls = n.self ? 'node-self' : 'node-peer';
-    const label = n.self ? `${n.id} (you)` : n.id;
-    const pctText = nodes.length > 1 ? `${pct}%` : '';
-    return `<div class="cluster-node ${cls}" style="flex:${Math.max(n.vram, 1)}">
-      <div class="cluster-pct">${pctText}</div>
-      <div class="cluster-id">${esc(label)}</div>
-      <div class="cluster-vram">${n.vram > 0 ? n.vram.toFixed(0) + ' GB' : ''}</div>
-    </div>`;
-  }).join('');
-}
-
-function renderInfo() {
-  const el = document.getElementById('infoItems');
-  const parts = [];
-  if (state.model_name) parts.push(`<span class="info-item">Model <span>${esc(state.model_name)}</span></span>`);
-  if (state.draft_name) parts.push(`<span class="info-item">Draft <span>${esc(state.draft_name)}</span></span>`);
-  const total = (state.my_vram_gb || 0) + (state.peers || []).reduce((s, p) => s + p.vram_gb, 0);
-  if (total > 0) parts.push(`<span class="info-item">Total <span>${total.toFixed(0)} GB</span></span>`);
-  if (state.llama_ready) {
-    parts.push(`<span class="info-item">API <span><a href="http://localhost:${state.api_port}" style="color:#6cf;text-decoration:none">:${state.api_port}</a></span></span>`);
-  }
-  el.innerHTML = parts.join('');
+  renderBadge(); renderMeta(); renderDiagram(); renderCards(); renderCfg();
+  const ok = S.llama_ready;
+  $('inp').disabled = !ok; $('btn').disabled = !ok;
+  $('msgs').classList.toggle('off', !ok);
+  if (ok) $('msgs').classList.remove('off');
+  $('chatHdr').textContent = ok ? `Chat · ${S.model_name||'model'}` : 'Chat';
 }
 
 function renderBadge() {
-  const el = document.getElementById('badge');
-  if (state.llama_ready) {
-    const label = state.is_host ? 'Host' : 'Connected';
-    el.innerHTML = `<span class="badge badge-green"><span class="dot"></span>${label}</span>`;
-  } else if (state.is_host) {
-    el.innerHTML = '<span class="badge badge-yellow"><span class="dot"></span>Loading</span>';
-  } else {
-    el.innerHTML = '<span class="badge badge-gray"><span class="dot"></span>Waiting</span>';
-  }
+  const e = $('badge');
+  if (S.llama_ready) e.innerHTML = `<span class="badge b-green"><span class="dot"></span>${S.is_host?'Host':'Ready'}</span>`;
+  else if (S.is_host) e.innerHTML = '<span class="badge b-yellow"><span class="dot"></span>Loading…</span>';
+  else if (S.node_id) e.innerHTML = '<span class="badge b-gray"><span class="dot"></span>Waiting</span>';
+  else e.innerHTML = '';
 }
 
-function renderToken() {
-  const inl = document.getElementById('tokenInline');
-  const full = document.getElementById('tokenSection');
-  if (state.token) {
-    inl.classList.remove('hidden');
-    inl.innerHTML = `<span class="token-preview">${state.token.slice(0, 12)}…</span><button class="copy-btn" onclick="copyToken()">copy token</button>`;
-    full.classList.remove('hidden');
-    document.getElementById('tokenFull').textContent = state.token;
-  } else {
-    inl.classList.add('hidden');
-    full.classList.add('hidden');
-  }
+function renderMeta() {
+  const p = [];
+  if (S.model_name) p.push(`Model <span>${esc(S.model_name)}</span>`);
+  if (S.draft_name) p.push(`Draft <span>${esc(S.draft_name)}</span>`);
+  if (S.llama_ready) p.push(`API <span>:${S.api_port}</span>`);
+  $('meta').innerHTML = p.join(' · ');
 }
 
-function copyToken() {
-  navigator.clipboard.writeText(state.token).then(() => {
-    const btn = document.querySelector('#tokenInline .copy-btn');
-    btn.textContent = '✓ copied';
-    setTimeout(() => { btn.textContent = 'copy token'; }, 2000);
+// ── Topology SVG ──
+
+function renderDiagram() {
+  const el = $('diagram');
+  const nodes = [];
+  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host });
+  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false }));
+  if (!nodes.length) { el.innerHTML = ''; return; }
+
+  // Infer host from VRAM (gossip bug workaround)
+  if (nodes.length > 1) {
+    const max = Math.max(...nodes.map(n => n.vram));
+    if (S.is_host) nodes.forEach(n => n.host = n.self);
+    else { const h = nodes.find(n => n.vram === max); if (h) h.host = true; }
+  } else {
+    nodes[0].host = true;
+  }
+
+  const total = nodes.reduce((s,n) => s + n.vram, 0);
+  const ok = S.llama_ready;
+  const W = 320, nW = 140, nH = 68;
+
+  if (nodes.length === 1) {
+    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok));
+    return;
+  }
+
+  const host = nodes.find(n => n.host) || nodes[0];
+  const workers = nodes.filter(n => n !== host);
+  const hX = W/2 - nW/2, hY = 10;
+  const wY = nH + 48;
+  const gap = Math.min(160, (W - 20) / workers.length);
+  const wStart = W/2 - (workers.length - 1) * gap / 2 - nW/2;
+
+  let out = '';
+
+  workers.forEach((w, i) => {
+    const wx = wStart + i * gap;
+    const x1 = hX + nW/2, y1 = hY + nH;
+    const x2 = wx + nW/2, y2 = wY;
+    const my = (y1 + y2) / 2, mx = (x1 + x2) / 2;
+
+    const col = ok ? '#2a5a2a' : '#1c1c1c';
+    const dash = ok ? '' : ' stroke-dasharray="4,3"';
+    out += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1.5"${dash}/>`;
+
+    if (ok) {
+      out += `<circle r="2" fill="#4c4" opacity="0.7"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x1},${y1} L${x2},${y2}"/></circle>`;
+      out += `<circle r="2" fill="#6cf" opacity="0.5"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x2},${y2} L${x1},${y1}"/></circle>`;
+    }
+
+    out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">QUIC · RPC</text>`;
   });
+
+  out += nBox(hX, hY, host, total, ok);
+  workers.forEach((w, i) => {
+    out += nBox(wStart + i * gap, wY, w, total, ok);
+  });
+
+  el.innerHTML = mkSvg(W, wY + nH + 10, out);
 }
 
-function renderAgents() {
-  const model = state.model_name || 'model';
-  const port = state.api_port || 9337;
-  document.getElementById('piCmd').textContent = state.launch_pi || `pi --provider mesh --model ${model}`;
-  document.getElementById('gooseCmd').textContent = state.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${port} OPENAI_API_KEY=mesh GOOSE_MODEL=${model} goose session`;
-  document.getElementById('piJson').textContent = JSON.stringify({
-    mesh: { baseUrl: `http://localhost:${port}/v1`, api: "openai-completions", apiKey: "mesh",
-      models: [{ id: model, name: model, reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 8192,
-        compat: { supportsUsageInStreaming: false, maxTokensField: "max_tokens", supportsDeveloperRole: false } }] }
-  }, null, 2);
+function nBox(x, y, n, total, ok) {
+  const pct = total > 0 ? Math.round(n.vram / total * 100) : 100;
+  const fill = n.self ? '#0d1a26' : '#10101c';
+  const stroke = ok ? (n.host ? '#2a5a2a' : '#1a3a5c') : '#1c1c1c';
+  const sw = ok ? '1.5' : '1';
+  const label = n.self ? `${n.id} (you)` : n.id;
+  const role = n.host ? 'HOST' : 'WORKER';
+  const rc = n.host ? '#4c4' : '#6cf';
+  const svc = n.host ? 'llama-server · rpc' : 'rpc-server';
+  const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
+  const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
+
+  const bW = 112, bH = 4, bX = x + 14, bY = y + 50;
+
+  let extra = '';
+  if (n.host && ok) {
+    extra = `<rect x="${x+97}" y="${y+3}" width="36" height="12" rx="3" fill="#0a1a0a" stroke="#2a5a2a" stroke-width="0.5"/>
+      <text x="${x+115}" y="${y+12}" text-anchor="middle" fill="#4c4" font-size="6.5" font-family="monospace">:${S.api_port||9337}</text>`;
+  }
+
+  return `<g>
+    <rect x="${x}" y="${y}" width="140" height="68" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
+    <text x="${x+70}" y="${y+15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
+    <text x="${x+70}" y="${y+27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
+    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="#3a3a3a" font-size="6.5" font-family="monospace">${svc}</text>
+    <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
+    <rect x="${bX}" y="${bY}" width="${bW*pct/100}" height="${bH}" rx="1.5" fill="${n.host?'#2a5a2a':'#1a3a5c'}"/>
+    <text x="${bX}" y="${bY+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}</text>
+    <text x="${bX+bW}" y="${bY+bH+9}" text-anchor="end" fill="#444" font-size="6.5" font-family="monospace">${pctL}</text>
+    ${extra}
+  </g>`;
 }
 
-async function sendChat() {
-  const input = document.getElementById('chatInput');
-  const msg = input.value.trim();
-  if (!msg) return;
-  input.value = '';
-  const messages = document.getElementById('chatMessages');
-  messages.innerHTML += `<div class="msg-user">› ${esc(msg)}</div>`;
-  const botDiv = document.createElement('div');
-  botDiv.className = 'msg-bot';
-  messages.appendChild(botDiv);
-  messages.scrollTop = messages.scrollHeight;
+function mkSvg(w, h, c) { return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${c}</svg>`; }
+
+// ── Guide cards ──
+
+function renderCards() {
+  const el = $('cards');
+  const peers = (S.peers||[]).length;
+  const model = S.model_name || '';
+  const token = S.token || '';
+  let h = '';
+
+  if (S.llama_ready) {
+    const n = peers + 1;
+    const total = ((S.my_vram_gb||0) + (S.peers||[]).reduce((s,p)=>s+p.vram_gb,0)).toFixed(0);
+    h += `<div class="card"><h3>✓ Running${n>1?` across ${n} nodes`:''}</h3>
+      <p>OpenAI-compatible API at <code>localhost:${S.api_port}</code>${n>1?` · ${total} GB combined`:''}</p></div>`;
+  } else if (S.is_host) {
+    h += `<div class="card"><h3>Loading model…</h3><p>Starting llama-server with ${esc(model)}</p></div>`;
+  } else if (peers > 0) {
+    h += `<div class="card"><h3>Mesh connected · ${peers+1} nodes</h3>
+      <p>Waiting for host to start the model. Highest VRAM node becomes host.</p></div>`;
+  }
+
+  if (token && !(peers > 0 && !S.llama_ready)) {
+    h += `<div class="card"><h3>Add another node</h3>
+      <p>Run on another machine with the same GGUF in <code>~/.models/</code>:</p>
+      <div class="cmd">mesh-inference --model ${esc(model)} --join ${esc(token)}</div>
+      <p class="dim" style="margin-top:0.25rem;font-size:0.65rem">Don't have the model? <code>mesh-inference download ${esc(shortName(model))}</code></p>
+    </div>`;
+  }
+
+  el.innerHTML = h;
+}
+
+// ── Config panel ──
+
+function renderCfg() {
+  const el = $('cfgBody');
+  let h = '';
+  if (S.llama_ready) {
+    const m = S.model_name||'model', p = S.api_port||9337;
+    const pi = S.launch_pi || `pi --provider mesh --model ${m}`;
+    const goose = S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`;
+    const json = JSON.stringify({
+      mesh:{baseUrl:`http://localhost:${p}/v1`,api:"openai-completions",apiKey:"mesh",
+        models:[{id:m,name:m,reasoning:false,input:["text"],contextWindow:32768,maxTokens:8192,
+          compat:{supportsUsageInStreaming:false,maxTokensField:"max_tokens",supportsDeveloperRole:false}}]}
+    },null,2);
+    h += `<div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div>
+      <details class="cfg-inner"><summary>~/.pi/agent/models.json</summary><pre>${esc(json)}</pre></details></div>
+    <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
+    <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions \\
+  -H 'Content-Type: application/json' \\
+  -d '{"model":"${m}","messages":[{"role":"user","content":"Hello"}]}'</div></div>`;
+  }
+  if (S.token) {
+    h += `<div class="cfg-row"><div class="cfg-label">Invite token</div><div class="cfg-tok">${esc(S.token)}</div></div>`;
+  }
+  el.innerHTML = h;
+}
+
+function shortName(n) { return (n||'').replace(/-Q\w+$/,'').replace(/-Instruct/,''); }
+
+// ── Chat ──
+
+async function send() {
+  if (!S.llama_ready) return;
+  const inp = $('inp');
+  const msg = inp.value.trim(); if (!msg) return;
+  inp.value = '';
+  const el = $('msgs');
+  el.innerHTML += `<div class="mu">› ${esc(msg)}</div>`;
+  const bot = document.createElement('div'); bot.className = 'mb';
+  el.appendChild(bot); el.scrollTop = el.scrollHeight;
   try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: msg }], stream: true }),
+    const r = await fetch('/api/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model:'test',messages:[{role:'user',content:msg}],stream:true}),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const reader = r.body.getReader();
+    const dec = new TextDecoder(); let buf = '';
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const d = line.slice(6).trim();
-        if (d === '[DONE]') continue;
-        try {
-          const chunk = JSON.parse(d);
-          const text = chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.reasoning_content || '';
-          if (text) { botDiv.textContent += text; messages.scrollTop = messages.scrollHeight; }
-        } catch {}
+      const {done,value} = await reader.read(); if (done) break;
+      buf += dec.decode(value,{stream:true});
+      const lines = buf.split('\n'); buf = lines.pop()||'';
+      for (const l of lines) {
+        if (!l.startsWith('data: ')) continue;
+        const d = l.slice(6).trim(); if (d==='[DONE]') continue;
+        try { const c=JSON.parse(d); const t=c.choices?.[0]?.delta?.content||c.choices?.[0]?.delta?.reasoning_content||'';
+          if (t) { bot.textContent += t; el.scrollTop = el.scrollHeight; }
+        } catch{}
       }
     }
-    if (!botDiv.textContent) botDiv.textContent = '(empty response)';
-  } catch (e) {
-    botDiv.remove();
-    messages.innerHTML += `<div class="msg-err">Error: ${esc(e.message)}</div>`;
-  }
-  messages.scrollTop = messages.scrollHeight;
+    if (!bot.textContent) bot.textContent = '(empty response)';
+  } catch(e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; }
+  el.scrollTop = el.scrollHeight;
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-fetch('/api/status').then(r => r.json()).then(d => { state = d; render(); });
+fetch('/api/status').then(r=>r.json()).then(d=>{ S=d; render(); });
 </script>
 </body>
 </html>
