@@ -47,49 +47,32 @@ If the model doesn't fit on the first machine, it waits for more peers:
 
 No single node needs to fit the entire model. Each loads only its assigned layers (`--no-mmap`).
 
-## Using with pi
+## Using with agents
 
-mesh-inference serves an OpenAI-compatible API. To use with [pi](https://github.com/mariozechner/pi-coding-agent), add to `~/.pi/agent/models.json`:
+mesh-inference prints launch commands when the LLM is ready (and shows them in `--console`):
 
-```json
-"mesh": {
-  "baseUrl": "http://localhost:9337/v1",
-  "api": "openai-completions",
-  "apiKey": "none",
-  "models": [
-    {
-      "id": "GLM-4.7-Flash-Q4_K_M.gguf",
-      "name": "GLM 4.7 Flash (Mesh)",
-      "reasoning": false,
-      "input": ["text"],
-      "contextWindow": 202752,
-      "maxTokens": 32768,
-      "compat": {
-        "supportsUsageInStreaming": false,
-        "maxTokensField": "max_tokens",
-        "supportsDeveloperRole": false
-      }
-    }
-  ]
-}
+```
+pi:    pi --provider mesh --model Qwen2.5-32B-Instruct-Q4_K_M
+goose: GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:9337 OPENAI_API_KEY=mesh GOOSE_MODEL=Qwen2.5-32B-Instruct-Q4_K_M goose session
 ```
 
-Start mesh-inference in any mode (solo, distributed, or lite client), then select the model in pi.
+**pi** requires a `"mesh"` provider in `~/.pi/agent/models.json` (the console shows the snippet to copy). **goose** just needs env vars.
 
 ## Web console
 
+Add `--console` to any run to open a browser dashboard on `:3131`:
+
 ```bash
-mesh-inference console    # opens http://localhost:3131
+mesh-inference --model ~/.models/model.gguf --console
+mesh-inference --model ~/.models/model.gguf --join <token> --console
 ```
 
-Browser dashboard for managing everything without the CLI:
+Shows the live state of the running process:
 
-- **Download models** from the catalog (with optional draft model)
-- **Join a mesh** by pasting an invite token
-- **Start as a GPU worker** — pick a model, auto-elect host, serve the LLM
-- **Connect as a lite client** — no GPU needed, proxy to a mesh host
-- **Chat** to test the API with streaming responses
-- **Live status** — see peers, roles, VRAM, election state via SSE
+- **Cluster bar** — nodes sized by VRAM, split percentages
+- **Model info** — model, draft, total VRAM, API port
+- **Agent commands** — copy-paste commands for pi and goose
+- **Chat** — test the API with streaming responses
 
 ## How It Works
 
@@ -152,9 +135,9 @@ mesh-inference [OPTIONS]
   --draft PATH         Draft model for speculative decoding (auto-detected from catalog)
   --draft-max N        Max draft tokens per speculation (default: 8)
   --no-draft           Disable auto draft detection
+  --console [PORT]     Web dashboard (default: 3131)
 
 mesh-inference download [NAME] [--draft]
-mesh-inference console [--port PORT]
 ```
 
 ## Speculative Decoding

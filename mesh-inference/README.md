@@ -12,7 +12,7 @@ src/
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
-├── console.rs     Web console: HTTP server, SSE, API, model catalog
+├── console.rs     Web console: status viewer over HTTP/SSE (--console flag)
 └── console.html   Embedded single-page dashboard
 ```
 

@@ -9,9 +9,10 @@
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; padding: 1.5rem; }
   .container { max-width: 720px; margin: 0 auto; }
 
-  h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.15rem; }
-  .subtitle { font-size: 0.75rem; color: #555; margin-bottom: 1.2rem; }
-  h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; margin: 1.2rem 0 0.4rem; }
+  h1 { font-size: 1.2rem; font-weight: 600; display: inline; }
+  .header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.15rem; }
+  .subtitle { font-size: 0.75rem; color: #555; margin-bottom: 1rem; }
+  h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; margin: 1rem 0 0.4rem; }
 
   /* Cluster bar */
   .cluster-bar { display: flex; height: 60px; border-radius: 6px; overflow: hidden; border: 1px solid #222; }
@@ -38,21 +39,31 @@
   .badge-gray { background: #151515; color: #666; }
   .badge-gray .dot { background: #555; }
 
-  /* Token */
-  .token { font-family: monospace; font-size: 0.65rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; user-select: all; cursor: text; margin-top: 0.3rem; word-break: break-all; }
+  /* Token (compact inline) */
+  .token-row { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; }
+  .token-preview { font-family: monospace; color: #444; font-size: 0.65rem; }
+  .copy-btn { background: #1a1a1a; border: 1px solid #333; border-radius: 3px; padding: 0.1rem 0.35rem; color: #888; cursor: pointer; font-size: 0.6rem; }
+  .copy-btn:hover { background: #222; color: #ccc; }
+
+  /* Config panel (collapsible) */
+  .config-panel { margin-top: 0.75rem; }
+  .config-panel summary { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; cursor: pointer; padding: 0.3rem 0; }
+  .config-panel summary:hover { color: #888; }
+  .config-panel[open] summary { color: #666; }
+  .config-body { padding-top: 0.4rem; }
 
   /* Agent commands */
   .agent-row { margin-bottom: 0.4rem; }
   .agent-label { font-size: 0.7rem; font-weight: 600; color: #555; margin-bottom: 0.1rem; }
   .agent-cmd { font-family: monospace; font-size: 0.65rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; user-select: all; cursor: text; word-break: break-all; }
   .agent-json { font-family: monospace; font-size: 0.55rem; color: #555; margin-top: 0.2rem; }
-  .agent-json summary { cursor: pointer; color: #444; }
+  .agent-json summary { cursor: pointer; color: #444; text-transform: none; letter-spacing: normal; }
   .agent-json summary:hover { color: #888; }
   .agent-json pre { background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-top: 0.2rem; user-select: all; cursor: text; white-space: pre-wrap; }
 
   /* Chat */
   .chat-area { margin-top: 0.5rem; }
-  .chat-messages { min-height: 60px; max-height: 350px; overflow-y: auto; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
+  .chat-messages { min-height: 80px; max-height: 400px; overflow-y: auto; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.5rem; font-size: 0.85rem; line-height: 1.5; }
   .chat-messages:empty::before { content: "Type a message..."; color: #333; font-style: italic; }
   .chat-input { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
   .chat-input input { flex: 1; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 0.45rem 0.6rem; color: #e0e0e0; font-size: 0.85rem; }
@@ -67,37 +78,19 @@
 </head>
 <body>
 <div class="container">
-  <h1>mesh-inference</h1>
+  <div class="header">
+    <h1>mesh-inference</h1>
+    <span id="badge"></span>
+    <span id="tokenInline" class="token-row hidden"></span>
+  </div>
   <div class="subtitle" id="nodeInfo">connecting...</div>
 
   <div class="cluster-bar" id="clusterBar">
-    <div class="node-empty" style="flex:1"><span style="color:#333;font-size:0.8rem"></span></div>
+    <div class="node-empty" style="flex:1"></div>
   </div>
 
   <div class="info-row">
     <div class="info-items" id="infoItems"></div>
-    <div id="badge"></div>
-  </div>
-
-  <div id="tokenSection" class="hidden">
-    <h2>Invite token</h2>
-    <div class="token" id="tokenText"></div>
-  </div>
-
-  <div id="agentSection" class="hidden">
-    <h2>Use in agents</h2>
-    <div class="agent-row">
-      <div class="agent-label">pi</div>
-      <div class="agent-cmd" id="piCmd"></div>
-      <details class="agent-json">
-        <summary>~/.pi/agent/models.json snippet</summary>
-        <pre id="piJson"></pre>
-      </details>
-    </div>
-    <div class="agent-row">
-      <div class="agent-label">goose</div>
-      <div class="agent-cmd" id="gooseCmd"></div>
-    </div>
   </div>
 
   <div id="chatSection" class="hidden">
@@ -110,6 +103,32 @@
       </div>
     </div>
   </div>
+
+  <details class="config-panel" id="configPanel">
+    <summary>Config & setup ▾</summary>
+    <div class="config-body">
+      <div id="agentSection" class="hidden">
+        <h2>Use in agents</h2>
+        <div class="agent-row">
+          <div class="agent-label">pi</div>
+          <div class="agent-cmd" id="piCmd"></div>
+          <details class="agent-json">
+            <summary>~/.pi/agent/models.json snippet</summary>
+            <pre id="piJson"></pre>
+          </details>
+        </div>
+        <div class="agent-row">
+          <div class="agent-label">goose</div>
+          <div class="agent-cmd" id="gooseCmd"></div>
+        </div>
+      </div>
+
+      <div id="tokenSection" class="hidden">
+        <h2>Invite token</h2>
+        <div style="font-family:monospace; font-size:0.6rem; color:#444; background:#080808; border:1px solid #1a1a1a; border-radius:4px; padding:0.3rem 0.5rem; user-select:all; cursor:text; word-break:break-all;" id="tokenFull"></div>
+      </div>
+    </div>
+  </details>
 </div>
 
 <script>
@@ -124,17 +143,8 @@ function render() {
   renderCluster();
   renderInfo();
   renderBadge();
+  renderToken();
 
-  // Token
-  const tok = document.getElementById('tokenSection');
-  if (state.token) {
-    tok.classList.remove('hidden');
-    document.getElementById('tokenText').textContent = state.token;
-  } else {
-    tok.classList.add('hidden');
-  }
-
-  // Agents + chat only when ready
   const ready = state.llama_ready;
   document.getElementById('agentSection').classList.toggle('hidden', !ready);
   document.getElementById('chatSection').classList.toggle('hidden', !ready);
@@ -191,6 +201,28 @@ function renderBadge() {
   } else {
     el.innerHTML = '<span class="badge badge-gray"><span class="dot"></span>Waiting</span>';
   }
+}
+
+function renderToken() {
+  const inl = document.getElementById('tokenInline');
+  const full = document.getElementById('tokenSection');
+  if (state.token) {
+    inl.classList.remove('hidden');
+    inl.innerHTML = `<span class="token-preview">${state.token.slice(0, 12)}…</span><button class="copy-btn" onclick="copyToken()">copy token</button>`;
+    full.classList.remove('hidden');
+    document.getElementById('tokenFull').textContent = state.token;
+  } else {
+    inl.classList.add('hidden');
+    full.classList.add('hidden');
+  }
+}
+
+function copyToken() {
+  navigator.clipboard.writeText(state.token).then(() => {
+    const btn = document.querySelector('#tokenInline .copy-btn');
+    btn.textContent = '✓ copied';
+    setTimeout(() => { btn.textContent = 'copy token'; }, 2000);
+  });
 }
 
 function renderAgents() {
