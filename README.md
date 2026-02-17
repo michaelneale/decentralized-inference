@@ -60,16 +60,16 @@ mesh-llm --model ~/.models/model.gguf
 
 ### Distributed (two or more machines)
 
-Both machines need the same GGUF file locally.
-
 ```bash
-# Machine A
-mesh-llm --model ~/.models/model.gguf
+# Machine A — starts the mesh, sets the model
+mesh-llm --model Qwen2.5-32B
 # Prints: Invite token: eyJ...
 
-# Machine B
-mesh-llm --model ~/.models/model.gguf --join <token>
+# Machine B — joins and auto-discovers the model
+mesh-llm --join <token>
 ```
+
+The joining node learns the model from the mesh via gossip. If the model file isn't already in `~/.models/`, it downloads automatically from HuggingFace (for catalog models). You can also specify `--model` explicitly on the joiner if you prefer.
 
 Both get `localhost:9337`. The host (highest VRAM) runs llama-server with `--rpc` across all nodes. Tensor split is automatic. When nodes join or leave, the mesh re-elects and restarts.
 

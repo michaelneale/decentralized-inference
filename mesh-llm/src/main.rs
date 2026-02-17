@@ -139,16 +139,19 @@ async fn main() -> Result<()> {
     if cli.client && cli.model.is_some() {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
+    if cli.model.is_none() && cli.join.is_empty() && !cli.client {
+        anyhow::bail!("--model is required (or use --join to auto-discover, or --client for lite mode)");
+    }
 
     // --- Lite client mode ---
     if cli.client {
         return run_client(cli).await;
     }
 
-    // --- Need a model for worker or host ---
+    // --- Resolve model (may be deferred if joining without --model) ---
     let model = match &cli.model {
-        Some(m) => resolve_model(m).await?,
-        None => anyhow::bail!("--model is required (or use --client for lite mode)"),
+        Some(m) => Some(resolve_model(m).await?),
+        None => None, // will learn from mesh after joining
     };
 
     let bin_dir = match &cli.bin_dir {
@@ -158,9 +161,11 @@ async fn main() -> Result<()> {
 
     // Auto-detect draft model from catalog if not explicitly set
     if cli.draft.is_none() && !cli.no_draft {
-        if let Some(draft_path) = auto_detect_draft(&model) {
-            eprintln!("Auto-detected draft model: {}", draft_path.display());
-            cli.draft = Some(draft_path);
+        if let Some(ref m) = model {
+            if let Some(draft_path) = auto_detect_draft(m) {
+                eprintln!("Auto-detected draft model: {}", draft_path.display());
+                cli.draft = Some(draft_path);
+            }
         }
     }
 
@@ -262,37 +267,16 @@ pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
 
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
 /// mesh-llm owns :port and proxies to llama-server (local or remote).
-async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
+async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
     let console_port = cli.console;
 
-    // Start rpc-server — every node contributes GPU
-    let rpc_port = launch::start_rpc_server(
-        &bin_dir, cli.device.as_deref(), Some(&model),
-    ).await?;
-    eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
-
-    // Start mesh node as Worker (election may promote to Host)
+    // Start mesh node first (needed for join-and-discover flow)
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
     let token = node.invite_token();
 
-    // Pass None for http_port — we'll handle HTTP proxying ourselves
-    let tunnel_mgr = tunnel::Manager::start(
-        node.clone(), rpc_port, channels.rpc, channels.http,
-    ).await?;
-
-    // Advertise local models
-    let model_name = model.file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    node.set_models(vec![model_name]).await;
-
-    // Join mesh or print token
-    if cli.join.is_empty() {
-        eprintln!("Invite token: {token}");
-        eprintln!("Waiting for peers to join...");
-    } else {
+    // Join mesh if --join was given
+    if !cli.join.is_empty() {
         let mut joined = false;
         for t in &cli.join {
             match node.join(t).await {
@@ -308,7 +292,69 @@ async fn run_auto(cli: Cli, model: PathBuf, bin_dir: PathBuf) -> Result<()> {
             eprintln!("Failed to join any peer — running standalone");
         }
         eprintln!("This node's token (for others to join): {token}");
+    } else {
+        eprintln!("Invite token: {token}");
+        eprintln!("Waiting for peers to join...");
     }
+
+    // Resolve model — either from CLI or discovered from mesh peers
+    let model = match model {
+        Some(m) => m,
+        None => {
+            // Learn model from mesh gossip
+            eprintln!("No --model specified, discovering from mesh...");
+            let source = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                async {
+                    loop {
+                        if let Some(src) = node.peer_model_source().await {
+                            return src;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            ).await.map_err(|_| anyhow::anyhow!("Timed out waiting for model info from mesh peers. Use --model to specify explicitly."))?;
+
+            eprintln!("Mesh model: {source}");
+            resolve_model(std::path::Path::new(&source)).await?
+        }
+    };
+
+    // Set model source for gossip (so other joiners can discover it too)
+    let model_source = if let Some(ref m) = cli.model {
+        // Use the original CLI input — could be catalog name, HF URL, etc.
+        m.to_string_lossy().to_string()
+    } else {
+        // We discovered it — propagate the filename stem as catalog-resolvable name
+        model.file_stem().unwrap_or_default().to_string_lossy().to_string()
+    };
+    node.set_model_source(model_source).await;
+
+    // Auto-detect draft if we didn't have --model originally (deferred detection)
+    if cli.draft.is_none() && !cli.no_draft {
+        if let Some(draft_path) = auto_detect_draft(&model) {
+            eprintln!("Auto-detected draft model: {}", draft_path.display());
+            cli.draft = Some(draft_path);
+        }
+    }
+
+    // Start rpc-server — every node contributes GPU
+    let rpc_port = launch::start_rpc_server(
+        &bin_dir, cli.device.as_deref(), Some(&model),
+    ).await?;
+    eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
+
+    // Pass None for http_port — we'll handle HTTP proxying ourselves
+    let tunnel_mgr = tunnel::Manager::start(
+        node.clone(), rpc_port, channels.rpc, channels.http,
+    ).await?;
+
+    // Advertise local models
+    let model_name = model.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    node.set_models(vec![model_name]).await;
 
     // Election publishes where llama-server is via this channel
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);

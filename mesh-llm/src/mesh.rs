@@ -49,6 +49,10 @@ struct PeerAnnouncement {
     /// Available VRAM in bytes (0 = unknown)
     #[serde(default)]
     vram_bytes: u64,
+    /// How to get the model — catalog name, HF URL, or filename.
+    /// Lets joining nodes auto-download without specifying --model.
+    #[serde(default)]
+    model_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,7 @@ pub struct PeerInfo {
     pub models: Vec<String>,
     pub vram_bytes: u64,
     pub rtt_ms: Option<u32>,
+    pub model_source: Option<String>,
 }
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
@@ -171,6 +176,7 @@ pub struct Node {
     state: Arc<Mutex<MeshState>>,
     role: Arc<Mutex<NodeRole>>,
     models: Arc<Mutex<Vec<String>>>,
+    model_source: Arc<Mutex<Option<String>>>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -264,6 +270,7 @@ impl Node {
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
+            model_source: Arc::new(Mutex::new(None)),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -319,6 +326,21 @@ impl Node {
 
     pub async fn set_models(&self, models: Vec<String>) {
         *self.models.lock().await = models;
+    }
+
+    pub async fn set_model_source(&self, source: String) {
+        *self.model_source.lock().await = Some(source);
+    }
+
+    /// Get model source from any peer in the mesh (for auto-download on join).
+    pub async fn peer_model_source(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        for p in state.peers.values() {
+            if let Some(ref src) = p.model_source {
+                return Some(src.clone());
+            }
+        }
+        None
     }
 
     pub fn vram_bytes(&self) -> u64 {
@@ -655,7 +677,7 @@ impl Node {
         // Register peer — find their own announcement for role + models + vram
         let peer_ann = their_announcements.iter().find(|a| a.addr.id == remote);
         if let Some(ann) = peer_ann {
-            self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
+            self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes, ann.model_source.clone()).await;
             // Store RTT
             let mut state = self.state.lock().await;
             if let Some(peer) = state.peers.get_mut(&remote) {
@@ -705,7 +727,7 @@ impl Node {
         // Register peer with role + models + vram
         for ann in &their_announcements {
             if ann.addr.id == remote {
-                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes).await;
+                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes, ann.model_source.clone()).await;
             }
         }
 
@@ -793,7 +815,7 @@ impl Node {
         }
     }
 
-    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>, vram_bytes: u64) {
+    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>, vram_bytes: u64, model_source: Option<String>) {
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
@@ -804,6 +826,9 @@ impl Node {
             }
             existing.models = models;
             existing.vram_bytes = vram_bytes;
+            if model_source.is_some() {
+                existing.model_source = model_source;
+            }
             if role_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -813,7 +838,7 @@ impl Node {
         }
         tracing::info!("Peer added: {} role={:?} vram={:.1}GB models={:?} (total: {})",
             id.fmt_short(), role, vram_bytes as f64 / 1e9, models, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes, rtt_ms: None });
+        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes, rtt_ms: None, model_source });
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
@@ -823,14 +848,16 @@ impl Node {
         let state = self.state.lock().await;
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
+        let my_source = self.model_source.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
-            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone(), vram_bytes: p.vram_bytes })
+            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone(), vram_bytes: p.vram_bytes, model_source: p.model_source.clone() })
             .collect();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
             models: my_models,
             vram_bytes: self.vram_bytes,
+            model_source: my_source,
         });
         announcements
     }
