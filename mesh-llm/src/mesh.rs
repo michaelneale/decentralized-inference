@@ -22,9 +22,9 @@ pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
 /// Role a node plays in the mesh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum NodeRole {
-    /// Provides GPU compute via rpc-server.
+    /// Provides GPU compute via rpc-server for a specific model.
     Worker,
-    /// Runs llama-server, orchestrates inference, provides HTTP API.
+    /// Runs llama-server for a specific model, orchestrates inference, provides HTTP API.
     Host { http_port: u16 },
     /// Lite client — no compute, accesses the API via tunnel.
     Client,
@@ -43,7 +43,7 @@ struct PeerAnnouncement {
     addr: EndpointAddr,
     #[serde(default)]
     role: NodeRole,
-    /// GGUF model names available on this node (e.g. ["GLM-4.7-Flash-Q4_K_M"])
+    /// GGUF model names on disk (catalog contribution)
     #[serde(default)]
     models: Vec<String>,
     /// Available VRAM in bytes (0 = unknown)
@@ -53,6 +53,15 @@ struct PeerAnnouncement {
     /// Lets joining nodes auto-download without specifying --model.
     #[serde(default)]
     model_source: Option<String>,
+    /// Model currently loaded in VRAM (None = not assigned yet)
+    #[serde(default)]
+    serving: Option<String>,
+    /// All GGUF filenames on disk in ~/.models/ (for mesh catalog)
+    #[serde(default)]
+    available_models: Vec<String>,
+    /// Models this node wants the mesh to serve (from --model flags)
+    #[serde(default)]
+    requested_models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +74,36 @@ pub struct PeerInfo {
     pub vram_bytes: u64,
     pub rtt_ms: Option<u32>,
     pub model_source: Option<String>,
+    /// Model currently loaded in VRAM
+    pub serving: Option<String>,
+    /// All GGUFs on disk
+    pub available_models: Vec<String>,
+    /// Models this node has requested the mesh to serve
+    pub requested_models: Vec<String>,
+}
+
+/// Scan ~/.models/ for GGUF files and return their stem names.
+pub fn scan_local_models() -> Vec<String> {
+    let models_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".models");
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    // Skip draft models (tiny) and partial downloads
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    if size > 500_000_000 { // > 500MB, skip draft models
+                        names.push(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    names
 }
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
@@ -177,6 +216,9 @@ pub struct Node {
     role: Arc<Mutex<NodeRole>>,
     models: Arc<Mutex<Vec<String>>>,
     model_source: Arc<Mutex<Option<String>>>,
+    serving: Arc<Mutex<Option<String>>>,
+    available_models: Arc<Mutex<Vec<String>>>,
+    requested_models: Arc<Mutex<Vec<String>>>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -273,6 +315,9 @@ impl Node {
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
             model_source: Arc::new(Mutex::new(None)),
+            serving: Arc::new(Mutex::new(None)),
+            available_models: Arc::new(Mutex::new(Vec::new())),
+            requested_models: Arc::new(Mutex::new(Vec::new())),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -334,12 +379,96 @@ impl Node {
         *self.model_source.lock().await = Some(source);
     }
 
+    pub async fn set_serving(&self, model: Option<String>) {
+        *self.serving.lock().await = model;
+    }
+
+    pub async fn serving(&self) -> Option<String> {
+        self.serving.lock().await.clone()
+    }
+
+    pub async fn set_available_models(&self, models: Vec<String>) {
+        *self.available_models.lock().await = models;
+    }
+
+    pub async fn set_requested_models(&self, models: Vec<String>) {
+        *self.requested_models.lock().await = models;
+    }
+
     /// Get model source from any peer in the mesh (for auto-download on join).
     pub async fn peer_model_source(&self) -> Option<String> {
         let state = self.state.lock().await;
         for p in state.peers.values() {
             if let Some(ref src) = p.model_source {
                 return Some(src.clone());
+            }
+        }
+        None
+    }
+
+    /// Get the mesh catalog: all models that any node has on disk or has requested.
+    /// Returns deduplicated list of model names (file stems, no .gguf).
+    pub async fn mesh_catalog(&self) -> Vec<String> {
+        let state = self.state.lock().await;
+        let my_available = self.available_models.lock().await;
+        let my_requested = self.requested_models.lock().await;
+        let mut all = std::collections::HashSet::new();
+        for m in my_available.iter() {
+            all.insert(m.clone());
+        }
+        for m in my_requested.iter() {
+            all.insert(m.clone());
+        }
+        for p in state.peers.values() {
+            for m in &p.available_models {
+                all.insert(m.clone());
+            }
+            for m in &p.requested_models {
+                all.insert(m.clone());
+            }
+        }
+        let mut result: Vec<String> = all.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Get all models currently being served in the mesh (loaded in VRAM somewhere).
+    pub async fn models_being_served(&self) -> Vec<String> {
+        let state = self.state.lock().await;
+        let my_serving = self.serving.lock().await;
+        let mut served = std::collections::HashSet::new();
+        if let Some(ref s) = *my_serving {
+            served.insert(s.clone());
+        }
+        for p in state.peers.values() {
+            if let Some(ref s) = p.serving {
+                served.insert(s.clone());
+            }
+        }
+        let mut result: Vec<String> = served.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Get peers serving a specific model (including self if applicable).
+    /// Returns (my_serving, peers_serving) — my_serving is true if this node serves it.
+    pub async fn peers_serving_model(&self, model: &str) -> (bool, Vec<PeerInfo>) {
+        let state = self.state.lock().await;
+        let my_serving = self.serving.lock().await;
+        let i_serve = my_serving.as_deref() == Some(model);
+        let peers: Vec<PeerInfo> = state.peers.values()
+            .filter(|p| p.serving.as_deref() == Some(model))
+            .cloned()
+            .collect();
+        (i_serve, peers)
+    }
+
+    /// Find the host for a specific model (if any).
+    pub async fn host_for_model(&self, model: &str) -> Option<PeerInfo> {
+        let state = self.state.lock().await;
+        for p in state.peers.values() {
+            if matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model) {
+                return Some(p.clone());
             }
         }
         None
@@ -679,7 +808,7 @@ impl Node {
         // Register peer — find their own announcement for role + models + vram
         let peer_ann = their_announcements.iter().find(|a| a.addr.id == remote);
         if let Some(ann) = peer_ann {
-            self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes, ann.model_source.clone()).await;
+            self.add_peer(remote, ann.addr.clone(), ann).await;
             // Store RTT
             let mut state = self.state.lock().await;
             if let Some(peer) = state.peers.get_mut(&remote) {
@@ -729,7 +858,7 @@ impl Node {
         // Register peer with role + models + vram
         for ann in &their_announcements {
             if ann.addr.id == remote {
-                self.add_peer(remote, ann.addr.clone(), ann.role.clone(), ann.models.clone(), ann.vram_bytes, ann.model_source.clone()).await;
+                self.add_peer(remote, ann.addr.clone(), ann).await;
             }
         }
 
@@ -817,30 +946,44 @@ impl Node {
         }
     }
 
-    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, role: NodeRole, models: Vec<String>, vram_bytes: u64, model_source: Option<String>) {
+    async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, ann: &PeerAnnouncement) {
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
-            let role_changed = existing.role != role;
+            let role_changed = existing.role != ann.role;
+            let serving_changed = existing.serving != ann.serving;
             if role_changed {
-                tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, role);
-                existing.role = role;
+                tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, ann.role);
+                existing.role = ann.role.clone();
             }
-            existing.models = models;
-            existing.vram_bytes = vram_bytes;
-            if model_source.is_some() {
-                existing.model_source = model_source;
+            existing.models = ann.models.clone();
+            existing.vram_bytes = ann.vram_bytes;
+            if ann.model_source.is_some() {
+                existing.model_source = ann.model_source.clone();
             }
-            if role_changed {
+            existing.serving = ann.serving.clone();
+            existing.available_models = ann.available_models.clone();
+            existing.requested_models = ann.requested_models.clone();
+            if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
                 let _ = self.peer_change_tx.send(count);
             }
             return;
         }
-        tracing::info!("Peer added: {} role={:?} vram={:.1}GB models={:?} (total: {})",
-            id.fmt_short(), role, vram_bytes as f64 / 1e9, models, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo { id, addr, tunnel_port: None, role, models, vram_bytes, rtt_ms: None, model_source });
+        tracing::info!("Peer added: {} role={:?} vram={:.1}GB serving={:?} available={:?} (total: {})",
+            id.fmt_short(), ann.role, ann.vram_bytes as f64 / 1e9, ann.serving, ann.available_models, state.peers.len() + 1);
+        state.peers.insert(id, PeerInfo {
+            id, addr, tunnel_port: None,
+            role: ann.role.clone(),
+            models: ann.models.clone(),
+            vram_bytes: ann.vram_bytes,
+            rtt_ms: None,
+            model_source: ann.model_source.clone(),
+            serving: ann.serving.clone(),
+            available_models: ann.available_models.clone(),
+            requested_models: ann.requested_models.clone(),
+        });
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
@@ -851,8 +994,20 @@ impl Node {
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
         let my_source = self.model_source.lock().await.clone();
+        let my_serving = self.serving.lock().await.clone();
+        let my_available = self.available_models.lock().await.clone();
+        let my_requested = self.requested_models.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
-            .map(|p| PeerAnnouncement { addr: p.addr.clone(), role: p.role.clone(), models: p.models.clone(), vram_bytes: p.vram_bytes, model_source: p.model_source.clone() })
+            .map(|p| PeerAnnouncement {
+                addr: p.addr.clone(),
+                role: p.role.clone(),
+                models: p.models.clone(),
+                vram_bytes: p.vram_bytes,
+                model_source: p.model_source.clone(),
+                serving: p.serving.clone(),
+                available_models: p.available_models.clone(),
+                requested_models: p.requested_models.clone(),
+            })
             .collect();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
@@ -860,6 +1015,9 @@ impl Node {
             models: my_models,
             vram_bytes: self.vram_bytes,
             model_source: my_source,
+            serving: my_serving,
+            available_models: my_available,
+            requested_models: my_requested,
         });
         announcements
     }
