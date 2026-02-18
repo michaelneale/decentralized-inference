@@ -283,16 +283,25 @@ For `--client` mode only the `mesh-llm` binary is needed.
 <details>
 <summary>Future ideas</summary>
 
-### Multi-model mesh
-Each mesh currently runs one model. Multiple models would need separate llama-server instances, per-model VRAM allocation, and API routing by model name. Essentially multiple independent meshes sharing a QUIC overlay. Significant redesign.
+### Multi-model serving
+Each mesh currently runs one model. There are two paths to serving multiple models:
 
-### Mesh-propagated models
-The mesh already shares model names via gossip. This could go further:
+**Single-node: llama-server router mode (ready today)**
+llama-server has a built-in router (`--models-dir ~/.models/`) that spawns a child process per model, routes requests by the `model` field in the OpenAI API request, and LRU-evicts when VRAM is full (`--models-max`). This works for models that fit on one machine — no mesh needed. mesh-llm could use router mode on the host instead of single-model mode, letting clients pick models by name.
 
-- **Auto-download on join**: new node learns the model name from peers, checks `~/.models/`, downloads from HF catalog or from peers over QUIC if missing. `--model` becomes optional when joining.
-- **P2P model transfer**: nodes that already have the model serve chunks over QUIC to new joiners. Faster than HF on LAN, doesn't depend on the catalog, works for any GGUF.
-- **Model survives host death**: any node with the model can re-elect as host. The model propagates through the mesh — after enough nodes join, no single node is critical.
-- **Deferred join**: node joins as client, learns model, downloads, starts rpc-server, promotes to worker. Different startup flow but not a huge refactor.
+**Multi-node: distributed models across the mesh**
+For models too large for one node, tensor split across the mesh is still needed (the current approach). The question is whether one mesh should serve multiple large models simultaneously. Two possible designs:
+
+- **Multiple meshes**: run a separate mesh-llm process per model, each with its own invite token and election. A lightweight router in front multiplexes by model name. Simple, no architectural changes, nodes can join multiple meshes. The multi-model experience is just composition.
+- **Capacity pool**: one mesh, many models. Nodes advertise available VRAM and local GGUFs via gossip. The host becomes a scheduler — small models route to a single node, large models trigger tensor split across nodes that have the GGUF. More powerful, but essentially a GPU cluster scheduler. Significant redesign.
+
+The multiple-meshes approach is likely the 80/20 — each mesh stays self-contained, and a thin HTTP proxy (even a separate `mesh-router` binary) handles model routing. The gossip already carries `models: Vec<String>` per node, so the building blocks exist.
+
+### P2P model transfer
+Nodes that already have a model could serve GGUF chunks over QUIC to new joiners. Faster than HuggingFace on LAN, doesn't depend on the catalog, works for any GGUF.
+
+### Model switching
+Today, changing models requires restarting all nodes. Since each node's identity (and invite token) is derived from a persistent key in `~/.mesh-llm/key`, the token survives restarts — joiners can use the same token after a model switch. A smoother path: gossip a model-switch event, each node downloads the new GGUF if needed, restarts its rpc-server, and triggers re-election. The mesh/QUIC layer stays up throughout. The main complexity is coordinating rpc-server restarts across nodes.
 
 ### 405B-class models
 Tested Hermes-3-Llama-3.1-405B IQ2_M (137GB, 4 split files) across 2× M4 Max nodes. The mesh handled it correctly — auto-split, VRAM gating, split GGUF loading, no mmap. But generation was 0.04 tok/s (27s per token). The bottleneck is raw compute, not network — 405B parameters through 126 transformer layers is too much for 2 Apple Silicon chips. Would need 4+ high-end nodes or wait for faster hardware.
