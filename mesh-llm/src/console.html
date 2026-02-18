@@ -45,6 +45,16 @@
   .section-label { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; margin: 0.6rem 0 0.25rem; }
 
   /* Agent rows */
+  /* Models list */
+  .models-list { margin-bottom: 0.5rem; }
+  .model-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.65rem; padding: 0.15rem 0; }
+  .model-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .model-dot.warm { background: #4c4; }
+  .model-dot.cold { background: #444; }
+  .model-name { color: #aaa; font-family: monospace; }
+  .model-name.warm { color: #ccc; }
+  .model-info { color: #444; font-size: 0.55rem; margin-left: auto; }
+
   .agent-row { display: flex; gap: 0.4rem; align-items: baseline; margin-bottom: 0.2rem; }
   .agent-name { font-size: 0.6rem; font-weight: 600; color: #555; min-width: 36px; flex-shrink: 0; }
   .cmd-sm { font-family: monospace; font-size: 0.55rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 3px; padding: 0.2rem 0.35rem; cursor: text; word-break: break-all; line-height: 1.4; }
@@ -106,6 +116,7 @@
   <div class="left" id="leftPanel">
     <div class="diagram" id="diagram"></div>
     <div id="status"></div>
+    <div id="models"></div>
     <div id="agents"></div>
     <div id="joinHint"></div>
     <details class="cfg" id="cfg"><summary>Use with agents</summary><div id="cfgBody"></div></details>
@@ -137,7 +148,7 @@ function togglePanel() {
 }
 
 function render() {
-  renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderAgents(); renderJoin(); renderMore();
+  renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderMore();
   const ok = S.llama_ready;
   $('inp').disabled = !ok; $('btn').disabled = !ok;
   $('msgs').classList.toggle('off', !ok);
@@ -167,8 +178,8 @@ function renderDiagram() {
   const el = $('diagram');
   const nodes = [];
   const isClient = S.is_client;
-  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient });
-  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false, client: p.role === 'Client' }));
+  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient, serving: S.model_name||'' });
+  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false, client: p.role === 'Client', serving: p.serving||'' }));
   if (!nodes.length) { el.innerHTML = ''; return; }
 
   // Infer host from VRAM (gossip bug workaround)
@@ -234,7 +245,7 @@ function nBox(x, y, n, total, ok) {
   const label = n.self ? `${n.id} (you)` : n.id;
   const role = n.client ? 'CLIENT' : (n.host ? 'HOST' : 'WORKER');
   const rc = n.client ? '#888' : (n.host ? '#4c4' : '#6cf');
-  const svc = n.client ? 'API tunnel' : (n.host ? 'llama-server · rpc' : 'rpc-server');
+  const svc = n.client ? 'API tunnel' : (n.serving ? shortName(n.serving) : (n.host ? 'llama-server · rpc' : 'rpc-server'));
   const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
   const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
 
@@ -281,6 +292,24 @@ function renderStatus() {
   } else {
     el.innerHTML = '';
   }
+}
+
+// ── Models list ──
+
+function renderModels() {
+  const el = $('models');
+  const models = S.mesh_models || [];
+  if (models.length <= 1) { el.innerHTML = ''; return; } // single model — no need to show list
+  el.innerHTML = '<div class="section-label">Models</div><div class="models-list">' +
+    models.map(m => {
+      const warm = m.status === 'warm';
+      const nodes = m.node_count > 0 ? `${m.node_count} node${m.node_count>1?'s':''}` : 'not loaded';
+      return `<div class="model-item">
+        <span class="model-dot ${warm?'warm':'cold'}"></span>
+        <span class="model-name ${warm?'warm':''}">${esc(shortName(m.name))}</span>
+        <span class="model-info">${nodes}</span>
+      </div>`;
+    }).join('') + '</div>';
 }
 
 // ── Agent commands (visible inline: API endpoint only) ──

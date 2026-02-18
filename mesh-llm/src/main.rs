@@ -447,6 +447,8 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     node.set_model_source(model_source).await;
     node.set_serving(Some(model_name.clone())).await;
     node.set_models(vec![model_name.clone()]).await;
+    // Re-gossip so peers learn what we're serving
+    node.regossip().await;
 
     // Auto-detect draft model
     if cli.draft.is_none() && !cli.no_draft {

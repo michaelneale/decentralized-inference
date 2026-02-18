@@ -175,6 +175,8 @@ pub async fn election_loop(
 
             node.set_role(NodeRole::Host { http_port: llama_port }).await;
             tunnel_mgr.set_http_port(llama_port);
+            // Re-gossip so peers learn we're the host for this model
+            node.regossip().await;
             update_targets(&node, &model_name, InferenceTarget::Local(llama_port), &target_tx).await;
             on_change(true, true);
             eprintln!("✅ [{}] llama-server ready on internal port {llama_port}", model_name);

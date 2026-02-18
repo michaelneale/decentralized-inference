@@ -383,6 +383,23 @@ impl Node {
         *self.serving.lock().await = model;
     }
 
+    /// Re-gossip our state to all connected peers.
+    /// Call after changing serving/role/models so peers learn the update.
+    pub async fn regossip(&self) {
+        let conns: Vec<(EndpointId, Connection)> = {
+            let state = self.state.lock().await;
+            state.connections.iter().map(|(id, c)| (*id, c.clone())).collect()
+        };
+        for (peer_id, conn) in conns {
+            let node = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = node.initiate_gossip(conn, peer_id).await {
+                    tracing::debug!("Regossip to {} failed: {e}", peer_id.fmt_short());
+                }
+            });
+        }
+    }
+
     pub async fn serving(&self) -> Option<String> {
         self.serving.lock().await.clone()
     }
