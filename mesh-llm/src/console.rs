@@ -47,6 +47,8 @@ struct StatusPayload {
     peers: Vec<PeerPayload>,
     launch_pi: Option<String>,
     launch_goose: Option<String>,
+    /// All models in the mesh with their status
+    mesh_models: Vec<MeshModelPayload>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +57,17 @@ struct PeerPayload {
     role: String,
     models: Vec<String>,
     vram_gb: f64,
+    /// What this peer is currently serving
+    serving: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MeshModelPayload {
+    name: String,
+    /// "warm" = loaded and serving, "cold" = available on disk but not loaded
+    status: String,
+    /// Number of nodes serving this model
+    node_count: usize,
 }
 
 impl ConsoleState {
@@ -102,15 +115,41 @@ impl ConsoleState {
         let token = node.invite_token();
         let my_vram_gb = node.vram_bytes() as f64 / 1e9;
 
-        let peers: Vec<PeerPayload> = node.peers().await.into_iter().map(|p| PeerPayload {
+        let all_peers = node.peers().await;
+        let peers: Vec<PeerPayload> = all_peers.iter().map(|p| PeerPayload {
             id: p.id.fmt_short().to_string(),
             role: match p.role {
                 mesh::NodeRole::Worker => "Worker".into(),
                 mesh::NodeRole::Host { http_port } => format!("Host (:{http_port})"),
                 mesh::NodeRole::Client => "Client".into(),
             },
-            models: p.models,
+            models: p.models.clone(),
             vram_gb: p.vram_bytes as f64 / 1e9,
+            serving: p.serving.clone(),
+        }).collect();
+
+        // Build mesh model list: warm (being served) and cold (on disk only)
+        // Note: mesh_catalog and models_being_served need the node's inner locks,
+        // but we already hold inner (ConsoleInner). The Node locks are separate, so this is fine.
+        let catalog = node.mesh_catalog().await;
+        let served = node.models_being_served().await;
+        let my_serving = inner.model_name.clone(); // what this node is serving
+        let mesh_models: Vec<MeshModelPayload> = catalog.iter().map(|name| {
+            let is_warm = served.contains(name);
+            let node_count = if is_warm {
+                let peer_count = all_peers.iter()
+                    .filter(|p| p.serving.as_deref() == Some(name.as_str()))
+                    .count();
+                let me = if *name == my_serving { 1 } else { 0 };
+                peer_count + me
+            } else {
+                0
+            };
+            MeshModelPayload {
+                name: name.clone(),
+                status: if is_warm { "warm".into() } else { "cold".into() },
+                node_count,
+            }
         }).collect();
 
         let (launch_pi, launch_goose) = if inner.llama_ready {
@@ -135,6 +174,7 @@ impl ConsoleState {
             peers,
             launch_pi,
             launch_goose,
+            mesh_models,
         }
     }
 

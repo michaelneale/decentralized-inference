@@ -99,6 +99,14 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
+    /// Drop a model from the mesh — stops all nodes serving it
+    Drop {
+        /// Model name to drop
+        name: String,
+        /// API port of the running mesh-llm instance (default: 9337)
+        #[arg(long, default_value = "9337")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -113,25 +121,32 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Subcommand dispatch
-    if let Some(Command::Download { name, draft }) = &cli.command {
-        match name {
-            Some(query) => {
-                let model = download::find_model(query)
-                    .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
-                download::download_model(model).await?;
-                if *draft {
-                    if let Some(draft_name) = model.draft {
-                        let draft_model = download::find_model(draft_name)
-                            .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
-                        download::download_model(draft_model).await?;
-                    } else {
-                        eprintln!("⚠ No draft model available for {}", model.name);
+    if let Some(cmd) = &cli.command {
+        match cmd {
+            Command::Download { name, draft } => {
+                match name {
+                    Some(query) => {
+                        let model = download::find_model(query)
+                            .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
+                        download::download_model(model).await?;
+                        if *draft {
+                            if let Some(draft_name) = model.draft {
+                                let draft_model = download::find_model(draft_name)
+                                    .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
+                                download::download_model(draft_model).await?;
+                            } else {
+                                eprintln!("⚠ No draft model available for {}", model.name);
+                            }
+                        }
                     }
+                    None => download::list_models(),
                 }
+                return Ok(());
             }
-            None => download::list_models(),
+            Command::Drop { name, port } => {
+                return run_drop(name, *port).await;
+            }
         }
-        return Ok(());
     }
 
     // --- Validation ---
@@ -454,11 +469,14 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     // Election publishes per-model targets
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
 
+    // Drop channel: API proxy sends model names to drop, main loop handles shutdown
+    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // API proxy: model-aware routing
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
-        api_proxy(proxy_node, api_port, proxy_rx).await;
+        api_proxy(proxy_node, api_port, proxy_rx, drop_tx).await;
     });
 
     // Console (optional)
@@ -529,8 +547,27 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         ).await;
     });
 
-    tokio::signal::ctrl_c().await?;
-    eprintln!("\nShutting down...");
+    // Wait for ctrl-c or a drop command for our model
+    let drop_model_name = model_name.clone();
+    let drop_node = node.clone();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nShutting down...");
+        }
+        dropped = async {
+            while let Some(name) = drop_rx.recv().await {
+                if name == drop_model_name {
+                    return name;
+                }
+                eprintln!("⚠ Drop request for '{}' — not our model ({}), ignoring", name, drop_model_name);
+            }
+            drop_model_name.clone() // channel closed
+        } => {
+            eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", dropped);
+            drop_node.set_serving(None).await;
+        }
+    }
+
     launch::kill_llama_server().await;
     Ok(())
 }
@@ -598,11 +635,33 @@ async fn run_client(cli: Cli) -> Result<()> {
                 let (tcp_stream, addr) = accept_result?;
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Client connection from {addr}");
-                // For now, route all traffic to the first host found.
-                // TODO: parse model from request body and route to correct host.
                 let node = node.clone();
                 tokio::spawn(async move {
-                    match node.open_http_tunnel(host_id).await {
+                    // Peek to extract model name and check for /v1/models
+                    let mut buf = vec![0u8; 32768];
+                    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+
+                    // Handle /v1/models locally from gossip state
+                    if is_models_list_request(&buf[..n]) {
+                        let served = node.models_being_served().await;
+                        let _ = send_models_list(tcp_stream, &served).await;
+                        return;
+                    }
+
+                    // Find the host for this model
+                    let target_host = if let Some(ref name) = model_name {
+                        // Look for a host serving this model
+                        node.host_for_model(name).await.map(|p| p.id)
+                    } else {
+                        None
+                    };
+                    // Fall back to any host
+                    let target_host = target_host.unwrap_or(host_id);
+
+                    match node.open_http_tunnel(target_host).await {
                         Ok((quic_send, quic_recv)) => {
                             if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
                                 tracing::debug!("HTTP tunnel relay ended: {e}");
@@ -625,7 +684,7 @@ async fn run_client(cli: Cli) -> Result<()> {
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target
 /// if model is not specified or not found.
-async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>) {
+async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>) {
     let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -644,6 +703,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
         let targets = target_rx.borrow().clone();
         let node = node.clone();
 
+        let drop_tx = drop_tx.clone();
         tokio::spawn(async move {
             // Read the HTTP request to extract the model name
             let mut buf = vec![0u8; 32768];
@@ -653,6 +713,17 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                     if is_models_list_request(&buf[..n]) {
                         let models: Vec<String> = targets.targets.keys().cloned().collect();
                         let _ = send_models_list(tcp_stream, &models).await;
+                        return;
+                    }
+
+                    // Handle /mesh/drop control endpoint
+                    if is_drop_request(&buf[..n]) {
+                        if let Some(ref name) = model_name {
+                            let _ = drop_tx.send(name.clone());
+                            let _ = send_json_ok(tcp_stream, &serde_json::json!({"dropped": name})).await;
+                        } else {
+                            let _ = send_400(tcp_stream, "missing 'model' field").await;
+                        }
                         return;
                     }
 
@@ -683,6 +754,11 @@ fn first_available_target(targets: &election::ModelTargets) -> election::Inferen
         }
     }
     election::InferenceTarget::None
+}
+
+fn is_drop_request(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.starts_with("POST ") && s.contains("/mesh/drop")
 }
 
 fn is_models_list_request(buf: &[u8]) -> bool {
@@ -774,6 +850,30 @@ async fn send_models_list(mut stream: tokio::net::TcpStream, models: &[String]) 
     Ok(())
 }
 
+async fn send_json_ok(mut stream: tokio::net::TcpStream, data: &serde_json::Value) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = data.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn send_400(mut stream: tokio::net::TcpStream, msg: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = format!("{{\"error\":\"{msg}\"}}");
+    let resp = format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
 async fn send_503(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let body = r#"{"error":"No inference server available — election in progress"}"#;
@@ -857,4 +957,31 @@ fn update_pi_models_json(model_id: &str, port: u16) {
             tracing::warn!("Failed to update {}: {e}", models_path.display());
         }
     }
+}
+
+/// Drop a model from the mesh by sending a control request to the running instance.
+async fn run_drop(model_name: &str, port: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = serde_json::json!({ "model": model_name }).to_string();
+    let request = format!(
+        "POST /mesh/drop HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await
+        .with_context(|| format!("Can't connect to mesh-llm on port {port}. Is it running?"))?;
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut response = vec![0u8; 4096];
+    let n = stream.read(&mut response).await?;
+    let resp = String::from_utf8_lossy(&response[..n]);
+
+    if resp.contains("200 OK") {
+        eprintln!("✅ Dropped model: {model_name}");
+    } else {
+        eprintln!("❌ Failed to drop model: {}", resp.lines().last().unwrap_or("unknown error"));
+    }
+
+    Ok(())
 }
