@@ -228,20 +228,22 @@ impl Node {
             builder = builder.bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))?;
         }
         let endpoint = builder.bind().await?;
-        // Don't block on relay connection — direct UDP works without it.
-        // online() waits for a relay home, which hangs on sinkholed networks.
-        tokio::spawn({
-            let ep = endpoint.clone();
-            async move { ep.online().await; }
-        });
+        // Wait briefly for relay connection so the invite token includes the relay URL.
+        // On sinkholed networks this times out and we proceed without relay (direct UDP only).
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            endpoint.online(),
+        ).await {
+            Ok(()) => tracing::info!("Relay connected"),
+            Err(_) => tracing::warn!("Relay connection timed out (5s) — proceeding without relay"),
+        }
 
-        // If we bound to a fixed port, discover our public IP via STUN so the
-        // invite token includes it. Relay STUN may not work on sinkholed networks.
-        let public_addr = if let Some(port) = bind_port {
-            stun_public_addr(port).await
-        } else {
-            None
-        };
+        // Discover public IP via STUN so the invite token includes it.
+        // With --bind-port, the advertised port is the bound port (for port forwarding).
+        // Without --bind-port, we use port 0 — the IP is still useful for hole-punching.
+        // Relay STUN may not work on sinkholed networks, so we use raw STUN to Google/Cloudflare.
+        let stun_port = bind_port.unwrap_or(0);
+        let public_addr = stun_public_addr(stun_port).await;
 
         let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
