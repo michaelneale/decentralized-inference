@@ -29,6 +29,25 @@ Or join without a GPU:
 mesh-llm --client --join <token>
 ```
 
+## macOS Menu Bar App
+
+This repo also contains a native macOS menu bar controller app in `macos/`.
+It bundles `mesh-llm` (plus `rpc-server`/`llama-server`) into a distributable
+`Mesh LLM.app`.
+
+Build and package from this repo root:
+
+```bash
+cd macos
+./scripts/package-app.sh
+```
+
+Output:
+
+```bash
+macos/dist/Mesh LLM.app
+```
+
 ## How it works
 A common question is around latency and networks, there are a few ways that are addressed.
 This uses mesh tech (quic) to distribute inference workload: 
