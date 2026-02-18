@@ -7,21 +7,17 @@ Split LLM inference across multiple machines over QUIC. Models can be larger tha
 ## Quick start (macOS Apple Silicon)
 
 ```bash
-# Download and install
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+```
 
-# Download a model and run
-mesh-llm download 32b        # Qwen2.5-32B (~20GB)
-mesh-llm --model Qwen2.5-32B
-# API ready at http://localhost:9337
+Then run:
+```bash
+mesh-llm --model Qwen2.5-32B --console    # downloads model on first run (~20GB), starts API + web console
 ```
 
 To add another machine to the mesh:
 ```bash
-# On the second machine (same install steps above, then):
-mesh-llm --model Qwen2.5-32B --join <token>
-# Token is printed by the first machine
+mesh-llm --model Qwen2.5-32B --join <token>    # token is printed by the first machine
 ```
 
 Or join without a GPU:
