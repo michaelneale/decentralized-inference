@@ -14,7 +14,7 @@ build:
         echo "Cloning michaelneale/llama.cpp (rpc-local-gguf branch)..."
         git clone -b rpc-local-gguf https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
     fi
-    cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF
+    cmake -B "{{build_dir}}" -S "{{llama_dir}}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
     cmake --build "{{build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
     echo "Build complete: {{build_dir}}/bin/"
     if [ -d "{{mesh_dir}}" ]; then
