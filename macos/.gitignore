@@ -1,0 +1,3 @@
+.build/
+dist/
+external/decentralized-inference/mesh-llm/.artifacts/

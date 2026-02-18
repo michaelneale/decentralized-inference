@@ -2,3 +2,11 @@ llama.cpp/
 llama.cpp-rpc-b2b/
 target/
 llama.cpp.bak/
+
+# macOS Swift menu bar app local build/config artifacts
+macos/.build/
+macos/.swiftpm/
+macos/Package.resolved
+macos/dist/
+macos/.DS_Store
+macos/Sources/.DS_Store
