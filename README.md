@@ -13,6 +13,7 @@ curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/late
 Then run:
 ```bash
 mesh-llm --model Qwen2.5-32B --console    # downloads model on first run (~20GB), starts API + web console
+mesh-llm --model Qwen2.5-3B --console     # or try a small model first (~2GB)
 ```
 
 To add another machine to the mesh:
