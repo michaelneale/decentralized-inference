@@ -112,21 +112,15 @@ pub async fn election_loop(
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
 
+    // Track the set of model-group worker IDs to detect when we actually need to restart
+    let mut last_worker_set: Vec<iroh::EndpointId> = vec![];
+    let mut currently_host = false;
+
     // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     loop {
-        // Step 1: Kill llama-server if we're running it
-        let was_host = matches!(node.role().await, NodeRole::Host { .. });
-        if was_host {
-            launch::kill_llama_server().await;
-            tunnel_mgr.set_http_port(0);
-            node.set_role(NodeRole::Worker).await;
-            update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
-            on_change(false, false);
-        }
-
-        // Step 2: Elect within our model group
+        // Collect our model group
         let peers = node.peers().await;
         let model_peers: Vec<mesh::PeerInfo> = peers.iter()
             .filter(|p| p.serving.as_deref() == Some(&model_name))
@@ -134,6 +128,36 @@ pub async fn election_loop(
             .collect();
 
         let i_am_host = should_be_host_for_model(node.id(), node.vram_bytes(), &model_peers);
+
+        // Compute the worker set for this model group
+        let mut new_worker_set: Vec<iroh::EndpointId> = model_peers.iter()
+            .filter(|p| !matches!(p.role, NodeRole::Client))
+            .map(|p| p.id)
+            .collect();
+        new_worker_set.sort();
+
+        // If we're already host and the election result + worker set hasn't changed, skip restart
+        if currently_host && i_am_host && new_worker_set == last_worker_set {
+            // Just update the target map (in case other models' hosts changed)
+            if let NodeRole::Host { http_port } = node.role().await {
+                update_targets(&node, &model_name, InferenceTarget::Local(http_port), &target_tx).await;
+            }
+            // Wait for next change
+            if peer_rx.changed().await.is_err() { break; }
+            eprintln!("⚡ Mesh changed — re-checking... (still host, no restart needed)");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            continue;
+        }
+
+        // Something changed — kill llama-server if we were running it
+        if currently_host {
+            launch::kill_llama_server().await;
+            tunnel_mgr.set_http_port(0);
+            node.set_role(NodeRole::Worker).await;
+            update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+            on_change(false, false);
+            currently_host = false;
+        }
 
         if i_am_host {
             // Check if total model-group VRAM is enough
@@ -151,6 +175,7 @@ pub async fn election_loop(
                     model_name, min_vram as f64 / 1e9, total_vram as f64 / 1e9);
                 update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
                 on_change(false, false);
+                last_worker_set = new_worker_set;
                 if peer_rx.changed().await.is_err() { break; }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 continue;
@@ -167,6 +192,7 @@ pub async fn election_loop(
                 Some(port) => port,
                 None => {
                     on_change(true, false);
+                    last_worker_set = new_worker_set;
                     let _ = peer_rx.changed().await;
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
@@ -175,6 +201,8 @@ pub async fn election_loop(
 
             node.set_role(NodeRole::Host { http_port: llama_port }).await;
             tunnel_mgr.set_http_port(llama_port);
+            currently_host = true;
+            last_worker_set = new_worker_set;
             // Re-gossip so peers learn we're the host for this model
             node.regossip().await;
             update_targets(&node, &model_name, InferenceTarget::Local(llama_port), &target_tx).await;
@@ -183,6 +211,8 @@ pub async fn election_loop(
         } else {
             // We're a worker for this model. Find who the host is.
             node.set_role(NodeRole::Worker).await;
+            currently_host = false;
+            last_worker_set = new_worker_set;
 
             // Look for the highest VRAM peer in our model group
             let host_peer = model_peers.iter()
