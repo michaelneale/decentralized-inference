@@ -281,27 +281,45 @@ For `--client` mode only the `mesh-llm` binary is needed.
 | `mesh-llm/` | Rust QUIC mesh ([details](mesh-llm/README.md), [design](mesh-llm/DESIGN.md)) |
 
 <details>
+<summary>Multi-model serving (multi-model branch)</summary>
+
+The mesh serves multiple models simultaneously. Different nodes load different models, and the API proxy routes by model name. See [MULTI-MODEL.md](mesh-llm/MULTI-MODEL.md) for full details.
+
+```bash
+# Node 1: seed mesh with two models, serves the first
+mesh-llm --model Qwen2.5-32B --model GLM-4.7-Flash
+
+# Node 2: joins, auto-assigned to serve GLM (needed, already on disk)
+mesh-llm --join <token>
+
+# Any node's API port routes to the right model
+curl localhost:9337/v1/models                    # lists both
+curl localhost:9337/v1/chat/completions \
+  -d '{"model":"GLM-4.7-Flash-Q4_K_M", ...}'    # routed to node 2 via QUIC
+```
+
+Key properties:
+- One model per node process. No VRAM double-commitment
+- No accidental tensor split — solo mode when model fits on one node
+- `/v1/models` lists all served models across the mesh
+- Console model picker to chat with any model, node highlighting
+- `mesh-llm drop <model>` to stop serving a model
+- Dead peer cleanup in ~15s via health check
+- `--client` works alongside GPU nodes on the same machine (ephemeral key)
+
+</details>
+
+<details>
 <summary>Future ideas</summary>
 
-### Multi-model serving
-Each mesh currently runs one model. There are two paths to serving multiple models:
-
-**Single-node: llama-server router mode (ready today)**
-llama-server has a built-in router (`--models-dir ~/.models/`) that spawns a child process per model, routes requests by the `model` field in the OpenAI API request, and LRU-evicts when VRAM is full (`--models-max`). This works for models that fit on one machine — no mesh needed. mesh-llm could use router mode on the host instead of single-model mode, letting clients pick models by name.
-
-**Multi-node: distributed models across the mesh**
-For models too large for one node, tensor split across the mesh is still needed (the current approach). The question is whether one mesh should serve multiple large models simultaneously. Two possible designs:
-
-- **Multiple meshes**: run a separate mesh-llm process per model, each with its own invite token and election. A lightweight router in front multiplexes by model name. Simple, no architectural changes, nodes can join multiple meshes. The multi-model experience is just composition.
-- **Capacity pool**: one mesh, many models. Nodes advertise available VRAM and local GGUFs via gossip. The host becomes a scheduler — small models route to a single node, large models trigger tensor split across nodes that have the GGUF. More powerful, but essentially a GPU cluster scheduler. Significant redesign.
-
-The multiple-meshes approach is likely the 80/20 — each mesh stays self-contained, and a thin HTTP proxy (even a separate `mesh-router` binary) handles model routing. The gossip already carries `models: Vec<String>` per node, so the building blocks exist.
+### Load balancing across hosts
+When multiple nodes independently serve the same model (solo mode), the proxy could round-robin requests across them. Currently it picks one deterministically.
 
 ### P2P model transfer
 Nodes that already have a model could serve GGUF chunks over QUIC to new joiners. Faster than HuggingFace on LAN, doesn't depend on the catalog, works for any GGUF.
 
-### Model switching
-Today, changing models requires restarting all nodes. Since each node's identity (and invite token) is derived from a persistent key in `~/.mesh-llm/key`, the token survives restarts — joiners can use the same token after a model switch. A smoother path: gossip a model-switch event, each node downloads the new GGUF if needed, restarts its rpc-server, and triggers re-election. The mesh/QUIC layer stays up throughout. The main complexity is coordinating rpc-server restarts across nodes.
+### Usage-aware rebalancing
+Track per-model request rates via gossip. Automatically unload idle models and reassign nodes to busy ones. Currently assignments are static after join.
 
 ### 405B-class models
 Tested Hermes-3-Llama-3.1-405B IQ2_M (137GB, 4 split files) across 2× M4 Max nodes. The mesh handled it correctly — auto-split, VRAM gating, split GGUF loading, no mmap. But generation was 0.04 tok/s (27s per token). The bottleneck is raw compute, not network — 405B parameters through 126 transformer layers is too much for 2 Apple Silicon chips. Would need 4+ high-end nodes or wait for faster hardware.

@@ -22,9 +22,11 @@ struct Cli {
     #[arg(long, short, global = true)]
     join: Vec<String>,
 
-    /// Path to GGUF model file. Starts rpc-server and enters auto-election.
+    /// GGUF model to serve. Can be a path, catalog name, or HuggingFace URL.
+    /// Specify multiple times to seed the mesh with multiple models.
+    /// When joining without --model, the mesh assigns one automatically.
     #[arg(long)]
-    model: Option<PathBuf>,
+    model: Vec<PathBuf>,
 
     /// Local HTTP port for the API (default: 9337).
     /// The elected host runs llama-server here; workers proxy to the host.
@@ -97,6 +99,14 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
+    /// Drop a model from the mesh — stops all nodes serving it
+    Drop {
+        /// Model name to drop
+        name: String,
+        /// API port of the running mesh-llm instance (default: 9337)
+        #[arg(long, default_value = "9337")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -108,38 +118,45 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut cli = Cli::parse();
+    let cli = Cli::parse();
 
     // Subcommand dispatch
-    if let Some(Command::Download { name, draft }) = &cli.command {
-        match name {
-            Some(query) => {
-                let model = download::find_model(query)
-                    .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
-                download::download_model(model).await?;
-                if *draft {
-                    if let Some(draft_name) = model.draft {
-                        let draft_model = download::find_model(draft_name)
-                            .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
-                        download::download_model(draft_model).await?;
-                    } else {
-                        eprintln!("⚠ No draft model available for {}", model.name);
+    if let Some(cmd) = &cli.command {
+        match cmd {
+            Command::Download { name, draft } => {
+                match name {
+                    Some(query) => {
+                        let model = download::find_model(query)
+                            .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
+                        download::download_model(model).await?;
+                        if *draft {
+                            if let Some(draft_name) = model.draft {
+                                let draft_model = download::find_model(draft_name)
+                                    .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
+                                download::download_model(draft_model).await?;
+                            } else {
+                                eprintln!("⚠ No draft model available for {}", model.name);
+                            }
+                        }
                     }
+                    None => download::list_models(),
                 }
+                return Ok(());
             }
-            None => download::list_models(),
+            Command::Drop { name, port } => {
+                return run_drop(name, *port).await;
+            }
         }
-        return Ok(());
     }
 
     // --- Validation ---
     if cli.client && cli.join.is_empty() {
         anyhow::bail!("--client requires --join to connect to a mesh");
     }
-    if cli.client && cli.model.is_some() {
+    if cli.client && !cli.model.is_empty() {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
-    if cli.model.is_none() && cli.join.is_empty() && !cli.client {
+    if cli.model.is_empty() && cli.join.is_empty() && !cli.client {
         anyhow::bail!("--model is required (or use --join to auto-discover, or --client for lite mode)");
     }
 
@@ -148,36 +165,26 @@ async fn main() -> Result<()> {
         return run_client(cli).await;
     }
 
-    // --- Resolve model (may be deferred if joining without --model) ---
-    let model = match &cli.model {
-        Some(m) => Some(resolve_model(m).await?),
-        None => None, // will learn from mesh after joining
-    };
+    // --- Resolve models from CLI ---
+    let mut resolved_models: Vec<PathBuf> = Vec::new();
+    for m in &cli.model {
+        resolved_models.push(resolve_model(m).await?);
+    }
+
+    // Collect requested model names (what the user explicitly asked for)
+    let requested_model_names: Vec<String> = resolved_models.iter()
+        .filter_map(|m| m.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .collect();
 
     let bin_dir = match &cli.bin_dir {
         Some(d) => d.clone(),
         None => detect_bin_dir()?,
     };
 
-    // Auto-detect draft model from catalog if not explicitly set
-    if cli.draft.is_none() && !cli.no_draft {
-        if let Some(ref m) = model {
-            if let Some(draft_path) = auto_detect_draft(m) {
-                eprintln!("Auto-detected draft model: {}", draft_path.display());
-                cli.draft = Some(draft_path);
-            }
-        }
-    }
-
-    run_auto(cli, model, bin_dir).await
+    run_auto(cli, resolved_models, requested_model_names, bin_dir).await
 }
 
 /// Resolve a model path: local file, catalog name, or HuggingFace URL.
-///
-/// - If it's an existing file path, use it directly.
-/// - If it matches a catalog entry name, download if needed.
-/// - If it looks like a HF URL (https://huggingface.co/...), download to ~/.models/.
-/// - If it looks like a HF repo shorthand (org/repo/file.gguf), construct URL and download.
 async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
     let s = input.to_string_lossy();
 
@@ -196,7 +203,6 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
         if let Some(entry) = download::find_model(&s) {
             return download::download_model(entry).await;
         }
-        // Try as bare filename in ~/.models/
         anyhow::bail!(
             "Model not found: {}\nNot a local file, not in ~/.models/, not in catalog.\n\
              Use a path, a catalog name (run `mesh-llm download` to list), or a HuggingFace URL.",
@@ -221,12 +227,11 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
         return Ok(dest);
     }
 
-    // HF shorthand: org/repo/file.gguf or org/repo/resolve/main/file.gguf
+    // HF shorthand: org/repo/file.gguf
     if s.contains('/') && s.ends_with(".gguf") {
         let url = if s.contains("/resolve/") {
             format!("https://huggingface.co/{}", s)
         } else {
-            // org/repo/file.gguf -> https://huggingface.co/org/repo/resolve/main/file.gguf
             let parts: Vec<&str> = s.splitn(3, '/').collect();
             if parts.len() == 3 {
                 format!("https://huggingface.co/{}/{}/resolve/main/{}", parts[0], parts[1], parts[2])
@@ -265,15 +270,96 @@ pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
+/// Pick which model this node should serve.
+///
+/// Priority:
+/// 1. Models the mesh needs that we already have on disk
+/// 2. Models in the mesh catalog that nobody is serving yet (on disk preferred)
+/// 3. The most underserved model (fewest nodes serving it relative to its size)
+/// 4. Fall back to the first requested model in the mesh
+async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
+    let peers = node.peers().await;
+
+    // Collect what the mesh wants served (from requested_models across all peers)
+    let mut mesh_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &peers {
+        for m in &p.requested_models {
+            mesh_requested.insert(m.clone());
+        }
+    }
+
+    if mesh_requested.is_empty() {
+        // Nobody has requested anything — shouldn't happen if seeder ran
+        return None;
+    }
+
+    // Count how many nodes are serving each model
+    let mut serving_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in &peers {
+        if let Some(ref s) = p.serving {
+            *serving_count.entry(s.clone()).or_default() += 1;
+        }
+    }
+
+    // Priority 1: models the mesh wants that nobody is serving, and we have on disk
+    for m in &mesh_requested {
+        if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
+            eprintln!("📋 Assigned to serve {} (needed by mesh, already on disk)", m);
+            return Some(m.clone());
+        }
+    }
+
+    // Priority 2: models the mesh wants that nobody is serving (need download)
+    for m in &mesh_requested {
+        if serving_count.get(m).copied().unwrap_or(0) == 0 {
+            eprintln!("📋 Assigned to serve {} (needed by mesh, will download)", m);
+            return Some(m.clone());
+        }
+    }
+
+    // Priority 3: least-served model that we have on disk
+    let mut candidates: Vec<(&String, usize)> = mesh_requested.iter()
+        .filter(|m| local_models.contains(m))
+        .map(|m| (m, serving_count.get(m).copied().unwrap_or(0)))
+        .collect();
+    candidates.sort_by_key(|(_m, count)| *count);
+    if let Some((m, _)) = candidates.first() {
+        eprintln!("📋 Assigned to serve {} (least served model on disk)", m);
+        return Some((*m).clone());
+    }
+
+    // Priority 4: least-served model (will need download)
+    let mut all_candidates: Vec<(&String, usize)> = mesh_requested.iter()
+        .map(|m| (m, serving_count.get(m).copied().unwrap_or(0)))
+        .collect();
+    all_candidates.sort_by_key(|(_m, count)| *count);
+    if let Some((m, _)) = all_candidates.first() {
+        eprintln!("📋 Assigned to serve {} (least served model)", m);
+        return Some((*m).clone());
+    }
+
+    None
+}
+
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
-/// mesh-llm owns :port and proxies to llama-server (local or remote).
-async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Result<()> {
+async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_names: Vec<String>, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
     let console_port = cli.console;
 
-    // Start mesh node first (needed for join-and-discover flow)
+    // Scan local models on disk
+    let local_models = mesh::scan_local_models();
+    eprintln!("Local models on disk: {:?}", local_models);
+
+    // Start mesh node
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
     let token = node.invite_token();
+
+    // Advertise what we have on disk and what we want the mesh to serve
+    node.set_available_models(local_models.clone()).await;
+    node.set_requested_models(requested_model_names.clone()).await;
+
+    // Start periodic health check to detect dead peers
+    node.start_health_check();
 
     // Join mesh if --join was given
     if !cli.join.is_empty() {
@@ -297,40 +383,77 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
         eprintln!("Waiting for peers to join...");
     }
 
-    // Resolve model — either from CLI or discovered from mesh peers
-    let model = match model {
-        Some(m) => m,
-        None => {
-            // Learn model from mesh gossip
-            eprintln!("No --model specified, discovering from mesh...");
-            let source = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                async {
-                    loop {
-                        if let Some(src) = node.peer_model_source().await {
-                            return src;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
+    // Decide which model THIS node will serve
+    let model = if !resolved_models.is_empty() {
+        // We have explicit --model(s). If only one, serve it.
+        // If multiple, we seeded the mesh catalog but only serve one.
+        if resolved_models.len() == 1 {
+            resolved_models[0].clone()
+        } else {
+            // Multiple models seeded — pick based on allocation
+            // First, give gossip a moment to propagate
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let assignment = pick_model_assignment(&node, &local_models).await;
+            match assignment {
+                Some(name) => {
+                    // Find the resolved path for this model
+                    resolved_models.iter()
+                        .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(&name))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            // Not in our resolved list but we have it on disk
+                            download::models_dir().join(format!("{}.gguf", name))
+                        })
                 }
-            ).await.map_err(|_| anyhow::anyhow!("Timed out waiting for model info from mesh peers. Use --model to specify explicitly."))?;
-
-            eprintln!("Mesh model: {source}");
-            resolve_model(std::path::Path::new(&source)).await?
+                None => resolved_models[0].clone(), // fallback to first
+            }
         }
+    } else {
+        // No --model: discover from mesh and get assigned
+        eprintln!("No --model specified, discovering from mesh...");
+
+        // Wait for gossip to tell us what the mesh wants
+        let assignment = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            async {
+                loop {
+                    // Try assignment from mesh catalog
+                    let assignment = pick_model_assignment(&node, &local_models).await;
+                    if assignment.is_some() {
+                        return assignment;
+                    }
+                    // Fall back to old single-model source discovery
+                    if let Some(src) = node.peer_model_source().await {
+                        return Some(src);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        ).await.map_err(|_| anyhow::anyhow!("Timed out waiting for model info from mesh peers. Use --model to specify explicitly."))?;
+
+        let model_name = assignment.unwrap();
+        eprintln!("Mesh assigned model: {model_name}");
+        resolve_model(std::path::Path::new(&model_name)).await?
     };
+
+    let model_name = model.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     // Set model source for gossip (so other joiners can discover it too)
-    let model_source = if let Some(ref m) = cli.model {
-        // Use the original CLI input — could be catalog name, HF URL, etc.
-        m.to_string_lossy().to_string()
+    let model_source = if !cli.model.is_empty() {
+        cli.model[0].to_string_lossy().to_string()
     } else {
-        // We discovered it — propagate the filename stem as catalog-resolvable name
-        model.file_stem().unwrap_or_default().to_string_lossy().to_string()
+        model_name.clone()
     };
     node.set_model_source(model_source).await;
+    node.set_serving(Some(model_name.clone())).await;
+    node.set_models(vec![model_name.clone()]).await;
+    // Re-gossip so peers learn what we're serving
+    node.regossip().await;
 
-    // Auto-detect draft if we didn't have --model originally (deferred detection)
+    // Auto-detect draft model
     if cli.draft.is_none() && !cli.no_draft {
         if let Some(draft_path) = auto_detect_draft(&model) {
             eprintln!("Auto-detected draft model: {}", draft_path.display());
@@ -338,47 +461,53 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
         }
     }
 
-    // Start rpc-server — every node contributes GPU
+    // Start rpc-server
     let rpc_port = launch::start_rpc_server(
         &bin_dir, cli.device.as_deref(), Some(&model),
     ).await?;
-    eprintln!("rpc-server on 127.0.0.1:{rpc_port}");
+    eprintln!("rpc-server on 127.0.0.1:{rpc_port} serving {model_name}");
 
-    // Pass None for http_port — we'll handle HTTP proxying ourselves
     let tunnel_mgr = tunnel::Manager::start(
         node.clone(), rpc_port, channels.rpc, channels.http,
     ).await?;
 
-    // Advertise local models
-    let model_name = model.file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    node.set_models(vec![model_name]).await;
+    // Election publishes per-model targets
+    let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
 
-    // Election publishes where llama-server is via this channel
-    let (target_tx, target_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
+    // Drop channel: API proxy sends model names to drop, main loop handles shutdown
+    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    // API proxy: mesh-llm owns :api_port, forwards to wherever llama-server is
+    // API proxy: model-aware routing
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
-        api_proxy(proxy_node, api_port, proxy_rx).await;
+        api_proxy(proxy_node, api_port, proxy_rx, drop_tx).await;
     });
 
     // Console (optional)
-    let model_name_str = model.file_stem()
-        .unwrap_or_default().to_string_lossy().to_string();
+    let model_name_for_console = model_name.clone();
     let console_state = if let Some(cport) = console_port {
-        let cs = console::ConsoleState::new(node.clone(), model_name_str.clone(), api_port);
+        let cs = console::ConsoleState::new(node.clone(), model_name_for_console.clone(), api_port);
         if let Some(draft) = &cli.draft {
             let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
             cs.set_draft_name(dn).await;
         }
         let cs2 = cs.clone();
         let console_rx = target_rx.clone();
+        let mn = model_name_for_console.clone();
         tokio::spawn(async move {
-            console::start(cport, cs2, console_rx).await;
+            // Console still takes old-style InferenceTarget for now — adapt
+            let (adapted_tx, adapted_rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
+            tokio::spawn(async move {
+                let mut rx = console_rx;
+                loop {
+                    let targets = rx.borrow().clone();
+                    let target = targets.get(&mn);
+                    adapted_tx.send_replace(target);
+                    if rx.changed().await.is_err() { break; }
+                }
+            });
+            console::start(cport, cs2, adapted_rx).await;
         });
         Some(cs)
     } else {
@@ -386,7 +515,7 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
     };
 
     // Election loop
-    eprintln!("Entering auto-election (highest VRAM becomes host)...");
+    eprintln!("Entering auto-election for model: {model_name}");
     let node2 = node.clone();
     let tunnel_mgr2 = tunnel_mgr.clone();
     let bin_dir2 = bin_dir.clone();
@@ -394,10 +523,12 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
     let draft2 = cli.draft.clone();
     let draft_max = cli.draft_max;
     let force_split = cli.split;
-    let model_name_for_cb = model_name_str.clone();
+    let model_name_for_cb = model_name.clone();
+    let model_name_for_election = model_name.clone();
     tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, draft2, draft_max, force_split, target_tx,
+            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, model_name_for_election,
+            draft2, draft_max, force_split, target_tx,
             move |is_host, llama_ready| {
                 if is_host && llama_ready {
                     let url = format!("http://localhost:{api_port}");
@@ -411,7 +542,6 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
                 } else {
                     eprintln!("  API: http://localhost:{api_port} (proxied to host)");
                 }
-                // Update console if running
                 if let Some(ref cs) = console_state {
                     let cs = cs.clone();
                     tokio::spawn(async move {
@@ -422,18 +552,39 @@ async fn run_auto(mut cli: Cli, model: Option<PathBuf>, bin_dir: PathBuf) -> Res
         ).await;
     });
 
-    tokio::signal::ctrl_c().await?;
-    eprintln!("\nShutting down...");
+    // Wait for ctrl-c or a drop command for our model
+    let drop_model_name = model_name.clone();
+    let drop_node = node.clone();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nShutting down...");
+        }
+        dropped = async {
+            while let Some(name) = drop_rx.recv().await {
+                if name == drop_model_name {
+                    return name;
+                }
+                eprintln!("⚠ Drop request for '{}' — not our model ({}), ignoring", name, drop_model_name);
+            }
+            drop_model_name.clone() // channel closed
+        } => {
+            eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", dropped);
+            drop_node.set_serving(None).await;
+        }
+    }
+
     launch::kill_llama_server().await;
     Ok(())
 }
 
 /// Run as a lite client: join mesh, find host, expose local HTTP proxy.
+/// Now model-aware — routes requests by model name to the right host.
 async fn run_client(cli: Cli) -> Result<()> {
     let local_port = cli.port;
 
     let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
     let token = node.invite_token();
+    node.start_health_check();
 
     let mut joined = false;
     for t in &cli.join {
@@ -456,6 +607,12 @@ async fn run_client(cli: Cli) -> Result<()> {
         eprintln!("Found host {}", host_id.fmt_short());
     }
 
+    // Show all models available in the mesh
+    let catalog = node.mesh_catalog().await;
+    if !catalog.is_empty() {
+        eprintln!("Available models in mesh: {:?}", catalog);
+    }
+
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{local_port}")).await
         .with_context(|| format!("Failed to bind to port {local_port}"))?;
     eprintln!("Lite client ready: http://localhost:{local_port}");
@@ -463,16 +620,13 @@ async fn run_client(cli: Cli) -> Result<()> {
     eprintln!();
     eprintln!("Launch with pi:");
     eprintln!("  OPENAI_API_KEY=mesh OPENAI_BASE_URL=http://localhost:{local_port}/v1 pi --provider openai");
-    eprintln!();
-    eprintln!("Launch with goose:");
-    eprintln!("  GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:{local_port} OPENAI_API_KEY=mesh goose session");
 
     // Console (optional)
     if let Some(cport) = cli.console {
         let model_name = host.models.first().cloned().unwrap_or_default();
         let cs = console::ConsoleState::new(node.clone(), model_name, local_port);
         cs.set_client(true).await;
-        cs.update(false, true).await; // not host, but ready (tunneling to host)
+        cs.update(false, true).await;
         tokio::spawn(async move {
             let (_tx, rx) = tokio::sync::watch::channel(
                 election::InferenceTarget::Remote(host_id)
@@ -489,7 +643,31 @@ async fn run_client(cli: Cli) -> Result<()> {
                 tracing::info!("Client connection from {addr}");
                 let node = node.clone();
                 tokio::spawn(async move {
-                    match node.open_http_tunnel(host_id).await {
+                    // Peek to extract model name and check for /v1/models
+                    let mut buf = vec![0u8; 32768];
+                    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+
+                    // Handle /v1/models locally from gossip state
+                    if is_models_list_request(&buf[..n]) {
+                        let served = node.models_being_served().await;
+                        let _ = send_models_list(tcp_stream, &served).await;
+                        return;
+                    }
+
+                    // Find the host for this model
+                    let target_host = if let Some(ref name) = model_name {
+                        // Look for a host serving this model
+                        node.host_for_model(name).await.map(|p| p.id)
+                    } else {
+                        None
+                    };
+                    // Fall back to any host
+                    let target_host = target_host.unwrap_or(host_id);
+
+                    match node.open_http_tunnel(target_host).await {
                         Ok((quic_send, quic_recv)) => {
                             if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
                                 tracing::debug!("HTTP tunnel relay ended: {e}");
@@ -509,12 +687,10 @@ async fn run_client(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Unified API proxy. mesh-llm owns :port and forwards every request
-/// to wherever llama-server is running, based on the election target.
-///   - Local(port): llama-server on this machine → TCP proxy to localhost:port
-///   - Remote(peer): llama-server on another node → QUIC HTTP tunnel
-///   - None: no server yet → 503
-async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::InferenceTarget>) {
+/// Model-aware API proxy. Parses the "model" field from POST request bodies
+/// and routes to the correct host. Falls back to the first available target
+/// if model is not specified or not found.
+async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>) {
     let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -530,46 +706,178 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
         };
         let _ = tcp_stream.set_nodelay(true);
 
-        let target = target_rx.borrow().clone();
+        let targets = target_rx.borrow().clone();
         let node = node.clone();
 
+        let drop_tx = drop_tx.clone();
         tokio::spawn(async move {
-            match target {
-                election::InferenceTarget::Local(llama_port) => {
-                    // Proxy to local llama-server
-                    match tokio::net::TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
-                        Ok(upstream) => {
-                            let _ = upstream.set_nodelay(true);
-                            if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
-                                tracing::debug!("API proxy (local) ended: {e}");
-                            }
+            // Read the HTTP request to extract the model name
+            let mut buf = vec![0u8; 32768];
+            match peek_request(&tcp_stream, &mut buf).await {
+                Ok((n, model_name)) => {
+                    // Handle /v1/models ourselves if it's a GET
+                    if is_models_list_request(&buf[..n]) {
+                        let models: Vec<String> = targets.targets.keys().cloned().collect();
+                        let _ = send_models_list(tcp_stream, &models).await;
+                        return;
+                    }
+
+                    // Handle /mesh/drop control endpoint
+                    if is_drop_request(&buf[..n]) {
+                        if let Some(ref name) = model_name {
+                            let _ = drop_tx.send(name.clone());
+                            let _ = send_json_ok(tcp_stream, &serde_json::json!({"dropped": name})).await;
+                        } else {
+                            let _ = send_400(tcp_stream, "missing 'model' field").await;
                         }
-                        Err(e) => {
-                            tracing::warn!("API proxy: can't reach local llama-server on {llama_port}: {e}");
-                            let _ = send_503(tcp_stream).await;
+                        return;
+                    }
+
+                    let target = if let Some(ref name) = model_name {
+                        let t = targets.get(name);
+                        if matches!(t, election::InferenceTarget::None) {
+                            tracing::debug!("Model '{}' not found, trying first available", name);
+                            first_available_target(&targets)
+                        } else {
+                            t
                         }
+                    } else {
+                        first_available_target(&targets)
+                    };
+
+                    route_request(node, tcp_stream, target).await;
+                }
+                Err(_) => return,
+            };
+        });
+    }
+}
+
+fn first_available_target(targets: &election::ModelTargets) -> election::InferenceTarget {
+    for target in targets.targets.values() {
+        if !matches!(target, election::InferenceTarget::None) {
+            return target.clone();
+        }
+    }
+    election::InferenceTarget::None
+}
+
+fn is_drop_request(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.starts_with("POST ") && s.contains("/mesh/drop")
+}
+
+fn is_models_list_request(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.starts_with("GET ") && (s.contains("/v1/models") || s.contains("/models"))
+        && !s.contains("/v1/models/")
+}
+
+/// Extract model name from a JSON POST body in an HTTP request.
+fn extract_model_from_http(buf: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(buf).ok()?;
+    // Find the JSON body (after \r\n\r\n)
+    let body_start = s.find("\r\n\r\n")? + 4;
+    let body = &s[body_start..];
+    // Simple extraction — look for "model": "..."
+    let model_key = "\"model\"";
+    let pos = body.find(model_key)?;
+    let after_key = &body[pos + model_key.len()..];
+    // Skip whitespace and colon
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let after_ws = after_colon.trim_start();
+    // Extract quoted string
+    let after_quote = after_ws.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(after_quote[..end].to_string())
+}
+
+/// Peek at the request without consuming it. Returns bytes read and optional model name.
+async fn peek_request(stream: &tokio::net::TcpStream, buf: &mut [u8]) -> Result<(usize, Option<String>)> {
+    let n = stream.peek(buf).await?;
+    if n == 0 {
+        anyhow::bail!("Empty request");
+    }
+    let model = extract_model_from_http(&buf[..n]);
+    Ok((n, model))
+}
+
+async fn route_request(node: mesh::Node, tcp_stream: tokio::net::TcpStream, target: election::InferenceTarget) {
+    match target {
+        election::InferenceTarget::Local(llama_port) => {
+            match tokio::net::TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
+                Ok(upstream) => {
+                    let _ = upstream.set_nodelay(true);
+                    if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
+                        tracing::debug!("API proxy (local) ended: {e}");
                     }
                 }
-                election::InferenceTarget::Remote(host_id) => {
-                    // Proxy via QUIC tunnel to remote host
-                    match node.open_http_tunnel(host_id).await {
-                        Ok((quic_send, quic_recv)) => {
-                            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                                tracing::debug!("API proxy (remote) ended: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("API proxy: can't tunnel to host {}: {e}", host_id.fmt_short());
-                            let _ = send_503(tcp_stream).await;
-                        }
-                    }
-                }
-                election::InferenceTarget::None => {
+                Err(e) => {
+                    tracing::warn!("API proxy: can't reach local llama-server on {llama_port}: {e}");
                     let _ = send_503(tcp_stream).await;
                 }
             }
-        });
+        }
+        election::InferenceTarget::Remote(host_id) => {
+            match node.open_http_tunnel(host_id).await {
+                Ok((quic_send, quic_recv)) => {
+                    if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
+                        tracing::debug!("API proxy (remote) ended: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("API proxy: can't tunnel to host {}: {e}", host_id.fmt_short());
+                    let _ = send_503(tcp_stream).await;
+                }
+            }
+        }
+        election::InferenceTarget::None => {
+            let _ = send_503(tcp_stream).await;
+        }
     }
+}
+
+async fn send_models_list(mut stream: tokio::net::TcpStream, models: &[String]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let data: Vec<serde_json::Value> = models.iter().map(|m| {
+        serde_json::json!({
+            "id": m,
+            "object": "model",
+            "owned_by": "mesh-llm",
+        })
+    }).collect();
+    let body = serde_json::json!({ "object": "list", "data": data }).to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn send_json_ok(mut stream: tokio::net::TcpStream, data: &serde_json::Value) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = data.to_string();
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+async fn send_400(mut stream: tokio::net::TcpStream, msg: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = format!("{{\"error\":\"{msg}\"}}");
+    let resp = format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(), body
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn send_503(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
@@ -590,16 +898,13 @@ fn detect_bin_dir() -> Result<PathBuf> {
     let dir = exe.parent()
         .context("Binary has no parent directory")?;
 
-    // Same directory (bundle layout)
     if dir.join("rpc-server").exists() && dir.join("llama-server").exists() {
         return Ok(dir.to_path_buf());
     }
-    // Dev layout: ../llama.cpp/build/bin/
     let dev = dir.join("../llama.cpp/build/bin");
     if dev.join("rpc-server").exists() && dev.join("llama-server").exists() {
         return Ok(dev.canonicalize()?);
     }
-    // Cargo target/release/ layout
     let cargo = dir.join("../../../llama.cpp/build/bin");
     if cargo.join("rpc-server").exists() && cargo.join("llama-server").exists() {
         return Ok(cargo.canonicalize()?);
@@ -608,8 +913,7 @@ fn detect_bin_dir() -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
-/// Update ~/.pi/agent/models.json to include a "mesh" provider pointing at localhost.
-/// Creates the file if it doesn't exist, or updates the mesh provider's model list.
+/// Update ~/.pi/agent/models.json to include a "mesh" provider.
 fn update_pi_models_json(model_id: &str, port: u16) {
     let Some(home) = dirs::home_dir() else { return };
     let models_path = home.join(".pi/agent/models.json");
@@ -630,7 +934,6 @@ fn update_pi_models_json(model_id: &str, port: u16) {
         });
     let Some(providers) = providers else { return };
 
-    // Build the mesh provider entry
     let mesh = serde_json::json!({
         "baseUrl": format!("http://localhost:{port}/v1"),
         "api": "openai-completions",
@@ -652,7 +955,6 @@ fn update_pi_models_json(model_id: &str, port: u16) {
 
     providers.insert("mesh".to_string(), mesh);
 
-    // Write back
     if let Some(parent) = models_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -661,4 +963,31 @@ fn update_pi_models_json(model_id: &str, port: u16) {
             tracing::warn!("Failed to update {}: {e}", models_path.display());
         }
     }
+}
+
+/// Drop a model from the mesh by sending a control request to the running instance.
+async fn run_drop(model_name: &str, port: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = serde_json::json!({ "model": model_name }).to_string();
+    let request = format!(
+        "POST /mesh/drop HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await
+        .with_context(|| format!("Can't connect to mesh-llm on port {port}. Is it running?"))?;
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut response = vec![0u8; 4096];
+    let n = stream.read(&mut response).await?;
+    let resp = String::from_utf8_lossy(&response[..n]);
+
+    if resp.contains("200 OK") {
+        eprintln!("✅ Dropped model: {model_name}");
+    } else {
+        eprintln!("❌ Failed to drop model: {}", resp.lines().last().unwrap_or("unknown error"));
+    }
+
+    Ok(())
 }

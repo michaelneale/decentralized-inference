@@ -45,6 +45,16 @@
   .section-label { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; margin: 0.6rem 0 0.25rem; }
 
   /* Agent rows */
+  /* Models list */
+  .models-list { margin-bottom: 0.5rem; }
+  .model-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.65rem; padding: 0.15rem 0; }
+  .model-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .model-dot.warm { background: #4c4; }
+  .model-dot.cold { background: #444; }
+  .model-name { color: #aaa; font-family: monospace; }
+  .model-name.warm { color: #ccc; }
+  .model-info { color: #444; font-size: 0.55rem; margin-left: auto; }
+
   .agent-row { display: flex; gap: 0.4rem; align-items: baseline; margin-bottom: 0.2rem; }
   .agent-name { font-size: 0.6rem; font-weight: 600; color: #555; min-width: 36px; flex-shrink: 0; }
   .cmd-sm { font-family: monospace; font-size: 0.55rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 3px; padding: 0.2rem 0.35rem; cursor: text; word-break: break-all; line-height: 1.4; }
@@ -70,6 +80,9 @@
   /* Chat */
   .chat-hdr { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1a1a1a; font-size: 0.7rem; color: #555; flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
   .chat-hdr-title { flex: 1; }
+  .model-picker { background: #0a0a0a; border: 1px solid #222; border-radius: 4px; color: #aaa; font-size: 0.65rem; font-family: monospace; padding: 0.15rem 0.3rem; cursor: pointer; max-width: 180px; }
+  .model-picker:focus { outline: none; border-color: #6cf; }
+  .model-picker option { background: #0a0a0a; color: #ccc; }
   .chat-msgs { flex: 1; overflow-y: auto; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; }
   .chat-msgs:empty::before { content: "Send a message to test the model…"; color: #222; font-style: italic; font-size: 0.85rem; }
   .chat-msgs.off:empty::before { content: "Waiting for model to load…"; }
@@ -106,6 +119,7 @@
   <div class="left" id="leftPanel">
     <div class="diagram" id="diagram"></div>
     <div id="status"></div>
+    <div id="models"></div>
     <div id="agents"></div>
     <div id="joinHint"></div>
     <details class="cfg" id="cfg"><summary>Use with agents</summary><div id="cfgBody"></div></details>
@@ -114,6 +128,7 @@
     <div class="chat-hdr">
       <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
       <span class="chat-hdr-title" id="chatHdr">Chat</span>
+      <select id="modelPicker" class="model-picker" title="Select model" onchange="renderDiagram()"></select>
     </div>
     <div class="chat-msgs" id="msgs"></div>
     <div class="chat-in">
@@ -137,12 +152,13 @@ function togglePanel() {
 }
 
 function render() {
-  renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderAgents(); renderJoin(); renderMore();
+  renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderMore();
   const ok = S.llama_ready;
   $('inp').disabled = !ok; $('btn').disabled = !ok;
   $('msgs').classList.toggle('off', !ok);
   if (ok) $('msgs').classList.remove('off');
-  $('chatHdr').textContent = ok ? `Chat · ${S.model_name||'model'}` : 'Chat';
+  updateModelPicker();
+  $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
 }
 
 function renderBadge() {
@@ -167,8 +183,8 @@ function renderDiagram() {
   const el = $('diagram');
   const nodes = [];
   const isClient = S.is_client;
-  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient });
-  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false, client: p.role === 'Client' }));
+  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient, serving: S.model_name||'' });
+  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: false, client: p.role === 'Client', serving: p.serving||'' }));
   if (!nodes.length) { el.innerHTML = ''; return; }
 
   // Infer host from VRAM (gossip bug workaround)
@@ -183,10 +199,11 @@ function renderDiagram() {
 
   const total = nodes.filter(n => !n.client).reduce((s,n) => s + n.vram, 0);
   const ok = S.llama_ready;
+  const sel = selectedModel();
   const W = 320, nW = 140, nH = 68;
 
   if (nodes.length === 1) {
-    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok));
+    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok, sel));
     return;
   }
 
@@ -218,23 +235,25 @@ function renderDiagram() {
     out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">${linkLabel}</text>`;
   });
 
-  out += nBox(hX, hY, host, total, ok);
+  out += nBox(hX, hY, host, total, ok, sel);
   workers.forEach((w, i) => {
-    out += nBox(wStart + i * gap, wY, w, total, ok);
+    out += nBox(wStart + i * gap, wY, w, total, ok, sel);
   });
 
   el.innerHTML = mkSvg(W, wY + nH + 10, out);
 }
 
-function nBox(x, y, n, total, ok) {
+function nBox(x, y, n, total, ok, sel) {
   const pct = n.client ? 0 : (total > 0 ? Math.round(n.vram / total * 100) : 100);
-  const fill = n.self ? '#0d1a26' : '#10101c';
-  const stroke = ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c';
-  const sw = ok ? '1.5' : '1';
+  const active = ok && !n.client && n.serving === sel;
+  const fill = active ? '#0a1a12' : (n.self ? '#0d1a26' : '#10101c');
+  const stroke = active ? '#4c4' : (ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c');
+  const sw = active ? '2' : (ok ? '1.5' : '1');
   const label = n.self ? `${n.id} (you)` : n.id;
   const role = n.client ? 'CLIENT' : (n.host ? 'HOST' : 'WORKER');
   const rc = n.client ? '#888' : (n.host ? '#4c4' : '#6cf');
-  const svc = n.client ? 'API tunnel' : (n.host ? 'llama-server · rpc' : 'rpc-server');
+  const svc = n.client ? 'API tunnel' : (n.serving ? shortName(n.serving) : (n.host ? 'llama-server · rpc' : 'rpc-server'));
+  const svcColor = active ? '#4c4' : '#3a3a3a';
   const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
   const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
 
@@ -250,7 +269,7 @@ function nBox(x, y, n, total, ok) {
     <rect x="${x}" y="${y}" width="140" height="68" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
     <text x="${x+70}" y="${y+15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
     <text x="${x+70}" y="${y+27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
-    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="#3a3a3a" font-size="6.5" font-family="monospace">${svc}</text>
+    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="${svcColor}" font-size="6.5" font-family="monospace">${svc}</text>
     <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
     <rect x="${bX}" y="${bY}" width="${bW*pct/100}" height="${bH}" rx="1.5" fill="${n.host?'#2a5a2a':'#1a3a5c'}"/>
     <text x="${bX}" y="${bY+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}</text>
@@ -267,20 +286,38 @@ function renderStatus() {
   const el = $('status');
   const peers = (S.peers||[]).length;
   const model = S.model_name || '';
+  const n = peers + 1;
+  const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
+  const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB mesh` : '';
   if (S.llama_ready) {
-    const n = peers + 1;
-    const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
-    const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB` : '';
-    el.innerHTML = `<div class="status-line ok">✓ Running${n>1?` · ${n} nodes${vramStr}`:''}</div>`;
+    el.innerHTML = `<div class="status-line ok">✓ Running · ${n} node${n>1?'s':''}${vramStr}</div>`;
   } else if (S.is_host) {
-    el.innerHTML = `<div class="status-line">Loading ${esc(model)}…</div>`;
+    el.innerHTML = `<div class="status-line">Loading ${esc(model)}…${n>1?' · '+n+' nodes'+vramStr:''}</div>`;
   } else if (peers > 0) {
-    el.innerHTML = `<div class="status-line">Waiting for host · ${peers+1} nodes</div>`;
+    el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
   } else if (S.node_id) {
     el.innerHTML = `<div class="status-line">Waiting for peers…</div>`;
   } else {
     el.innerHTML = '';
   }
+}
+
+// ── Models list ──
+
+function renderModels() {
+  const el = $('models');
+  const models = S.mesh_models || [];
+  if (models.length <= 1) { el.innerHTML = ''; return; } // single model — no need to show list
+  el.innerHTML = '<div class="section-label">Models</div><div class="models-list">' +
+    models.map(m => {
+      const warm = m.status === 'warm';
+      const nodes = m.node_count > 0 ? `${m.node_count} node${m.node_count>1?'s':''}` : 'not loaded';
+      return `<div class="model-item">
+        <span class="model-dot ${warm?'warm':'cold'}"></span>
+        <span class="model-name ${warm?'warm':''}">${esc(shortName(m.name))}</span>
+        <span class="model-info">${nodes}</span>
+      </div>`;
+    }).join('') + '</div>';
 }
 
 // ── Agent commands (visible inline: API endpoint only) ──
@@ -338,6 +375,29 @@ function renderMore() {
 
 function shortName(n) { return (n||'').replace(/-Q\w+$/,'').replace(/-Instruct/,''); }
 
+// ── Model picker ──
+
+function updateModelPicker() {
+  const sel = $('modelPicker');
+  const warm = (S.mesh_models || []).filter(m => m.status === 'warm').map(m => m.name);
+  // Fall back to just our model if no mesh_models
+  if (!warm.length && S.model_name) warm.push(S.model_name);
+  const prev = sel.value;
+  // Only rebuild if options changed
+  const current = Array.from(sel.options).map(o => o.value).join(',');
+  const next = warm.join(',');
+  if (current !== next) {
+    sel.innerHTML = warm.map(m => `<option value="${esc(m)}">${esc(shortName(m))}</option>`).join('');
+    if (warm.includes(prev)) sel.value = prev;
+  }
+  sel.style.display = warm.length > 1 ? '' : 'none';
+}
+
+function selectedModel() {
+  const sel = $('modelPicker');
+  return sel.value || S.model_name || 'test';
+}
+
 // ── Chat ──
 
 async function send() {
@@ -346,13 +406,15 @@ async function send() {
   const msg = inp.value.trim(); if (!msg) return;
   inp.value = '';
   const el = $('msgs');
-  el.innerHTML += `<div class="mu">› ${esc(msg)}</div>`;
+  const model = selectedModel();
+  const label = shortName(model);
+  el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models||[]).filter(m=>m.status==='warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
   const bot = document.createElement('div'); bot.className = 'mb';
   el.appendChild(bot); el.scrollTop = el.scrollHeight;
   try {
     const r = await fetch('/api/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model:'test',messages:[{role:'user',content:msg}],stream:true}),
+      body: JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true}),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const reader = r.body.getReader();
