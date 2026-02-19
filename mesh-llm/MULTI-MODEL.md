@@ -1,170 +1,128 @@
-# Multi-model mesh design
+# Multi-model mesh
 
-## Overview
+## Status: implemented on `multi-model` branch
 
-The mesh serves multiple models simultaneously. Different nodes load different models. Nodes serving the same model group together for tensor split and election. The mesh routes requests by model name via a single API endpoint. The degenerate case (one model) behaves identically to today.
+The mesh serves multiple models simultaneously. Different nodes load different models. The API proxy routes requests by model name. A single `localhost:9337` endpoint serves all models.
 
-## Key principles
+## How it works
 
-- **No VRAM double-commitment.** Each node loads exactly one model at a time. VRAM is never split between models on a single node — it either goes entirely to one model (solo) or contributes layers to a tensor split for that model.
-- **No llama-server multi-model.** Each node runs one rpc-server + one llama-server (if host), same as today. Multi-model comes from different nodes running different things, not from any single process serving multiple models.
-- **Degenerate case is today's behavior.** One model in the mesh = exactly how it works now. Adding more models is additive.
-- **Smart packing.** Nodes are assigned models based on what the mesh needs, what they already have on disk, and their VRAM. No wasted capacity.
+### Starting a mesh
 
-## Node lifecycle
-
-### First node (seeder)
-
-Starts the mesh and declares what models it wants to serve. Could be one or many:
+The first node seeds the mesh with one or more model names:
 
 ```bash
-mesh-llm --model Qwen2.5-32B                              # one model, same as today
-mesh-llm --model Qwen2.5-32B --model Qwen2.5-3B           # seed with two models
-mesh-llm --models-dir ~/.models/                           # serve everything on disk
-```
+# Serve one model (backward compatible, identical to before)
+mesh-llm --model Qwen2.5-32B
 
-The node itself only loads one model (the one it's best suited for given its VRAM). The others go into the mesh catalog — available but waiting for capacity.
+# Seed two models — this node serves the first, the second waits for capacity
+mesh-llm --model Qwen2.5-32B --model Qwen2.5-3B
+```
 
 ### Joining nodes
 
-Join without specifying a model, same as today:
+Nodes can join with a specific model or let the mesh assign one:
 
 ```bash
+# Explicit: "I want to serve this model"
+mesh-llm --model GLM-4.7-Flash --join <token>
+
+# Auto-assign: mesh picks based on what's needed and what's on disk
 mesh-llm --join <token>
 ```
 
-The node gossips its VRAM and what GGUFs it has in `~/.models/`. The mesh assigns it a model using the allocation heuristic (see below). The node downloads if needed, starts rpc-server, joins that model's election group.
+Auto-assignment priority:
+1. Unserved model already on disk (no download, fills a gap)
+2. Unserved model, needs download (fills a gap)
+3. Least-served model on disk (add capacity)
+4. Least-served model overall
 
-A node can also explicitly request a model: `mesh-llm --model Qwen2.5-3B --join <token>`. This overrides the assignment — "I want to serve this specifically."
+### Lite clients
 
-## Gossip changes
+Clients use an ephemeral key (unique identity), so they work even on the same machine as a GPU node:
 
-`PeerAnnouncement` grows:
-
-```rust
-struct PeerAnnouncement {
-    addr: EndpointAddr,
-    role: NodeRole,           // Worker { model } | Host { model, http_port } | Client
-    vram_bytes: u64,
-    available_models: Vec<String>,   // GGUFs on disk (catalog contribution)
-    serving: Option<String>,         // model currently loaded in VRAM (None = not assigned yet)
-    model_source: Option<String>,    // how to get the model (for auto-download)
-}
+```bash
+mesh-llm --client --join <token> --port 9555
 ```
 
-The **mesh catalog** is the union of `available_models` from all peers, plus any models from `--model` flags that haven't been downloaded yet (they exist in the catalog as "downloadable"). A model is **servable** if enough VRAM exists across nodes that have it on disk (or are willing to download it).
+The client sees all models via gossip and routes to any host.
 
-## Mesh catalog
+## API
 
-A new concept: the mesh maintains a catalog of models, derived from gossip:
+Standard OpenAI-compatible API on every node's port:
 
-```rust
-struct MeshModel {
-    name: String,                    // e.g. "Qwen2.5-32B-Instruct-Q4_K_M"
-    source: String,                  // catalog name / HF URL for downloading
-    file_size_bytes: u64,            // from GGUF metadata or filesystem
-    nodes_on_disk: Vec<EndpointId>,  // nodes that have the file
-    nodes_serving: Vec<EndpointId>,  // nodes currently loaded and serving
-    host: Option<EndpointId>,        // elected host for this model (runs llama-server)
-    status: ModelStatus,             // Unloaded | Loading | Ready | NeedsCapacity
-}
+```bash
+# List all served models
+curl http://localhost:9337/v1/models
+
+# Chat with a specific model — routed to the right node automatically
+curl http://localhost:9337/v1/chat/completions \
+  -d '{"model": "Qwen2.5-3B-Instruct-Q4_K_M", "messages": [...]}'
 ```
 
-The catalog is computed locally by each node from gossip state. No central authority — everyone derives the same view from the same information.
+If the requested model is on this node, it's served locally. If it's on another node, the request is tunneled via QUIC to that node's llama-server.
 
-## Model allocation heuristic
+### Drop a model
 
-When a node joins (or a new model is added), the mesh decides what model the node should serve. Priority order:
-
-1. **Model that can't run without this node.** A model needs tensor split and doesn't have enough VRAM yet. This node's VRAM would put it over the threshold. Prefer models the node already has on disk (no download wait).
-
-2. **Model with no nodes serving it.** A model is in the catalog but nobody is loaded. Assign it if the node has enough VRAM and has it on disk. Gets a new model online with zero download.
-
-3. **Model that would benefit from more capacity.** A model is being served but tensor split could use more VRAM (faster split, more headroom). Node already has it on disk.
-
-4. **Download and serve.** Same as above but the node needs to download first. Deprioritized because of download latency.
-
-5. **Join the biggest model.** If everything is covered, join the largest model's group (most likely to benefit from extra tensor split capacity, and handles the degenerate single-model case).
-
-Tie-breaking: prefer models already on disk > larger models > alphabetical.
-
-## Per-model election
-
-Today's election: one global host, highest VRAM wins.
-
-New: election runs **per model group**. For each model, the highest-VRAM node *serving that model* becomes its host. That host runs llama-server with `--rpc` pointing at other nodes in the same model group.
-
-```rust
-// Pseudo-code
-for model in mesh_catalog.models_with_serving_nodes() {
-    let group: Vec<PeerInfo> = peers_serving(model);
-    let host = group.max_by_key(|p| (p.vram_bytes, p.id));
-    if i_am(host) {
-        start_llama_server(model, rpc_ports_for(group));
-    }
-}
+```bash
+mesh-llm drop <model-name>
 ```
 
-Each node only participates in one model group, so it only runs one rpc-server and at most one llama-server. The election loop iterates over model groups but each node only acts on its own group.
+Sends a control request to the running instance. The node clears its serving state, kills llama-server, and exits. Other nodes are unaffected.
 
-Re-election triggers remain the same: any peer join/leave causes all model groups to re-evaluate. A node leaving a model group might leave it short on VRAM, which could trigger reassignment of unassigned nodes.
+## Architecture
 
-## API routing
+### No accidental tensor split
 
-The API proxy on `:9337` becomes model-aware:
+Each node runs its own llama-server independently (solo mode) as long as the model fits in its VRAM. Two nodes both serving Qwen2.5-3B = two independent llama-servers, not a tensor split.
 
-```rust
-// Parse model from request body
-let model_name = parse_model_from_request(&body);
+Tensor split only happens when:
+- The model genuinely doesn't fit on any single node, OR
+- `--split` is explicitly passed
 
-// Look up target for this model
-let target = model_targets.get(&model_name);
+### Per-model election groups
 
-match target {
-    Some(InferenceTarget::Local(port)) => proxy_to_local(port),
-    Some(InferenceTarget::Remote(peer)) => proxy_via_quic(peer),
-    None => return_503("model not available"),
-}
-```
+Nodes serving the same model form an election group. Within a group, the highest-VRAM node becomes host, others become RPC workers (only relevant in split mode).
 
-`/v1/models` returns all models in the mesh catalog with their status (ready, loading, needs capacity).
+Different model groups are independent — their elections don't interfere.
 
-Every node in the mesh can serve as the API entry point — workers proxy to the right host via QUIC, same as today but per-model. A client node proxies all requests through the mesh.
+### Gossip
 
-## Unloading and contention
+`PeerAnnouncement` carries:
+- `serving: Option<String>` — model currently loaded
+- `available_models: Vec<String>` — GGUFs on disk (>500MB, scanned from `~/.models/`)
+- `requested_models: Vec<String>` — from `--model` flags (the mesh catalog seed)
+- `role: NodeRole` — Worker / Host { http_port } / Client
 
-When VRAM is tight or models are unused:
+The **mesh catalog** is the union of all nodes' `available_models` and `requested_models`.
 
-**Tracking usage:** Each model host tracks last-request time. This propagates via gossip (a timestamp or "last used N seconds ago" field). Nodes can see which models are hot and which are cold.
+State changes (becoming host, setting serving) trigger a regossip to all peers so they learn immediately rather than waiting for the next connection event.
 
-**When to unload:** A model becomes a candidate for unloading when:
-- It hasn't received a request in N minutes (configurable, default 30?)
-- Another model needs the VRAM (new model added to catalog, or existing model needs more split capacity)
-- The node is explicitly told to switch (future: admin command)
+### Health check
 
-**How unloading works:** The node kills its rpc-server + llama-server (if host), updates gossip to `serving: None`, and the allocation heuristic runs again. It might get assigned a different model, or stay idle until needed. From the model group's perspective, a node left — same as today when a peer disconnects. The group re-elects and adjusts tensor split.
+Every 15s, each node probes all peers via gossip with a 5s timeout. Dead peers are removed immediately rather than waiting for QUIC idle timeout (30s). This ensures:
+- Dead models go cold within ~15s
+- Rejoining nodes are discovered cleanly
+- The console and `/v1/models` stay accurate
 
-**No preemption for v1.** A node doesn't get yanked from a model mid-request. Unloading only happens during idle periods. Usage-aware rebalancing is an optimisation — v1 can just use static assignments (whatever you were assigned at join time, you keep).
+### Routing
 
-## What changes per file
+The API proxy on each node peeks at the HTTP request body to extract the `model` field, then routes:
+- **Local model** → forward to local llama-server
+- **Remote model** → QUIC tunnel to the host for that model
+- **Unknown model** → fall back to first available target
 
-- **mesh.rs**: `PeerAnnouncement` grows `available_models` (all GGUFs on disk) and `serving` (currently loaded model). New helper methods: `models_catalog()`, `peers_serving(model)`, `peer_for_model_host(model)`.
-- **election.rs**: `election_loop` becomes `election_loop_for_model` or iterates model groups. `should_be_host` takes a model filter. `InferenceTarget` map becomes `HashMap<String, InferenceTarget>`.
-- **main.rs**: `--model` becomes repeatable or `--models-dir` added. API proxy parses model name from request body. `/v1/models` endpoint returns mesh catalog. Model allocation heuristic on join.
-- **launch.rs**: No changes — still starts one rpc-server and one llama-server per node.
-- **tunnel.rs**: No changes — tunnels are per-peer, model-agnostic.
-- **rewrite.rs**: No changes.
+## Console
 
-## Degenerate cases
+The web console (`--console <port>`) shows:
+- **Models list** — all mesh models with warm (green) / cold (gray) status and node count
+- **Model picker** — dropdown in chat header to select which model to talk to
+- **Node highlight** — switching models highlights the node box serving it
+- **Total mesh VRAM** — aggregate across all GPU nodes
+- **Per-node model name** — each node box shows what it's serving
 
-- **One model, one node**: identical to today. Single model group, solo election, no split.
-- **One model, multiple nodes**: identical to today. Single model group, tensor split.
-- **Multiple models, all fit solo**: each node loads a different model, each is its own host. No tensor split. Mesh is just a routing layer.
-- **Mix of big and small models**: big model gets tensor split across multiple nodes, small models each on one node. Natural packing.
+## What's not implemented
 
-## Open questions
-
-- Should nodes be able to serve more than one model if they have enough VRAM? (Probably not for v1 — keep it simple, one model per node.)
-- How does the console show multi-model state? (Model list with status, per-model cluster bar?)
-- Should the seeder's `--model` list be a hard requirement ("mesh must serve these") or a suggestion ("serve these if capacity allows")?
-- Speculative decoding: draft model is always local to the host. Does it count as a second model? (No — it's small and co-located, not a mesh concern.)
+- **Load balancing across multiple hosts for the same model** — if two nodes both serve Qwen2.5-3B independently, the proxy picks one deterministically. No round-robin.
+- **`--models-dir`** — serve everything on disk automatically. Currently you list models explicitly with `--model`.
+- **Usage-aware rebalancing** — no automatic unloading of idle models or reassignment based on traffic.
+- **Admin/trust gating on drop** — anyone on localhost can drop a model.
