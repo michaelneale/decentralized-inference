@@ -278,15 +278,15 @@ function renderStatus() {
   const el = $('status');
   const peers = (S.peers||[]).length;
   const model = S.model_name || '';
+  const n = peers + 1;
+  const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
+  const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB mesh` : '';
   if (S.llama_ready) {
-    const n = peers + 1;
-    const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
-    const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB` : '';
-    el.innerHTML = `<div class="status-line ok">✓ Running${n>1?` · ${n} nodes${vramStr}`:''}</div>`;
+    el.innerHTML = `<div class="status-line ok">✓ Running · ${n} node${n>1?'s':''}${vramStr}</div>`;
   } else if (S.is_host) {
-    el.innerHTML = `<div class="status-line">Loading ${esc(model)}…</div>`;
+    el.innerHTML = `<div class="status-line">Loading ${esc(model)}…${n>1?' · '+n+' nodes'+vramStr:''}</div>`;
   } else if (peers > 0) {
-    el.innerHTML = `<div class="status-line">Waiting for host · ${peers+1} nodes</div>`;
+    el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
   } else if (S.node_id) {
     el.innerHTML = `<div class="status-line">Waiting for peers…</div>`;
   } else {
