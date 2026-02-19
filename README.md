@@ -351,7 +351,6 @@ Or filter first:
 ```bash
 mesh-llm discover --model Qwen           # by model name
 mesh-llm discover --region US             # by region
-mesh-llm discover --needs-workers         # meshes that want GPU help
 ```
 
 **Optional flags for publishers:**

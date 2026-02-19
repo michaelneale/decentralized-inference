@@ -141,9 +141,6 @@ enum Command {
         /// Filter by region
         #[arg(long)]
         region: Option<String>,
-        /// Only show meshes that need more GPU nodes
-        #[arg(long)]
-        needs_workers: bool,
         /// Print the invite token of the best match (for piping to --join)
         #[arg(long)]
         auto: bool,
@@ -195,8 +192,8 @@ async fn main() -> Result<()> {
             Command::Drop { name, port } => {
                 return run_drop(name, *port).await;
             }
-            Command::Discover { model, min_vram, region, needs_workers, auto, relay } => {
-                return run_discover(model.clone(), *min_vram, region.clone(), *needs_workers, *auto, relay.clone()).await;
+            Command::Discover { model, min_vram, region, auto, relay } => {
+                return run_discover(model.clone(), *min_vram, region.clone(), *auto, relay.clone()).await;
             }
             Command::RotateKey => {
                 return nostr::rotate_keys().map_err(Into::into);
@@ -1063,7 +1060,6 @@ async fn run_discover(
     model: Option<String>,
     min_vram: Option<f64>,
     region: Option<String>,
-    needs_workers: bool,
     auto_join: bool,
     relays: Vec<String>,
 ) -> Result<()> {
@@ -1077,7 +1073,6 @@ async fn run_discover(
         model,
         min_vram_gb: min_vram,
         region,
-        needs_workers,
     };
 
     eprintln!("🔍 Searching Nostr relays for mesh-llm meshes...");

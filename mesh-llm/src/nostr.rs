@@ -36,9 +36,6 @@ pub struct MeshListing {
     pub total_vram_bytes: u64,
     /// Number of GPU nodes in the mesh
     pub node_count: usize,
-    /// Whether the mesh wants more GPU nodes (unserved models or needs split)
-    #[serde(default)]
-    pub needs_workers: bool,
     /// Optional human-readable name for the mesh
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -77,9 +74,6 @@ impl std::fmt::Display for DiscoveredMesh {
         }
         if !self.listing.wanted_models.is_empty() {
             write!(f, "  wanted: {}", self.listing.wanted_models.join(", "))?;
-        }
-        if self.listing.needs_workers {
-            write!(f, "  [needs workers]")?;
         }
         Ok(())
     }
@@ -316,8 +310,6 @@ pub async fn publish_loop(
             .count()
             + 1; // +1 for self
 
-        let needs_workers = !wanted.is_empty();
-
         let listing = MeshListing {
             invite_token,
             models: actually_serving,
@@ -325,7 +317,6 @@ pub async fn publish_loop(
             available_models: available,
             total_vram_bytes: total_vram,
             node_count,
-            needs_workers,
             name: name.clone(),
             region: region.clone(),
         };
@@ -353,8 +344,6 @@ pub struct MeshFilter {
     pub min_vram_gb: Option<f64>,
     /// Geographic region
     pub region: Option<String>,
-    /// Only show meshes that need more GPU nodes
-    pub needs_workers: bool,
 }
 
 impl MeshFilter {
@@ -379,9 +368,6 @@ impl MeshFilter {
                 Some(r) if r.eq_ignore_ascii_case(region) => {}
                 _ => return false,
             }
-        }
-        if self.needs_workers && !mesh.listing.needs_workers {
-            return false;
         }
         true
     }
