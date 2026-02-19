@@ -17,7 +17,8 @@ src/
 ├── launch.rs      rpc-server and llama-server process management
 ├── console.rs     Web console: status, model list, chat proxy (--console flag)
 ├── console.html   Embedded dashboard with model picker and topology view
-└── download.rs    Model catalog and HuggingFace download
+├── download.rs    Model catalog and HuggingFace download
+└── nostr.rs       Nostr publish/discover: mesh listings on public relays
 ```
 
 ## Key design

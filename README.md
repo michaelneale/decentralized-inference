@@ -314,6 +314,31 @@ Other features:
 </details>
 
 <details>
+<summary>Nostr discovery</summary>
+
+Meshes can publish themselves to Nostr relays so others can find and join them. No central registry — discovery is fully decentralized via the Nostr protocol.
+
+```bash
+# Publish your mesh for others to find
+mesh-llm --model Qwen2.5-32B --publish --mesh-name "my-rig" --region AU
+
+# Discover available meshes
+mesh-llm discover                          # list all
+mesh-llm discover --model Qwen             # filter by model
+mesh-llm discover --min-vram 64            # filter by VRAM
+mesh-llm discover --region US              # filter by region
+
+# Auto-join the best match (pipe-friendly)
+mesh-llm --join $(mesh-llm discover --auto --model Qwen)
+```
+
+Published listings include: invite token, served models, wanted models, total VRAM, node count, name, and region. Listings are republished every 60s and expire after 120s if the mesh goes down.
+
+Nostr keys are stored separately from the mesh identity (`~/.mesh-llm/nostr.nsec`). Rotate with `mesh-llm rotate-key` — this changes the publisher identity without affecting the mesh.
+
+</details>
+
+<details>
 <summary>Future ideas</summary>
 
 ### Load balancing across hosts
