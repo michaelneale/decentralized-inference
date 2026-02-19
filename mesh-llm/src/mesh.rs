@@ -416,8 +416,16 @@ impl Node {
         *self.available_models.lock().await = models;
     }
 
+    pub async fn available_models(&self) -> Vec<String> {
+        self.available_models.lock().await.clone()
+    }
+
     pub async fn set_requested_models(&self, models: Vec<String>) {
         *self.requested_models.lock().await = models;
+    }
+
+    pub async fn requested_models(&self) -> Vec<String> {
+        self.requested_models.lock().await.clone()
     }
 
     /// Start a background task that periodically checks peer health.

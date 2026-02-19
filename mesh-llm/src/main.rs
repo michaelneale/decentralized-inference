@@ -3,6 +3,7 @@ mod download;
 mod election;
 mod launch;
 mod mesh;
+mod nostr;
 mod rewrite;
 mod tunnel;
 
@@ -87,6 +88,28 @@ struct Cli {
     /// Start the web console on this port (default: 3131 if flag is present).
     #[arg(long, default_missing_value = "3131", num_args = 0..=1)]
     console: Option<u16>,
+
+    /// Publish this mesh to Nostr for discovery by others.
+    /// Republishes every 60s so the listing stays fresh.
+    #[arg(long)]
+    publish: bool,
+
+    /// Human-readable name for this mesh (shown in discovery).
+    #[arg(long)]
+    mesh_name: Option<String>,
+
+    /// Geographic region tag (e.g. "US", "EU", "AU"). Shown in discovery.
+    #[arg(long)]
+    region: Option<String>,
+
+    /// Stop advertising on Nostr when this many clients are connected.
+    /// Re-publishes when clients drop below the cap. No cap by default.
+    #[arg(long)]
+    max_clients: Option<usize>,
+
+    /// Nostr relay URLs for publishing/discovery (default: damus, nos.lol, nostr.band).
+    #[arg(long)]
+    nostr_relay: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,6 +130,29 @@ enum Command {
         #[arg(long, default_value = "9337")]
         port: u16,
     },
+    /// Discover meshes published to Nostr and optionally auto-join one
+    Discover {
+        /// Filter by model name (substring match)
+        #[arg(long)]
+        model: Option<String>,
+        /// Filter by minimum VRAM (GB)
+        #[arg(long)]
+        min_vram: Option<f64>,
+        /// Filter by region
+        #[arg(long)]
+        region: Option<String>,
+        /// Only show meshes that need more GPU nodes
+        #[arg(long)]
+        needs_workers: bool,
+        /// Print the invite token of the best match (for piping to --join)
+        #[arg(long)]
+        auto: bool,
+        /// Nostr relay URLs (default: damus, nos.lol, nostr.band)
+        #[arg(long)]
+        relay: Vec<String>,
+    },
+    /// Rotate the Nostr identity key (forces new keypair on next --publish)
+    RotateKey,
 }
 
 #[tokio::main]
@@ -114,8 +160,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("mesh_inference=info".parse()?),
+                .add_directive("mesh_inference=info".parse()?)
+                .add_directive("nostr_relay_pool=off".parse()?)
+                .add_directive("nostr_sdk=warn".parse()?),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -145,6 +194,12 @@ async fn main() -> Result<()> {
             }
             Command::Drop { name, port } => {
                 return run_drop(name, *port).await;
+            }
+            Command::Discover { model, min_vram, region, needs_workers, auto, relay } => {
+                return run_discover(model.clone(), *min_vram, region.clone(), *needs_workers, *auto, relay.clone()).await;
+            }
+            Command::RotateKey => {
+                return nostr::rotate_keys().map_err(Into::into);
             }
         }
     }
@@ -552,6 +607,21 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         ).await;
     });
 
+    // Nostr publish loop (if --publish)
+    let nostr_publisher = if cli.publish {
+        let nostr_keys = nostr::load_or_create_keys()?;
+        let relays = nostr_relays(&cli.nostr_relay);
+        let pub_node = node.clone();
+        let pub_name = cli.mesh_name.clone();
+        let pub_region = cli.region.clone();
+        let pub_max_clients = cli.max_clients;
+        Some(tokio::spawn(async move {
+            nostr::publish_loop(pub_node, nostr_keys, relays, pub_name, pub_region, pub_max_clients, 60).await;
+        }))
+    } else {
+        None
+    };
+
     // Wait for ctrl-c or a drop command for our model
     let drop_model_name = model_name.clone();
     let drop_node = node.clone();
@@ -571,6 +641,20 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", dropped);
             drop_node.set_serving(None).await;
         }
+    }
+
+    // Clean up Nostr listing on shutdown
+    if cli.publish {
+        if let Ok(keys) = nostr::load_or_create_keys() {
+            let relays = nostr_relays(&cli.nostr_relay);
+            if let Ok(publisher) = nostr::Publisher::new(keys, &relays).await {
+                let _ = publisher.unpublish().await;
+                eprintln!("Removed Nostr listing");
+            }
+        }
+    }
+    if let Some(handle) = nostr_publisher {
+        handle.abort();
     }
 
     launch::kill_llama_server().await;
@@ -963,6 +1047,80 @@ fn update_pi_models_json(model_id: &str, port: u16) {
             tracing::warn!("Failed to update {}: {e}", models_path.display());
         }
     }
+}
+
+/// Resolve Nostr relay URLs from CLI or defaults.
+fn nostr_relays(cli_relays: &[String]) -> Vec<String> {
+    if cli_relays.is_empty() {
+        nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+    } else {
+        cli_relays.to_vec()
+    }
+}
+
+/// Discover meshes on Nostr and optionally join one.
+async fn run_discover(
+    model: Option<String>,
+    min_vram: Option<f64>,
+    region: Option<String>,
+    needs_workers: bool,
+    auto_join: bool,
+    relays: Vec<String>,
+) -> Result<()> {
+    let relays = if relays.is_empty() {
+        nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+    } else {
+        relays
+    };
+
+    let filter = nostr::MeshFilter {
+        model,
+        min_vram_gb: min_vram,
+        region,
+        needs_workers,
+    };
+
+    eprintln!("🔍 Searching Nostr relays for mesh-llm meshes...");
+    let meshes = nostr::discover(&relays, &filter).await?;
+
+    if meshes.is_empty() {
+        eprintln!("No meshes found.");
+        if filter.model.is_some() || filter.min_vram_gb.is_some() || filter.region.is_some() {
+            eprintln!("Try broader filters or check relays.");
+        }
+        return Ok(());
+    }
+
+    eprintln!("Found {} mesh(es):\n", meshes.len());
+    for (i, mesh) in meshes.iter().enumerate() {
+        eprintln!("  [{}] {}", i + 1, mesh);
+        let token = &mesh.listing.invite_token;
+        let display_token = if token.len() > 40 {
+            format!("{}...{}", &token[..20], &token[token.len()-12..])
+        } else {
+            token.clone()
+        };
+        if !mesh.listing.available_models.is_empty() {
+            eprintln!("      on disk: {}", mesh.listing.available_models.join(", "));
+        }
+        eprintln!("      token: {}", display_token);
+        eprintln!();
+    }
+
+    if auto_join {
+        let best = &meshes[0];
+        eprintln!("Auto-joining best match: {}", best);
+        eprintln!("\nRun:");
+        eprintln!("  mesh-llm --join {}", best.listing.invite_token);
+        // Print the full token so it can be piped
+        println!("{}", best.listing.invite_token);
+    } else {
+        eprintln!("To join a mesh:");
+        eprintln!("  mesh-llm --join <token>");
+        eprintln!("\nOr use `mesh-llm discover --join` to auto-join the best match.");
+    }
+
+    Ok(())
 }
 
 /// Drop a model from the mesh by sending a control request to the running instance.

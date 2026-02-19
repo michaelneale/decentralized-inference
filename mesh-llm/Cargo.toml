@@ -16,3 +16,5 @@ rand = "0.9"
 base64 = "0.22"
 dirs = "6.0.0"
 hex = "0.4.3"
+nostr-sdk = { version = "0.44.1", default-features = false }
+rustls = "0.23.36"
