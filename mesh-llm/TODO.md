@@ -1,41 +1,42 @@
 # mesh-llm TODO
 
-## Console flicker: nodes appearing/disappearing
-Flappy cross-network connections (e.g. Mini↔Brad via relay) cause peer_rx to fire
-on every reconnect, making the console diagram flicker even though nothing meaningful changed.
-Election already handles it (no restart), it's a display issue.
+## Event-driven mesh (in progress)
+Replaced aggressive 15s health check polling with event-driven death detection:
+- [x] Slow heartbeat (60s) catches silent failures
+- [x] Death broadcast: when tunnel fails, broadcast "X is dead" to all peers
+- [x] Peers verify death before removing (prevents split-brain false positives)
+- [x] Clean shutdown broadcast (STREAM_PEER_LEAVING)
+- [x] `open_http_tunnel` failure triggers `handle_peer_death` → broadcast
+- [ ] Test: kill -9 a node, verify other nodes detect + remove within ~60s
+- [ ] Test: clean shutdown (ctrl-c), verify peers remove immediately
 
-**Fix:** Only notify peer_rx when PeerInfo actually changes (serving, role, VRAM) — not on
-reconnect events. Diff old vs new in `add_peer()` before sending.
+## Unified passive mode
+Clients and standby GPU nodes use same lightweight path:
+- Get routing table from any active node (STREAM_ROUTE_REQUEST)
+- Route requests by tunneling to hosts
+- No gossip participation
+- `--client` = passive + never promote (0 VRAM)
+- Standby GPU = passive + can promote when needed
+- [ ] Refactor `run_client()` and `run_idle_gpu()` into single `run_passive()` path
+- [ ] Hash-based host selection: `hash(client_id + model) % hosts.len()`
+- [ ] Periodic routing table refresh (30s) instead of gossip
 
-## Console: VRAM usage bar per node
-Currently each node box shows a bar for VRAM proportion (node's share of total mesh VRAM).
-Add a second bar showing how much of that node's VRAM is in use by the model it's serving.
+## Reactive rebalancing
+On topology changes, nodes self-decide whether to promote:
+- [ ] On join: check routing table, serve unserved model if possible
+- [ ] On death broadcast: standby checks if dead node's model is now unserved
+- [ ] Standby with matching model promotes itself to active
 
-**Plan:**
-1. Add `size_gb: f64` to `MeshModelPayload` in `console.rs`
-2. Get size from `~/.models/<name>.gguf` via `fs::metadata`. If not on our disk, use 0
-3. In console HTML, match `node.serving` to `mesh_models` to get `size_gb`
-4. Compute `usage_pct = model.size_gb / node.vram * 100`
-5. Draw a second thinner bar or inner fill in a different color (e.g. brighter green/blue)
+## Don't download what won't fit
+- [ ] Before downloading via `--model`, check if node VRAM >= model_size * 1.1
+- [ ] Skip download if model won't fit and no split peers available
 
-Data is already in gossip — no new network calls needed.
+## Console VRAM usage bar per node
+Add a second bar showing how much of node's VRAM is used by its model.
+Data is already in gossip — just UI work in console.html.
 
-## Smart model assignment for publisher
-When publisher runs `--model A --model B`, assignment is arbitrary (HashSet iteration order).
-Should assign biggest model to biggest VRAM node. The publisher picks first (no peers yet)
-so it should sort its own models by size descending and serve the largest one, leaving
-smaller ones for joining nodes.
-
-## Load balancing across multiple hosts for same model
-When multiple nodes independently serve the same model, the proxy picks one deterministically.
-Should round-robin or least-connections when multiple hosts available.
-
-## `--models-dir` flag
-Serve everything on disk automatically instead of listing models explicitly.
-
-## Usage-aware rebalancing
-Track per-model request rates, unload idle models, reassign nodes.
-
-## P2P model transfer
-Nodes serve GGUF chunks over QUIC to new joiners instead of downloading from HuggingFace.
+## Test forced tensor split
+- [ ] Pick a small model (e.g. Qwen2.5-3B)
+- [ ] Force split across two nodes even though it fits on one (test `--split` flag or hack VRAM detection)
+- [ ] Verify rpc-server workers and tensor split still work correctly with new event-driven mesh
+- [ ] Confirm solo mode still works (no accidental split when model fits locally)

@@ -406,7 +406,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     node.set_requested_models(requested_model_names.clone()).await;
 
     // Start periodic health check to detect dead peers
-    node.start_health_check();
+    node.start_heartbeat();
 
     // Join mesh if --join was given
     if !cli.join.is_empty() {
@@ -650,6 +650,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         }
     }
 
+    // Announce clean departure to peers
+    node.broadcast_leaving().await;
+
     // Clean up Nostr listing on shutdown
     if cli.publish {
         if let Ok(keys) = nostr::load_or_create_keys() {
@@ -765,7 +768,7 @@ async fn run_client(cli: Cli) -> Result<()> {
 
     let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
     let token = node.invite_token();
-    node.start_health_check();
+    node.start_heartbeat();
 
     let mut joined = false;
     for t in &cli.join {
@@ -872,6 +875,7 @@ async fn run_client(cli: Cli) -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\nShutting down...");
+                node.broadcast_leaving().await;
                 break;
             }
         }

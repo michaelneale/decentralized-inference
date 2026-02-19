@@ -19,6 +19,8 @@ const STREAM_TUNNEL: u8 = 0x02;
 const STREAM_TUNNEL_MAP: u8 = 0x03;
 pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
 const STREAM_ROUTE_REQUEST: u8 = 0x05;
+const STREAM_PEER_DOWN: u8 = 0x06;
+const STREAM_PEER_LEAVING: u8 = 0x07;
 
 /// Role a node plays in the mesh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -448,15 +450,16 @@ impl Node {
     /// Probes each peer by attempting a gossip exchange. If the probe fails
     /// (connection dead, peer unresponsive), removes the peer immediately
     /// rather than waiting for QUIC idle timeout.
-    pub fn start_health_check(&self) {
+    /// Start a slow heartbeat (60s) to catch silent failures.
+    /// Unlike the old aggressive health check (15s full gossip), this just
+    /// verifies connections are alive. Death detection mostly happens on use
+    /// (tunnel open fails → broadcast_peer_down).
+    pub fn start_heartbeat(&self) {
         let node = self.clone();
         tokio::spawn(async move {
-            // Track consecutive failures per peer before removing
             let mut fail_counts: std::collections::HashMap<EndpointId, u32> = std::collections::HashMap::new();
-            const MAX_FAILURES: u32 = 2; // remove after 2 consecutive failures (~30s)
-
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
                 let peers_and_conns: Vec<(EndpointId, Option<Connection>)> = {
                     let state = node.state.lock().await;
@@ -467,64 +470,98 @@ impl Node {
                 };
 
                 for (peer_id, conn) in peers_and_conns {
-                    let Some(conn) = conn else {
-                        let count = fail_counts.entry(peer_id).or_default();
-                        *count += 1;
-                        if *count >= MAX_FAILURES {
-                            tracing::info!("Health check: no connection to {} ({} failures), removing", peer_id.fmt_short(), count);
-                            fail_counts.remove(&peer_id);
-                            node.remove_peer(peer_id).await;
-                        } else {
-                            tracing::info!("Health check: no connection to {} ({}/{}), will retry", peer_id.fmt_short(), count, MAX_FAILURES);
-                        }
-                        continue;
+                    let alive = if let Some(conn) = conn {
+                        // Use gossip stream as heartbeat — also refreshes peer state
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            node.initiate_gossip(conn, peer_id),
+                        ).await.map(|r| r.is_ok()).unwrap_or(false)
+                    } else {
+                        false
                     };
 
-                    // Try to open a gossip stream with a short timeout
-                    let probe = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        node.initiate_gossip(conn, peer_id),
-                    ).await;
-
-                    match probe {
-                        Ok(Ok(())) => {
-                            // Peer is alive, clear failure count
+                    if alive {
+                        fail_counts.remove(&peer_id);
+                    } else {
+                        let count = fail_counts.entry(peer_id).or_default();
+                        *count += 1;
+                        if *count >= 2 {
+                            eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
                             fail_counts.remove(&peer_id);
-                        }
-                        Ok(Err(e)) => {
-                            let count = fail_counts.entry(peer_id).or_default();
-                            *count += 1;
-                            if *count >= MAX_FAILURES {
-                                tracing::info!("Health check: {} unreachable ({e}), {count} failures, removing", peer_id.fmt_short());
-                                fail_counts.remove(&peer_id);
-                                {
-                                    let mut state = node.state.lock().await;
-                                    state.connections.remove(&peer_id);
-                                }
-                                node.remove_peer(peer_id).await;
-                            } else {
-                                tracing::info!("Health check: {} unreachable ({e}), {count}/{MAX_FAILURES} failures", peer_id.fmt_short());
-                            }
-                        }
-                        Err(_) => {
-                            let count = fail_counts.entry(peer_id).or_default();
-                            *count += 1;
-                            if *count >= MAX_FAILURES {
-                                tracing::info!("Health check: {} timed out, {count} failures, removing", peer_id.fmt_short());
-                                fail_counts.remove(&peer_id);
-                                {
-                                    let mut state = node.state.lock().await;
-                                    state.connections.remove(&peer_id);
-                                }
-                                node.remove_peer(peer_id).await;
-                            } else {
-                                tracing::info!("Health check: {} timed out, {count}/{MAX_FAILURES} failures", peer_id.fmt_short());
-                            }
+                            node.handle_peer_death(peer_id).await;
+                        } else {
+                            eprintln!("💛 Heartbeat: {} unreachable ({}/2), will retry", peer_id.fmt_short(), count);
                         }
                     }
                 }
             }
         });
+    }
+
+    /// Handle a peer death: remove from state, broadcast to all other peers.
+    pub async fn handle_peer_death(&self, dead_id: EndpointId) {
+        eprintln!("⚠️  Peer {} died — removing and broadcasting", dead_id.fmt_short());
+        {
+            let mut state = self.state.lock().await;
+            state.connections.remove(&dead_id);
+        }
+        self.remove_peer(dead_id).await;
+        self.broadcast_peer_down(dead_id).await;
+    }
+
+    /// Broadcast that a peer is down to all connected peers.
+    async fn broadcast_peer_down(&self, dead_id: EndpointId) {
+        let conns: Vec<(EndpointId, Connection)> = {
+            let state = self.state.lock().await;
+            state.connections.iter()
+                .filter(|(id, _)| **id != dead_id)
+                .map(|(id, c)| (*id, c.clone()))
+                .collect()
+        };
+        let dead_bytes = dead_id.as_bytes().to_vec();
+        for (peer_id, conn) in conns {
+            let bytes = dead_bytes.clone();
+            tokio::spawn(async move {
+                let res = async {
+                    let (mut send, _recv) = conn.open_bi().await?;
+                    send.write_all(&[STREAM_PEER_DOWN]).await?;
+                    send.write_all(&bytes).await?;
+                    send.finish()?;
+                    Ok::<_, anyhow::Error>(())
+                }.await;
+                if let Err(e) = res {
+                    tracing::debug!("Failed to broadcast peer_down to {}: {e}", peer_id.fmt_short());
+                }
+            });
+        }
+    }
+
+    /// Announce clean shutdown to all peers.
+    pub async fn broadcast_leaving(&self) {
+        let my_id_bytes = self.endpoint.id().as_bytes().to_vec();
+        let conns: Vec<(EndpointId, Connection)> = {
+            let state = self.state.lock().await;
+            state.connections.iter()
+                .map(|(id, c)| (*id, c.clone()))
+                .collect()
+        };
+        for (peer_id, conn) in conns {
+            let bytes = my_id_bytes.clone();
+            tokio::spawn(async move {
+                let res = async {
+                    let (mut send, _recv) = conn.open_bi().await?;
+                    send.write_all(&[STREAM_PEER_LEAVING]).await?;
+                    send.write_all(&bytes).await?;
+                    send.finish()?;
+                    Ok::<_, anyhow::Error>(())
+                }.await;
+                if let Err(e) = res {
+                    tracing::debug!("Failed to send leaving to {}: {e}", peer_id.fmt_short());
+                }
+            });
+        }
+        // Give broadcasts a moment to flush
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 
     /// Get model source from any peer in the mesh (for auto-download on join).
@@ -686,9 +723,19 @@ impl Node {
             self.state.lock().await.connections.get(&peer_id).cloned()
                 .ok_or_else(|| anyhow::anyhow!("No connection to {}", peer_id.fmt_short()))?
         };
-        let (mut send, recv) = conn.open_bi().await?;
-        send.write_all(&[STREAM_TUNNEL_HTTP]).await?;
-        Ok((send, recv))
+        let result = async {
+            let (mut send, recv) = conn.open_bi().await?;
+            send.write_all(&[STREAM_TUNNEL_HTTP]).await?;
+            Ok::<_, anyhow::Error>((send, recv))
+        }.await;
+
+        if result.is_err() {
+            // Connection failed — peer is likely dead, broadcast it
+            tracing::info!("Tunnel to {} failed, broadcasting death", peer_id.fmt_short());
+            self.handle_peer_death(peer_id).await;
+        }
+
+        result
     }
 
     pub async fn set_tunnel_port(&self, id: EndpointId, port: u16) {
@@ -923,6 +970,59 @@ impl Node {
                         if let Ok(data) = serde_json::to_vec(&table) {
                             let _ = send.write_all(&data).await;
                             let _ = send.finish();
+                        }
+                    });
+                }
+                STREAM_PEER_DOWN => {
+                    let node = self.clone();
+                    tokio::spawn(async move {
+                        // Read the 32-byte endpoint ID of the dead peer
+                        let mut id_bytes = [0u8; 32];
+                        if recv.read_exact(&mut id_bytes).await.is_ok() {
+                            if let Ok(pk) = iroh::PublicKey::from_bytes(&id_bytes) {
+                                let dead_id = EndpointId::from(pk);
+                                if dead_id != node.endpoint.id() {
+                                    // Verify: try to reach the dead peer ourselves before removing
+                                    let should_remove = {
+                                        let state = node.state.lock().await;
+                                        if let Some(conn) = state.connections.get(&dead_id) {
+                                            tokio::time::timeout(
+                                                std::time::Duration::from_secs(3),
+                                                conn.open_bi(),
+                                            ).await.is_err()
+                                        } else {
+                                            true // no connection = already gone
+                                        }
+                                    };
+                                    if should_remove {
+                                        eprintln!("⚠️  Peer {} reported dead by {}, confirmed, removing",
+                                            dead_id.fmt_short(), remote.fmt_short());
+                                        let mut state = node.state.lock().await;
+                                        state.connections.remove(&dead_id);
+                                        drop(state);
+                                        node.remove_peer(dead_id).await;
+                                    } else {
+                                        eprintln!("ℹ️  Peer {} reported dead by {} but still reachable, ignoring",
+                                            dead_id.fmt_short(), remote.fmt_short());
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                STREAM_PEER_LEAVING => {
+                    let node = self.clone();
+                    tokio::spawn(async move {
+                        let mut id_bytes = [0u8; 32];
+                        if recv.read_exact(&mut id_bytes).await.is_ok() {
+                            if let Ok(pk) = iroh::PublicKey::from_bytes(&id_bytes) {
+                                let leaving_id = EndpointId::from(pk);
+                                eprintln!("👋 Peer {} announced clean shutdown", leaving_id.fmt_short());
+                                let mut state = node.state.lock().await;
+                                state.connections.remove(&leaving_id);
+                                drop(state);
+                                node.remove_peer(leaving_id).await;
+                            }
                         }
                     });
                 }
