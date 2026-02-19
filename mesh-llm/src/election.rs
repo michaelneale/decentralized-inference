@@ -119,24 +119,44 @@ pub async fn election_loop(
     // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    let model_bytes = total_model_bytes(&model);
+    let my_vram = node.vram_bytes();
+    let model_fits_locally = my_vram >= (model_bytes as f64 * 1.1) as u64;
+
     loop {
-        // Collect our model group
+        // Collect our model group (peers also serving this model)
         let peers = node.peers().await;
         let model_peers: Vec<mesh::PeerInfo> = peers.iter()
             .filter(|p| p.serving.as_deref() == Some(&model_name))
             .cloned()
             .collect();
 
-        let i_am_host = should_be_host_for_model(node.id(), node.vram_bytes(), &model_peers);
+        // Splitting decision: only split when forced OR when the model
+        // genuinely doesn't fit on this node alone. If it fits, every
+        // node serving this model runs its own independent llama-server
+        // (no election needed — everyone is a host).
+        let need_split = force_split || !model_fits_locally;
 
-        // Compute the worker set for this model group
-        let mut new_worker_set: Vec<iroh::EndpointId> = model_peers.iter()
-            .filter(|p| !matches!(p.role, NodeRole::Client))
-            .map(|p| p.id)
-            .collect();
+        let i_am_host = if need_split {
+            // Distributed mode: elect one host from the model group
+            should_be_host_for_model(node.id(), my_vram, &model_peers)
+        } else {
+            // Solo mode: this node always runs its own llama-server
+            true
+        };
+
+        // Compute the worker set (only relevant in split mode)
+        let mut new_worker_set: Vec<iroh::EndpointId> = if need_split {
+            model_peers.iter()
+                .filter(|p| !matches!(p.role, NodeRole::Client))
+                .map(|p| p.id)
+                .collect()
+        } else {
+            vec![] // solo mode — no workers
+        };
         new_worker_set.sort();
 
-        // If we're already host and the election result + worker set hasn't changed, skip restart
+        // If we're already host and nothing changed, skip restart
         if currently_host && i_am_host && new_worker_set == last_worker_set {
             // Just update the target map (in case other models' hosts changed)
             if let NodeRole::Host { http_port } = node.role().await {
@@ -160,34 +180,39 @@ pub async fn election_loop(
         }
 
         if i_am_host {
-            // Check if total model-group VRAM is enough
-            let model_bytes = total_model_bytes(&model);
-            let min_vram = (model_bytes as f64 * 1.1) as u64;
-            let my_vram = node.vram_bytes();
-            let peer_vram: u64 = model_peers.iter()
-                .filter(|p| !matches!(p.role, NodeRole::Client))
-                .map(|p| p.vram_bytes)
-                .sum();
-            let total_vram = my_vram + peer_vram;
+            if need_split {
+                // Distributed mode: check total group VRAM
+                let peer_vram: u64 = model_peers.iter()
+                    .filter(|p| !matches!(p.role, NodeRole::Client))
+                    .map(|p| p.vram_bytes)
+                    .sum();
+                let total_vram = my_vram + peer_vram;
+                let min_vram = (model_bytes as f64 * 1.1) as u64;
 
-            if total_vram < min_vram {
-                eprintln!("⏳ [{}] Waiting for more peers — need {:.1}GB VRAM, have {:.1}GB",
-                    model_name, min_vram as f64 / 1e9, total_vram as f64 / 1e9);
-                update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
-                on_change(false, false);
-                last_worker_set = new_worker_set;
-                if peer_rx.changed().await.is_err() { break; }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                continue;
+                if total_vram < min_vram {
+                    eprintln!("⏳ [{}] Waiting for more peers — need {:.1}GB VRAM, have {:.1}GB",
+                        model_name, min_vram as f64 / 1e9, total_vram as f64 / 1e9);
+                    update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                    on_change(false, false);
+                    last_worker_set = new_worker_set;
+                    if peer_rx.changed().await.is_err() { break; }
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                eprintln!("🗳 [{}] Elected as host ({:.1}GB VRAM for {:.1}GB model, {} node(s), split)",
+                    model_name, total_vram as f64 / 1e9, model_bytes as f64 / 1e9, model_peers.len() + 1);
+            } else {
+                eprintln!("🗳 [{}] Running as host ({:.1}GB VRAM for {:.1}GB model, solo)",
+                    model_name, my_vram as f64 / 1e9, model_bytes as f64 / 1e9);
             }
-
-            eprintln!("🗳 [{}] Elected as host ({:.1}GB VRAM for {:.1}GB model, {} node(s))",
-                model_name, total_vram as f64 / 1e9, model_bytes as f64 / 1e9, model_peers.len() + 1);
             on_change(true, false);
 
+            // In solo mode, pass empty model_peers so start_llama won't use any workers
+            let peers_for_launch = if need_split { &model_peers[..] } else { &[] };
             let llama_port = match start_llama(
                 &node, &tunnel_mgr, rpc_port, &bin_dir, &model, &model_name,
-                &model_peers, draft.as_deref(), draft_max, force_split,
+                peers_for_launch, draft.as_deref(), draft_max, force_split,
             ).await {
                 Some(port) => port,
                 None => {
@@ -209,12 +234,11 @@ pub async fn election_loop(
             on_change(true, true);
             eprintln!("✅ [{}] llama-server ready on internal port {llama_port}", model_name);
         } else {
-            // We're a worker for this model. Find who the host is.
+            // We're a worker in split mode. Find who the host is.
             node.set_role(NodeRole::Worker).await;
             currently_host = false;
             last_worker_set = new_worker_set;
 
-            // Look for the highest VRAM peer in our model group
             let host_peer = model_peers.iter()
                 .filter(|p| !matches!(p.role, NodeRole::Client))
                 .max_by_key(|p| (p.vram_bytes, p.id));
@@ -222,7 +246,7 @@ pub async fn election_loop(
             if let Some(host) = host_peer {
                 if should_be_host_for_model(host.id, host.vram_bytes, &model_peers) {
                     update_targets(&node, &model_name, InferenceTarget::Remote(host.id), &target_tx).await;
-                    eprintln!("📡 [{}] Worker — host is {}", model_name, host.id.fmt_short());
+                    eprintln!("📡 [{}] Worker — host is {} (split mode)", model_name, host.id.fmt_short());
                 } else {
                     update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
                 }
