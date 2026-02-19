@@ -128,7 +128,7 @@
     <div class="chat-hdr">
       <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
       <span class="chat-hdr-title" id="chatHdr">Chat</span>
-      <select id="modelPicker" class="model-picker" title="Select model"></select>
+      <select id="modelPicker" class="model-picker" title="Select model" onchange="renderDiagram()"></select>
     </div>
     <div class="chat-msgs" id="msgs"></div>
     <div class="chat-in">
@@ -199,10 +199,11 @@ function renderDiagram() {
 
   const total = nodes.filter(n => !n.client).reduce((s,n) => s + n.vram, 0);
   const ok = S.llama_ready;
+  const sel = selectedModel();
   const W = 320, nW = 140, nH = 68;
 
   if (nodes.length === 1) {
-    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok));
+    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok, sel));
     return;
   }
 
@@ -234,23 +235,25 @@ function renderDiagram() {
     out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">${linkLabel}</text>`;
   });
 
-  out += nBox(hX, hY, host, total, ok);
+  out += nBox(hX, hY, host, total, ok, sel);
   workers.forEach((w, i) => {
-    out += nBox(wStart + i * gap, wY, w, total, ok);
+    out += nBox(wStart + i * gap, wY, w, total, ok, sel);
   });
 
   el.innerHTML = mkSvg(W, wY + nH + 10, out);
 }
 
-function nBox(x, y, n, total, ok) {
+function nBox(x, y, n, total, ok, sel) {
   const pct = n.client ? 0 : (total > 0 ? Math.round(n.vram / total * 100) : 100);
-  const fill = n.self ? '#0d1a26' : '#10101c';
-  const stroke = ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c';
-  const sw = ok ? '1.5' : '1';
+  const active = ok && !n.client && n.serving === sel;
+  const fill = active ? '#0a1a12' : (n.self ? '#0d1a26' : '#10101c');
+  const stroke = active ? '#4c4' : (ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c');
+  const sw = active ? '2' : (ok ? '1.5' : '1');
   const label = n.self ? `${n.id} (you)` : n.id;
   const role = n.client ? 'CLIENT' : (n.host ? 'HOST' : 'WORKER');
   const rc = n.client ? '#888' : (n.host ? '#4c4' : '#6cf');
   const svc = n.client ? 'API tunnel' : (n.serving ? shortName(n.serving) : (n.host ? 'llama-server · rpc' : 'rpc-server'));
+  const svcColor = active ? '#4c4' : '#3a3a3a';
   const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
   const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
 
@@ -266,7 +269,7 @@ function nBox(x, y, n, total, ok) {
     <rect x="${x}" y="${y}" width="140" height="68" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
     <text x="${x+70}" y="${y+15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
     <text x="${x+70}" y="${y+27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
-    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="#3a3a3a" font-size="6.5" font-family="monospace">${svc}</text>
+    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="${svcColor}" font-size="6.5" font-family="monospace">${svc}</text>
     <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
     <rect x="${bX}" y="${bY}" width="${bW*pct/100}" height="${bH}" rx="1.5" fill="${n.host?'#2a5a2a':'#1a3a5c'}"/>
     <text x="${bX}" y="${bY+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}</text>
