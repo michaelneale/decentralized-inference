@@ -363,6 +363,8 @@ mesh-llm --model Qwen2.5-32B --publish \
 
 Listings republish every 60s and expire after 2 minutes if your mesh goes down. Use `mesh-llm rotate-key` to get a fresh Nostr identity.
 
+**What gets published:** invite token (contains your node's public key and IP addresses), models being served, models wanted, models on disk, total VRAM, node count, name and region. Nothing is published without `--publish`.
+
 
 <details>
 <summary>Future ideas</summary>
