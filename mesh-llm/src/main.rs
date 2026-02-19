@@ -102,6 +102,11 @@ struct Cli {
     #[arg(long)]
     region: Option<String>,
 
+    /// Stop advertising on Nostr when this many clients are connected.
+    /// Re-publishes when clients drop below the cap. No cap by default.
+    #[arg(long)]
+    max_clients: Option<usize>,
+
     /// Nostr relay URLs for publishing/discovery (default: damus, nos.lol, nostr.band).
     #[arg(long)]
     nostr_relay: Vec<String>,
@@ -609,8 +614,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         let pub_node = node.clone();
         let pub_name = cli.mesh_name.clone();
         let pub_region = cli.region.clone();
+        let pub_max_clients = cli.max_clients;
         Some(tokio::spawn(async move {
-            nostr::publish_loop(pub_node, nostr_keys, relays, pub_name, pub_region, 60).await;
+            nostr::publish_loop(pub_node, nostr_keys, relays, pub_name, pub_region, pub_max_clients, 60).await;
         }))
     } else {
         None

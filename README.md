@@ -18,7 +18,13 @@ mesh-llm --model Qwen2.5-3B --console     # or try a small model first (~2GB)
 
 To add another machine to the mesh:
 ```bash
-mesh-llm --model Qwen2.5-32B --join <token>    # token is printed by the first machine
+mesh-llm --join <token>                         # token is printed by the first machine
+```
+
+Or find a mesh someone is sharing:
+```bash
+mesh-llm discover                               # see what's out there
+mesh-llm --join $(mesh-llm discover --auto)     # join the best match
 ```
 
 Or join without a GPU:
@@ -313,30 +319,51 @@ Other features:
 
 </details>
 
-<details>
-<summary>Nostr discovery</summary>
+## Share your mesh (Nostr discovery)
 
-Meshes can publish themselves to Nostr relays so others can find and join them. No central registry — discovery is fully decentralized via the Nostr protocol.
+Publish your mesh so anyone can find and join it — no server, no sign-up, just Nostr relays.
 
+**Share yours:**
 ```bash
-# Publish your mesh for others to find
-mesh-llm --model Qwen2.5-32B --publish --mesh-name "my-rig" --region AU
-
-# Discover available meshes
-mesh-llm discover                          # list all
-mesh-llm discover --model Qwen             # filter by model
-mesh-llm discover --min-vram 64            # filter by VRAM
-mesh-llm discover --region US              # filter by region
-
-# Auto-join the best match (pipe-friendly)
-mesh-llm --join $(mesh-llm discover --auto --model Qwen)
+mesh-llm --model Qwen2.5-32B --publish
 ```
 
-Published listings include: invite token, served models, wanted models, total VRAM, node count, name, and region. Listings are republished every 60s and expire after 120s if the mesh goes down.
+That's it. Your mesh is now listed on public Nostr relays. Anyone can find it.
 
-Nostr keys are stored separately from the mesh identity (`~/.mesh-llm/nostr.nsec`). Rotate with `mesh-llm rotate-key` — this changes the publisher identity without affecting the mesh.
+**Find a mesh to join:**
+```bash
+mesh-llm discover
+```
+```
+Found 1 mesh(es):
 
-</details>
+  [1] mikes-rig  2 node(s), 64GB VRAM  models: Qwen2.5-32B-Instruct-Q4_K_M  region: AU
+      on disk: GLM-4.7-Flash-Q4_K_M, Qwen2.5-3B-Instruct-Q4_K_M
+      token: eyJpZCI6IjhjZ...
+```
+
+**Join it:**
+```bash
+mesh-llm --join $(mesh-llm discover --auto)
+```
+
+Or filter first:
+```bash
+mesh-llm discover --model Qwen           # by model name
+mesh-llm discover --region US             # by region
+mesh-llm discover --needs-workers         # meshes that want GPU help
+```
+
+**Optional flags for publishers:**
+```bash
+mesh-llm --model Qwen2.5-32B --publish \
+  --mesh-name "my-rig" \                  # human-readable name
+  --region AU \                           # so people can filter by location
+  --max-clients 5                         # delist from Nostr when 5 clients connected
+```
+
+Listings republish every 60s and expire after 2 minutes if your mesh goes down. Use `mesh-llm rotate-key` to get a fresh Nostr identity.
+
 
 <details>
 <summary>Future ideas</summary>

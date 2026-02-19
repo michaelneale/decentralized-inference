@@ -193,14 +193,15 @@ impl Publisher {
 /// Background publish loop. Republishes every `interval` seconds using
 /// fresh data from the mesh node.
 ///
-/// Auto-delists when the mesh is "full" (all requested models served,
-/// no models waiting for split). Re-publishes if state changes back.
+/// If `max_clients` is set, delists when that many clients are connected
+/// and re-publishes when clients drop below the cap.
 pub async fn publish_loop(
     node: crate::mesh::Node,
     keys: Keys,
     relays: Vec<String>,
     name: Option<String>,
     region: Option<String>,
+    max_clients: Option<usize>,
     interval_secs: u64,
 ) {
     let publisher = match Publisher::new(keys.clone(), &relays).await {
@@ -213,20 +214,46 @@ pub async fn publish_loop(
 
     let npub = publisher.npub();
     eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
+    if let Some(cap) = max_clients {
+        eprintln!("   Will delist when {} clients connected", cap);
+    }
 
     let mut delisted = false;
 
     loop {
-        // Gather current mesh state
         let invite_token = node.invite_token();
         let peers = node.peers().await;
 
+        // Count clients
+        let client_count = peers.iter()
+            .filter(|p| matches!(p.role, crate::mesh::NodeRole::Client))
+            .count();
+
+        // Check max-clients cap
+        if let Some(cap) = max_clients {
+            if client_count >= cap && !delisted {
+                if let Err(e) = publisher.unpublish().await {
+                    tracing::warn!("Failed to unpublish from Nostr: {e}");
+                }
+                eprintln!("📡 Delisted from Nostr ({} clients, cap is {})", client_count, cap);
+                delisted = true;
+                tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                continue;
+            } else if client_count < cap && delisted {
+                eprintln!("📡 Re-publishing to Nostr ({} clients, cap is {})", client_count, cap);
+                delisted = false;
+            }
+        }
+
+        if delisted {
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            continue;
+        }
+
         // "Actually serving" = a Host node has llama-server running for this model.
-        // A node waiting for tensor-split is Worker with serving set, but no Host exists.
         let my_role = node.role().await;
         let my_serving = node.serving().await;
         let mut actually_serving: Vec<String> = Vec::new();
-        // Check if we're a host serving something
         if matches!(my_role, crate::mesh::NodeRole::Host { .. }) {
             if let Some(ref s) = my_serving {
                 if !actually_serving.contains(s) {
@@ -234,7 +261,6 @@ pub async fn publish_loop(
                 }
             }
         }
-        // Check peers that are hosts
         for p in &peers {
             if matches!(p.role, crate::mesh::NodeRole::Host { .. }) {
                 if let Some(ref s) = p.serving {
@@ -290,31 +316,7 @@ pub async fn publish_loop(
             .count()
             + 1; // +1 for self
 
-        // Needs workers if there are unserved models or we're waiting for split
         let needs_workers = !wanted.is_empty();
-
-        // Auto-delist: if all requested models are served and no models need
-        // workers, stop publishing. The listing will expire on its own (TTL).
-        // Re-publish if state changes.
-        let all_served = wanted.is_empty() && !actually_serving.is_empty();
-        if all_served && !delisted {
-            // Everything the mesh wanted is being served — go quiet
-            if let Err(e) = publisher.unpublish().await {
-                tracing::warn!("Failed to unpublish from Nostr: {e}");
-            }
-            eprintln!("📡 Mesh is full — delisted from Nostr (all models served)");
-            delisted = true;
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            continue;
-        } else if !all_served && delisted {
-            eprintln!("📡 Mesh needs workers again — re-publishing to Nostr");
-            delisted = false;
-        }
-
-        if delisted {
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-            continue;
-        }
 
         let listing = MeshListing {
             invite_token,
@@ -328,10 +330,9 @@ pub async fn publish_loop(
             region: region.clone(),
         };
 
-        // TTL = 2× interval, so listing expires if we stop publishing
         let ttl = interval_secs * 2;
         match publisher.publish(&listing, ttl).await {
-            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes, needs_workers={})", listing.models.len(), listing.node_count, listing.needs_workers),
+            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes, {} clients)", listing.models.len(), listing.node_count, client_count),
             Err(e) => tracing::warn!("Failed to publish to Nostr: {e}"),
         }
 
