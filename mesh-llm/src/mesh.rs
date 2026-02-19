@@ -241,7 +241,15 @@ pub struct TunnelChannels {
 
 impl Node {
     pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>, max_vram_gb: Option<f64>) -> Result<(Self, TunnelChannels)> {
-        let secret_key = load_or_create_key().await?;
+        // Clients use an ephemeral key so they get a unique identity even
+        // when running on the same machine as a GPU node.
+        let secret_key = if matches!(role, NodeRole::Client) {
+            let key = SecretKey::generate(&mut rand::rng());
+            tracing::info!("Client mode: using ephemeral key");
+            key
+        } else {
+            load_or_create_key().await?
+        };
         // Configure QUIC transport for heavy RPC traffic:
         // - Allow many concurrent bi-streams (model loading opens hundreds)
         // - Long idle timeout to survive pauses during tensor transfers
