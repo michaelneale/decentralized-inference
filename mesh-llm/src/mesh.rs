@@ -248,8 +248,8 @@ impl Node {
         use iroh::endpoint::QuicTransportConfig;
         let transport_config = QuicTransportConfig::builder()
             .max_concurrent_bidi_streams(1024u32.into())
-            .max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into()?))
-            .keep_alive_interval(std::time::Duration::from_secs(10))
+            .max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?))
+            .keep_alive_interval(std::time::Duration::from_secs(5))
             .build();
         let mut builder = Endpoint::builder()
             .secret_key(secret_key)
@@ -410,6 +410,64 @@ impl Node {
 
     pub async fn set_requested_models(&self, models: Vec<String>) {
         *self.requested_models.lock().await = models;
+    }
+
+    /// Start a background task that periodically checks peer health.
+    /// Probes each peer by attempting a gossip exchange. If the probe fails
+    /// (connection dead, peer unresponsive), removes the peer immediately
+    /// rather than waiting for QUIC idle timeout.
+    pub fn start_health_check(&self) {
+        let node = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+                let peers_and_conns: Vec<(EndpointId, Option<Connection>)> = {
+                    let state = node.state.lock().await;
+                    state.peers.keys().map(|id| {
+                        let conn = state.connections.get(id).cloned();
+                        (*id, conn)
+                    }).collect()
+                };
+
+                for (peer_id, conn) in peers_and_conns {
+                    let Some(conn) = conn else {
+                        // No connection on file — peer is stale
+                        tracing::info!("Health check: no connection to {}, removing", peer_id.fmt_short());
+                        node.remove_peer(peer_id).await;
+                        continue;
+                    };
+
+                    // Try to open a gossip stream with a short timeout
+                    let probe = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        node.initiate_gossip(conn, peer_id),
+                    ).await;
+
+                    match probe {
+                        Ok(Ok(())) => {
+                            // Peer is alive, gossip exchanged (state updated)
+                        }
+                        Ok(Err(e)) => {
+                            tracing::info!("Health check: {} unreachable ({e}), removing", peer_id.fmt_short());
+                            {
+                                let mut state = node.state.lock().await;
+                                state.connections.remove(&peer_id);
+                            }
+                            node.remove_peer(peer_id).await;
+                        }
+                        Err(_) => {
+                            tracing::info!("Health check: {} timed out, removing", peer_id.fmt_short());
+                            {
+                                let mut state = node.state.lock().await;
+                                state.connections.remove(&peer_id);
+                            }
+                            node.remove_peer(peer_id).await;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Get model source from any peer in the mesh (for auto-download on join).

@@ -358,6 +358,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     node.set_available_models(local_models.clone()).await;
     node.set_requested_models(requested_model_names.clone()).await;
 
+    // Start periodic health check to detect dead peers
+    node.start_health_check();
+
     // Join mesh if --join was given
     if !cli.join.is_empty() {
         let mut joined = false;
@@ -581,6 +584,7 @@ async fn run_client(cli: Cli) -> Result<()> {
 
     let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
     let token = node.invite_token();
+    node.start_health_check();
 
     let mut joined = false;
     for t in &cli.join {
