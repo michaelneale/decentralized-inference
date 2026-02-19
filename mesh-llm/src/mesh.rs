@@ -18,6 +18,7 @@ const STREAM_GOSSIP: u8 = 0x01;
 const STREAM_TUNNEL: u8 = 0x02;
 const STREAM_TUNNEL_MAP: u8 = 0x03;
 pub const STREAM_TUNNEL_HTTP: u8 = 0x04;
+const STREAM_ROUTE_REQUEST: u8 = 0x05;
 
 /// Role a node plays in the mesh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +127,21 @@ pub fn detect_vram_bytes() -> u64 {
         }
     }
     0
+}
+
+/// Lightweight routing table for passive nodes (clients + standby GPU).
+/// Contains just enough info to route requests to the right host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingTable {
+    pub hosts: Vec<RouteEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteEntry {
+    pub model: String,
+    pub node_id: String,
+    pub endpoint_id: EndpointId,
+    pub vram_gb: f64,
 }
 
 /// Discover our public IP via STUN, then pair it with the given port.
@@ -435,6 +451,10 @@ impl Node {
     pub fn start_health_check(&self) {
         let node = self.clone();
         tokio::spawn(async move {
+            // Track consecutive failures per peer before removing
+            let mut fail_counts: std::collections::HashMap<EndpointId, u32> = std::collections::HashMap::new();
+            const MAX_FAILURES: u32 = 2; // remove after 2 consecutive failures (~30s)
+
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
@@ -448,9 +468,15 @@ impl Node {
 
                 for (peer_id, conn) in peers_and_conns {
                     let Some(conn) = conn else {
-                        // No connection on file — peer is stale
-                        tracing::info!("Health check: no connection to {}, removing", peer_id.fmt_short());
-                        node.remove_peer(peer_id).await;
+                        let count = fail_counts.entry(peer_id).or_default();
+                        *count += 1;
+                        if *count >= MAX_FAILURES {
+                            tracing::info!("Health check: no connection to {} ({} failures), removing", peer_id.fmt_short(), count);
+                            fail_counts.remove(&peer_id);
+                            node.remove_peer(peer_id).await;
+                        } else {
+                            tracing::info!("Health check: no connection to {} ({}/{}), will retry", peer_id.fmt_short(), count, MAX_FAILURES);
+                        }
                         continue;
                     };
 
@@ -462,23 +488,38 @@ impl Node {
 
                     match probe {
                         Ok(Ok(())) => {
-                            // Peer is alive, gossip exchanged (state updated)
+                            // Peer is alive, clear failure count
+                            fail_counts.remove(&peer_id);
                         }
                         Ok(Err(e)) => {
-                            tracing::info!("Health check: {} unreachable ({e}), removing", peer_id.fmt_short());
-                            {
-                                let mut state = node.state.lock().await;
-                                state.connections.remove(&peer_id);
+                            let count = fail_counts.entry(peer_id).or_default();
+                            *count += 1;
+                            if *count >= MAX_FAILURES {
+                                tracing::info!("Health check: {} unreachable ({e}), {count} failures, removing", peer_id.fmt_short());
+                                fail_counts.remove(&peer_id);
+                                {
+                                    let mut state = node.state.lock().await;
+                                    state.connections.remove(&peer_id);
+                                }
+                                node.remove_peer(peer_id).await;
+                            } else {
+                                tracing::info!("Health check: {} unreachable ({e}), {count}/{MAX_FAILURES} failures", peer_id.fmt_short());
                             }
-                            node.remove_peer(peer_id).await;
                         }
                         Err(_) => {
-                            tracing::info!("Health check: {} timed out, removing", peer_id.fmt_short());
-                            {
-                                let mut state = node.state.lock().await;
-                                state.connections.remove(&peer_id);
+                            let count = fail_counts.entry(peer_id).or_default();
+                            *count += 1;
+                            if *count >= MAX_FAILURES {
+                                tracing::info!("Health check: {} timed out, {count} failures, removing", peer_id.fmt_short());
+                                fail_counts.remove(&peer_id);
+                                {
+                                    let mut state = node.state.lock().await;
+                                    state.connections.remove(&peer_id);
+                                }
+                                node.remove_peer(peer_id).await;
+                            } else {
+                                tracing::info!("Health check: {} timed out, {count}/{MAX_FAILURES} failures", peer_id.fmt_short());
                             }
-                            node.remove_peer(peer_id).await;
                         }
                     }
                 }
@@ -563,6 +604,58 @@ impl Node {
             }
         }
         None
+    }
+
+    /// Build the current routing table from this node's view of the mesh.
+    pub async fn routing_table(&self) -> RoutingTable {
+        let state = self.state.lock().await;
+        let my_serving = self.serving.lock().await;
+        let my_role = self.role.lock().await.clone();
+        let mut hosts = Vec::new();
+
+        // Include self if we're a host
+        if matches!(my_role, NodeRole::Host { .. }) {
+            if let Some(ref model) = *my_serving {
+                hosts.push(RouteEntry {
+                    model: model.clone(),
+                    node_id: format!("{}", self.endpoint.id().fmt_short()),
+                    endpoint_id: self.endpoint.id(),
+                    vram_gb: self.vram_bytes as f64 / 1e9,
+                });
+            }
+        }
+
+        // Include peers that are hosts
+        for p in state.peers.values() {
+            if matches!(p.role, NodeRole::Host { .. }) {
+                if let Some(ref model) = p.serving {
+                    hosts.push(RouteEntry {
+                        model: model.clone(),
+                        node_id: format!("{}", p.id.fmt_short()),
+                        endpoint_id: p.id,
+                        vram_gb: p.vram_bytes as f64 / 1e9,
+                    });
+                }
+            }
+        }
+
+        RoutingTable { hosts }
+    }
+
+    /// Request routing table from a connected peer (for passive nodes).
+    pub async fn request_routing_table(&self, peer_id: EndpointId) -> Result<RoutingTable> {
+        let conn = {
+            let state = self.state.lock().await;
+            state.connections.get(&peer_id).cloned()
+                .ok_or_else(|| anyhow::anyhow!("No connection to peer"))?
+        };
+        let (mut send, mut recv) = conn.open_bi().await?;
+        send.write_all(&[STREAM_ROUTE_REQUEST]).await?;
+        send.finish()?;
+
+        let data = recv.read_to_end(64 * 1024).await?;
+        let table: RoutingTable = serde_json::from_slice(&data)?;
+        Ok(table)
     }
 
     pub fn vram_bytes(&self) -> u64 {
@@ -821,6 +914,17 @@ impl Node {
                         tracing::warn!("HTTP tunnel receiver dropped");
                         break;
                     }
+                }
+                STREAM_ROUTE_REQUEST => {
+                    let node = self.clone();
+                    tokio::spawn(async move {
+                        let mut send = send;
+                        let table = node.routing_table().await;
+                        if let Ok(data) = serde_json::to_vec(&table) {
+                            let _ = send.write_all(&data).await;
+                            let _ = send.finish();
+                        }
+                    });
                 }
                 other => {
                     tracing::warn!("Unknown stream type {other} from {}", remote.fmt_short());

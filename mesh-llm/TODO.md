@@ -1,5 +1,13 @@
 # mesh-llm TODO
 
+## Console flicker: nodes appearing/disappearing
+Flappy cross-network connections (e.g. Mini↔Brad via relay) cause peer_rx to fire
+on every reconnect, making the console diagram flicker even though nothing meaningful changed.
+Election already handles it (no restart), it's a display issue.
+
+**Fix:** Only notify peer_rx when PeerInfo actually changes (serving, role, VRAM) — not on
+reconnect events. Diff old vs new in `add_peer()` before sending.
+
 ## Console: VRAM usage bar per node
 Currently each node box shows a bar for VRAM proportion (node's share of total mesh VRAM).
 Add a second bar showing how much of that node's VRAM is in use by the model it's serving.

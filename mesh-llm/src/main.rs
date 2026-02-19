@@ -425,6 +425,22 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             eprintln!("Failed to join any peer — running standalone");
         }
         eprintln!("This node's token (for others to join): {token}");
+
+        // Periodic rejoin: re-connect to bootstrap tokens every 60s.
+        // No-op if already connected (connect_to_peer returns early).
+        // Recovers from dropped connections without manual intervention.
+        let rejoin_node = node.clone();
+        let rejoin_tokens: Vec<String> = cli.join.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                for t in &rejoin_tokens {
+                    if let Err(e) = rejoin_node.join(t).await {
+                        tracing::debug!("Rejoin failed: {e}");
+                    }
+                }
+            }
+        });
     } else {
         eprintln!("Invite token: {token}");
         eprintln!("Waiting for peers to join...");
@@ -762,6 +778,18 @@ async fn run_client(cli: Cli) -> Result<()> {
         anyhow::bail!("Failed to join any peer in the mesh");
     }
     eprintln!("This node's token (for others to join): {token}");
+
+    // Periodic rejoin
+    let rejoin_node = node.clone();
+    let rejoin_tokens: Vec<String> = cli.join.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            for t in &rejoin_tokens {
+                let _ = rejoin_node.join(t).await;
+            }
+        }
+    });
 
     eprintln!("Looking for a host node with llama-server...");
     let host = node.wait_for_host().await?;
