@@ -80,6 +80,9 @@
   /* Chat */
   .chat-hdr { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1a1a1a; font-size: 0.7rem; color: #555; flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
   .chat-hdr-title { flex: 1; }
+  .model-picker { background: #0a0a0a; border: 1px solid #222; border-radius: 4px; color: #aaa; font-size: 0.65rem; font-family: monospace; padding: 0.15rem 0.3rem; cursor: pointer; max-width: 180px; }
+  .model-picker:focus { outline: none; border-color: #6cf; }
+  .model-picker option { background: #0a0a0a; color: #ccc; }
   .chat-msgs { flex: 1; overflow-y: auto; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; }
   .chat-msgs:empty::before { content: "Send a message to test the model…"; color: #222; font-style: italic; font-size: 0.85rem; }
   .chat-msgs.off:empty::before { content: "Waiting for model to load…"; }
@@ -125,6 +128,7 @@
     <div class="chat-hdr">
       <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
       <span class="chat-hdr-title" id="chatHdr">Chat</span>
+      <select id="modelPicker" class="model-picker" title="Select model"></select>
     </div>
     <div class="chat-msgs" id="msgs"></div>
     <div class="chat-in">
@@ -153,7 +157,8 @@ function render() {
   $('inp').disabled = !ok; $('btn').disabled = !ok;
   $('msgs').classList.toggle('off', !ok);
   if (ok) $('msgs').classList.remove('off');
-  $('chatHdr').textContent = ok ? `Chat · ${S.model_name||'model'}` : 'Chat';
+  updateModelPicker();
+  $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
 }
 
 function renderBadge() {
@@ -367,6 +372,29 @@ function renderMore() {
 
 function shortName(n) { return (n||'').replace(/-Q\w+$/,'').replace(/-Instruct/,''); }
 
+// ── Model picker ──
+
+function updateModelPicker() {
+  const sel = $('modelPicker');
+  const warm = (S.mesh_models || []).filter(m => m.status === 'warm').map(m => m.name);
+  // Fall back to just our model if no mesh_models
+  if (!warm.length && S.model_name) warm.push(S.model_name);
+  const prev = sel.value;
+  // Only rebuild if options changed
+  const current = Array.from(sel.options).map(o => o.value).join(',');
+  const next = warm.join(',');
+  if (current !== next) {
+    sel.innerHTML = warm.map(m => `<option value="${esc(m)}">${esc(shortName(m))}</option>`).join('');
+    if (warm.includes(prev)) sel.value = prev;
+  }
+  sel.style.display = warm.length > 1 ? '' : 'none';
+}
+
+function selectedModel() {
+  const sel = $('modelPicker');
+  return sel.value || S.model_name || 'test';
+}
+
 // ── Chat ──
 
 async function send() {
@@ -375,13 +403,15 @@ async function send() {
   const msg = inp.value.trim(); if (!msg) return;
   inp.value = '';
   const el = $('msgs');
-  el.innerHTML += `<div class="mu">› ${esc(msg)}</div>`;
+  const model = selectedModel();
+  const label = shortName(model);
+  el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models||[]).filter(m=>m.status==='warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
   const bot = document.createElement('div'); bot.className = 'mb';
   el.appendChild(bot); el.scrollTop = el.scrollHeight;
   try {
     const r = await fetch('/api/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model:'test',messages:[{role:'user',content:msg}],stream:true}),
+      body: JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true}),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const reader = r.body.getReader();

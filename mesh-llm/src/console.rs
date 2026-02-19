@@ -295,16 +295,14 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
             }
         }
         p if p.starts_with("/api/chat") => {
-            // Proxy chat to the API port (which handles local or remote)
+            // Always route through the API port — it handles model-based
+            // routing (local llama-server OR remote via QUIC tunnel)
             let inner = state.inner.lock().await;
-            let port = if let Some(lp) = inner.llama_port {
-                lp // local llama-server
-            } else if inner.llama_ready {
-                inner.api_port // worker — use the API proxy which tunnels to host
-            } else {
+            if !inner.llama_ready {
                 drop(inner);
                 return respond_error(&mut stream, 503, "LLM not ready").await;
-            };
+            }
+            let port = inner.api_port;
             drop(inner);
             let target = format!("127.0.0.1:{port}");
             if let Ok(mut upstream) = TcpStream::connect(&target).await {
