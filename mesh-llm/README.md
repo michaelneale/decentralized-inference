@@ -3,7 +3,7 @@
 Rust sidecar for distributed llama.cpp inference over QUIC. See the [project README](../README.md) for usage.
 
 See [DESIGN.md](DESIGN.md) for internals — stream types, B2B rewriting, tunnel manager, etc.
-See [MULTI-MODEL.md](MULTI-MODEL.md) for multi-model serving design and status.
+See [docs/MULTI-MODEL.md](docs/MULTI-MODEL.md) for multi-model internals.
 
 ```
 src/

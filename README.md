@@ -281,31 +281,35 @@ For `--client` mode only the `mesh-llm` binary is needed.
 | `mesh-llm/` | Rust QUIC mesh ([details](mesh-llm/README.md), [design](mesh-llm/DESIGN.md)) |
 
 <details>
-<summary>Multi-model serving (multi-model branch)</summary>
+<summary>Multi-model serving</summary>
 
-The mesh serves multiple models simultaneously. Different nodes load different models, and the API proxy routes by model name. See [MULTI-MODEL.md](mesh-llm/MULTI-MODEL.md) for full details.
+The mesh can serve multiple models simultaneously. Different nodes load different models, and a single API endpoint routes requests by model name.
 
 ```bash
-# Node 1: seed mesh with two models, serves the first
+# Node 1: seed mesh with two models, serves the first itself
 mesh-llm --model Qwen2.5-32B --model GLM-4.7-Flash
 
-# Node 2: joins, auto-assigned to serve GLM (needed, already on disk)
+# Node 2: joins without --model, auto-assigned to GLM (needed by mesh, already on disk)
 mesh-llm --join <token>
 
 # Any node's API port routes to the right model
-curl localhost:9337/v1/models                    # lists both
+curl localhost:9337/v1/models                    # lists both models
 curl localhost:9337/v1/chat/completions \
   -d '{"model":"GLM-4.7-Flash-Q4_K_M", ...}'    # routed to node 2 via QUIC
 ```
 
-Key properties:
-- One model per node process. No VRAM double-commitment
-- No accidental tensor split — solo mode when model fits on one node
-- `/v1/models` lists all served models across the mesh
-- Console model picker to chat with any model, node highlighting
+**How models are balanced:** Each node serves exactly one model. When a node joins without `--model`, the mesh assigns it automatically — preferring models that nobody is serving yet and that the node already has on disk (no download wait), then falling back to the least-served model. Nodes scan `~/.models/` on startup and advertise what they have via gossip.
+
+**No accidental tensor split:** If a model fits on one node, it runs solo — its own independent llama-server. Two nodes both serving Qwen2.5-3B = two independent servers, not a tensor split. Splitting only happens when a model genuinely doesn't fit on any single node, or when `--split` is explicitly passed.
+
+**Big models still split across nodes:** For a model too large for one machine, nodes serving that model form a group. The highest-VRAM node becomes host and runs llama-server with `--rpc` pointing at the others. This is the same tensor-split behavior as before, just scoped to one model's group.
+
+Other features:
+- `/v1/models` returns all served models (standard OpenAI API)
 - `mesh-llm drop <model>` to stop serving a model
-- Dead peer cleanup in ~15s via health check
-- `--client` works alongside GPU nodes on the same machine (ephemeral key)
+- Console: model picker to chat with any model, nodes highlight when selected
+- `--client` works alongside GPU nodes on the same machine
+- Dead peers detected and cleaned up in ~15s
 
 </details>
 
