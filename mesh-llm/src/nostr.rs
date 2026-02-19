@@ -29,10 +29,16 @@ pub struct MeshListing {
     /// Models the mesh wants served but nobody has loaded yet
     #[serde(default)]
     pub wanted_models: Vec<String>,
+    /// Models on disk across the mesh (cold — not loaded but available)
+    #[serde(default)]
+    pub available_models: Vec<String>,
     /// Total VRAM across all GPU nodes (bytes)
     pub total_vram_bytes: u64,
     /// Number of GPU nodes in the mesh
     pub node_count: usize,
+    /// Whether the mesh wants more GPU nodes (unserved models or needs split)
+    #[serde(default)]
+    pub needs_workers: bool,
     /// Optional human-readable name for the mesh
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -71,6 +77,9 @@ impl std::fmt::Display for DiscoveredMesh {
         }
         if !self.listing.wanted_models.is_empty() {
             write!(f, "  wanted: {}", self.listing.wanted_models.join(", "))?;
+        }
+        if self.listing.needs_workers {
+            write!(f, "  [needs workers]")?;
         }
         Ok(())
     }
@@ -183,6 +192,9 @@ impl Publisher {
 
 /// Background publish loop. Republishes every `interval` seconds using
 /// fresh data from the mesh node.
+///
+/// Auto-delists when the mesh is "full" (all requested models served,
+/// no models waiting for split). Re-publishes if state changes back.
 pub async fn publish_loop(
     node: crate::mesh::Node,
     keys: Keys,
@@ -202,19 +214,67 @@ pub async fn publish_loop(
     let npub = publisher.npub();
     eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
 
+    let mut delisted = false;
+
     loop {
         // Gather current mesh state
         let invite_token = node.invite_token();
         let peers = node.peers().await;
-        let models = node.models_being_served().await;
 
-        // Wanted = requested but not yet served
-        let served_set: std::collections::HashSet<&str> = models.iter().map(|s| s.as_str()).collect();
+        // "Actually serving" = a Host node has llama-server running for this model.
+        // A node waiting for tensor-split is Worker with serving set, but no Host exists.
+        let my_role = node.role().await;
+        let my_serving = node.serving().await;
+        let mut actually_serving: Vec<String> = Vec::new();
+        // Check if we're a host serving something
+        if matches!(my_role, crate::mesh::NodeRole::Host { .. }) {
+            if let Some(ref s) = my_serving {
+                if !actually_serving.contains(s) {
+                    actually_serving.push(s.clone());
+                }
+            }
+        }
+        // Check peers that are hosts
+        for p in &peers {
+            if matches!(p.role, crate::mesh::NodeRole::Host { .. }) {
+                if let Some(ref s) = p.serving {
+                    if !actually_serving.contains(s) {
+                        actually_serving.push(s.clone());
+                    }
+                }
+            }
+        }
+
+        let served_set: std::collections::HashSet<&str> = actually_serving.iter().map(|s| s.as_str()).collect();
+
+        // Wanted = requested but not actually being served by a host
         let mut wanted: Vec<String> = Vec::new();
+        let my_requested = node.requested_models().await;
+        for m in &my_requested {
+            if !served_set.contains(m.as_str()) && !wanted.contains(m) {
+                wanted.push(m.clone());
+            }
+        }
         for p in &peers {
             for m in &p.requested_models {
                 if !served_set.contains(m.as_str()) && !wanted.contains(m) {
                     wanted.push(m.clone());
+                }
+            }
+        }
+
+        // Available = all GGUFs on disk across mesh, minus what's already warm
+        let mut available: Vec<String> = Vec::new();
+        let my_available = node.available_models().await;
+        for m in &my_available {
+            if !served_set.contains(m.as_str()) && !available.contains(m) {
+                available.push(m.clone());
+            }
+        }
+        for p in &peers {
+            for m in &p.available_models {
+                if !served_set.contains(m.as_str()) && !available.contains(m) {
+                    available.push(m.clone());
                 }
             }
         }
@@ -230,12 +290,40 @@ pub async fn publish_loop(
             .count()
             + 1; // +1 for self
 
+        // Needs workers if there are unserved models or we're waiting for split
+        let needs_workers = !wanted.is_empty();
+
+        // Auto-delist: if all requested models are served and no models need
+        // workers, stop publishing. The listing will expire on its own (TTL).
+        // Re-publish if state changes.
+        let all_served = wanted.is_empty() && !actually_serving.is_empty();
+        if all_served && !delisted {
+            // Everything the mesh wanted is being served — go quiet
+            if let Err(e) = publisher.unpublish().await {
+                tracing::warn!("Failed to unpublish from Nostr: {e}");
+            }
+            eprintln!("📡 Mesh is full — delisted from Nostr (all models served)");
+            delisted = true;
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            continue;
+        } else if !all_served && delisted {
+            eprintln!("📡 Mesh needs workers again — re-publishing to Nostr");
+            delisted = false;
+        }
+
+        if delisted {
+            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            continue;
+        }
+
         let listing = MeshListing {
             invite_token,
-            models,
+            models: actually_serving,
             wanted_models: wanted,
+            available_models: available,
             total_vram_bytes: total_vram,
             node_count,
+            needs_workers,
             name: name.clone(),
             region: region.clone(),
         };
@@ -243,7 +331,7 @@ pub async fn publish_loop(
         // TTL = 2× interval, so listing expires if we stop publishing
         let ttl = interval_secs * 2;
         match publisher.publish(&listing, ttl).await {
-            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes)", listing.models.len(), listing.node_count),
+            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes, needs_workers={})", listing.models.len(), listing.node_count, listing.needs_workers),
             Err(e) => tracing::warn!("Failed to publish to Nostr: {e}"),
         }
 
@@ -264,6 +352,8 @@ pub struct MeshFilter {
     pub min_vram_gb: Option<f64>,
     /// Geographic region
     pub region: Option<String>,
+    /// Only show meshes that need more GPU nodes
+    pub needs_workers: bool,
 }
 
 impl MeshFilter {
@@ -271,7 +361,8 @@ impl MeshFilter {
         if let Some(ref model) = self.model {
             let model_lower = model.to_lowercase();
             let has_model = mesh.listing.models.iter().any(|m| m.to_lowercase().contains(&model_lower))
-                || mesh.listing.wanted_models.iter().any(|m| m.to_lowercase().contains(&model_lower));
+                || mesh.listing.wanted_models.iter().any(|m| m.to_lowercase().contains(&model_lower))
+                || mesh.listing.available_models.iter().any(|m| m.to_lowercase().contains(&model_lower));
             if !has_model {
                 return false;
             }
@@ -287,6 +378,9 @@ impl MeshFilter {
                 Some(r) if r.eq_ignore_ascii_case(region) => {}
                 _ => return false,
             }
+        }
+        if self.needs_workers && !mesh.listing.needs_workers {
+            return false;
         }
         true
     }
