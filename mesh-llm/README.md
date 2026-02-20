@@ -10,7 +10,7 @@ Docs:
 ```
 src/
 ├── main.rs        CLI, startup, API proxy (owns :9337), model routing
-├── mesh.rs        iroh QUIC endpoint, gossip, peer management, health check
+├── mesh.rs        iroh QUIC endpoint, gossip, peer management, routing table
 ├── election.rs    Per-model host election, solo/split mode, llama-server lifecycle
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
@@ -28,5 +28,6 @@ src/
 - **One model per node** — each node loads exactly one model. Multi-model = different nodes serving different things
 - **No accidental split** — if a model fits on one node, it runs solo. Tensor split only when the model doesn't fit or `--split` is forced
 - **Every mesh change = re-evaluate** — but skip restart if election result unchanged (no gossip storms)
-- **Health check** — periodic gossip probes detect dead peers in ~15s
+- **Event-driven mesh** — death detected on use (tunnel failure) + 60s heartbeat fallback. Dead peers broadcast to mesh, not re-added by gossip. Scales better than aggressive polling.
+- **Rejoin loop** — reconnects to bootstrap token every 60s if connection drops
 - **Ephemeral client keys** — `--client` gets a unique identity, works alongside GPU nodes on the same machine

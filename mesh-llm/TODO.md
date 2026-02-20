@@ -1,14 +1,15 @@
 # mesh-llm TODO
 
-## Event-driven mesh (in progress)
-Replaced aggressive 15s health check polling with event-driven death detection:
-- [x] Slow heartbeat (60s) catches silent failures
-- [x] Death broadcast: when tunnel fails, broadcast "X is dead" to all peers
+## Done
+- [x] Event-driven mesh: replaced 15s aggressive polling with 60s heartbeat + death broadcasts
+- [x] Death broadcast (STREAM_PEER_DOWN): tunnel failure → broadcast to all peers
+- [x] Clean shutdown broadcast (STREAM_PEER_LEAVING): ctrl-c → notify peers
 - [x] Peers verify death before removing (prevents split-brain false positives)
-- [x] Clean shutdown broadcast (STREAM_PEER_LEAVING)
-- [x] `open_http_tunnel` failure triggers `handle_peer_death` → broadcast
-- [ ] Test: kill -9 a node, verify other nodes detect + remove within ~60s
-- [ ] Test: clean shutdown (ctrl-c), verify peers remove immediately
+- [x] Dead peers set: prevents gossip from re-adding killed nodes (flap fix)
+- [x] Dead peer cleared on inbound reconnection (node comes back → mesh accepts it)
+- [x] Rejoin loop: re-connects to bootstrap token every 60s
+- [x] Routing table protocol (STREAM_ROUTE_REQUEST): lightweight alternative to full gossip
+- [x] Console JS fix (servingSel ordering bug)
 
 ## Unified passive mode
 Clients and standby GPU nodes use same lightweight path:
@@ -37,6 +38,6 @@ Data is already in gossip — just UI work in console.html.
 
 ## Test forced tensor split
 - [ ] Pick a small model (e.g. Qwen2.5-3B)
-- [ ] Force split across two nodes even though it fits on one (test `--split` flag or hack VRAM detection)
-- [ ] Verify rpc-server workers and tensor split still work correctly with new event-driven mesh
+- [ ] Force split across two nodes even though it fits on one (test `--split` flag or hack VRAM)
+- [ ] Verify rpc-server workers and tensor split still work with event-driven mesh
 - [ ] Confirm solo mode still works (no accidental split when model fits locally)
