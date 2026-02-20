@@ -648,15 +648,29 @@ impl Node {
         (i_serve, peers)
     }
 
-    /// Find the host for a specific model (if any).
+    /// Find a host for a specific model, using hash-based selection for load distribution.
+    /// When multiple hosts serve the same model, picks one based on our node ID hash.
     pub async fn host_for_model(&self, model: &str) -> Option<PeerInfo> {
         let state = self.state.lock().await;
-        for p in state.peers.values() {
-            if matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model) {
-                return Some(p.clone());
-            }
-        }
-        None
+        let mut hosts: Vec<&PeerInfo> = state.peers.values()
+            .filter(|p| matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model))
+            .collect();
+        if hosts.is_empty() { return None; }
+        // Sort for deterministic ordering, then hash-select
+        hosts.sort_by_key(|p| p.id);
+        let my_id = self.endpoint.id();
+        let my_id_bytes = my_id.as_bytes();
+        let hash = my_id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let idx = (hash as usize) % hosts.len();
+        Some(hosts[idx].clone())
+    }
+
+    /// Find ANY host in the mesh (fallback when no model match).
+    pub async fn any_host(&self) -> Option<PeerInfo> {
+        let state = self.state.lock().await;
+        state.peers.values()
+            .find(|p| matches!(p.role, NodeRole::Host { .. }))
+            .cloned()
     }
 
     /// Build the current routing table from this node's view of the mesh.

@@ -28,6 +28,11 @@ struct Cli {
     #[arg(long, default_missing_value = "", num_args = 0..=1)]
     discover: Option<String>,
 
+    /// Auto-join: discover a mesh via Nostr and join it.
+    /// Equivalent to: mesh-llm --join $(mesh-llm discover --auto)
+    #[arg(long)]
+    auto: bool,
+
     /// GGUF model to serve. Can be a path, catalog name, or HuggingFace URL.
     /// Specify multiple times to seed the mesh with multiple models.
     /// When joining without --model, the mesh assigns one automatically.
@@ -169,7 +174,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     // Subcommand dispatch
     if let Some(cmd) = &cli.command {
@@ -206,6 +211,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Auto-discover ---
+    if cli.auto && cli.join.is_empty() {
+        eprintln!("🔍 Discovering meshes via Nostr...");
+        let relays = nostr_relays(&cli.nostr_relay);
+        let filter = nostr::MeshFilter {
+            model: None,
+            min_vram_gb: None,
+            region: None,
+        };
+        let meshes = nostr::discover(&relays, &filter).await?;
+        if let Some(best) = meshes.first() {
+            eprintln!("Found mesh: {} ({} nodes, {} models)",
+                best.listing.name.as_deref().unwrap_or("unnamed"),
+                best.listing.node_count,
+                best.listing.models.len());
+            cli.join.push(best.listing.invite_token.clone());
+        } else {
+            anyhow::bail!("No meshes found via Nostr. Try --join <token> instead.");
+        }
+    }
+
     // --- Validation ---
     if cli.client && cli.join.is_empty() {
         anyhow::bail!("--client requires --join to connect to a mesh");
@@ -213,13 +239,39 @@ async fn main() -> Result<()> {
     if cli.client && !cli.model.is_empty() {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
-    if cli.model.is_empty() && cli.join.is_empty() && !cli.client {
-        anyhow::bail!("--model is required (or use --join to auto-discover, or --client for lite mode)");
+    if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
+        anyhow::bail!("--model is required (or use --join, --auto, or --client)");
     }
 
-    // --- Lite client mode ---
+    // --- Client mode (passive, never serves) ---
     if cli.client {
-        return run_client(cli).await;
+        let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
+        node.start_heartbeat();
+
+        let mut joined = false;
+        for t in &cli.join {
+            match node.join(t).await {
+                Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
+                Err(e) => tracing::warn!("Failed to join via token: {e}"),
+            }
+        }
+        if !joined {
+            anyhow::bail!("Failed to join any peer in the mesh");
+        }
+
+        // Periodic rejoin
+        let rejoin_node = node.clone();
+        let rejoin_tokens: Vec<String> = cli.join.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                for t in &rejoin_tokens {
+                    let _ = rejoin_node.join(t).await;
+                }
+            }
+        });
+
+        return run_passive(&cli, node, true).await;
     }
 
     // --- Resolve models from CLI ---
@@ -490,11 +542,11 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                 if alt.exists() { alt } else { model_path }
             }
         } else {
-            // Nothing on disk matches — go idle, act as proxy
-            eprintln!("💤 No matching model on disk — running as idle GPU node");
+            // Nothing on disk matches — go passive, act as proxy
+            eprintln!("💤 No matching model on disk — running as standby GPU node");
             eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, local_models);
             eprintln!("   Proxying requests to other nodes. Will activate when needed.");
-            return run_idle_gpu(cli, node, channels, &local_models).await;
+            return run_passive(&cli, node, false).await;
         }
     };
 
@@ -671,27 +723,17 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     Ok(())
 }
 
-/// Run as an idle GPU node: joined the mesh but no matching model on disk.
-/// Acts like a client (proxies requests) but keeps advertising VRAM and local models
-/// via gossip. If the mesh later needs a model we have, we could activate.
-async fn run_idle_gpu(mut cli: Cli, node: mesh::Node, _channels: mesh::TunnelChannels, _local_models: &[String]) -> Result<()> {
+/// Run in passive mode: proxy requests to active hosts, no local llama-server.
+/// Used by both --client (pure consumer) and idle GPU nodes (standby, no matching model).
+/// If `create_node` is true, creates a new Node (--client path). Otherwise reuses existing.
+async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<()> {
     let local_port = cli.port;
-    let api_port = local_port;
 
-    // We're already joined and health-checking. Just set up the proxy.
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{local_port}")).await
-        .with_context(|| format!("Failed to bind to port {local_port}"))?;
-    eprintln!("  API proxy: http://localhost:{local_port}");
-
-    // Nostr publishing (if --publish)
-    if cli.publish {
+    // Nostr publishing (if --publish, for idle GPU nodes advertising capacity)
+    if cli.publish && !is_client {
         let pub_node = node.clone();
         let nostr_keys = nostr::load_or_create_keys()?;
-        let relays = if cli.nostr_relay.is_empty() {
-            nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
-        } else {
-            cli.nostr_relay.clone()
-        };
+        let relays = nostr_relays(&cli.nostr_relay);
         let pub_name = cli.mesh_name.clone();
         let pub_region = cli.region.clone();
         let pub_max_clients = cli.max_clients;
@@ -700,133 +742,28 @@ async fn run_idle_gpu(mut cli: Cli, node: mesh::Node, _channels: mesh::TunnelCha
         });
     }
 
-    // Console (optional)
-    if let Some(cport) = cli.console {
-        let cs = console::ConsoleState::new(node.clone(), "(idle)".into(), local_port);
-        cs.update(false, false).await;
-        let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
-        tokio::spawn(async move {
-            console::start(cport, cs, rx).await;
-        });
-    }
+    // Wait briefly for gossip to propagate
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    loop {
-        let (tcp_stream, addr) = listener.accept().await?;
-        tcp_stream.set_nodelay(true)?;
-        tracing::info!("Connection from {addr}");
-        let node = node.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 32768];
-            let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-
-            // Handle /v1/models locally
-            if is_models_list_request(&buf[..n]) {
-                let served = node.models_being_served().await;
-                let _ = send_models_list(tcp_stream, &served).await;
-                return;
-            }
-
-            // Route to host by model name
-            let target_host = if let Some(ref name) = model_name {
-                node.host_for_model(name).await.map(|p| p.id)
-            } else {
-                None
-            };
-            // Fall back to any host in the mesh
-            let target_host = match target_host {
-                Some(id) => id,
-                None => {
-                    let peers = node.peers().await;
-                    match peers.iter().find(|p| matches!(p.role, mesh::NodeRole::Host { .. })) {
-                        Some(p) => p.id,
-                        None => {
-                            let _ = send_503(tcp_stream).await;
-                            return;
-                        }
-                    }
-                }
-            };
-            match node.open_http_tunnel(target_host).await {
-                Ok((quic_send, quic_recv)) => {
-                    if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                        tracing::debug!("HTTP tunnel relay ended: {e}");
-                    }
-                }
-                Err(e) => tracing::warn!("Failed to open HTTP tunnel to host: {e}"),
-            }
-        });
-    }
-}
-
-/// Run as a lite client: join mesh, find host, expose local HTTP proxy.
-/// Now model-aware — routes requests by model name to the right host.
-async fn run_client(cli: Cli) -> Result<()> {
-    let local_port = cli.port;
-
-    let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
-    let token = node.invite_token();
-    node.start_heartbeat();
-
-    let mut joined = false;
-    for t in &cli.join {
-        match node.join(t).await {
-            Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
-            Err(e) => tracing::warn!("Failed to join via token: {e}"),
-        }
-    }
-    if !joined {
-        anyhow::bail!("Failed to join any peer in the mesh");
-    }
-    eprintln!("This node's token (for others to join): {token}");
-
-    // Periodic rejoin
-    let rejoin_node = node.clone();
-    let rejoin_tokens: Vec<String> = cli.join.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            for t in &rejoin_tokens {
-                let _ = rejoin_node.join(t).await;
-            }
-        }
-    });
-
-    eprintln!("Looking for a host node with llama-server...");
-    let host = node.wait_for_host().await?;
-    let host_id = host.id;
-    if let NodeRole::Host { http_port } = &host.role {
-        eprintln!("Found host {} (llama-server on port {})", host_id.fmt_short(), http_port);
-    } else {
-        eprintln!("Found host {}", host_id.fmt_short());
-    }
-
-    // Show all models available in the mesh
-    let catalog = node.mesh_catalog().await;
-    if !catalog.is_empty() {
-        eprintln!("Available models in mesh: {:?}", catalog);
+    let served = node.models_being_served().await;
+    if !served.is_empty() {
+        eprintln!("Models available in mesh: {:?}", served);
     }
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{local_port}")).await
         .with_context(|| format!("Failed to bind to port {local_port}"))?;
-    eprintln!("Lite client ready: http://localhost:{local_port}");
-    eprintln!("  → tunneling to host {}", host_id.fmt_short());
-    eprintln!();
-    eprintln!("Launch with pi:");
-    eprintln!("  OPENAI_API_KEY=mesh OPENAI_BASE_URL=http://localhost:{local_port}/v1 pi --provider openai");
+    let mode = if is_client { "client" } else { "standby" };
+    eprintln!("Passive {mode} ready: http://localhost:{local_port}");
+    eprintln!("  Requests routed to active hosts via QUIC tunnel");
 
     // Console (optional)
     if let Some(cport) = cli.console {
-        let model_name = host.models.first().cloned().unwrap_or_default();
-        let cs = console::ConsoleState::new(node.clone(), model_name, local_port);
-        cs.set_client(true).await;
-        cs.update(false, true).await;
+        let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
+        let cs = console::ConsoleState::new(node.clone(), label, local_port);
+        if is_client { cs.set_client(true).await; }
+        cs.update(false, !is_client).await;
+        let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
         tokio::spawn(async move {
-            let (_tx, rx) = tokio::sync::watch::channel(
-                election::InferenceTarget::Remote(host_id)
-            );
             console::start(cport, cs, rx).await;
         });
     }
@@ -836,32 +773,39 @@ async fn run_client(cli: Cli) -> Result<()> {
             accept_result = listener.accept() => {
                 let (tcp_stream, addr) = accept_result?;
                 tcp_stream.set_nodelay(true)?;
-                tracing::info!("Client connection from {addr}");
+                tracing::info!("Connection from {addr}");
                 let node = node.clone();
                 tokio::spawn(async move {
-                    // Peek to extract model name and check for /v1/models
                     let mut buf = vec![0u8; 32768];
                     let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
                         Ok(v) => v,
                         Err(_) => return,
                     };
 
-                    // Handle /v1/models locally from gossip state
+                    // Handle /v1/models locally
                     if is_models_list_request(&buf[..n]) {
                         let served = node.models_being_served().await;
                         let _ = send_models_list(tcp_stream, &served).await;
                         return;
                     }
 
-                    // Find the host for this model
+                    // Route to host by model name (hash-based selection)
                     let target_host = if let Some(ref name) = model_name {
-                        // Look for a host serving this model
                         node.host_for_model(name).await.map(|p| p.id)
                     } else {
                         None
                     };
-                    // Fall back to any host
-                    let target_host = target_host.unwrap_or(host_id);
+                    // Fall back to any host in the mesh
+                    let target_host = match target_host {
+                        Some(id) => id,
+                        None => match node.any_host().await {
+                            Some(p) => p.id,
+                            None => {
+                                let _ = send_503(tcp_stream).await;
+                                return;
+                            }
+                        }
+                    };
 
                     match node.open_http_tunnel(target_host).await {
                         Ok((quic_send, quic_recv)) => {
