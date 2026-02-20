@@ -295,7 +295,7 @@
     <div class="step">
       <div class="step-num">2</div>
       <h3>Others join</h3>
-      <p>Anyone with the token joins over QUIC. The mesh auto-elects a host, calculates tensor split from VRAM, and starts serving.</p>
+      <p>Anyone with the token joins over QUIC. The mesh auto-elects a host, splits tensors across nodes proportional to VRAM, and starts serving.</p>
     </div>
     <div class="step">
       <div class="step-num">3</div>
@@ -326,7 +326,7 @@
     <div class="feature">
       <div class="feature-icon">⚡</div>
       <h3>Automatic tensor split</h3>
-      <p>Model doesn't fit on one machine? Layers are split proportionally across nodes by VRAM. No manual configuration.</p>
+      <p>Model doesn't fit on one machine? Tensors are split proportionally across nodes by VRAM via llama.cpp's RPC. No manual configuration.</p>
     </div>
     <div class="feature">
       <div class="feature-icon">🔀</div>
