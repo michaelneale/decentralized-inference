@@ -23,10 +23,17 @@ To add another machine to the mesh:
 mesh-llm --join <token>                         # token is printed by the first machine
 ```
 
-Or find a mesh someone is sharing:
+Or find and join a mesh someone is sharing (via Nostr):
 ```bash
-mesh-llm discover                               # see what's out there
-mesh-llm --join $(mesh-llm discover --auto)     # join the best match
+mesh-llm --auto                                 # discover and join the best mesh
+mesh-llm --auto --model Qwen2.5-3B             # join and serve a model
+mesh-llm --auto --client                        # join as API-only client (no GPU)
+mesh-llm discover                               # browse available meshes
+```
+
+Or publish your mesh for others to find:
+```bash
+mesh-llm --model Qwen2.5-3B --publish --mesh-name "My Mesh" --region AU
 ```
 
 Or join without a GPU:
