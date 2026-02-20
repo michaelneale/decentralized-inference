@@ -274,7 +274,9 @@ async fn main() -> Result<()> {
             }
         });
 
-        return run_passive(&cli, node, true).await;
+        // Client never promotes — discard the return
+        run_passive(&cli, node, true).await?;
+        return Ok(());
     }
 
     // --- Resolve models from CLI ---
@@ -421,21 +423,43 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         }
     }
 
-    // Priority 2: least-served model that we have on disk
-    let mut candidates: Vec<(&String, usize)> = mesh_requested.iter()
-        .filter(|m| local_models.contains(m))
-        .map(|m| (m, serving_count.get(m).copied().unwrap_or(0)))
-        .collect();
-    candidates.sort_by_key(|(_m, count)| *count);
-    if let Some((m, _)) = candidates.first() {
-        eprintln!("📋 Assigned to serve {} (least served model on disk)", m);
-        return Some((*m).clone());
+    // If every requested model has at least one server, stay idle.
+    // Don't add redundancy just because we can — save VRAM for reactive promotion.
+    let all_covered = mesh_requested.iter()
+        .all(|m| serving_count.get(m).copied().unwrap_or(0) > 0);
+    if all_covered {
+        eprintln!("📋 All mesh models are served — staying on standby");
+        return None;
     }
 
-    // Priority 3: any model we have on disk that the mesh wants
+    None
+}
+
+/// Check if any mesh-requested model has zero servers and we have it on disk.
+/// Unlike pick_model_assignment(), this only returns a model when one is truly
+/// unserved — it won't promote just to add redundancy.
+async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Option<String> {
+    let peers = node.peers().await;
+
+    let mut mesh_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &peers {
+        for m in &p.requested_models {
+            mesh_requested.insert(m.clone());
+        }
+    }
+
+    if mesh_requested.is_empty() { return None; }
+
+    let mut serving_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in &peers {
+        if let Some(ref s) = p.serving {
+            *serving_count.entry(s.clone()).or_default() += 1;
+        }
+    }
+
+    // Only promote when a model has ZERO servers
     for m in &mesh_requested {
-        if local_models.contains(m) {
-            eprintln!("📋 Assigned to serve {} (on disk)", m);
+        if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
             return Some(m.clone());
         }
     }
@@ -546,10 +570,23 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             }
         } else {
             // Nothing on disk matches — go passive, act as proxy
+            // If a model becomes unserved while we're standby, we'll promote
             eprintln!("💤 No matching model on disk — running as standby GPU node");
             eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, local_models);
             eprintln!("   Proxying requests to other nodes. Will activate when needed.");
-            return run_passive(&cli, node, false).await;
+            match run_passive(&cli, node.clone(), false).await? {
+                Some(model_name) => {
+                    // Promoted! Resolve the model path and continue to serving
+                    let model_path = download::models_dir().join(format!("{}.gguf", model_name));
+                    if model_path.exists() {
+                        model_path
+                    } else {
+                        let alt = download::models_dir().join(&model_name);
+                        if alt.exists() { alt } else { model_path }
+                    }
+                }
+                None => return Ok(()), // clean shutdown
+            }
         }
     };
 
@@ -730,7 +767,10 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 /// Run in passive mode: proxy requests to active hosts, no local llama-server.
 /// Used by both --client (pure consumer) and idle GPU nodes (standby, no matching model).
 /// If `create_node` is true, creates a new Node (--client path). Otherwise reuses existing.
-async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<()> {
+/// Run as passive node (client or standby GPU).
+/// Returns Ok(Some(model_name)) if a standby GPU should promote to serve a model.
+/// Returns Ok(None) on clean shutdown.
+async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Option<String>> {
     let local_port = cli.port;
 
     // Nostr publishing (if --publish, for idle GPU nodes advertising capacity)
@@ -769,6 +809,35 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<()>
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
         tokio::spawn(async move {
             console::start(cport, cs, rx).await;
+        });
+    }
+
+    // Reactive rebalancing: watch for topology changes and promote if needed.
+    // Only for standby GPU nodes (not clients — they never serve).
+    let (promote_tx, mut promote_rx) = tokio::sync::mpsc::channel::<String>(1);
+    if !is_client {
+        let watch_node = node.clone();
+        let mut peer_rx = node.peer_change_rx.clone();
+        let local_models = mesh::scan_local_models();
+        tokio::spawn(async move {
+            // Wait for initial mesh settle
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            loop {
+                // Wait for a topology change
+                if peer_rx.changed().await.is_err() { break; }
+                // Debounce — multiple changes can fire in quick succession
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // Drain any queued changes
+                while peer_rx.has_changed().unwrap_or(false) {
+                    let _ = peer_rx.borrow_and_update();
+                }
+                // Check if there's an unserved model we can handle
+                if let Some(model_name) = check_unserved_model(&watch_node, &local_models).await {
+                    eprintln!("🚀 Promoting from standby — serving {model_name}");
+                    let _ = promote_tx.send(model_name).await;
+                    break;
+                }
+            }
         });
     }
 
@@ -821,15 +890,19 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<()>
                     }
                 });
             }
+            Some(model_name) = promote_rx.recv() => {
+                eprintln!("⬆️  Standby promoting to serve: {model_name}");
+                return Ok(Some(model_name));
+            }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\nShutting down...");
                 node.broadcast_leaving().await;
-                break;
+                return Ok(None);
             }
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
