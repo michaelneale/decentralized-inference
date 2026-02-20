@@ -604,7 +604,8 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     // Console (optional)
     let model_name_for_console = model_name.clone();
     let console_state = if let Some(cport) = console_port {
-        let cs = console::ConsoleState::new(node.clone(), model_name_for_console.clone(), api_port);
+        let model_size_bytes = election::total_model_bytes(&model);
+        let cs = console::ConsoleState::new(node.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
         if let Some(draft) = &cli.draft {
             let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
             cs.set_draft_name(dn).await;
@@ -762,7 +763,7 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<()>
     // Console (optional)
     if let Some(cport) = cli.console {
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
-        let cs = console::ConsoleState::new(node.clone(), label, local_port);
+        let cs = console::ConsoleState::new(node.clone(), label, local_port, 0);
         if is_client { cs.set_client(true).await; }
         cs.update(false, !is_client).await;
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);

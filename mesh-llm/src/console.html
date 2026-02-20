@@ -190,7 +190,7 @@ function renderDiagram() {
   const total = nodes.filter(n => !n.client).reduce((s,n) => s + n.vram, 0);
   const ok = S.llama_ready;
   const sel = selectedModel();
-  const W = 320, nW = 140, nH = 68;
+  const W = 320, nW = 140, nH = 76;
 
   if (nodes.length === 1) {
     el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok, sel));
@@ -248,7 +248,13 @@ function nBox(x, y, n, total, ok, sel) {
   const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
   const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
 
+  // Model usage bar (model_size / node_vram)
+  const modelGB = S.model_size_gb || 0;
+  const usagePct = (!n.client && n.vram > 0 && modelGB > 0) ? Math.min(100, Math.round(modelGB / n.vram * 100)) : 0;
+  const usageLabel = (!n.client && modelGB > 0) ? `${modelGB.toFixed(1)}GB model` : '';
+
   const bW = 112, bH = 4, bX = x + 14, bY = y + 50;
+  const b2Y = bY + bH + 2; // second bar just below first
 
   let extra = '';
   if (n.host && ok) {
@@ -256,15 +262,21 @@ function nBox(x, y, n, total, ok, sel) {
       <text x="${x+115}" y="${y+12}" text-anchor="middle" fill="#4c4" font-size="6.5" font-family="monospace">:${S.api_port||9337}</text>`;
   }
 
+  // Second bar: model usage (orange-ish for utilisation)
+  const bar2 = usagePct > 0 ? `
+    <rect x="${bX}" y="${b2Y}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
+    <rect x="${bX}" y="${b2Y}" width="${bW*usagePct/100}" height="${bH}" rx="1.5" fill="${usagePct > 80 ? '#8a4a2a' : '#5a4a2a'}"/>` : '';
+
   return `<g>
-    <rect x="${x}" y="${y}" width="140" height="68" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
+    <rect x="${x}" y="${y}" width="140" height="76" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
     <text x="${x+70}" y="${y+15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
     <text x="${x+70}" y="${y+27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
     <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="${svcColor}" font-size="6.5" font-family="monospace">${svc}</text>
     <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
     <rect x="${bX}" y="${bY}" width="${bW*pct/100}" height="${bH}" rx="1.5" fill="${servingSel?'#2a5a2a':'#1a3a5c'}"/>
-    <text x="${bX}" y="${bY+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}</text>
-    <text x="${bX+bW}" y="${bY+bH+9}" text-anchor="end" fill="#444" font-size="6.5" font-family="monospace">${pctL}</text>
+    ${bar2}
+    <text x="${bX}" y="${b2Y+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}${usageLabel ? ' · '+usageLabel : ''}</text>
+    <text x="${bX+bW}" y="${b2Y+bH+9}" text-anchor="end" fill="#444" font-size="6.5" font-family="monospace">${usagePct > 0 ? usagePct+'% used' : pctL}</text>
     ${extra}
   </g>`;
 }

@@ -30,6 +30,7 @@ struct ConsoleInner {
     model_name: String,
     draft_name: Option<String>,
     api_port: u16,
+    model_size_bytes: u64,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -44,6 +45,7 @@ struct StatusPayload {
     draft_name: Option<String>,
     api_port: u16,
     my_vram_gb: f64,
+    model_size_gb: f64,
     peers: Vec<PeerPayload>,
     launch_pi: Option<String>,
     launch_goose: Option<String>,
@@ -71,7 +73,7 @@ struct MeshModelPayload {
 }
 
 impl ConsoleState {
-    pub fn new(node: mesh::Node, model_name: String, api_port: u16) -> Self {
+    pub fn new(node: mesh::Node, model_name: String, api_port: u16, model_size_bytes: u64) -> Self {
         ConsoleState {
             inner: Arc::new(Mutex::new(ConsoleInner {
                 node,
@@ -82,6 +84,7 @@ impl ConsoleState {
                 model_name,
                 draft_name: None,
                 api_port,
+                model_size_bytes,
                 sse_clients: Vec::new(),
             })),
         }
@@ -171,6 +174,7 @@ impl ConsoleState {
             draft_name: inner.draft_name.clone(),
             api_port: inner.api_port,
             my_vram_gb,
+            model_size_gb: inner.model_size_bytes as f64 / 1e9,
             peers,
             launch_pi,
             launch_goose,

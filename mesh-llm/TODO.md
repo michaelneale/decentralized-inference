@@ -8,9 +8,9 @@
 - [x] `--auto` Nostr discovery
 - [x] Passive node scaling (no gossip, routing table only, zero server state)
 - [x] `MESH_LLM_EPHEMERAL_KEY=1` for single-machine testing
-- [x] Tensor split tested locally (split, worker death → solo recovery)
-- [x] Tensor split tested cross-network (Brad+Local+Mini, 3-way, Sydney↔QLD)
+- [x] Tensor split tested locally + cross-network (3-way Brad+Local+Mini)
 - [x] Passive client tested (no gossip, routing table, tunnel inference)
+- [x] Console VRAM usage bar (model_size / node_vram per node)
 
 ## Nice to have
 
@@ -23,6 +23,3 @@ When a host dies, standby nodes with that model on disk could self-promote.
 ### Don't download what won't fit
 Before downloading via `--model`, check if node VRAM >= model_size * 1.1.
 Skip download if model won't fit and no split peers available.
-
-### Console VRAM usage bar
-Second bar per node showing model_size / node_vram. Data already in gossip, just UI.
