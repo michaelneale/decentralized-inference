@@ -249,6 +249,9 @@ struct MeshState {
     connections: HashMap<EndpointId, Connection>,
     /// Remote peers' tunnel maps: peer_endpoint_id → { target_endpoint_id → tunnel_port_on_that_peer }
     remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>>,
+    /// Peers confirmed dead — don't reconnect from gossip discovery.
+    /// Cleared when the peer successfully reconnects via rejoin/join.
+    dead_peers: std::collections::HashSet<EndpointId>,
 }
 
 /// Channels returned by Node::start for inbound tunnel streams.
@@ -337,6 +340,7 @@ impl Node {
                 peers: HashMap::new(),
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
+                dead_peers: std::collections::HashSet::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
@@ -382,6 +386,8 @@ impl Node {
     pub async fn join(&self, invite_token: &str) -> Result<()> {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
         let addr: EndpointAddr = serde_json::from_slice(&json)?;
+        // Clear dead status — explicit join should always attempt connection
+        self.state.lock().await.dead_peers.remove(&addr.id);
         self.connect_to_peer(addr).await
     }
 
@@ -458,6 +464,7 @@ impl Node {
         let node = self.clone();
         tokio::spawn(async move {
             let mut fail_counts: std::collections::HashMap<EndpointId, u32> = std::collections::HashMap::new();
+
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
@@ -471,20 +478,27 @@ impl Node {
 
                 for (peer_id, conn) in peers_and_conns {
                     let alive = if let Some(conn) = conn {
-                        // Use gossip stream as heartbeat — also refreshes peer state
+                        // Gossip as heartbeat — syncs state but won't re-discover dead peers
                         tokio::time::timeout(
                             std::time::Duration::from_secs(10),
-                            node.initiate_gossip(conn, peer_id),
+                            node.initiate_gossip_inner(conn, peer_id, false),
                         ).await.map(|r| r.is_ok()).unwrap_or(false)
                     } else {
                         false
                     };
 
                     if alive {
+                        if fail_counts.contains_key(&peer_id) {
+                            eprintln!("💚 Heartbeat: {} recovered (was {}/2)", peer_id.fmt_short(), fail_counts.get(&peer_id).unwrap_or(&0));
+                            // Clear dead_peers if peer came back
+                            node.state.lock().await.dead_peers.remove(&peer_id);
+                        }
                         fail_counts.remove(&peer_id);
                     } else {
                         let count = fail_counts.entry(peer_id).or_default();
                         *count += 1;
+                        // Mark as suspect immediately to prevent gossip re-adding
+                        node.state.lock().await.dead_peers.insert(peer_id);
                         if *count >= 2 {
                             eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
                             fail_counts.remove(&peer_id);
@@ -494,6 +508,7 @@ impl Node {
                         }
                     }
                 }
+
             }
         });
     }
@@ -504,6 +519,7 @@ impl Node {
         {
             let mut state = self.state.lock().await;
             state.connections.remove(&dead_id);
+            state.dead_peers.insert(dead_id);
         }
         self.remove_peer(dead_id).await;
         self.broadcast_peer_down(dead_id).await;
@@ -852,6 +868,9 @@ impl Node {
         // Store connection and start stream dispatcher
         {
             let mut state = self.state.lock().await;
+            if state.dead_peers.remove(&remote) {
+                eprintln!("🔄 Previously dead peer {} reconnected", remote.fmt_short());
+            }
             state.connections.insert(remote, conn.clone());
         }
 
@@ -1042,6 +1061,10 @@ impl Node {
         {
             let state = self.state.lock().await;
             if state.peers.contains_key(&peer_id) { return Ok(()); }
+            if state.dead_peers.contains(&peer_id) {
+                tracing::debug!("Skipping connection to dead peer {}", peer_id.fmt_short());
+                return Ok(());
+            }
         }
 
         tracing::info!("Connecting to peer {}...", peer_id.fmt_short());
@@ -1076,6 +1099,10 @@ impl Node {
 
     /// Open a gossip stream on an existing connection to exchange peer info.
     async fn initiate_gossip(&self, conn: Connection, remote: EndpointId) -> Result<()> {
+        self.initiate_gossip_inner(conn, remote, true).await
+    }
+
+    async fn initiate_gossip_inner(&self, conn: Connection, remote: EndpointId, discover_peers: bool) -> Result<()> {
         let t0 = std::time::Instant::now();
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_GOSSIP]).await?;
@@ -1112,11 +1139,13 @@ impl Node {
             }
         }
 
-        // Discover new peers (don't block on failures)
-        for ann in their_announcements {
-            if ann.addr.id != self.endpoint.id() {
-                if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
-                    tracing::warn!("Failed to discover peer: {e}");
+        // Discover new peers (only on initial join, not heartbeat)
+        if discover_peers {
+            for ann in their_announcements {
+                if ann.addr.id != self.endpoint.id() {
+                    if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
+                        tracing::warn!("Failed to discover peer: {e}");
+                    }
                 }
             }
         }
@@ -1180,9 +1209,15 @@ impl Node {
             }
         }
 
-        // Discover new peers (don't block on failures)
+        // Discover new peers mentioned in gossip — but only try to connect
+        // to peers we don't already know about. Skip peers we've recently removed
+        // (they'll be rediscovered via the rejoin loop if they come back).
         for ann in their_announcements {
-            if ann.addr.id != self.endpoint.id() {
+            let peer_id = ann.addr.id;
+            if peer_id == self.endpoint.id() { continue; }
+            // Only discover if we don't already have this peer
+            let already_known = self.state.lock().await.peers.contains_key(&peer_id);
+            if !already_known {
                 if let Err(e) = Box::pin(self.connect_to_peer(ann.addr)).await {
                     tracing::warn!("Failed to discover peer: {e}");
                 }
