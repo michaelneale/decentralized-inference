@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mesh-llm — Distributed LLM Inference</title>
+<meta name="description" content="Split LLM inference across multiple machines over QUIC. Models larger than any single machine's VRAM, running across a decentralized mesh.">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg2: #0d0d0d;
+    --bg3: #111;
+    --border: #1a1a1a;
+    --text: #d0d0d0;
+    --text2: #888;
+    --text3: #555;
+    --green: #4c4;
+    --green-dim: #2a5a2a;
+    --green-bg: #0a1a0a;
+    --blue: #6cf;
+    --blue-dim: #1a3a5c;
+    --blue-bg: #0d1a26;
+    --orange: #c84;
+    --orange-dim: #5a4a2a;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; }
+
+  /* Nav */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(10,10,10,0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 0.7rem 2rem;
+    display: flex; align-items: center; gap: 1rem;
+  }
+  nav .logo { font-weight: 700; font-size: 1.05rem; color: #fff; letter-spacing: -0.02em; }
+  nav .logo span { color: var(--green); }
+  nav .links { margin-left: auto; display: flex; gap: 1.5rem; font-size: 0.8rem; }
+  nav .links a { color: var(--text2); }
+  nav .links a:hover { color: #fff; text-decoration: none; }
+
+  /* Sections */
+  section { max-width: 860px; margin: 0 auto; padding: 5rem 2rem; }
+  section.wide { max-width: 1000px; }
+
+  /* Hero */
+  .hero {
+    min-height: 90vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center;
+    padding-top: 6rem;
+  }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    font-size: 0.7rem; color: var(--green);
+    background: var(--green-bg); border: 1px solid var(--green-dim);
+    border-radius: 20px; padding: 0.25rem 0.8rem;
+    margin-bottom: 1.5rem; letter-spacing: 0.03em;
+  }
+  .hero-badge .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.5rem);
+    font-weight: 700; letter-spacing: -0.03em;
+    line-height: 1.15; color: #fff;
+    max-width: 700px; margin-bottom: 1.2rem;
+  }
+  .hero p {
+    font-size: 1.1rem; color: var(--text2);
+    max-width: 560px; margin-bottom: 2rem;
+  }
+  .hero-ctas { display: flex; gap: 0.8rem; flex-wrap: wrap; justify-content: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.6rem 1.4rem; border-radius: 8px;
+    font-size: 0.85rem; font-weight: 500;
+    transition: all 0.15s ease; cursor: pointer; border: none;
+  }
+  .btn-primary { background: #fff; color: #000; }
+  .btn-primary:hover { background: #e0e0e0; text-decoration: none; }
+  .btn-secondary { background: transparent; color: var(--text); border: 1px solid #333; }
+  .btn-secondary:hover { border-color: #666; text-decoration: none; }
+
+  /* Mesh diagram */
+  .mesh-demo {
+    margin: 3rem auto 0;
+    max-width: 580px; width: 100%;
+  }
+  .mesh-demo svg { width: 100%; height: auto; display: block; }
+
+  /* Feature tags */
+  .tags {
+    display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center;
+    margin-top: 2rem; font-size: 0.7rem;
+  }
+  .tag {
+    padding: 0.2rem 0.6rem; border-radius: 4px;
+    color: var(--text3); border: 1px solid var(--border);
+  }
+
+  /* Section headers */
+  .section-tag {
+    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--green); margin-bottom: 0.5rem;
+  }
+  h2 {
+    font-size: 1.8rem; font-weight: 700; color: #fff;
+    letter-spacing: -0.02em; margin-bottom: 0.6rem;
+  }
+  .section-lead { color: var(--text2); font-size: 1rem; margin-bottom: 2.5rem; max-width: 560px; }
+
+  /* How it works steps */
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; }
+  .step {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.5rem;
+  }
+  .step-num {
+    font-size: 0.65rem; font-weight: 700; color: var(--green);
+    background: var(--green-bg); border: 1px solid var(--green-dim);
+    width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 0.8rem;
+  }
+  .step h3 { font-size: 0.95rem; color: #fff; margin-bottom: 0.4rem; }
+  .step p { font-size: 0.8rem; color: var(--text2); line-height: 1.6; }
+
+  /* Code blocks */
+  .code-block {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.2rem 1.5rem; overflow-x: auto;
+    font-size: 0.8rem; line-height: 1.8;
+    margin: 1.5rem 0;
+  }
+  .code-block .comment { color: var(--text3); }
+  .code-block .cmd { color: var(--green); }
+  .code-block .flag { color: var(--blue); }
+  .code-block .val { color: var(--orange); }
+
+  /* Feature grid */
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.2rem; }
+  .feature {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.3rem;
+  }
+  .feature h3 { font-size: 0.85rem; color: #fff; margin-bottom: 0.3rem; }
+  .feature p { font-size: 0.78rem; color: var(--text2); line-height: 1.6; }
+  .feature-icon { font-size: 1.2rem; margin-bottom: 0.6rem; }
+
+  /* CTA section */
+  .cta-section {
+    text-align: center;
+    border-top: 1px solid var(--border);
+    padding-top: 4rem;
+  }
+  .cta-section h2 { margin-bottom: 1rem; }
+  .cta-section p { color: var(--text2); margin-bottom: 2rem; }
+  .cta-buttons { display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
+
+  /* Footer */
+  footer {
+    text-align: center; padding: 2rem;
+    font-size: 0.7rem; color: var(--text3);
+    border-top: 1px solid var(--border);
+  }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    section { padding: 3rem 1.2rem; }
+    nav { padding: 0.6rem 1rem; }
+    .steps { grid-template-columns: 1fr; }
+    .features { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">mesh-<span>llm</span></div>
+  <div class="links">
+    <a href="#how">How it works</a>
+    <a href="#features">Features</a>
+    <a href="https://github.com/michaelneale/decentralized-inference">GitHub</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge"><span class="dot"></span> Open Source · Rust · QUIC</div>
+  <h1>Split LLM inference across machines</h1>
+  <p>Run models larger than any single machine's VRAM. Nodes find each other, elect a host, split the work, and serve an OpenAI-compatible API.</p>
+  <div class="hero-ctas">
+    <a href="https://github.com/michaelneale/decentralized-inference" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/michaelneale/decentralized-inference" class="btn btn-secondary">View on GitHub</a>
+  </div>
+
+  <!-- Mesh topology diagram (SVG, inspired by console) -->
+  <div class="mesh-demo">
+    <svg viewBox="0 0 580 260" xmlns="http://www.w3.org/2000/svg">
+      <!-- Connection lines -->
+      <line x1="290" y1="76" x2="130" y2="170" stroke="#2a5a2a" stroke-width="1.5"/>
+      <line x1="290" y1="76" x2="450" y2="170" stroke="#2a5a2a" stroke-width="1.5"/>
+      <line x1="130" y1="170" x2="450" y2="170" stroke="#1a3a5c" stroke-width="1" stroke-dasharray="4,3"/>
+
+      <!-- Animated dots on connections -->
+      <circle r="2.5" fill="#4c4" opacity="0.7">
+        <animateMotion dur="2s" repeatCount="indefinite" path="M290,76 L130,170"/>
+      </circle>
+      <circle r="2.5" fill="#6cf" opacity="0.5">
+        <animateMotion dur="2s" repeatCount="indefinite" path="M130,170 L290,76"/>
+      </circle>
+      <circle r="2.5" fill="#4c4" opacity="0.7">
+        <animateMotion dur="2.2s" repeatCount="indefinite" path="M290,76 L450,170"/>
+      </circle>
+      <circle r="2.5" fill="#6cf" opacity="0.5">
+        <animateMotion dur="2.2s" repeatCount="indefinite" path="M450,170 L290,76"/>
+      </circle>
+
+      <!-- Link labels -->
+      <text x="195" y="118" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">QUIC · RPC</text>
+      <text x="385" y="118" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">QUIC · RPC</text>
+      <text x="290" y="185" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">QUIC · gossip</text>
+
+      <!-- Host node (top center) -->
+      <rect x="220" y="8" width="140" height="68" rx="6" fill="#0a1a12" stroke="#4c4" stroke-width="2"/>
+      <text x="290" y="26" text-anchor="middle" fill="#4c4" font-size="9" font-family="monospace" font-weight="600">GLM-4.7-Flash</text>
+      <text x="290" y="40" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">host-a (you)</text>
+      <text x="290" y="52" text-anchor="middle" fill="#4c4" font-size="7.5" font-family="monospace">llama-server</text>
+      <!-- VRAM bar -->
+      <rect x="234" y="58" width="112" height="4" rx="1.5" fill="#151515"/>
+      <rect x="234" y="58" width="73" height="4" rx="1.5" fill="#2a5a2a"/>
+      <text x="234" y="72" fill="#444" font-size="7" font-family="monospace">103 GB</text>
+      <text x="346" y="72" text-anchor="end" fill="#444" font-size="7" font-family="monospace">62%</text>
+      <!-- Port badge -->
+      <rect x="323" y="11" width="32" height="12" rx="3" fill="#0a1a0a" stroke="#2a5a2a" stroke-width="0.5"/>
+      <text x="339" y="20" text-anchor="middle" fill="#4c4" font-size="7" font-family="monospace">:9337</text>
+
+      <!-- Worker node (bottom left) -->
+      <rect x="60" y="170" width="140" height="68" rx="6" fill="#0d1a26" stroke="#1a3a5c" stroke-width="1.5"/>
+      <text x="130" y="188" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace" font-weight="600">GLM-4.7-Flash</text>
+      <text x="130" y="202" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">worker-b</text>
+      <text x="130" y="214" text-anchor="middle" fill="#3a3a3a" font-size="7.5" font-family="monospace">rpc-server</text>
+      <rect x="74" y="220" width="112" height="4" rx="1.5" fill="#151515"/>
+      <rect x="74" y="220" width="35" height="4" rx="1.5" fill="#1a3a5c"/>
+      <text x="74" y="234" fill="#444" font-size="7" font-family="monospace">52 GB</text>
+      <text x="186" y="234" text-anchor="end" fill="#444" font-size="7" font-family="monospace">31%</text>
+
+      <!-- Second model node (bottom right) -->
+      <rect x="380" y="170" width="140" height="68" rx="6" fill="#0d1a26" stroke="#1a3a5c" stroke-width="1.5"/>
+      <text x="450" y="188" text-anchor="middle" fill="#c84" font-size="9" font-family="monospace" font-weight="600">Qwen2.5-3B</text>
+      <text x="450" y="202" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">node-c</text>
+      <text x="450" y="214" text-anchor="middle" fill="#4c4" font-size="7.5" font-family="monospace">llama-server</text>
+      <rect x="394" y="220" width="112" height="4" rx="1.5" fill="#151515"/>
+      <rect x="394" y="220" width="14" height="4" rx="1.5" fill="#5a4a2a"/>
+      <text x="394" y="234" fill="#444" font-size="7" font-family="monospace">13 GB</text>
+      <text x="506" y="234" text-anchor="end" fill="#444" font-size="7" font-family="monospace">8%</text>
+    </svg>
+  </div>
+
+  <div class="tags">
+    <span class="tag">OpenAI-compatible API</span>
+    <span class="tag">Tensor split</span>
+    <span class="tag">Multi-model</span>
+    <span class="tag">Auto-discovery via Nostr</span>
+    <span class="tag">Zero config</span>
+  </div>
+</section>
+
+<!-- How it works -->
+<section id="how">
+  <div class="section-tag">How it works</div>
+  <h2>Three commands, distributed inference</h2>
+  <p class="section-lead">No coordinator, no cloud, no API keys. Just machines on the internet pooling their VRAM.</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <h3>Start a mesh</h3>
+      <p>Pick a model. mesh-llm downloads it, starts the server, and prints an invite token. That's your mesh.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <h3>Others join</h3>
+      <p>Anyone with the token joins over QUIC. The mesh auto-elects a host, calculates tensor split from VRAM, and starts serving.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <h3>Use it</h3>
+      <p>Every node gets <code>localhost:9337/v1</code> — a standard OpenAI API. Use it with any tool: pi, goose, curl, anything.</p>
+    </div>
+  </div>
+
+  <div class="code-block">
+    <span class="comment"># Start a mesh</span><br>
+    <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen2.5-3B</span><br><br>
+    <span class="comment"># On another machine — join with the invite token</span><br>
+    <span class="cmd">mesh-llm</span> <span class="flag">--join</span> <span class="val">&lt;token&gt;</span><br><br>
+    <span class="comment"># Or discover and join public meshes automatically</span><br>
+    <span class="cmd">mesh-llm</span> <span class="flag">--auto</span><br><br>
+    <span class="comment"># Use it — standard OpenAI API</span><br>
+    <span class="cmd">curl</span> http://localhost:9337/v1/chat/completions <span class="flag">-d</span> <span class="val">'{"model":"Qwen2.5-3B","messages":[...]}'</span>
+  </div>
+</section>
+
+<!-- Features -->
+<section id="features">
+  <div class="section-tag">Features</div>
+  <h2>Built for real-world distributed inference</h2>
+  <p class="section-lead">Handles the hard parts: election, tensor split, fault tolerance, model routing.</p>
+
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">⚡</div>
+      <h3>Automatic tensor split</h3>
+      <p>Model doesn't fit on one machine? Layers are split proportionally across nodes by VRAM. No manual configuration.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🔀</div>
+      <h3>Multi-model serving</h3>
+      <p>Different nodes serve different models simultaneously. The API proxy routes requests by the <code>model</code> field. <code>/v1/models</code> lists everything available.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🔄</div>
+      <h3>Reactive rebalancing</h3>
+      <p>A host dies? Standby nodes with the model on disk auto-promote within 60 seconds. No manual intervention.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📡</div>
+      <h3>Nostr discovery</h3>
+      <p>Publish your mesh to Nostr relays. Others find it with <code>mesh-llm discover</code> or join with <code>--auto</code>. No tokens to exchange out-of-band.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🌐</div>
+      <h3>QUIC transport</h3>
+      <p>All traffic over QUIC via iroh. Hole-punching, relay fallback, encrypted by default. Works across NATs without port forwarding.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📈</div>
+      <h3>Scales to 1000s</h3>
+      <p>Active GPU nodes gossip. Passive clients use lightweight routing tables — zero per-client state on the server. O(topology changes), not O(n²).</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🗳️</div>
+      <h3>Automatic election</h3>
+      <p>Highest VRAM becomes host. Workers run rpc-server. Nodes join or leave — the mesh re-elects and restarts automatically.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">💻</div>
+      <h3>Web console</h3>
+      <p>Live topology view, model status, VRAM bars, built-in chat. All backed by the same API the CLI uses.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Publish & Discover -->
+<section>
+  <div class="section-tag">Discovery</div>
+  <h2>Find meshes. Or share yours.</h2>
+  <p class="section-lead">Decentralized discovery via Nostr relays. No central registry. Names are just display text — your key is your identity.</p>
+
+  <div class="code-block">
+    <span class="comment"># Publish your mesh for others to find</span><br>
+    <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen2.5-3B</span> <span class="flag">--publish</span> <span class="flag">--mesh-name</span> <span class="val">"Sydney Lab"</span> <span class="flag">--region</span> <span class="val">AU</span><br><br>
+    <span class="comment"># Browse available meshes</span><br>
+    <span class="cmd">mesh-llm discover</span><br><br>
+    <span class="comment"># Filter by model and region</span><br>
+    <span class="cmd">mesh-llm discover</span> <span class="flag">--model</span> <span class="val">GLM</span> <span class="flag">--region</span> <span class="val">AU</span><br><br>
+    <span class="comment"># Auto-join the best match</span><br>
+    <span class="cmd">mesh-llm</span> <span class="flag">--auto</span>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <h2>Try it now</h2>
+  <p>One binary. No dependencies beyond llama.cpp. Works on macOS (Apple Silicon) and Linux.</p>
+  <div class="cta-buttons">
+    <a href="https://github.com/michaelneale/decentralized-inference#quickstart" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/michaelneale/decentralized-inference" class="btn btn-secondary">View on GitHub →</a>
+  </div>
+</section>
+
+<footer>
+  <p>mesh-llm is open source under MIT. Built with Rust, iroh, llama.cpp.</p>
+</footer>
+
+</body>
+</html>
