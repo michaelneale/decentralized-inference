@@ -1,5 +1,7 @@
 # Mesh LLM - a new kind of LLM
 
+![Mesh LLM](mesh.png)
+
 Donate or pool your spare capacity so you can run LLMs at larger scale. 
 
 Split LLM inference across multiple machines over QUIC. Models can be larger than any single machine's VRAM — each node only loads the layers assigned to it by the tensor split. Weights are read from each node's own local GGUF copy (zero network transfer for model loading). The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
