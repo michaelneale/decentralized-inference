@@ -273,7 +273,7 @@
 
   <div class="tags">
     <span class="tag">OpenAI-compatible API</span>
-    <span class="tag">Tensor split</span>
+    <span class="tag">Layer split across GPUs</span>
     <span class="tag">Multi-model</span>
     <span class="tag">Auto-discovery via Nostr</span>
     <span class="tag">Zero config</span>
@@ -295,7 +295,7 @@
     <div class="step">
       <div class="step-num">2</div>
       <h3>Others join</h3>
-      <p>Anyone with the token joins over QUIC. The mesh auto-elects a host, splits tensors across nodes proportional to VRAM, and starts serving.</p>
+      <p>Anyone with the token joins over QUIC. The mesh auto-elects a host, distributes layers across nodes by VRAM, and starts serving.</p>
     </div>
     <div class="step">
       <div class="step-num">3</div>
@@ -320,13 +320,13 @@
 <section id="features">
   <div class="section-tag">Features</div>
   <h2>Built for real-world distributed inference</h2>
-  <p class="section-lead">Handles the hard parts: election, tensor split, fault tolerance, model routing.</p>
+  <p class="section-lead">Handles the hard parts: election, layer distribution, fault tolerance, model routing.</p>
 
   <div class="features">
     <div class="feature">
       <div class="feature-icon">⚡</div>
-      <h3>Automatic tensor split</h3>
-      <p>Model doesn't fit on one machine? Tensors are split proportionally across nodes by VRAM via llama.cpp's RPC. No manual configuration.</p>
+      <h3>Automatic layer split</h3>
+      <p>Model doesn't fit on one machine? Layers are distributed across nodes proportional to VRAM via llama.cpp's RPC. No manual configuration.</p>
     </div>
     <div class="feature">
       <div class="feature-icon">🔀</div>
