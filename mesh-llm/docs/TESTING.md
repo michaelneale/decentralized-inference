@@ -115,15 +115,17 @@ mesh-llm drop GLM-4.7-Flash-Q4_K_M
 ### 11. Dead peer cleanup
 
 - Kill a node with `kill -9`
-- Health check detects it in ~15s (gossip probe every 15s, 5s timeout)
-- Dead model goes cold, peer removed from list
+- Heartbeat detects it in ~120s (60s interval, 2 consecutive failures)
+- On-use detection is faster: tunnel failure → immediate death broadcast
+- Dead model goes cold, peer removed from list, death broadcast to mesh
+- Dead peer won't be re-added by gossip (dead_peers set)
 - Console updates automatically
 
 ### 12. Node rejoin
 
 - Kill a node, restart it with `--join <token>`
-- Health check cleans stale peer entry
-- New connection brings fresh gossip
+- Rejoin loop (60s) reconnects to bootstrap if connection drops
+- Inbound reconnection clears dead_peers entry
 - Model goes warm again, cross-model routing resumes
 
 ### 13. Gossip stability
@@ -131,6 +133,42 @@ mesh-llm drop GLM-4.7-Flash-Q4_K_M
 - Regossip after becoming host should NOT cause restart loops
 - Log should show "still host, no restart needed" on re-check
 - llama-server starts exactly once per election (not 5-9 times)
+- Heartbeat gossip doesn't re-discover dead peers (discover_peers=false)
+
+## Single-machine testing with ephemeral keys
+
+Set `MESH_LLM_EPHEMERAL_KEY=1` to give a second process a unique identity on the same machine.
+Without this, both processes share `~/.mesh-llm/key` and appear as the same node.
+
+### 14. Forced split on one machine
+
+```bash
+# Terminal 1: host with --split
+mesh-llm --model Qwen2.5-3B --port 9337 --split --console
+
+# Terminal 2: worker with ephemeral key
+MESH_LLM_EPHEMERAL_KEY=1 mesh-llm --model Qwen2.5-3B --join <TOKEN> --port 9338 --split --max-vram 1
+```
+
+- Host starts solo, then re-elects with split when worker joins
+- Worker becomes rpc-server, proxies API to host
+- Tensor split proportional to VRAM (e.g. `0.98,0.02`)
+- Kill worker → host detects via heartbeat (~60s), reverts to solo mode
+
+### 15. Passive client on one machine
+
+```bash
+# Terminal 1: host
+mesh-llm --model Qwen2.5-3B --port 9337
+
+# Terminal 2: passive client (--client uses ephemeral key automatically)
+mesh-llm --client --join <TOKEN> --port 9338
+```
+
+- Client connects without gossip (no peer list entry on host)
+- `/v1/models` returns models from routing table
+- Inference routes through QUIC tunnel to host
+- Host does NOT see client in its peer list (zero per-client state)
 
 ## Deploy to remote node
 

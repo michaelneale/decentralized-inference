@@ -13,14 +13,10 @@
 - [x] Route table refresh: passive nodes poll every 30s, stay in sync
 - [x] On-demand QUIC connect: passive nodes connect to hosts from routing table
 - [x] Active nodes don't track passive clients (zero per-client server state)
+- [x] `MESH_LLM_EPHEMERAL_KEY=1` for single-machine testing with distinct identities
+- [x] Forced tensor split tested locally: split, worker death → solo recovery ✅
+- [x] Passive client tested locally: no gossip, routing table, tunnel works ✅
 - [x] Console JS fix (servingSel ordering)
-
-## Test forced tensor split
-Verify split mode still works after event-driven mesh changes.
-- [ ] Pick Qwen2.5-3B, force split across two nodes
-- [ ] Verify rpc-server workers and tensor split still work
-- [ ] Verify solo mode still works (no accidental split)
-- [ ] Verify death broadcast works with split group (host dies → workers notice)
 
 ## Reactive rebalancing (nice to have)
 - [ ] On death broadcast: standby checks if dead node's model is now unserved

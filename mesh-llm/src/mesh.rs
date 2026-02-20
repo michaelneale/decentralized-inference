@@ -264,9 +264,9 @@ impl Node {
     pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>, max_vram_gb: Option<f64>) -> Result<(Self, TunnelChannels)> {
         // Clients use an ephemeral key so they get a unique identity even
         // when running on the same machine as a GPU node.
-        let secret_key = if matches!(role, NodeRole::Client) {
+        let secret_key = if matches!(role, NodeRole::Client) || std::env::var("MESH_LLM_EPHEMERAL_KEY").is_ok() {
             let key = SecretKey::generate(&mut rand::rng());
-            tracing::info!("Client mode: using ephemeral key");
+            tracing::info!("Using ephemeral key (unique identity)");
             key
         } else {
             load_or_create_key().await?
