@@ -246,12 +246,12 @@ async fn main() -> Result<()> {
     // --- Client mode (passive, never serves) ---
     if cli.client {
         let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
-        node.start_heartbeat();
+        // No heartbeat for passive nodes — they don't track peers
 
         let mut joined = false;
         for t in &cli.join {
-            match node.join(t).await {
-                Ok(()) => { eprintln!("Joined mesh"); joined = true; break; }
+            match node.join_passive(t).await {
+                Ok(()) => { eprintln!("Joined mesh (passive)"); joined = true; break; }
                 Err(e) => tracing::warn!("Failed to join via token: {e}"),
             }
         }
@@ -259,15 +259,18 @@ async fn main() -> Result<()> {
             anyhow::bail!("Failed to join any peer in the mesh");
         }
 
-        // Periodic rejoin
-        let rejoin_node = node.clone();
-        let rejoin_tokens: Vec<String> = cli.join.clone();
+        // Periodic route table refresh + reconnect (instead of gossip heartbeat)
+        let refresh_node = node.clone();
+        let refresh_tokens: Vec<String> = cli.join.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                for t in &rejoin_tokens {
-                    let _ = rejoin_node.join(t).await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                // Reconnect if needed
+                for t in &refresh_tokens {
+                    let _ = refresh_node.join_passive(t).await;
                 }
+                // Refresh routing table from any connected peer
+                refresh_node.refresh_routing_table().await;
             }
         });
 

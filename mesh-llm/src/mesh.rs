@@ -391,6 +391,79 @@ impl Node {
         self.connect_to_peer(addr).await
     }
 
+    /// Connect to a peer without gossip exchange — for passive nodes (clients/standby).
+    /// Establishes QUIC connection and stores it, but doesn't add to peer list.
+    /// The passive node can then use route requests and HTTP tunnels.
+    pub async fn join_passive(&self, invite_token: &str) -> Result<()> {
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
+        let addr: EndpointAddr = serde_json::from_slice(&json)?;
+        let peer_id = addr.id;
+        if peer_id == self.endpoint.id() { return Ok(()); }
+
+        // Already have a connection? Done.
+        {
+            let state = self.state.lock().await;
+            if state.connections.contains_key(&peer_id) { return Ok(()); }
+        }
+
+        tracing::info!("Passive connect to {}...", peer_id.fmt_short());
+        let conn = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.endpoint.connect(addr.clone(), ALPN),
+        ).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => anyhow::bail!("Failed to connect: {e}"),
+            Err(_) => anyhow::bail!("Timeout connecting (15s)"),
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            state.connections.insert(peer_id, conn.clone());
+        }
+
+        // Start stream dispatcher (for responses to our requests)
+        let node = self.clone();
+        tokio::spawn(async move {
+            node.dispatch_streams(conn, peer_id).await;
+        });
+
+        // Get initial routing table
+        if let Ok(table) = self.request_routing_table(peer_id).await {
+            // Store route entries as lightweight peer info so host_for_model works
+            for entry in &table.hosts {
+                self.add_route_entry(entry).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a route entry as a lightweight peer (from routing table, not gossip).
+    async fn add_route_entry(&self, entry: &RouteEntry) {
+        let mut state = self.state.lock().await;
+        if entry.endpoint_id == self.endpoint.id() { return; }
+        // Only add/update if we don't already have full peer info from gossip
+        if let Some(existing) = state.peers.get_mut(&entry.endpoint_id) {
+            // Update serving info from route table
+            existing.serving = Some(entry.model.clone());
+            return;
+        }
+        // Add a minimal peer entry for routing purposes
+        state.peers.insert(entry.endpoint_id, PeerInfo {
+            id: entry.endpoint_id,
+            addr: EndpointAddr { id: entry.endpoint_id, addrs: Default::default() },
+            tunnel_port: None,
+            role: NodeRole::Host { http_port: 0 },
+            models: vec![entry.model.clone()],
+            vram_bytes: (entry.vram_gb * 1e9) as u64,
+            rtt_ms: None,
+            model_source: None,
+            serving: Some(entry.model.clone()),
+            available_models: vec![],
+            requested_models: vec![],
+        });
+    }
+
     #[allow(dead_code)]
     pub fn endpoint(&self) -> &Endpoint { &self.endpoint }
     pub fn id(&self) -> EndpointId { self.endpoint.id() }
@@ -725,6 +798,32 @@ impl Node {
         Ok(table)
     }
 
+    /// Refresh routing table from any connected peer (for passive nodes).
+    /// Updates local peer info with current host/model mappings.
+    pub async fn refresh_routing_table(&self) {
+        let connected: Vec<EndpointId> = {
+            self.state.lock().await.connections.keys().cloned().collect()
+        };
+        for peer_id in connected {
+            match self.request_routing_table(peer_id).await {
+                Ok(table) => {
+                    for entry in &table.hosts {
+                        self.add_route_entry(entry).await;
+                    }
+                    // Remove peers no longer in routing table
+                    let active_ids: std::collections::HashSet<EndpointId> =
+                        table.hosts.iter().map(|e| e.endpoint_id).collect();
+                    let mut state = self.state.lock().await;
+                    state.peers.retain(|id, _| active_ids.contains(id) || *id == peer_id);
+                    return; // Got table from one peer, that's enough
+                }
+                Err(e) => {
+                    tracing::debug!("Route table refresh from {} failed: {e}", peer_id.fmt_short());
+                }
+            }
+        }
+    }
+
     pub fn vram_bytes(&self) -> u64 {
         self.vram_bytes
     }
@@ -748,10 +847,31 @@ impl Node {
     }
 
     /// Open an HTTP tunnel bi-stream to a peer (tagged STREAM_TUNNEL_HTTP).
+    /// If no connection exists, tries to connect on-demand (for passive nodes
+    /// that learned about hosts from routing table but aren't directly connected).
     pub async fn open_http_tunnel(&self, peer_id: EndpointId) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
         let conn = {
-            self.state.lock().await.connections.get(&peer_id).cloned()
-                .ok_or_else(|| anyhow::anyhow!("No connection to {}", peer_id.fmt_short()))?
+            let state = self.state.lock().await;
+            match state.connections.get(&peer_id).cloned() {
+                Some(c) => c,
+                None => {
+                    // Try on-demand connect using peer's addr from peer info
+                    let addr = state.peers.get(&peer_id).map(|p| p.addr.clone());
+                    drop(state);
+                    if let Some(addr) = addr {
+                        let c = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            self.endpoint.connect(addr, ALPN),
+                        ).await
+                            .map_err(|_| anyhow::anyhow!("Timeout connecting to {}", peer_id.fmt_short()))?
+                            .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {e}", peer_id.fmt_short()))?;
+                        self.state.lock().await.connections.insert(peer_id, c.clone());
+                        c
+                    } else {
+                        anyhow::bail!("No connection or address for {}", peer_id.fmt_short());
+                    }
+                }
+            }
         };
         let result = async {
             let (mut send, recv) = conn.open_bi().await?;
@@ -879,7 +999,8 @@ impl Node {
         let remote = conn.remote_id();
         tracing::info!("Inbound connection from {}", remote.fmt_short());
 
-        // Store connection and start stream dispatcher
+        // Store connection for stream dispatch (tunneling, route requests, etc.)
+        // Don't add to peer list yet — only gossip exchange promotes to peer.
         {
             let mut state = self.state.lock().await;
             if state.dead_peers.remove(&remote) {
@@ -888,14 +1009,9 @@ impl Node {
             state.connections.insert(remote, conn.clone());
         }
 
-        // Initiate gossip exchange so we (re-)learn their role/VRAM
-        let node = self.clone();
-        let gossip_conn = conn.clone();
-        tokio::spawn(async move {
-            if let Err(e) = node.initiate_gossip(gossip_conn, remote).await {
-                tracing::debug!("Gossip on inbound connection to {}: {e}", remote.fmt_short());
-            }
-        });
+        // Don't auto-gossip: passive nodes (clients/standby) just connect and
+        // send streams. Active peers identify themselves by sending STREAM_GOSSIP.
+        // Gossip exchange in handle_gossip_stream calls add_peer().
 
         self.dispatch_streams(conn, remote).await;
         Ok(())
