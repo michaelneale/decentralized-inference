@@ -1,7 +1,8 @@
-//! Model download with resume support.
+//! Model download with resume support using reqwest.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 
 pub struct CatalogModel {
     pub name: &'static str,
@@ -154,7 +155,6 @@ pub async fn download_model(model: &CatalogModel) -> Result<PathBuf> {
     let dest = dir.join(model.file);
 
     if dest.exists() {
-        // Check if it looks complete (at least some reasonable size)
         let size = tokio::fs::metadata(&dest).await?.len();
         if size > 1_000_000 {
             eprintln!("✅ {} already exists ({:.1}GB)", model.file, size as f64 / 1e9);
@@ -173,45 +173,132 @@ pub async fn download_url(url: &str, dest: &Path) -> Result<()> {
     download_with_resume(dest, url).await
 }
 
-/// Download with resume support, retrying up to 5 times.
+/// Download with resume support and retries using reqwest.
 async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
+    use tokio_stream::StreamExt;
+
     let tmp = dest.with_extension("gguf.part");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3600)) // 1h overall timeout
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?;
 
     for attempt in 1..=5 {
-        let args = vec![
-            "-L".to_string(),
-            "-C".to_string(), "-".to_string(),  // resume
-            "-o".to_string(), tmp.to_string_lossy().to_string(),
-            "--progress-bar".to_string(),
-            "--retry".to_string(), "3".to_string(),
-            "--retry-delay".to_string(), "5".to_string(),
-            url.to_string(),
-        ];
+        // Check how much we already have (for resume)
+        let existing_bytes = if tmp.exists() {
+            tokio::fs::metadata(&tmp).await?.len()
+        } else {
+            0
+        };
 
-        eprintln!("  attempt {attempt}/5...");
-        let status = tokio::process::Command::new("curl")
-            .args(&args)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to run curl")?;
+        eprintln!("  attempt {attempt}/5{}...",
+            if existing_bytes > 0 { format!(" (resuming from {:.1}MB)", existing_bytes as f64 / 1e6) } else { String::new() });
 
-        if status.success() {
-            tokio::fs::rename(&tmp, dest).await
-                .context("Failed to move downloaded file")?;
-            return Ok(());
+        let mut request = client.get(url);
+        if existing_bytes > 0 {
+            request = request.header("Range", format!("bytes={existing_bytes}-"));
         }
 
-        if attempt < 5 {
-            eprintln!("  download interrupted, retrying in 3s...");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  connection failed: {e}");
+                if attempt < 5 {
+                    eprintln!("  retrying in 3s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            // If server doesn't support resume (416 Range Not Satisfiable), start fresh
+            if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                eprintln!("  server rejected resume, starting fresh...");
+                continue;
+            }
+            anyhow::bail!("HTTP {status} downloading {url}");
+        }
+
+        // Total size from Content-Length (or Content-Range)
+        let total_bytes = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // Content-Range: bytes 1234-5678/9999
+            response.headers().get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|s| s.parse::<u64>().ok())
+        } else {
+            response.content_length().map(|cl| cl + existing_bytes)
+        };
+
+        // Open file for append (resume) or create
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&tmp)
+            .await
+            .context("Failed to open temp file")?;
+
+        let mut stream = response.bytes_stream();
+        let mut downloaded = existing_bytes;
+        let mut last_progress = std::time::Instant::now();
+
+        // Print initial progress
+        print_progress(downloaded, total_bytes);
+
+        loop {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    file.write_all(&chunk).await.context("Failed to write chunk")?;
+                    downloaded += chunk.len() as u64;
+
+                    // Update progress every 500ms
+                    if last_progress.elapsed() >= std::time::Duration::from_millis(500) {
+                        print_progress(downloaded, total_bytes);
+                        last_progress = std::time::Instant::now();
+                    }
+                }
+                Some(Err(e)) => {
+                    file.flush().await.ok();
+                    eprint!("\r");
+                    eprintln!("  download interrupted at {:.1}MB: {e}",
+                        downloaded as f64 / 1e6);
+                    if attempt < 5 {
+                        eprintln!("  retrying in 3s (will resume)...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    break;
+                }
+                None => {
+                    // Stream complete
+                    file.flush().await?;
+                    eprint!("\r");
+                    print_progress(downloaded, total_bytes);
+                    eprintln!();
+                    tokio::fs::rename(&tmp, dest).await
+                        .context("Failed to move downloaded file")?;
+                    return Ok(());
+                }
+            }
         }
     }
 
-    // Clean up partial
+    // Clean up partial on total failure
     let _ = tokio::fs::remove_file(&tmp).await;
     anyhow::bail!("Download failed after 5 attempts");
+}
+
+fn print_progress(downloaded: u64, total: Option<u64>) {
+    if let Some(total) = total {
+        let pct = (downloaded as f64 / total as f64) * 100.0;
+        let downloaded_mb = downloaded as f64 / 1e6;
+        let total_mb = total as f64 / 1e6;
+        eprint!("\r  {:.1}/{:.1}MB ({:.1}%)", downloaded_mb, total_mb, pct);
+    } else {
+        eprint!("\r  {:.1}MB", downloaded as f64 / 1e6);
+    }
 }
 
 /// List available models

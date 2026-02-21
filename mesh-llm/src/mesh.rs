@@ -111,6 +111,16 @@ pub fn scan_local_models() -> Vec<String> {
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
 /// (the rest is reserved for OS/apps on unified memory).
+/// Detect VRAM, capped by max_vram_gb if set.
+pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
+    let mut vram = detect_vram_bytes();
+    if let Some(cap) = max_vram_gb {
+        let cap_bytes = (cap * 1e9) as u64;
+        if cap_bytes < vram { vram = cap_bytes; }
+    }
+    vram
+}
+
 pub fn detect_vram_bytes() -> u64 {
     #[cfg(target_os = "macos")]
     {
@@ -128,6 +138,49 @@ pub fn detect_vram_bytes() -> u64 {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try NVIDIA GPU first (nvidia-smi)
+        let output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Sum all GPUs (multi-GPU systems), nvidia-smi reports in MiB
+                    let total_mib: u64 = s.lines()
+                        .filter_map(|line| line.trim().parse::<u64>().ok())
+                        .sum();
+                    if total_mib > 0 {
+                        return total_mib * 1024 * 1024;
+                    }
+                }
+            }
+        }
+
+        // Fallback: try AMD ROCm (rocm-smi)
+        let output = std::process::Command::new("rocm-smi")
+            .args(["--showmeminfo", "vram", "--csv"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Parse total VRAM from CSV output
+                    for line in s.lines().skip(1) {
+                        if let Some(total) = line.split(',').nth(1) {
+                            if let Ok(bytes) = total.trim().parse::<u64>() {
+                                return bytes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     0
 }
 
@@ -826,6 +879,18 @@ impl Node {
 
     pub fn vram_bytes(&self) -> u64 {
         self.vram_bytes
+    }
+
+    /// Detect region from this node's relay URL.
+    pub fn detect_region(&self) -> Option<String> {
+        use iroh::TransportAddr;
+        let addr = self.endpoint.addr();
+        for transport_addr in &addr.addrs {
+            if let TransportAddr::Relay(url) = transport_addr {
+                return crate::nostr::region_from_relay_url(url.as_str());
+            }
+        }
+        None
     }
 
     pub async fn peers(&self) -> Vec<PeerInfo> {

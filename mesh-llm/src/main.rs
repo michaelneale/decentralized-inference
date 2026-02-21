@@ -214,21 +214,74 @@ async fn main() -> Result<()> {
     // --- Auto-discover ---
     if cli.auto && cli.join.is_empty() {
         eprintln!("🔍 Discovering meshes via Nostr...");
+
+        // Auto-detect region from iroh relay if not specified
+        let my_region = if let Some(ref r) = cli.region {
+            Some(r.clone())
+        } else {
+            eprintln!("  Detecting region from relay...");
+            let detected = nostr::detect_region_auto().await;
+            if let Some(ref r) = detected {
+                eprintln!("  Region: {r} (auto-detected)");
+            }
+            detected
+        };
+
         let relays = nostr_relays(&cli.nostr_relay);
+        // Don't hard-filter by region — let scoring prefer same-region
         let filter = nostr::MeshFilter {
             model: None,
             min_vram_gb: None,
             region: None,
         };
         let meshes = nostr::discover(&relays, &filter).await?;
-        if let Some(best) = meshes.first() {
-            eprintln!("Found mesh: {} ({} nodes, {} models)",
-                best.listing.name.as_deref().unwrap_or("unnamed"),
-                best.listing.node_count,
-                best.listing.models.len());
-            cli.join.push(best.listing.invite_token.clone());
-        } else {
-            anyhow::bail!("No meshes found via Nostr. Try --join <token> instead.");
+        let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        eprintln!("  Found {} mesh(es)", meshes.len());
+        for m in &meshes {
+            let score = nostr::score_mesh(m, my_region.as_deref(), now);
+            eprintln!("  · {} (score: {}, {} nodes, {:.0}GB, {} clients{})",
+                m.listing.name.as_deref().unwrap_or("unnamed"),
+                score,
+                m.listing.node_count,
+                m.listing.total_vram_bytes as f64 / 1e9,
+                m.listing.client_count,
+                m.listing.region.as_ref().map(|r| format!(", {r}")).unwrap_or_default());
+        }
+
+        match nostr::smart_auto(&meshes, my_region.as_deref(), my_vram_gb) {
+            nostr::AutoDecision::Join { token, mesh } => {
+                // Health probe: try connecting before committing
+                eprintln!("  Probing mesh health...");
+                match probe_mesh_health(&token).await {
+                    Ok(()) => {
+                        eprintln!("✅ Joining: {} ({} nodes, {} models{})",
+                            mesh.listing.name.as_deref().unwrap_or("unnamed"),
+                            mesh.listing.node_count,
+                            mesh.listing.serving.len(),
+                            mesh.listing.region.as_ref().map(|r| format!(", region: {r}")).unwrap_or_default());
+                        cli.join.push(token);
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️  Best mesh unreachable: {e}");
+                        if cli.client {
+                            anyhow::bail!("Mesh found but unreachable. Try again later.");
+                        }
+                        let models = nostr::default_models_for_vram(my_vram_gb);
+                        start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+                    }
+                }
+            }
+            nostr::AutoDecision::StartNew { models } => {
+                if cli.client {
+                    anyhow::bail!("No meshes found to join. Run without --client to start a new mesh.");
+                }
+                start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+            }
         }
     }
 
@@ -371,16 +424,27 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
 }
 
 /// Look up the model filename in the catalog and check if its draft model exists on disk.
-pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
+/// If not on disk, downloads it (drafts are <1GB).
+pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
     let filename = model.file_name()?.to_str()?;
     let catalog_entry = download::MODEL_CATALOG.iter().find(|m| m.file == filename)?;
     let draft_name = catalog_entry.draft?;
     let draft_entry = download::MODEL_CATALOG.iter().find(|m| m.name == draft_name)?;
     let draft_path = download::models_dir().join(draft_entry.file);
     if draft_path.exists() {
-        Some(draft_path)
-    } else {
-        None
+        return Some(draft_path);
+    }
+    // Draft not on disk — download it (small, <1GB)
+    eprintln!("📥 Downloading draft model {} ({})...", draft_entry.name, draft_entry.size);
+    match download::download_model(draft_entry).await {
+        Ok(_path) => {
+            eprintln!("✅ Draft model ready: {}", draft_entry.name);
+            Some(draft_path)
+        }
+        Err(e) => {
+            eprintln!("⚠ Failed to download draft model: {e} — continuing without speculative decoding");
+            None
+        }
     }
 }
 
@@ -394,8 +458,11 @@ pub fn auto_detect_draft(model: &std::path::Path) -> Option<PathBuf> {
 async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
 
-    // Collect what the mesh wants served (from requested_models across all peers)
+    // Collect what the mesh wants served (from our own + all peers' requested_models)
     let mut mesh_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &node.requested_models().await {
+        mesh_requested.insert(m.clone());
+    }
     for p in &peers {
         for m in &p.requested_models {
             mesh_requested.insert(m.clone());
@@ -415,9 +482,20 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         }
     }
 
-    // Priority 1: models the mesh wants that nobody is serving, and we have on disk
+    let my_vram = node.vram_bytes();
+
+    // Priority 1: models the mesh wants that nobody is serving, we have on disk, and can solo
     for m in &mesh_requested {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
+            // Check if we can solo this model (need model_size * 1.1 headroom)
+            let model_path = download::models_dir().join(format!("{}.gguf", m));
+            let model_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+            let needed = (model_bytes as f64 * 1.1) as u64;
+            if model_bytes > 0 && needed > my_vram {
+                eprintln!("📋 Skipping {} — needs {:.1}GB, we have {:.1}GB",
+                    m, needed as f64 / 1e9, my_vram as f64 / 1e9);
+                continue;
+            }
             eprintln!("📋 Assigned to serve {} (needed by mesh, already on disk)", m);
             return Some(m.clone());
         }
@@ -457,9 +535,17 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
         }
     }
 
-    // Only promote when a model has ZERO servers
+    let my_vram = node.vram_bytes();
+
+    // Only promote when a model has ZERO servers and we can solo it
     for m in &mesh_requested {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
+            let model_path = download::models_dir().join(format!("{}.gguf", m));
+            let model_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+            let needed = (model_bytes as f64 * 1.1) as u64;
+            if model_bytes > 0 && needed > my_vram {
+                continue; // can't solo this model
+            }
             return Some(m.clone());
         }
     }
@@ -533,8 +619,8 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             resolved_models[0].clone()
         } else {
             // Multiple models seeded — pick based on allocation
-            // First, give gossip a moment to propagate
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Give gossip time to propagate so we see what peers are serving
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let assignment = pick_model_assignment(&node, &local_models).await;
             match assignment {
                 Some(name) => {
@@ -547,7 +633,20 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                             download::models_dir().join(format!("{}.gguf", name))
                         })
                 }
-                None => resolved_models[0].clone(), // fallback to first
+                None => {
+                    // All models covered — go standby
+                    eprintln!("💤 All models served — running as standby GPU node");
+                    eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, &local_models);
+                    match run_passive(&cli, node.clone(), false).await? {
+                        Some(model_name) => {
+                            resolved_models.iter()
+                                .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(&model_name))
+                                .cloned()
+                                .unwrap_or_else(|| download::models_dir().join(format!("{}.gguf", model_name)))
+                        }
+                        None => return Ok(()), // clean shutdown
+                    }
+                }
             }
         }
     } else {
@@ -607,9 +706,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     // Re-gossip so peers learn what we're serving
     node.regossip().await;
 
-    // Auto-detect draft model
+    // Ensure draft model is available (downloads if needed, <1GB)
     if cli.draft.is_none() && !cli.no_draft {
-        if let Some(draft_path) = auto_detect_draft(&model) {
+        if let Some(draft_path) = ensure_draft(&model).await {
             eprintln!("Auto-detected draft model: {}", draft_path.display());
             cli.draft = Some(draft_path);
         }
@@ -707,7 +806,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         ).await;
     });
 
-    // Nostr publish loop (if --publish)
+    // Nostr publish loop (if --publish) or watchdog (if --auto, to take over if publisher dies)
     let nostr_publisher = if cli.publish {
         let nostr_keys = nostr::load_or_create_keys()?;
         let relays = nostr_relays(&cli.nostr_relay);
@@ -717,6 +816,15 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         let pub_max_clients = cli.max_clients;
         Some(tokio::spawn(async move {
             nostr::publish_loop(pub_node, nostr_keys, relays, pub_name, pub_region, pub_max_clients, 60).await;
+        }))
+    } else if cli.auto {
+        // Watchdog: if we joined via --auto, watch for the publisher to die and take over
+        let relays = nostr_relays(&cli.nostr_relay);
+        let wd_node = node.clone();
+        let wd_name = cli.mesh_name.clone();
+        let wd_region = cli.region.clone();
+        Some(tokio::spawn(async move {
+            nostr::publish_watchdog(wd_node, relays, wd_name, wd_region, 120).await;
         }))
     } else {
         None
@@ -783,6 +891,15 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         let pub_max_clients = cli.max_clients;
         tokio::spawn(async move {
             nostr::publish_loop(pub_node, nostr_keys, relays, pub_name, pub_region, pub_max_clients, 60).await;
+        });
+    } else if cli.auto && !is_client {
+        // Watchdog: take over publishing if the original publisher dies
+        let relays = nostr_relays(&cli.nostr_relay);
+        let wd_node = node.clone();
+        let wd_name = cli.mesh_name.clone();
+        let wd_region = cli.region.clone();
+        tokio::spawn(async move {
+            nostr::publish_watchdog(wd_node, relays, wd_name, wd_region, 120).await;
         });
     }
 
@@ -1184,6 +1301,62 @@ fn update_pi_models_json(model_id: &str, port: u16) {
 }
 
 /// Resolve Nostr relay URLs from CLI or defaults.
+/// Health probe: try QUIC connect to the mesh's bootstrap node.
+/// Returns Ok if reachable within 10s, Err if not.
+async fn probe_mesh_health(invite_token: &str) -> Result<()> {
+    use base64::Engine;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
+    let addr: iroh::EndpointAddr = serde_json::from_slice(&json)?;
+
+    let key = iroh::SecretKey::generate(&mut rand::rng());
+    let ep = iroh::Endpoint::builder()
+        .secret_key(key)
+        .bind().await?;
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        ep.connect(addr, mesh::ALPN),
+    ).await {
+        Ok(Ok(_conn)) => {
+            ep.close().await;
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            ep.close().await;
+            anyhow::bail!("Connection failed: {e}")
+        }
+        Err(_) => {
+            ep.close().await;
+            anyhow::bail!("Connection timed out (10s)")
+        }
+    }
+}
+
+/// Helper for StartNew path — configure CLI to start a new mesh.
+fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64, my_region: &Option<String>) {
+    eprintln!("🆕 Starting a new mesh");
+    eprintln!("   Primary model: {}", models[0]);
+    if models.len() > 1 {
+        eprintln!("   Also declaring: {:?}", &models[1..]);
+    }
+    eprintln!("   VRAM: {:.0}GB", my_vram_gb);
+    if cli.model.is_empty() {
+        for m in models {
+            cli.model.push(m.into());
+        }
+    }
+    if !cli.publish {
+        cli.publish = true;
+        eprintln!("   Auto-enabling --publish for discovery");
+    }
+    if cli.region.is_none() {
+        if let Some(r) = my_region {
+            cli.region = Some(r.clone());
+            eprintln!("   Region: {r} (auto-detected)");
+        }
+    }
+}
+
 fn nostr_relays(cli_relays: &[String]) -> Vec<String> {
     if cli_relays.is_empty() {
         nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
@@ -1223,17 +1396,30 @@ async fn run_discover(
         return Ok(());
     }
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     eprintln!("Found {} mesh(es):\n", meshes.len());
     for (i, mesh) in meshes.iter().enumerate() {
-        eprintln!("  [{}] {}", i + 1, mesh);
+        let score = nostr::score_mesh(mesh, filter.region.as_deref(), now);
+        let age = now.saturating_sub(mesh.published_at);
+        let freshness = if age < 120 { "fresh" } else if age < 300 { "ok" } else { "stale" };
+        let capacity = if mesh.listing.max_clients > 0 {
+            format!("{}/{} clients", mesh.listing.client_count, mesh.listing.max_clients)
+        } else {
+            format!("{} clients", mesh.listing.client_count)
+        };
+        eprintln!("  [{}] {} (score: {}, {}, {})", i + 1, mesh, score, freshness, capacity);
         let token = &mesh.listing.invite_token;
         let display_token = if token.len() > 40 {
             format!("{}...{}", &token[..20], &token[token.len()-12..])
         } else {
             token.clone()
         };
-        if !mesh.listing.available_models.is_empty() {
-            eprintln!("      on disk: {}", mesh.listing.available_models.join(", "));
+        if !mesh.listing.on_disk.is_empty() {
+            eprintln!("      on disk: {}", mesh.listing.on_disk.join(", "));
         }
         eprintln!("      token: {}", display_token);
         eprintln!();
