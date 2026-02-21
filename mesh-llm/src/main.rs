@@ -601,14 +601,15 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
         *total_demand.entry(model.clone()).or_default() += rate;
     }
 
-    // Find the model with the worst demand/server ratio
-    // Only promote if the ratio is significantly worse than others
+    // Find the model with the worst demand/server ratio.
+    // Promote if: a model we can serve has significantly higher demand per server
+    // than others, OR is hot enough on its own (≥10 req/min per server).
     if !total_demand.is_empty() {
         let mut ratios: Vec<(String, f64)> = Vec::new();
         for m in &mesh_requested {
             let demand = *total_demand.get(m).unwrap_or(&0) as f64;
             let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
-            if servers > 0.0 && demand > 0.0 && local_models.contains(m) {
+            if servers > 0.0 && local_models.contains(m) {
                 let model_path = download::models_dir().join(format!("{}.gguf", m));
                 let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
                 let needed = (model_bytes as f64 * 1.1) as u64;
@@ -619,14 +620,25 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
             }
         }
 
-        if ratios.len() >= 2 {
+        if !ratios.is_empty() {
             ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let (hottest_model, hottest_ratio) = &ratios[0];
-            let (_, coldest_ratio) = &ratios[ratios.len() - 1];
-            // Only rebalance if the hottest model has ≥3x the demand/server of the coldest
-            // and at least 10 requests/min (ignore noise)
-            if hottest_ratio >= &(coldest_ratio * 3.0) && *hottest_ratio >= 10.0 {
-                eprintln!("📋 Promoting to serve {} — demand {:.0} req/min/server vs {:.0} for least loaded",
+
+            // Two cases for promotion:
+            // 1. Multiple models with demand: hottest is ≥3x coldest (and ≥10 req/min)
+            // 2. Single hot model: ≥10 req/min per server with no other models getting traffic
+            let coldest_ratio = if ratios.len() >= 2 { ratios[ratios.len() - 1].1 } else { 0.0 };
+            let should_promote = if ratios.len() >= 2 {
+                *hottest_ratio >= coldest_ratio * 3.0 && *hottest_ratio >= 10.0
+            } else {
+                // Only one model has demand — promote if it's clearly hot
+                // and there's at least one model with 0 demand we could serve instead
+                // (otherwise adding capacity to the only active model is always right)
+                *hottest_ratio >= 10.0
+            };
+
+            if should_promote {
+                eprintln!("📋 Promoting to serve {} — demand {:.0} req/min/server (coldest: {:.0})",
                     hottest_model, hottest_ratio, coldest_ratio);
                 return Some(hottest_model.clone());
             }
@@ -1022,16 +1034,26 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         tokio::spawn(async move {
             // Wait for initial mesh settle
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            // Periodic demand check interval (aligned with gossip cycle)
+            let mut demand_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            demand_interval.tick().await; // consume first immediate tick
             loop {
-                // Wait for a topology change
-                if peer_rx.changed().await.is_err() { break; }
-                // Debounce — multiple changes can fire in quick succession
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                // Drain any queued changes
-                while peer_rx.has_changed().unwrap_or(false) {
-                    let _ = peer_rx.borrow_and_update();
+                // Wait for EITHER a topology change OR periodic demand check
+                tokio::select! {
+                    res = peer_rx.changed() => {
+                        if res.is_err() { break; }
+                        // Debounce — multiple changes can fire in quick succession
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        // Drain any queued changes
+                        while peer_rx.has_changed().unwrap_or(false) {
+                            let _ = peer_rx.borrow_and_update();
+                        }
+                    }
+                    _ = demand_interval.tick() => {
+                        // Periodic check for demand-based rebalancing
+                    }
                 }
-                // Check if there's an unserved model we can handle
+                // Check if there's an unserved or demand-imbalanced model we can handle
                 if let Some(model_name) = check_unserved_model(&watch_node, &local_models).await {
                     eprintln!("🚀 Promoting from standby — serving {model_name}");
                     let _ = promote_tx.send(model_name).await;
