@@ -9,5 +9,4 @@
 ## Future
 - [ ] Demand-based Nostr listings: include request rates so `--auto` joiners can see what's hot
 - [ ] Model catalog: embedded JSON of popular GGUF models with VRAM estimates
-- [ ] Speculative decoding across mesh: draft model on small node, verify on big node
 - [ ] Multi-node tensor split recovery: if one split peer dies, re-split across remaining
