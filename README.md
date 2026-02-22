@@ -1,10 +1,8 @@
-# Mesh LLM - a new kind of LLM
+# Mesh LLM
 
 ![Mesh LLM](mesh.png)
 
-Donate or pool your spare capacity so you can run LLMs at larger scale. 
-
-Split LLM inference across multiple machines over QUIC. Models can be larger than any single machine's VRAM — each node only loads the layers assigned to it by the tensor split. Weights are read from each node's own local GGUF copy (zero network transfer for model loading). The mesh auto-elects a host, calculates tensor split from VRAM, and restarts when nodes join or leave.
+Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights).
 
 ## Quick start (macOS Apple Silicon)
 
@@ -12,382 +10,177 @@ Split LLM inference across multiple machines over QUIC. Models can be larger tha
 curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 ```
 
-Then run:
 ```bash
-mesh-llm --model Qwen2.5-32B --console    # downloads model on first run (~20GB), starts API + web console
-mesh-llm --model Qwen2.5-3B --console     # or try a small model first (~2GB)
+mesh-llm --model Qwen2.5-32B --console    # downloads model (~20GB), starts API + web console
+mesh-llm --model Qwen2.5-3B --console     # or a small model first (~2GB)
 ```
 
-To add another machine to the mesh:
+Add another machine:
 ```bash
-mesh-llm --join <token>                         # token is printed by the first machine
+mesh-llm --join <token>                    # token printed by the first machine
 ```
 
-Or find and join a mesh someone is sharing (via Nostr):
+Or discover and join public meshes:
 ```bash
-mesh-llm --auto                                 # discover and join the best mesh
-mesh-llm --auto --model Qwen2.5-3B             # join and serve a model
-mesh-llm --auto --client                        # join as API-only client (no GPU)
-mesh-llm discover                               # browse available meshes
-```
-
-Or publish your mesh for others to find:
-```bash
-mesh-llm --model Qwen2.5-3B --publish --mesh-name "My Mesh" --region AU
-```
-
-Or join without a GPU:
-```bash
-mesh-llm --client --join <token>
+mesh-llm --auto                            # find and join the best mesh via Nostr
+mesh-llm --auto --client                   # join as API-only client (no GPU)
 ```
 
 ## How it works
-A common question is around latency and networks, there are a few ways that are addressed.
-This uses mesh tech (quic) to distribute inference workload: 
 
-* use UDP to establish a mesh
-* Zero-transfer GGUF loading (SET_TENSOR_GGUF) — Instead of sending model weights over the network, the RPC server reads them
- directly from a local copy of the GGUF file on disk. Dropped model load time from 111s → 5s on localhost. Also skips unnecessary
- op-support probing for RPC backends.
-* RPC round-trip reduction — Caches get_alloc_size responses (deterministic for a given tensor shape/op) and skips GGUF lookups
- for tiny intermediate compute tensors. Reduced per-token round-trips from 558 → 8, boosting generation from ~3 tok/s to ~15
- tok/s over WiFi.
-* Direct server-to-server tensor transfers — When a model is split across multiple RPC servers, intermediate tensors are
- pushed directly between servers via TCP instead of relaying through the client. Adds REGISTER_PEER, PUSH_TENSOR_TO_PEER, and
- PEER_TENSOR_DATA protocol commands, with automatic fallback to the old client-relay path if the remote server doesn't support* 
-* draft/predictive models are used from the host so that in parallel many completions are evaluated reducing potential round trips when it guesses correctly (a bit like branch prediction but for LLMs!) - for some repetitive tasks (ie code!) that hit rate is 85%!
-* The mesh is automatically rebalanced, and a "host" is elected to run the head instance to distribute the work. 
+Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 
-Limitations: the more spread and the higher latency, the lower the enumber of tok/s. Nearby (city) and networks that are friendly work best, and minimal nodes. It will use just one node to serve if it can fit that model in comfortably.
+**Solo mode** — if a model fits on one machine, it runs there. Full speed, no network overhead.
 
+**Tensor split** — if a model doesn't fit, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
+
+**Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
+
+**Demand-aware rebalancing** — request rates are tracked per model and shared via gossip. Standby nodes auto-promote to serve hot models (≥10 req/min, ≥3x imbalance). Nodes also auto-promote when a model loses its last server (within ~60s).
+
+**Latency design** — the key insight is that HTTP streaming is latency-tolerant while RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for tensor splits where the model physically doesn't fit on one machine.
+
+### Network optimizations
+
+- **Zero-transfer GGUF loading** — `SET_TENSOR_GGUF` tells rpc-server to read weights from local disk. Dropped model load from 111s → 5s.
+- **RPC round-trip reduction** — cached `get_alloc_size`, skip GGUF lookups for intermediates. Per-token round-trips: 558 → 8.
+- **Direct server-to-server transfers** — intermediate tensors pushed directly between rpc-servers via TCP, not relayed through the client.
+- **Speculative decoding** — draft model runs locally on the host, proposes tokens verified in one batched forward pass. +38% throughput on code (75% acceptance).
 
 ## Usage
 
 ### Solo
-
 ```bash
-mesh-llm --model ~/.models/model.gguf
+mesh-llm --model Qwen2.5-32B
 # API ready at http://localhost:9337
 ```
 
-### Distributed (two or more machines)
-
+### Distributed
 ```bash
-# Machine A — starts the mesh, sets the model
+# Machine A
 mesh-llm --model Qwen2.5-32B
-# Prints: Invite token: eyJ...
+# Prints invite token
 
-# Machine B — joins and auto-discovers the model
+# Machine B — learns model from gossip, downloads if needed
 mesh-llm --join <token>
 ```
 
-The joining node learns the model from the mesh via gossip. If the model file isn't already in `~/.models/`, it downloads automatically from HuggingFace (for catalog models). You can also specify `--model` explicitly on the joiner if you prefer.
+### Multi-model
+```bash
+# Request two models — node picks one based on mesh needs
+mesh-llm --model Qwen2.5-32B --model GLM-4.7-Flash
 
-Both get `localhost:9337`. The host (highest VRAM) runs llama-server with `--rpc` across all nodes. Tensor split is automatic. When nodes join or leave, the mesh re-elects and restarts.
+# Route by model name
+curl localhost:9337/v1/chat/completions -d '{"model":"GLM-4.7-Flash-Q4_K_M", ...}'
+```
 
-### Lite client (no GPU needed)
-
+### Client (no GPU)
 ```bash
 mesh-llm --client --join <token>
-# API ready at http://localhost:9337
+# Proxies to mesh via QUIC
 ```
 
-Just the binary — no model, no llama.cpp. Proxies to the mesh via QUIC.
-
-### Models larger than one machine
-
-If the model doesn't fit on the first machine, it waits for more peers:
-
-```
-⏳ Waiting for more peers — need 55.0GB VRAM for model, have 51.5GB
-# ... another machine joins ...
-🗳 Elected as host (154.6GB VRAM available for 50.0GB model)
+### Share via Nostr
+```bash
+mesh-llm --model Qwen2.5-3B --publish --mesh-name "My Mesh" --region AU
+mesh-llm discover                          # browse meshes
+mesh-llm discover --model GLM --region AU  # filter
 ```
 
-No single node needs to fit the entire model. Each loads only its assigned layers (`--no-mmap`).
+## Web console
+
+```bash
+mesh-llm --model Qwen2.5-32B --console    # opens dashboard on :3131
+```
+
+Live topology, VRAM bars per node, model picker, built-in chat. Everything comes from `/api/status` (JSON) and `/api/events` (SSE).
 
 ## Using with agents
 
-mesh-llm prints launch commands when the LLM is ready (and shows them in `--console`):
-
+mesh-llm prints launch commands when ready:
 ```
 pi:    pi --provider mesh --model Qwen2.5-32B-Instruct-Q4_K_M
 goose: GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:9337 OPENAI_API_KEY=mesh GOOSE_MODEL=Qwen2.5-32B-Instruct-Q4_K_M goose session
 ```
 
-**pi** requires a `"mesh"` provider in `~/.pi/agent/models.json` (the console shows the snippet to copy). **goose** just needs env vars.
-
-## Web console
-
-Add `--console` to any run to open a browser dashboard on `:3131`:
-
-```bash
-mesh-llm --model ~/.models/model.gguf --console
-mesh-llm --model ~/.models/model.gguf --join <token> --console
-```
-
-Shows the live state of the running process:
-
-- **Cluster bar** — nodes sized by VRAM, split percentages
-- **Model info** — model, draft, total VRAM, API port
-- **Agent commands** — copy-paste commands for pi and goose
-- **Chat** — test the API with streaming responses
-
-## How It Works
-
-```
-┌──────────────────────────────────────────────────────┐
-│  Host (highest VRAM)                                  │
-│  rpc-server (GPU) + llama-server --rpc <all nodes>    │
-│  :9337 → local llama-server                           │
-└──────────────────────┬───────────────────────────────┘
-                       │ QUIC
-┌──────────────────────┴───────────────────────────────┐
-│  Worker                          │  Lite Client       │
-│  rpc-server (GPU)                │  (no GPU)          │
-│  :9337 → QUIC → host             │  :9337 → QUIC → host│
-└──────────────────────────────────┴───────────────────┘
-```
-
-- **Zero-transfer model loading**: each rpc-server loads its assigned layers from its own local GGUF file (`--gguf` flag on our llama.cpp fork). The host's llama-server sends a small `SET_TENSOR_GGUF` command (tensor name + offset, no weight data). Stock llama.cpp transfers the full model over RPC (~17GB for a 32B model); this fork transfers 0 bytes.
-- **Models larger than one machine**: the tensor split assigns layers across nodes. Each rpc-server only loads its slice. A 72B model (47GB) can run across two 32GB machines — neither needs to fit it alone.
-- **Election**: highest VRAM wins, deterministic, re-runs on every mesh change
-- **Tensor split**: auto from VRAM (e.g. 103GB + 51GB → 0.67, 0.33)
-- **RTT gating**: peers with >80ms round-trip are skipped for tensor split (stay in mesh as API clients). Measured during gossip exchange.
-- **VRAM cap**: `--max-vram 10` advertises 10GB to the mesh regardless of actual VRAM — limits how much work gets split to you
-- **Concurrent queries**: both ends can query simultaneously (llama-server request queue)
-
-## Networking
-
-Connections use [iroh](https://iroh.computer) QUIC with NAT traversal via STUN + relays.
-
-For WAN with port forwarding (best latency):
-```bash
-mesh-llm --model model.gguf --bind-port 7842  # pins QUIC to fixed UDP port
-```
-
-The joining side doesn't need port forwarding. If relays are blocked: `--relay <url>`.
-
 ## Benchmarks
 
-GLM-4.7-Flash-Q4_K_M (17GB), M4 Max + Mac Mini M4, WiFi.
+GLM-4.7-Flash-Q4_K_M (17GB), M4 Max + Mac Mini M4, WiFi:
 
 | Configuration | tok/s |
 |---|---|
-| Local only (no mesh) | 68 |
-| Mini orchestrator, 85% on M4 Max | **21** |
-| M4 Max orchestrator, 82% local | **16** |
-| 3-node (40/40/20) | **12-13** |
+| Solo (no mesh) | 68 |
+| 2-node split (85/15) | 21 |
+| 3-node split (62/31/8) | 12-13 |
 
-Stock llama.cpp RPC transfers 16.88GB of weights on connect (14+ min). This fork: **0 bytes, ~9 seconds**.
+Cross-network (Sydney ↔ Queensland, ~20ms RTT): 10-25 tok/s. Overhead dominated by per-token RPC latency.
+
+Stock llama.cpp RPC transfers 16.88GB on connect. This fork: **0 bytes, ~9 seconds**.
+
+## Model catalog
+
+```bash
+mesh-llm download           # list models
+mesh-llm download 32b       # Qwen2.5-32B (~20GB)
+mesh-llm download 72b --draft  # Qwen2.5-72B + draft model
+```
+
+Draft pairings for speculative decoding:
+
+| Model | Size | Draft | Draft size |
+|-------|------|-------|------------|
+| Qwen2.5 (3B/7B/14B/32B/72B) | 2-47GB | Qwen2.5-0.5B | 491MB |
+| Qwen3-32B | 20GB | Qwen3-0.6B | 397MB |
+| Llama-3.3-70B | 43GB | Llama-3.2-1B | 760MB |
+| Gemma-3-27B | 17GB | Gemma-3-1B | 780MB |
 
 ## CLI Reference
 
 ```
 mesh-llm [OPTIONS]
-  --model PATH         GGUF model file
-  --client             Lite client (no GPU/model)
+  --model NAME|PATH    Model to serve (can specify multiple)
+  --client             API-only client (no GPU)
   --join TOKEN         Join mesh via invite token
+  --auto               Discover and join via Nostr
+  --publish            Publish mesh to Nostr relays
+  --mesh-name NAME     Human-readable mesh name
+  --region REGION      Geographic region (AU, US-West, EU-West, ...)
+  --max-clients N      Delist from Nostr when N clients connected
   --port PORT          API port (default: 9337)
-  --bind-port PORT     Pin QUIC to fixed UDP port
-  --max-vram GB        Cap VRAM advertised to mesh (limits work split to you)
-  --split              Force tensor split even if model fits on host
-  --relay URL          Override relay URLs
-  --tensor-split R,R   Manual split ratios
-  --bin-dir PATH       Directory with rpc-server + llama-server
-  --device DEV         GPU device (default: MTL0)
-  --draft PATH         Draft model for speculative decoding (auto-detected from catalog)
-  --draft-max N        Max draft tokens per speculation (default: 8)
-  --no-draft           Disable auto draft detection
+  --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
+  --max-vram GB        Cap VRAM advertised to mesh
+  --split              Force tensor split
   --console [PORT]     Web dashboard (default: 3131)
+  --device DEV         GPU device (default: MTL0)
+  --draft PATH         Draft model for speculative decoding
+  --no-draft           Disable auto draft detection
 
 mesh-llm download [NAME] [--draft]
+mesh-llm discover [--model M] [--region R] [--auto]
+mesh-llm drop <model>
+mesh-llm rotate-key
 ```
 
-## Speculative Decoding
-
-A small "draft" model runs on the host GPU and proposes candidate tokens. The distributed
-main model verifies them in one batched forward pass, accepting multiple tokens per
-network round-trip. This helps most for code generation and when network latency is high.
-
-Draft models are auto-detected from the catalog — if you download a model with `--draft`,
-the draft model is found automatically on launch:
+## Deploying
 
 ```bash
-mesh-llm download 32b --draft    # downloads Qwen2.5-32B + 0.5B draft
-mesh-llm --model ~/.models/Qwen2.5-32B-Instruct-Q4_K_M.gguf
-# Auto-detected draft model: ~/.models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
-```
-
-Or specify explicitly: `--draft <path>`, `--draft-max N`, `--no-draft`.
-
-**Benchmarks** (Qwen2.5-32B, 2 nodes, 0.67/0.33 split, 20ms RTT):
-
-| Task | Baseline | With draft | Improvement |
-|------|----------|------------|-------------|
-| Prose (200 tok) | 5.3 tok/s | 6.2 tok/s (56% accept) | +17% |
-| Code (1000 tok) | 5.3 tok/s | 7.3 tok/s (75% accept) | +38% |
-
-Code has higher acceptance because it's more predictable. The draft model (491MB) costs
-almost nothing and is purely local — no extra network traffic.
-
-### Model catalog
-
-```bash
-mesh-llm download           # list all models
-mesh-llm download 72b       # download Qwen2.5-72B (47GB, needs 2+ machines)
-mesh-llm download 72b --draft  # also download the paired draft model
-```
-
-Models with tested draft pairings:
-
-| Model | Size | Draft | Draft size |
-|-------|------|-------|------------|
-| Qwen2.5 (3B/7B/14B/32B/72B) | 2-47GB | Qwen2.5-0.5B | 491MB |
-| Qwen2.5-Coder-32B | 20GB | Qwen2.5-0.5B | 491MB |
-| Qwen3-32B | 20GB | Qwen3-0.6B | 397MB |
-| Llama-3.3-70B | 43GB | Llama-3.2-1B | 760MB |
-| Gemma-3-27B | 17GB | Gemma-3-1B | 780MB |
-| GLM-4.7-Flash (MoE) | 17GB | — | No compatible draft |
-
-## Deploying to a remote node
-
-Build locally and copy the bundle:
-
-```bash
-just bundle                          # creates /tmp/mesh-bundle.tar.gz
+just bundle                                    # creates /tmp/mesh-bundle.tar.gz
 scp /tmp/mesh-bundle.tar.gz user@remote:
+ssh user@remote 'tar xzf mesh-bundle.tar.gz && mesh-bundle/mesh-llm --model Qwen2.5-3B'
 ```
 
-On the remote machine:
-
-```bash
-mkdir -p ~/bin && tar xzf mesh-bundle.tar.gz -C ~/bin --strip-components=1
-# Installs: mesh-llm, rpc-server, llama-server, *.dylib into ~/bin/
-```
-
-Download a model and start:
-
-```bash
-~/bin/mesh-llm download 32b --draft   # downloads to ~/.models/
-~/bin/mesh-llm --model Qwen2.5-32B --bind-port 7842
-# Prints invite token — paste on the joining machine
-```
-
-**Requirements**: same architecture (arm64 macOS → arm64 macOS). The bundle includes all llama.cpp dylibs. Models go in `~/.models/` by convention. `--bin-dir` defaults to the directory containing the `mesh-llm` binary.
-
-For WAN: forward the `--bind-port` UDP port on the router. Only one side needs port forwarding.
+Same architecture required (arm64 macOS → arm64 macOS). Bundle includes mesh-llm + llama.cpp binaries. For WAN: forward `--bind-port` UDP on the router — only the originator needs it.
 
 ## Building
 
 ```bash
 just build            # clones llama.cpp fork, builds everything
-just download-model   # downloads GLM-4.7-Flash Q4_K_M (~17GB)
-just bundle           # portable tarball for another machine
+just bundle           # portable tarball
 ```
-
-For `--client` mode only the `mesh-llm` binary is needed.
 
 ## Project Structure
 
 | Path | Purpose |
 |---|---|
-| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with RPC local-GGUF patches |
-| `mesh-llm/` | Rust QUIC mesh ([details](mesh-llm/README.md), [design](mesh-llm/DESIGN.md)) |
-
-<details>
-<summary>Multi-model serving</summary>
-
-The mesh can serve multiple models simultaneously. Different nodes load different models, and a single API endpoint routes requests by model name.
-
-```bash
-# Node 1: seed mesh with two models, serves the first itself
-mesh-llm --model Qwen2.5-32B --model GLM-4.7-Flash
-
-# Node 2: joins without --model, auto-assigned to GLM (needed by mesh, already on disk)
-mesh-llm --join <token>
-
-# Any node's API port routes to the right model
-curl localhost:9337/v1/models                    # lists both models
-curl localhost:9337/v1/chat/completions \
-  -d '{"model":"GLM-4.7-Flash-Q4_K_M", ...}'    # routed to node 2 via QUIC
-```
-
-**How models are balanced:** Each node serves exactly one model. When a node joins without `--model`, the mesh assigns it automatically — preferring models that nobody is serving yet and that the node already has on disk (no download wait), then falling back to the least-served model. Nodes scan `~/.models/` on startup and advertise what they have via gossip.
-
-**No accidental tensor split:** If a model fits on one node, it runs solo — its own independent llama-server. Two nodes both serving Qwen2.5-3B = two independent servers, not a tensor split. Splitting only happens when a model genuinely doesn't fit on any single node, or when `--split` is explicitly passed.
-
-**Big models still split across nodes:** For a model too large for one machine, nodes serving that model form a group. The highest-VRAM node becomes host and runs llama-server with `--rpc` pointing at the others. This is the same tensor-split behavior as before, just scoped to one model's group.
-
-Other features:
-- `/v1/models` returns all served models (standard OpenAI API)
-- `mesh-llm drop <model>` to stop serving a model
-- Console: model picker to chat with any model, nodes highlight when selected
-- `--client` works alongside GPU nodes on the same machine
-- Dead peers detected and cleaned up in ~15s
-
-</details>
-
-## Share your mesh (Nostr discovery)
-
-Publish your mesh so anyone can find and join it — no server, no sign-up, just Nostr relays.
-
-**Share yours:**
-```bash
-mesh-llm --model Qwen2.5-32B --publish
-```
-
-That's it. Your mesh is now listed on public Nostr relays. Anyone can find it.
-
-**Find a mesh to join:**
-```bash
-mesh-llm discover
-```
-```
-Found 1 mesh(es):
-
-  [1] mikes-rig  2 node(s), 64GB VRAM  models: Qwen2.5-32B-Instruct-Q4_K_M  region: AU
-      on disk: GLM-4.7-Flash-Q4_K_M, Qwen2.5-3B-Instruct-Q4_K_M
-      token: eyJpZCI6IjhjZ...
-```
-
-**Join it:**
-```bash
-mesh-llm --join $(mesh-llm discover --auto)
-```
-
-Or filter first:
-```bash
-mesh-llm discover --model Qwen           # by model name
-mesh-llm discover --region US             # by region
-```
-
-**Optional flags for publishers:**
-```bash
-mesh-llm --model Qwen2.5-32B --publish \
-  --mesh-name "my-rig" \                  # human-readable name
-  --region AU \                           # so people can filter by location
-  --max-clients 5                         # delist from Nostr when 5 clients connected
-```
-
-Listings republish every 60s and expire after 2 minutes if your mesh goes down. Use `mesh-llm rotate-key` to get a fresh Nostr identity.
-
-**What gets published:** invite token (contains your node's public key and IP addresses), models being served, models wanted, models on disk, total VRAM, node count, name and region. Nothing is published without `--publish`.
-
-
-<details>
-<summary>Future ideas</summary>
-
-### Load balancing across hosts
-When multiple nodes independently serve the same model (solo mode), the proxy could round-robin requests across them. Currently it picks one deterministically.
-
-### P2P model transfer
-Nodes that already have a model could serve GGUF chunks over QUIC to new joiners. Faster than HuggingFace on LAN, doesn't depend on the catalog, works for any GGUF.
-
-### Usage-aware rebalancing
-Track per-model request rates via gossip. Automatically unload idle models and reassign nodes to busy ones. Currently assignments are static after join.
-
-### 405B-class models
-Tested Hermes-3-Llama-3.1-405B IQ2_M (137GB, 4 split files) across 2× M4 Max nodes. The mesh handled it correctly — auto-split, VRAM gating, split GGUF loading, no mmap. But generation was 0.04 tok/s (27s per token). The bottleneck is raw compute, not network — 405B parameters through 126 transformer layers is too much for 2 Apple Silicon chips. Would need 4+ high-end nodes or wait for faster hardware.
-
-</details>
+| `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with zero-transfer RPC patches |
+| `mesh-llm/` | Rust QUIC mesh ([internals](mesh-llm/README.md)) |
