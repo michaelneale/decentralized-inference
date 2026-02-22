@@ -65,6 +65,9 @@ struct PeerAnnouncement {
     /// Models this node wants the mesh to serve (from --model flags)
     #[serde(default)]
     requested_models: Vec<String>,
+    /// Requests per minute by model (from API proxy routing)
+    #[serde(default)]
+    request_rates: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +86,8 @@ pub struct PeerInfo {
     pub available_models: Vec<String>,
     /// Models this node has requested the mesh to serve
     pub requested_models: Vec<String>,
+    /// Requests per minute by model (gossipped from API proxy)
+    pub request_rates: std::collections::HashMap<String, u64>,
 }
 
 /// Scan ~/.models/ for GGUF files and return their stem names.
@@ -111,6 +116,16 @@ pub fn scan_local_models() -> Vec<String> {
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
 /// (the rest is reserved for OS/apps on unified memory).
+/// Detect VRAM, capped by max_vram_gb if set.
+pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
+    let mut vram = detect_vram_bytes();
+    if let Some(cap) = max_vram_gb {
+        let cap_bytes = (cap * 1e9) as u64;
+        if cap_bytes < vram { vram = cap_bytes; }
+    }
+    vram
+}
+
 pub fn detect_vram_bytes() -> u64 {
     #[cfg(target_os = "macos")]
     {
@@ -128,6 +143,49 @@ pub fn detect_vram_bytes() -> u64 {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try NVIDIA GPU first (nvidia-smi)
+        let output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Sum all GPUs (multi-GPU systems), nvidia-smi reports in MiB
+                    let total_mib: u64 = s.lines()
+                        .filter_map(|line| line.trim().parse::<u64>().ok())
+                        .sum();
+                    if total_mib > 0 {
+                        return total_mib * 1024 * 1024;
+                    }
+                }
+            }
+        }
+
+        // Fallback: try AMD ROCm (rocm-smi)
+        let output = std::process::Command::new("rocm-smi")
+            .args(["--showmeminfo", "vram", "--csv"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Parse total VRAM from CSV output
+                    for line in s.lines().skip(1) {
+                        if let Some(total) = line.split(',').nth(1) {
+                            if let Ok(bytes) = total.trim().parse::<u64>() {
+                                return bytes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     0
 }
 
@@ -237,6 +295,8 @@ pub struct Node {
     serving: Arc<Mutex<Option<String>>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
+    request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    last_request_snapshot: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -348,6 +408,8 @@ impl Node {
             serving: Arc::new(Mutex::new(None)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_request_snapshot: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -461,6 +523,7 @@ impl Node {
             serving: Some(entry.model.clone()),
             available_models: vec![],
             requested_models: vec![],
+            request_rates: std::collections::HashMap::new(),
         });
     }
 
@@ -515,6 +578,29 @@ impl Node {
 
     pub async fn available_models(&self) -> Vec<String> {
         self.available_models.lock().await.clone()
+    }
+
+    /// Increment request count for a model (called from API proxy on every routed request).
+    /// Uses std::sync::Mutex (not tokio) so it can be called from sync context too.
+    pub fn record_request(&self, model: &str) {
+        let mut counts = self.request_counts.lock().unwrap();
+        *counts.entry(model.to_string()).or_default() += 1;
+    }
+
+    /// Snapshot request rates (requests per minute since last snapshot).
+    /// Called every gossip cycle (~60s). Returns rates and resets the counters.
+    pub fn snapshot_request_rates(&self) -> std::collections::HashMap<String, u64> {
+        let mut counts = self.request_counts.lock().unwrap();
+        let mut last = self.last_request_snapshot.lock().unwrap();
+        let mut rates = std::collections::HashMap::new();
+        for (model, &count) in counts.iter() {
+            let prev = last.get(model).copied().unwrap_or(0);
+            if count > prev {
+                rates.insert(model.clone(), count - prev);
+            }
+        }
+        *last = counts.clone();
+        rates
     }
 
     pub async fn set_requested_models(&self, models: Vec<String>) {
@@ -826,6 +912,18 @@ impl Node {
 
     pub fn vram_bytes(&self) -> u64 {
         self.vram_bytes
+    }
+
+    /// Detect region from this node's relay URL.
+    pub fn detect_region(&self) -> Option<String> {
+        use iroh::TransportAddr;
+        let addr = self.endpoint.addr();
+        for transport_addr in &addr.addrs {
+            if let TransportAddr::Relay(url) = transport_addr {
+                return crate::nostr::region_from_relay_url(url.as_str());
+            }
+        }
+        None
     }
 
     pub async fn peers(&self) -> Vec<PeerInfo> {
@@ -1424,6 +1522,7 @@ impl Node {
             existing.serving = ann.serving.clone();
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
+            existing.request_rates = ann.request_rates.clone();
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -1443,6 +1542,7 @@ impl Node {
             serving: ann.serving.clone(),
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
+            request_rates: ann.request_rates.clone(),
         });
         let count = state.peers.len();
         drop(state);
@@ -1467,8 +1567,10 @@ impl Node {
                 serving: p.serving.clone(),
                 available_models: p.available_models.clone(),
                 requested_models: p.requested_models.clone(),
+                request_rates: p.request_rates.clone(),
             })
             .collect();
+        let my_rates = self.snapshot_request_rates();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
@@ -1478,6 +1580,7 @@ impl Node {
             serving: my_serving,
             available_models: my_available,
             requested_models: my_requested,
+            request_rates: my_rates,
         });
         announcements
     }
