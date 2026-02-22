@@ -330,9 +330,10 @@ async fn start_llama(
 
     const MAX_RTT_MS: u32 = 80;
 
-    // Only use workers from our model group
+    // Only use workers from our model group, preferring lowest-latency peers.
+    // Take just enough to cover the VRAM shortfall, sorted by RTT.
     let worker_ids: Vec<_> = if need_split {
-        model_peers.iter()
+        let mut candidates: Vec<_> = model_peers.iter()
             .filter(|p| matches!(p.role, NodeRole::Worker) || p.serving.as_deref() == Some(model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
             .filter(|p| {
@@ -345,8 +346,31 @@ async fn start_llama(
                     _ => true,
                 }
             })
-            .map(|p| p.id)
-            .collect()
+            .collect();
+
+        // Sort by RTT ascending (unknown RTT sorts last)
+        candidates.sort_by_key(|p| p.rtt_ms.unwrap_or(u32::MAX));
+
+        // Take just enough peers to cover the VRAM gap
+        let mut accumulated_vram = my_vram;
+        let mut selected = Vec::new();
+        for p in &candidates {
+            if accumulated_vram >= min_vram {
+                break; // we have enough VRAM already
+            }
+            accumulated_vram += p.vram_bytes;
+            let rtt_str = p.rtt_ms.map(|r| format!("{}ms", r)).unwrap_or("?ms".to_string());
+            eprintln!("  ✓ Adding {} — {:.1}GB VRAM, RTT {rtt_str}",
+                p.id.fmt_short(), p.vram_bytes as f64 / 1e9);
+            selected.push(p.id);
+        }
+        if accumulated_vram < min_vram {
+            eprintln!("  ⚠ Total VRAM {:.1}GB still short of {:.1}GB — using all {} candidates",
+                accumulated_vram as f64 / 1e9, min_vram as f64 / 1e9, candidates.len());
+            // Fall back to all candidates if we can't cover it
+            selected = candidates.iter().map(|p| p.id).collect();
+        }
+        selected
     } else {
         let worker_count = model_peers.iter()
             .filter(|p| !matches!(p.role, NodeRole::Client))
