@@ -216,22 +216,18 @@ pub async fn publish_loop(
     };
 
     let npub = publisher.npub();
-    eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
     if let Some(cap) = max_clients {
         eprintln!("   Will delist when {} clients connected", cap);
     }
 
-    // Wait for model to actually be loaded before first publish (up to 60s).
-    // Check models_being_served() which requires Host role + serving set,
-    // then add a grace period for llama-server to finish loading.
+    // Wait for llama-server to be ready before first publish (up to 60s).
     for _ in 0..120 {
-        if !node.models_being_served().await.is_empty() {
-            // Give llama-server a moment to finish loading after election
-            tokio::time::sleep(Duration::from_secs(3)).await;
+        if node.is_llama_ready().await {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
 
     let mut delisted = false;
 

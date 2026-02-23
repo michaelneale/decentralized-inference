@@ -332,6 +332,7 @@ pub struct Node {
     models: Arc<Mutex<Vec<String>>>,
     model_source: Arc<Mutex<Option<String>>>,
     serving: Arc<Mutex<Option<String>>>,
+    llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
     request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
@@ -446,6 +447,7 @@ impl Node {
             models: Arc::new(Mutex::new(Vec::new())),
             model_source: Arc::new(Mutex::new(None)),
             serving: Arc::new(Mutex::new(None)),
+            llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
             request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -615,6 +617,14 @@ impl Node {
 
     pub async fn serving(&self) -> Option<String> {
         self.serving.lock().await.clone()
+    }
+
+    pub async fn set_llama_ready(&self, ready: bool) {
+        *self.llama_ready.lock().await = ready;
+    }
+
+    pub async fn is_llama_ready(&self) -> bool {
+        *self.llama_ready.lock().await
     }
 
     pub async fn mesh_id(&self) -> Option<String> {

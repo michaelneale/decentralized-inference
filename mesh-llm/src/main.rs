@@ -940,11 +940,16 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let force_split = cli.split;
     let model_name_for_cb = model_name.clone();
     let model_name_for_election = model_name.clone();
+    let node_for_cb = node.clone();
     tokio::spawn(async move {
         election::election_loop(
             node2, tunnel_mgr2, rpc_port, bin_dir2, model2, model_name_for_election,
             draft2, draft_max, force_split, target_tx,
             move |is_host, llama_ready| {
+                if llama_ready {
+                    let n = node_for_cb.clone();
+                    tokio::spawn(async move { n.set_llama_ready(true).await; });
+                }
                 if is_host && llama_ready {
                     let url = format!("http://localhost:{api_port}");
                     eprintln!("  API: {url}");
