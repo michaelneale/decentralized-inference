@@ -12,8 +12,10 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
+const VERSION: &str = "0.16.0";
+
 #[derive(Parser, Debug)]
-#[command(name = "mesh-llm", about = "P2P mesh for distributed llama.cpp inference over QUIC")]
+#[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -101,9 +103,13 @@ struct Cli {
     #[arg(long, global = true)]
     bind_port: Option<u16>,
 
-    /// Start the web console on this port (default: 3131 if flag is present).
-    #[arg(long, default_missing_value = "3131", num_args = 0..=1)]
-    console: Option<u16>,
+    /// Web console port (default: 3131). Use --no-console to disable.
+    #[arg(long, default_value = "3131")]
+    console: u16,
+
+    /// Disable the web console.
+    #[arg(long)]
+    no_console: bool,
 
     /// Publish this mesh to Nostr for discovery by others.
     /// Republishes every 60s so the listing stays fresh.
@@ -181,6 +187,11 @@ async fn main() -> Result<()> {
         .init();
 
     let mut cli = Cli::parse();
+
+    // Background version check (non-blocking)
+    tokio::spawn(async {
+        check_for_update().await;
+    });
 
     // Subcommand dispatch
     if let Some(cmd) = &cli.command {
@@ -662,11 +673,11 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
 async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_names: Vec<String>, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
-    let console_port = cli.console;
+    let console_port = if cli.no_console { None } else { Some(cli.console) };
 
     // Scan local models on disk
     let local_models = mesh::scan_local_models();
-    eprintln!("Local models on disk: {:?}", local_models);
+    tracing::info!("Local models on disk: {:?}", local_models);
 
     // Start mesh node
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
@@ -704,7 +715,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 if let Some(id) = save_node.mesh_id().await {
                     mesh::save_last_mesh_id(&id);
-                    eprintln!("📌 Mesh ID: {id}");
+                    tracing::info!("Mesh ID: {id}");
                 }
             });
         }
@@ -736,9 +747,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         let mesh_id = mesh::generate_mesh_id(cli.mesh_name.as_deref(), nostr_pubkey.as_deref());
         node.set_mesh_id_force(mesh_id.clone()).await;
         mesh::save_last_mesh_id(&mesh_id);
-        eprintln!("📌 Mesh ID: {mesh_id}");
-        eprintln!("Invite token: {token}");
-        eprintln!("Waiting for peers to join...");
+        tracing::info!("Mesh ID: {mesh_id}");
+        eprintln!("Invite: {token}");
+        eprintln!("Waiting for peers...");
     }
 
     // Start bootstrap proxy if joining an existing mesh.
@@ -869,7 +880,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let rpc_port = launch::start_rpc_server(
         &bin_dir, cli.device.as_deref(), Some(&model),
     ).await?;
-    eprintln!("rpc-server on 127.0.0.1:{rpc_port} serving {model_name}");
+    tracing::info!("rpc-server on 127.0.0.1:{rpc_port} serving {model_name}");
 
     let tunnel_mgr = tunnel::Manager::start(
         node.clone(), rpc_port, channels.rpc, channels.http,
@@ -930,7 +941,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     };
 
     // Election loop
-    eprintln!("Entering auto-election for model: {model_name}");
+    tracing::info!("Entering auto-election for model: {model_name}");
     let node2 = node.clone();
     let tunnel_mgr2 = tunnel_mgr.clone();
     let bin_dir2 = bin_dir.clone();
@@ -938,6 +949,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let draft2 = cli.draft.clone();
     let draft_max = cli.draft_max;
     let force_split = cli.split;
+    let cb_console_port = console_port;
     let model_name_for_cb = model_name.clone();
     let model_name_for_election = model_name.clone();
     let node_for_cb = node.clone();
@@ -952,7 +964,10 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                 }
                 if is_host && llama_ready {
                     let url = format!("http://localhost:{api_port}");
-                    eprintln!("  API: {url}");
+                    eprintln!("  API:     {url}");
+                    if let Some(cp) = cb_console_port {
+                        eprintln!("  Console: http://localhost:{cp}");
+                    }
                     update_pi_models_json(&model_name_for_cb, api_port);
                     eprintln!();
                     eprintln!("  pi:    pi --provider mesh --model {model_name_for_cb}");
@@ -1080,11 +1095,15 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{local_port}")).await
         .with_context(|| format!("Failed to bind to port {local_port}"))?;
     let mode = if is_client { "client" } else { "standby" };
-    eprintln!("Passive {mode} ready: http://localhost:{local_port}");
-    eprintln!("  Requests routed to active hosts via QUIC tunnel");
+    eprintln!("Passive {mode} ready:");
+    eprintln!("  API:     http://localhost:{local_port}");
+    if !cli.no_console {
+        eprintln!("  Console: http://localhost:{}", cli.console);
+    }
 
-    // Console (optional)
-    if let Some(cport) = cli.console {
+    // Console
+    if !cli.no_console {
+        let cport = cli.console;
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
         let cs = console::ConsoleState::new(node.clone(), label, local_port, 0);
         if is_client { cs.set_client(true).await; }
@@ -1734,4 +1753,30 @@ async fn run_drop(model_name: &str, port: u16) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn check_for_update() {
+    let url = "https://api.github.com/repos/michaelneale/decentralized-inference/releases/latest";
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let resp = match client.get(url)
+        .header("User-Agent", "mesh-llm")
+        .send().await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if let Some(tag) = body["tag_name"].as_str() {
+        let latest = tag.trim_start_matches('v');
+        if latest != VERSION {
+            eprintln!("💡 Update available: v{VERSION} → v{latest}  https://github.com/michaelneale/decentralized-inference/releases");
+        }
+    }
 }
