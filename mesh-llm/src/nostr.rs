@@ -221,6 +221,14 @@ pub async fn publish_loop(
         eprintln!("   Will delist when {} clients connected", cap);
     }
 
+    // Wait for model to be serving before first publish (up to 30s)
+    for _ in 0..60 {
+        if node.serving().await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
     let mut delisted = false;
 
     loop {
@@ -497,7 +505,7 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
         .custom_tag(SingleLetterTag::lowercase(Alphabet::K), "mesh-llm".to_string())
         .limit(100);
 
-    let events = client.fetch_events(nostr_filter, Duration::from_secs(10)).await?;
+    let events = client.fetch_events(nostr_filter, Duration::from_secs(5)).await?;
 
     let now = Timestamp::now().as_secs();
 
@@ -592,10 +600,6 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
 
     // Size: prefer meshes with more nodes (more resilient)
     score += (mesh.listing.node_count as i64).min(10) * 5;
-
-    // VRAM: prefer meshes with more total VRAM
-    let vram_gb = mesh.listing.total_vram_bytes as f64 / 1e9;
-    score += (vram_gb as i64).min(50);
 
     // Models: prefer meshes with more warm models
     score += (mesh.listing.serving.len() as i64) * 10;
