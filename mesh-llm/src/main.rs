@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-const VERSION: &str = "0.16.0";
+const VERSION: &str = "0.18.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
@@ -473,6 +473,18 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
 /// Priority:
 /// 1. Models the mesh needs that we already have on disk
 /// 2. Models in the mesh catalog that nobody is serving yet (on disk preferred)
+/// Parse a catalog size string like "18.3GB" or "491MB" into bytes.
+fn parse_size_str(s: &str) -> u64 {
+    let s = s.trim();
+    if let Some(gb) = s.strip_suffix("GB") {
+        (gb.parse::<f64>().unwrap_or(0.0) * 1e9) as u64
+    } else if let Some(mb) = s.strip_suffix("MB") {
+        (mb.parse::<f64>().unwrap_or(0.0) * 1e6) as u64
+    } else {
+        0
+    }
+}
+
 /// 3. The most underserved model (fewest nodes serving it relative to its size)
 /// 4. Fall back to the first requested model in the mesh
 async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
@@ -548,6 +560,33 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         let max_model = serving_count.iter().max_by_key(|(_, &v)| v).map(|(k, _)| k.as_str()).unwrap_or("?");
         eprintln!("📋 Assigned to serve {} ({} servers vs {} has {}) — rebalancing",
             pick, count, max_model, max_count);
+        return Some(pick.clone());
+    }
+
+    // Nothing on disk matches — check if we can download an unserved model from catalog
+    let mut downloadable: Vec<String> = Vec::new();
+    for m in &mesh_requested {
+        if serving_count.get(m).copied().unwrap_or(0) > 0 { continue; }
+        // Check catalog for size
+        if let Some(cat) = download::find_model(m) {
+            let size_bytes = parse_size_str(cat.size);
+            let needed = (size_bytes as f64 * 1.1) as u64;
+            if needed <= my_vram {
+                downloadable.push(m.clone());
+            } else {
+                eprintln!("📋 Skipping {} — needs {:.1}GB, we have {:.1}GB",
+                    m, needed as f64 / 1e9, my_vram as f64 / 1e9);
+            }
+        }
+    }
+    if !downloadable.is_empty() {
+        downloadable.sort();
+        let my_id = node.id();
+        let id_bytes = my_id.as_bytes();
+        let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let idx = (hash as usize) % downloadable.len();
+        let pick = &downloadable[idx];
+        eprintln!("📋 Assigned to serve {} (needed by mesh, will download)", pick);
         return Some(pick.clone());
     }
 
@@ -769,8 +808,14 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             let model_path = mesh::find_model_path(&model_name);
             if model_path.exists() {
                 model_path
+            } else if let Some(cat) = download::find_model(&model_name) {
+                // Model not on disk but in catalog — download it
+                eprintln!("📥 Downloading {} for mesh...", model_name);
+                let dest = download::models_dir().join(cat.file);
+                download::download_model(cat).await?;
+                dest
             } else {
-                // Check other common extensions
+                // Not on disk and not in catalog — try common paths
                 let alt = download::models_dir().join(&model_name);
                 if alt.exists() { alt } else { model_path }
             }
