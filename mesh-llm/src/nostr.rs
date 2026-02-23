@@ -362,9 +362,9 @@ pub async fn publish_watchdog(
     region: Option<String>,
     check_interval_secs: u64,
 ) {
-    // Random jitter (30-90s) so multiple watchdogs don't all fire at once
-    let jitter = (rand::random::<u64>() % 60) + 30;
-    tokio::time::sleep(Duration::from_secs(check_interval_secs + jitter)).await;
+    // Short initial wait with jitter (10-30s) — start watching quickly
+    let jitter = (rand::random::<u64>() % 20) + 10;
+    tokio::time::sleep(Duration::from_secs(jitter)).await;
 
     loop {
         // Check if any listing for our mesh exists on Nostr
@@ -385,13 +385,19 @@ pub async fn publish_watchdog(
                 };
 
                 if !mesh_listed && !our_peers.is_empty() {
-                    // Double-check after a short wait — maybe another watchdog
-                    // already took over and we just haven't seen it yet
-                    let backoff = (rand::random::<u64>() % 30) + 10;
+                    // Only take over if we're directly reachable (not relay-only)
+                    if !node.has_direct_connection().await {
+                        tracing::debug!("Mesh listing missing but we're relay-only — not taking over");
+                        tokio::time::sleep(Duration::from_secs(check_interval_secs)).await;
+                        continue;
+                    }
+
+                    // Brief backoff with jitter to avoid stampede (3-10s)
+                    let backoff = (rand::random::<u64>() % 7) + 3;
                     eprintln!("📡 Mesh listing missing from Nostr — waiting {backoff}s before taking over...");
                     tokio::time::sleep(Duration::from_secs(backoff)).await;
 
-                    // Re-check
+                    // Re-check — maybe another watchdog already took over
                     if let Ok(recheck) = discover(&relays, &filter).await {
                         let still_missing = if served.is_empty() {
                             true
@@ -426,7 +432,9 @@ pub async fn publish_watchdog(
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(check_interval_secs)).await;
+        // Check frequently so we catch gaps fast
+        let next_check = (rand::random::<u64>() % 15) + 20; // 20-35s
+        tokio::time::sleep(Duration::from_secs(next_check)).await;
     }
 }
 
