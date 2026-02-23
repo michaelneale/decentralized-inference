@@ -32,6 +32,14 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         description: "Small & fast general chat",
         draft: Some("Qwen2.5-0.5B-Instruct-Q4_K_M"),
     },
+    CatalogModel {
+        name: "Llama-3.2-3B-Instruct-Q4_K_M",
+        file: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        size: "2.0GB",
+        description: "Meta Llama 3.2, goose default, good tool calling",
+        draft: Some("Llama-3.2-1B-Instruct-Q4_K_M"),
+    },
     // ── Small (6-8GB VRAM) ──────────────────────────────────────────
     CatalogModel {
         name: "Qwen3-8B-Q4_K_M",

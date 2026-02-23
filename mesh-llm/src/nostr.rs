@@ -689,27 +689,22 @@ pub fn region_from_relay_url(url: &str) -> Option<String> {
 /// Model tiers by VRAM requirement (approximate loaded size × 1.1 headroom).
 /// Model tiers for auto-selection, ordered largest-first.
 /// min_vram = file_size * 1.1 rounded up. Prefer Qwen3 over 2.5 at same tier.
-const MODEL_TIERS: &[(&str, f64)] = &[
-    ("Qwen2.5-72B-Instruct-Q4_K_M", 53.0),
-    ("Llama-3.3-70B-Instruct-Q4_K_M", 48.0),
-    ("Llama-4-Scout-Q4_K_M", 26.0),
-    ("Qwen3-32B-Q4_K_M", 24.0),
-    ("GLM-4-32B-0414-Q4_K_M", 24.0),
-    ("Qwen2.5-Coder-32B-Instruct-Q4_K_M", 24.0),
-    ("GLM-4.7-Flash-Q4_K_M", 21.0),
-    ("Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", 21.0),
-    ("Gemma-3-27B-it-Q4_K_M", 20.0),
-    ("Devstral-Small-2505-Q4_K_M", 17.0),
-    ("Mistral-Small-3.1-24B-Instruct-Q4_K_M", 17.0),
-    ("Qwen3-14B-Q4_K_M", 11.0),
-    ("Qwen2.5-Coder-14B-Instruct-Q4_K_M", 11.0),
-    ("DeepSeek-R1-Distill-Qwen-14B-Q4_K_M", 11.0),
-    ("Gemma-3-12B-it-Q4_K_M", 9.0),
-    ("Qwen3-8B-Q4_K_M", 6.0),
-    ("Qwen2.5-Coder-7B-Instruct-Q4_K_M", 6.0),
-    ("Qwen3-4B-Q4_K_M", 3.0),
-    ("Qwen2.5-3B-Instruct-Q4_K_M", 3.0),
-];
+/// Parse a size string like "2.5GB" to GB as f64.
+fn parse_size_gb(s: &str) -> f64 {
+    s.trim_end_matches("GB").parse::<f64>().unwrap_or(0.0)
+}
+
+/// Build model tiers from the catalog, sorted largest first.
+/// Each entry is (model_name, min_vram_gb) where min_vram = file_size * 1.1.
+/// Excludes draft models (< 1GB).
+fn model_tiers() -> Vec<(&'static str, f64)> {
+    let mut tiers: Vec<_> = crate::download::MODEL_CATALOG.iter()
+        .filter(|m| parse_size_gb(m.size) >= 1.0) // skip drafts
+        .map(|m| (m.name, parse_size_gb(m.size) * 1.1))
+        .collect();
+    tiers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    tiers
+}
 
 /// Pick models for a new mesh based on VRAM and what's on disk.
 /// Returns 1-3 model names. The first one is what this node will serve
@@ -717,13 +712,14 @@ const MODEL_TIERS: &[(&str, f64)] = &[
 /// so other joiners know what the mesh could use.
 pub fn default_models_for_vram(vram_gb: f64) -> Vec<String> {
     let local_models = crate::mesh::scan_local_models();
+    let tiers = model_tiers();
 
     // Find the largest model that fits AND is already on disk
-    let on_disk_fit = MODEL_TIERS.iter()
+    let on_disk_fit = tiers.iter()
         .find(|(name, min_vram)| *min_vram <= vram_gb && local_models.contains(&name.to_string()));
 
     // Find the largest model that fits (may need download)
-    let any_fit = MODEL_TIERS.iter()
+    let any_fit = tiers.iter()
         .find(|(_, min_vram)| *min_vram <= vram_gb);
 
     // Primary: prefer on-disk, fall back to downloadable
