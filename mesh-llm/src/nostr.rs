@@ -54,7 +54,7 @@ pub struct MeshListing {
 }
 
 /// Discovered mesh from Nostr.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiscoveredMesh {
     pub listing: MeshListing,
     pub publisher_npub: String,

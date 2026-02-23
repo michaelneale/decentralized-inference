@@ -268,6 +268,59 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
             );
             stream.write_all(resp.as_bytes()).await?;
         }
+        "/api/discover" => {
+            let filter = crate::nostr::MeshFilter::default();
+            // Fetch discovery results inside a block so it doesn't block the async task
+            let relays: Vec<String> = crate::nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect();
+            match crate::nostr::discover(&relays, &filter).await {
+                Ok(meshes) => {
+                    if let Ok(json) = serde_json::to_string(&meshes) {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            json.len(), json
+                        );
+                        stream.write_all(resp.as_bytes()).await?;
+                    } else {
+                        respond_error(&mut stream, 500, "Failed to serialize meshes").await?;
+                    }
+                }
+                Err(e) => {
+                    respond_error(&mut stream, 500, &format!("Discovery failed: {e}")).await?;
+                }
+            }
+        }
+        "/api/join" => {
+            if req.starts_with("GET") {
+                return respond_error(&mut stream, 405, "Method Not Allowed").await;
+            }
+            // Parse POST body (crude extraction of the token field)
+            let mut body = String::new();
+            if let Some(pos) = req.find("\r\n\r\n") {
+                body = req[pos + 4..].to_string();
+            } else {
+                body = req.to_string(); // fallback if maybe only headers given or simple request
+            }
+            
+            #[derive(serde::Deserialize)]
+            struct JoinReq { token: String }
+            
+            match serde_json::from_str::<JoinReq>(&body) {
+                Ok(jr) => {
+                    // Call the node's join method
+                    let inner = state.inner.lock().await;
+                    let node = inner.node.clone();
+                    drop(inner);
+                    
+                    if let Err(e) = node.join(&jr.token).await {
+                        respond_error(&mut stream, 500, &format!("Failed to join mesh: {e}")).await?;
+                    } else {
+                        let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"ok\":true}";
+                        stream.write_all(resp.as_bytes()).await?;
+                    }
+                }
+                Err(_) => respond_error(&mut stream, 400, "Invalid JSON payload").await?,
+            }
+        }
         "/api/status" => {
             let status = state.status().await;
             let json = serde_json::to_string(&status)?;
