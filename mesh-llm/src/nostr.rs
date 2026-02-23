@@ -658,17 +658,18 @@ pub fn smart_auto(
 /// iroh picks the closest relay, so the relay URL tells us our region.
 pub async fn detect_region_auto() -> Option<String> {
     use iroh::Endpoint;
-    // Endpoint::builder().bind() generates its own key
     let ep = Endpoint::builder()
         .bind().await.ok()?;
-    // Wait briefly for relay assignment
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let addr = ep.addr();
-    for transport_addr in &addr.addrs {
-        if let iroh::TransportAddr::Relay(url) = transport_addr {
-            let region = region_from_relay_url(url.as_str());
-            ep.close().await;
-            return region;
+    // Poll for relay assignment — check every 100ms, up to 1.5s
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let addr = ep.addr();
+        for transport_addr in &addr.addrs {
+            if let iroh::TransportAddr::Relay(url) = transport_addr {
+                let region = region_from_relay_url(url.as_str());
+                ep.close().await;
+                return region;
+            }
         }
     }
     ep.close().await;

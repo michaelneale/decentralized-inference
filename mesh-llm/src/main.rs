@@ -221,26 +221,16 @@ async fn main() -> Result<()> {
     if cli.auto && cli.join.is_empty() {
         eprintln!("🔍 Discovering meshes via Nostr...");
 
-        // Auto-detect region from iroh relay if not specified
-        let my_region = if let Some(ref r) = cli.region {
-            Some(r.clone())
-        } else {
-            eprintln!("  Detecting region from relay...");
-            let detected = nostr::detect_region_auto().await;
-            if let Some(ref r) = detected {
-                eprintln!("  Region: {r} (auto-detected)");
-            }
-            detected
-        };
-
         let relays = nostr_relays(&cli.nostr_relay);
-        // Don't hard-filter by region — let scoring prefer same-region
         let filter = nostr::MeshFilter {
             model: None,
             min_vram_gb: None,
             region: None,
         };
         let meshes = nostr::discover(&relays, &filter).await?;
+
+        // Region: use explicit if given, otherwise skip (minor scoring factor, not worth the delay)
+        let my_region = cli.region.clone();
         let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -262,24 +252,31 @@ async fn main() -> Result<()> {
 
         match nostr::smart_auto(&meshes, my_region.as_deref(), my_vram_gb) {
             nostr::AutoDecision::Join { token, mesh } => {
-                // Health probe: try connecting before committing
-                eprintln!("  Probing mesh health...");
-                match probe_mesh_health(&token).await {
-                    Ok(()) => {
-                        eprintln!("✅ Joining: {} ({} nodes, {} models{})",
-                            mesh.listing.name.as_deref().unwrap_or("unnamed"),
-                            mesh.listing.node_count,
-                            mesh.listing.serving.len(),
-                            mesh.listing.region.as_ref().map(|r| format!(", region: {r}")).unwrap_or_default());
-                        cli.join.push(token);
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️  Best mesh unreachable: {e}");
-                        if cli.client {
-                            anyhow::bail!("Mesh found but unreachable. Try again later.");
+                if cli.client {
+                    // Skip health probe for clients — joining itself is the test
+                    eprintln!("✅ Joining: {} ({} nodes, {} models{})",
+                        mesh.listing.name.as_deref().unwrap_or("unnamed"),
+                        mesh.listing.node_count,
+                        mesh.listing.serving.len(),
+                        mesh.listing.region.as_ref().map(|r| format!(", region: {r}")).unwrap_or_default());
+                    cli.join.push(token);
+                } else {
+                    // GPU nodes: probe before committing (avoids downloading model for dead mesh)
+                    eprintln!("  Probing mesh health...");
+                    match probe_mesh_health(&token).await {
+                        Ok(()) => {
+                            eprintln!("✅ Joining: {} ({} nodes, {} models{})",
+                                mesh.listing.name.as_deref().unwrap_or("unnamed"),
+                                mesh.listing.node_count,
+                                mesh.listing.serving.len(),
+                                mesh.listing.region.as_ref().map(|r| format!(", region: {r}")).unwrap_or_default());
+                            cli.join.push(token);
                         }
-                        let models = nostr::default_models_for_vram(my_vram_gb);
-                        start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+                        Err(e) => {
+                            eprintln!("⚠️  Best mesh unreachable: {e}");
+                            let models = nostr::default_models_for_vram(my_vram_gb);
+                            start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+                        }
                     }
                 }
             }

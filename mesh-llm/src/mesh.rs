@@ -819,6 +819,7 @@ impl Node {
         let state = self.state.lock().await;
         let my_available = self.available_models.lock().await;
         let my_requested = self.requested_models.lock().await;
+        let my_serving = self.serving.lock().await;
         let mut all = std::collections::HashSet::new();
         for m in my_available.iter() {
             all.insert(m.clone());
@@ -826,12 +827,18 @@ impl Node {
         for m in my_requested.iter() {
             all.insert(m.clone());
         }
+        if let Some(ref s) = *my_serving {
+            all.insert(s.clone());
+        }
         for p in state.peers.values() {
             for m in &p.available_models {
                 all.insert(m.clone());
             }
             for m in &p.requested_models {
                 all.insert(m.clone());
+            }
+            if let Some(ref s) = p.serving {
+                all.insert(s.clone());
             }
         }
         let mut result: Vec<String> = all.into_iter().collect();
