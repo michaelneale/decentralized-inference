@@ -353,6 +353,10 @@ struct MeshState {
     /// Peers confirmed dead — don't reconnect from gossip discovery.
     /// Cleared when the peer successfully reconnects via rejoin/join.
     dead_peers: std::collections::HashSet<EndpointId>,
+    /// Mesh-level wanted models — accumulated from all peers' requested_models.
+    /// Survives peer removal so the mesh remembers what it needs even when
+    /// the node that declared the want goes offline.
+    mesh_wanted: std::collections::HashSet<String>,
 }
 
 /// Channels returned by Node::start for inbound tunnel streams.
@@ -442,6 +446,7 @@ impl Node {
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
                 dead_peers: std::collections::HashSet::new(),
+                mesh_wanted: std::collections::HashSet::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
@@ -677,11 +682,22 @@ impl Node {
     }
 
     pub async fn set_requested_models(&self, models: Vec<String>) {
+        // Also accumulate into mesh-level wanted set
+        let mut state = self.state.lock().await;
+        for m in &models {
+            state.mesh_wanted.insert(m.clone());
+        }
+        drop(state);
         *self.requested_models.lock().await = models;
     }
 
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
+    }
+
+    /// Get all models the mesh has ever wanted — survives peer removal.
+    pub async fn mesh_wanted_models(&self) -> std::collections::HashSet<String> {
+        self.state.lock().await.mesh_wanted.clone()
     }
 
     /// Start a background task that periodically checks peer health.
@@ -1619,6 +1635,10 @@ impl Node {
         }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
+        // Accumulate peer's requested_models into mesh-level wanted set
+        for m in &ann.requested_models {
+            state.mesh_wanted.insert(m.clone());
+        }
         if let Some(existing) = state.peers.get_mut(&id) {
             let role_changed = existing.role != ann.role;
             let serving_changed = existing.serving != ann.serving;

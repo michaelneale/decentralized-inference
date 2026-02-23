@@ -35,17 +35,12 @@ struct Cli {
     #[arg(long)]
     auto: bool,
 
-    /// GGUF model to serve. Can be a path, catalog name, or HuggingFace URL.
-    /// Specify multiple times to seed the mesh with multiple models.
+    /// GGUF model(s) for this mesh. Can be a path, catalog name, or HuggingFace URL.
+    /// First model is served by this node; additional models are wanted by the mesh
+    /// (other nodes joining will pick them up if they have them on disk).
     /// When joining without --model, the mesh assigns one automatically.
     #[arg(long)]
     model: Vec<PathBuf>,
-
-    /// Declare models the mesh wants but this node won't serve.
-    /// Other nodes joining will see these and may pick them up.
-    /// Does not trigger a download.
-    #[arg(long)]
-    want: Vec<String>,
 
     /// Local HTTP port for the API (default: 9337).
     /// The elected host runs llama-server here; workers proxy to the host.
@@ -347,18 +342,21 @@ async fn main() -> Result<()> {
     }
 
     // --- Resolve models from CLI ---
+    // First --model is what we serve (resolve/download it).
+    // Additional --model entries are mesh wants (names only, no download).
     let mut resolved_models: Vec<PathBuf> = Vec::new();
-    for m in &cli.model {
-        resolved_models.push(resolve_model(m).await?);
+    if let Some(first) = cli.model.first() {
+        resolved_models.push(resolve_model(first).await?);
     }
 
-    // Collect requested model names (what the user explicitly asked for + --want)
+    // Build requested model names: served model + additional wants
     let mut requested_model_names: Vec<String> = resolved_models.iter()
         .filter_map(|m| m.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
         .collect();
-    for w in &cli.want {
-        if !requested_model_names.contains(w) {
-            requested_model_names.push(w.clone());
+    for w in cli.model.iter().skip(1) {
+        let name = w.to_string_lossy().to_string();
+        if !requested_model_names.contains(&name) {
+            requested_model_names.push(name);
         }
     }
 
@@ -480,16 +478,8 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
 async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
 
-    // Collect what the mesh wants served (from our own + all peers' requested_models)
-    let mut mesh_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for m in &node.requested_models().await {
-        mesh_requested.insert(m.clone());
-    }
-    for p in &peers {
-        for m in &p.requested_models {
-            mesh_requested.insert(m.clone());
-        }
-    }
+    // Use mesh-level wanted set — survives peer removal
+    let mesh_requested = node.mesh_wanted_models().await;
 
     if mesh_requested.is_empty() {
         // Nobody has requested anything — shouldn't happen if seeder ran
@@ -578,12 +568,8 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
 
-    let mut mesh_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for p in &peers {
-        for m in &p.requested_models {
-            mesh_requested.insert(m.clone());
-        }
-    }
+    // Use mesh-level wanted set — survives peer removal
+    let mesh_requested = node.mesh_wanted_models().await;
 
     if mesh_requested.is_empty() { return None; }
 
@@ -768,46 +754,8 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 
     // Decide which model THIS node will serve
     let model = if !resolved_models.is_empty() {
-        // We have explicit --model(s). If only one, serve it.
-        // If multiple, we seeded the mesh catalog but only serve one.
-        if resolved_models.len() == 1 {
-            resolved_models[0].clone()
-        } else {
-            // Multiple models seeded — pick based on allocation
-            // Give gossip time to propagate so we see what peers are serving
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let assignment = pick_model_assignment(&node, &local_models).await;
-            match assignment {
-                Some(name) => {
-                    // Find the resolved path for this model
-                    resolved_models.iter()
-                        .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(&name))
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            // Not in our resolved list but we have it on disk
-                            mesh::find_model_path(&name)
-                        })
-                }
-                None => {
-                    // All models covered — go standby
-                    // Stop bootstrap proxy first (run_passive binds its own listener)
-                    drop(bootstrap_listener_tx.take());
-                    // Small delay for port to be released
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    eprintln!("💤 All models served — running as standby GPU node");
-                    eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, &local_models);
-                    match run_passive(&cli, node.clone(), false).await? {
-                        Some(model_name) => {
-                            resolved_models.iter()
-                                .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(&model_name))
-                                .cloned()
-                                .unwrap_or_else(|| mesh::find_model_path(&model_name))
-                        }
-                        None => return Ok(()), // clean shutdown
-                    }
-                }
-            }
-        }
+        // First --model is what we serve (already resolved/downloaded)
+        resolved_models[0].clone()
     } else {
         // No --model: try to find a model on disk that the mesh needs
         eprintln!("No --model specified, checking local models against mesh...");
