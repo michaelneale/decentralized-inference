@@ -1775,8 +1775,15 @@ async fn check_for_update() {
     };
     if let Some(tag) = body["tag_name"].as_str() {
         let latest = tag.trim_start_matches('v');
-        if latest != VERSION {
+        if version_newer(latest, VERSION) {
             eprintln!("💡 Update available: v{VERSION} → v{latest}  https://github.com/michaelneale/decentralized-inference/releases");
         }
     }
+}
+
+fn version_newer(a: &str, b: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> {
+        v.split('.').filter_map(|s| s.parse().ok()).collect()
+    };
+    parse(a) > parse(b)
 }

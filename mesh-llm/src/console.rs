@@ -241,7 +241,7 @@ pub async fn start(
             return;
         }
     };
-    eprintln!("Console: http://localhost:{port}");
+    tracing::info!("Console listening on http://localhost:{port}");
 
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
