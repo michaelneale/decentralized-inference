@@ -68,6 +68,10 @@ struct PeerAnnouncement {
     /// Requests per minute by model (from API proxy routing)
     #[serde(default)]
     request_rates: std::collections::HashMap<String, u64>,
+    /// Stable mesh identity — shared by all nodes in the same mesh.
+    /// Generated once by the originator, propagated via gossip.
+    #[serde(default)]
+    mesh_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +198,9 @@ pub fn detect_vram_bytes() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
     pub hosts: Vec<RouteEntry>,
+    /// Stable mesh identity — shared by all nodes in the same mesh.
+    #[serde(default)]
+    pub mesh_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +304,7 @@ pub struct Node {
     requested_models: Arc<Mutex<Vec<String>>>,
     request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     last_request_snapshot: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    mesh_id: Arc<Mutex<Option<String>>>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -410,6 +418,7 @@ impl Node {
             requested_models: Arc::new(Mutex::new(Vec::new())),
             request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             last_request_snapshot: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            mesh_id: Arc::new(Mutex::new(None)),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -491,6 +500,10 @@ impl Node {
 
         // Get initial routing table
         if let Ok(table) = self.request_routing_table(peer_id).await {
+            // Adopt mesh_id from routing table (for passive/client nodes)
+            if let Some(ref id) = table.mesh_id {
+                self.set_mesh_id(id.clone()).await;
+            }
             // Store route entries as lightweight peer info so host_for_model works
             for entry in &table.hosts {
                 self.add_route_entry(entry).await;
@@ -570,6 +583,24 @@ impl Node {
 
     pub async fn serving(&self) -> Option<String> {
         self.serving.lock().await.clone()
+    }
+
+    pub async fn mesh_id(&self) -> Option<String> {
+        self.mesh_id.lock().await.clone()
+    }
+
+    /// Set the mesh identity. If None was set, adopts the given ID (from gossip).
+    /// If already set, ignores (originator's ID wins).
+    pub async fn set_mesh_id(&self, id: String) {
+        let mut current = self.mesh_id.lock().await;
+        if current.is_none() {
+            *current = Some(id);
+        }
+    }
+
+    /// Set mesh ID unconditionally (for originator).
+    pub async fn set_mesh_id_force(&self, id: String) {
+        *self.mesh_id.lock().await = Some(id);
     }
 
     pub async fn set_available_models(&self, models: Vec<String>) {
@@ -865,7 +896,8 @@ impl Node {
             }
         }
 
-        RoutingTable { hosts }
+        let mesh_id = self.mesh_id.lock().await.clone();
+        RoutingTable { hosts, mesh_id }
     }
 
     /// Request routing table from a connected peer (for passive nodes).
@@ -1505,6 +1537,10 @@ impl Node {
     }
 
     async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, ann: &PeerAnnouncement) {
+        // Adopt mesh_id from gossip if we don't have one yet
+        if let Some(ref their_id) = ann.mesh_id {
+            self.set_mesh_id(their_id.clone()).await;
+        }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
@@ -1557,6 +1593,7 @@ impl Node {
         let my_serving = self.serving.lock().await.clone();
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
+        let my_mesh_id = self.mesh_id.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
             .map(|p| PeerAnnouncement {
                 addr: p.addr.clone(),
@@ -1568,6 +1605,7 @@ impl Node {
                 available_models: p.available_models.clone(),
                 requested_models: p.requested_models.clone(),
                 request_rates: p.request_rates.clone(),
+                mesh_id: my_mesh_id.clone(),
             })
             .collect();
         let my_rates = self.snapshot_request_rates();
@@ -1581,9 +1619,70 @@ impl Node {
             available_models: my_available,
             requested_models: my_requested,
             request_rates: my_rates,
+            mesh_id: my_mesh_id,
         });
         announcements
     }
+}
+
+/// Generate a mesh ID for a new mesh.
+/// Named meshes: `sha256("mesh-llm:" + name + ":" + nostr_pubkey)` — deterministic, unique per creator.
+/// Unnamed meshes: random UUID, persisted to `~/.mesh-llm/mesh-id`.
+pub fn generate_mesh_id(name: Option<&str>, nostr_pubkey: Option<&str>) -> String {
+    if let Some(name) = name {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "mesh-llm:".hash(&mut hasher);
+        name.hash(&mut hasher);
+        if let Some(pk) = nostr_pubkey {
+            pk.hash(&mut hasher);
+        }
+        format!("{:016x}", hasher.finish())
+    } else {
+        // Try to load persisted mesh-id
+        let path = mesh_id_path();
+        if let Ok(id) = std::fs::read_to_string(&path) {
+            let id = id.trim().to_string();
+            if !id.is_empty() {
+                return id;
+            }
+        }
+        // Generate new random ID and persist
+        let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &id);
+        id
+    }
+}
+
+fn mesh_id_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("mesh-id")
+}
+
+/// Save the mesh ID of the last mesh we successfully joined.
+pub fn save_last_mesh_id(mesh_id: &str) {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("last-mesh");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, mesh_id);
+}
+
+/// Load the mesh ID of the last mesh we successfully joined.
+pub fn load_last_mesh_id() -> Option<String> {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("last-mesh");
+    std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Load secret key from ~/.mesh-llm/key, or create a new one and save it.

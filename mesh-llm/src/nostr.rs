@@ -48,6 +48,9 @@ pub struct MeshListing {
     /// Optional geographic region
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Stable mesh identity — all nodes in the same mesh share this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_id: Option<String>,
 }
 
 /// Discovered mesh from Nostr.
@@ -316,6 +319,8 @@ pub async fn publish_loop(
             .count()
             + 1; // +1 for self
 
+        let mesh_id = node.mesh_id().await;
+
         let listing = MeshListing {
             invite_token,
             serving: actually_serving,
@@ -327,6 +332,7 @@ pub async fn publish_loop(
             max_clients: max_clients.unwrap_or(0),
             name: name.clone(),
             region: region.clone(),
+            mesh_id,
         };
 
         let ttl = interval_secs * 2;
@@ -549,8 +555,15 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
 /// Considers region match, capacity, and model availability.
 /// Freshness is mostly irrelevant since Nostr listings expire at 120s (TTL=2×60s),
 /// so anything we see from discover() is already reasonably fresh.
-pub fn score_mesh(mesh: &DiscoveredMesh, my_region: Option<&str>, _now_secs: u64) -> i64 {
+pub fn score_mesh(mesh: &DiscoveredMesh, my_region: Option<&str>, _now_secs: u64, last_mesh_id: Option<&str>) -> i64 {
     let mut score: i64 = 100; // base score — if we can see it, it's alive
+
+    // Sticky preference: strong bonus for the mesh we were last on
+    if let (Some(last_id), Some(mesh_id)) = (last_mesh_id, &mesh.listing.mesh_id) {
+        if last_id == mesh_id {
+            score += 500; // strong preference, not infinite — dead/degraded mesh loses on other factors
+        }
+    }
 
     // Region match: strong preference for same region
     if let (Some(my_r), Some(mesh_r)) = (my_region, &mesh.listing.region) {
@@ -610,9 +623,11 @@ pub fn smart_auto(
         .unwrap_or_default()
         .as_secs();
 
+    let last_mesh_id = crate::mesh::load_last_mesh_id();
+
     // Score and rank
     let mut scored: Vec<(&DiscoveredMesh, i64)> = meshes.iter()
-        .map(|m| (m, score_mesh(m, my_region, now)))
+        .map(|m| (m, score_mesh(m, my_region, now, last_mesh_id.as_deref())))
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
 

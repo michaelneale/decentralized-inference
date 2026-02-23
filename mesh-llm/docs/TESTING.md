@@ -110,6 +110,66 @@ mesh-llm drop GLM-4.7-Flash-Q4_K_M
 - Switching models highlights the serving node in topology view
 - Chat routes to selected model via API proxy
 
+## Mesh Identity
+
+### 16. Mesh ID generation (originator)
+
+```bash
+# With --mesh-name (deterministic ID)
+mesh-llm --model Qwen2.5-3B --mesh-name "test-mesh"
+```
+
+- Log: `📌 Mesh ID: <hex>`
+- `~/.mesh-llm/last-mesh` contains the same hex
+- Restart with same `--mesh-name` → same mesh ID (deterministic)
+- Different `--mesh-name` → different mesh ID
+
+### 17. Mesh ID propagation (joiner)
+
+```bash
+# Originator
+mesh-llm --model Qwen2.5-3B --mesh-name "test-mesh"
+# Joiner
+mesh-llm --model Qwen2.5-3B --join <TOKEN>
+```
+
+- Joiner log: `📌 Mesh ID: <same hex as originator>`
+- Joiner's `~/.mesh-llm/last-mesh` matches originator's mesh ID
+- Mesh ID arrives via gossip (worker nodes) or routing table (passive clients)
+
+### 18. Sticky mesh preference
+
+- Join a mesh → `~/.mesh-llm/last-mesh` saved
+- On next `--auto`, `score_mesh()` adds +500 for meshes with matching `mesh_id`
+- If that mesh is dead (not on Nostr), scoring proceeds normally without bonus
+
+## Bootstrap Proxy
+
+### 19. Instant API during GPU bootstrap
+
+```bash
+# Originator (already running)
+mesh-llm --model Qwen2.5-3B --port 8090
+# Joiner
+mesh-llm --model Qwen2.5-3B --join <TOKEN> --port 8091
+```
+
+- Joiner log: `⚡ API ready (bootstrap): http://localhost:8091`
+- BEFORE `rpc-server` or `llama-server` starts on joiner:
+  - `curl localhost:8091/v1/models` → lists mesh models
+  - `curl localhost:8091/v1/chat/completions` → inference via tunnel to originator
+- Log: `⚡ Bootstrap proxy handing off to full API proxy`
+- After handoff, API continues working (now served locally or via election)
+
+### 20. Bootstrap proxy not started for originator
+
+```bash
+mesh-llm --model Qwen2.5-3B
+```
+
+- No `⚡ API ready (bootstrap)` message (only joiners get bootstrap proxy)
+- API port opens only after election resolves
+
 ## Resilience
 
 ### 11. Dead peer cleanup

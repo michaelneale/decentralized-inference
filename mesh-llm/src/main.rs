@@ -241,9 +241,10 @@ async fn main() -> Result<()> {
             .unwrap_or_default()
             .as_secs();
 
+        let last_mesh_id = mesh::load_last_mesh_id();
         eprintln!("  Found {} mesh(es)", meshes.len());
         for m in &meshes {
-            let score = nostr::score_mesh(m, my_region.as_deref(), now);
+            let score = nostr::score_mesh(m, my_region.as_deref(), now, last_mesh_id.as_deref());
             eprintln!("  · {} (score: {}, {} nodes, {:.0}GB, {} clients{})",
                 m.listing.name.as_deref().unwrap_or("unnamed"),
                 score,
@@ -684,6 +685,20 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         if !joined {
             eprintln!("Failed to join any peer — running standalone");
         }
+
+        // Save mesh_id for sticky preference after gossip propagates it
+        {
+            let save_node = node.clone();
+            tokio::spawn(async move {
+                // Wait for gossip to propagate mesh_id
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Some(id) = save_node.mesh_id().await {
+                    mesh::save_last_mesh_id(&id);
+                    eprintln!("📌 Mesh ID: {id}");
+                }
+            });
+        }
+
         eprintln!("This node's token (for others to join): {token}");
 
         // Periodic rejoin: re-connect to bootstrap tokens every 60s.
@@ -702,9 +717,33 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             }
         });
     } else {
+        // Originator — generate mesh_id
+        let nostr_pubkey = if cli.publish {
+            nostr::load_or_create_keys().ok().map(|k| k.public_key().to_hex())
+        } else {
+            None
+        };
+        let mesh_id = mesh::generate_mesh_id(cli.mesh_name.as_deref(), nostr_pubkey.as_deref());
+        node.set_mesh_id_force(mesh_id.clone()).await;
+        mesh::save_last_mesh_id(&mesh_id);
+        eprintln!("📌 Mesh ID: {mesh_id}");
         eprintln!("Invite token: {token}");
         eprintln!("Waiting for peers to join...");
     }
+
+    // Start bootstrap proxy if joining an existing mesh.
+    // This gives instant API access via tunnel while our GPU loads.
+    let mut bootstrap_listener_tx = if !cli.join.is_empty() {
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>(1);
+        let boot_node = node.clone();
+        let boot_port = api_port;
+        tokio::spawn(async move {
+            bootstrap_proxy(boot_node, boot_port, stop_rx).await;
+        });
+        Some(stop_tx)
+    } else {
+        None
+    };
 
     // Decide which model THIS node will serve
     let model = if !resolved_models.is_empty() {
@@ -730,6 +769,10 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                 }
                 None => {
                     // All models covered — go standby
+                    // Stop bootstrap proxy first (run_passive binds its own listener)
+                    drop(bootstrap_listener_tx.take());
+                    // Small delay for port to be released
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     eprintln!("💤 All models served — running as standby GPU node");
                     eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, &local_models);
                     match run_passive(&cli, node.clone(), false).await? {
@@ -764,6 +807,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             }
         } else {
             // Nothing on disk matches — go passive, act as proxy
+            // Stop bootstrap proxy first (run_passive binds its own listener)
+            drop(bootstrap_listener_tx.take());
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             // If a model becomes unserved while we're standby, we'll promote
             eprintln!("💤 No matching model on disk — running as standby GPU node");
             eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, local_models);
@@ -825,11 +871,21 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     // Drop channel: API proxy sends model names to drop, main loop handles shutdown
     let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    // Take over listener from bootstrap proxy (if running), or bind a new one
+    let existing_listener = if let Some(tx) = bootstrap_listener_tx {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(resp_tx).await;
+        // Wait for bootstrap to hand back the TcpListener
+        resp_rx.await.ok()
+    } else {
+        None
+    };
+
     // API proxy: model-aware routing
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
-        api_proxy(proxy_node, api_port, proxy_rx, drop_tx).await;
+        api_proxy(proxy_node, api_port, proxy_rx, drop_tx, existing_listener).await;
     });
 
     // Console (optional)
@@ -1135,13 +1191,16 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target
 /// if model is not specified or not found.
-async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>) {
-    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind API proxy to port {port}: {e}");
-            return;
-        }
+async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>, existing_listener: Option<tokio::net::TcpListener>) {
+    let listener = match existing_listener {
+        Some(l) => l,
+        None => match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to bind API proxy to port {port}: {e}");
+                return;
+            }
+        },
     };
 
     loop {
@@ -1200,6 +1259,90 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                 Err(_) => return,
             };
         });
+    }
+}
+
+/// Bootstrap proxy: runs during GPU startup, tunnels all requests to mesh hosts.
+/// Returns the TcpListener when signaled to stop (so api_proxy can take it over).
+async fn bootstrap_proxy(
+    node: mesh::Node,
+    port: u16,
+    mut stop_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>,
+) {
+    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Bootstrap proxy: failed to bind to port {port}: {e}");
+            return;
+        }
+    };
+    eprintln!("⚡ API ready (bootstrap): http://localhost:{port}");
+    eprintln!("  Requests tunneled to mesh while GPU loads...");
+
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                let (tcp_stream, _addr) = match accept {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let _ = tcp_stream.set_nodelay(true);
+                let node = node.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 32768];
+                    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+
+                    // Handle /v1/models locally
+                    if is_models_list_request(&buf[..n]) {
+                        let served = node.models_being_served().await;
+                        let _ = send_models_list(tcp_stream, &served).await;
+                        return;
+                    }
+
+                    // Record request for demand tracking
+                    if let Some(ref name) = model_name {
+                        node.record_request(name);
+                    }
+
+                    // Route to host by model name
+                    let target_host = if let Some(ref name) = model_name {
+                        node.host_for_model(name).await.map(|p| p.id)
+                    } else {
+                        None
+                    };
+                    let target_host = match target_host {
+                        Some(id) => id,
+                        None => match node.any_host().await {
+                            Some(p) => p.id,
+                            None => {
+                                let _ = send_503(tcp_stream).await;
+                                return;
+                            }
+                        }
+                    };
+
+                    match node.open_http_tunnel(target_host).await {
+                        Ok((quic_send, quic_recv)) => {
+                            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
+                                tracing::debug!("Bootstrap tunnel relay ended: {e}");
+                            }
+                        }
+                        Err(e) => tracing::warn!("Bootstrap: failed to tunnel to host: {e}"),
+                    }
+                });
+            }
+            resp_tx = stop_rx.recv() => {
+                // Hand over listener to api_proxy
+                if let Some(tx) = resp_tx {
+                    eprintln!("⚡ Bootstrap proxy handing off to full API proxy");
+                    let _ = tx.send(listener);
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -1516,9 +1659,10 @@ async fn run_discover(
         .unwrap_or_default()
         .as_secs();
 
+    let last_mesh_id = mesh::load_last_mesh_id();
     eprintln!("Found {} mesh(es):\n", meshes.len());
     for (i, mesh) in meshes.iter().enumerate() {
-        let score = nostr::score_mesh(mesh, filter.region.as_deref(), now);
+        let score = nostr::score_mesh(mesh, filter.region.as_deref(), now, last_mesh_id.as_deref());
         let age = now.saturating_sub(mesh.published_at);
         let freshness = if age < 120 { "fresh" } else if age < 300 { "ok" } else { "stale" };
         let capacity = if mesh.listing.max_clients > 0 {
