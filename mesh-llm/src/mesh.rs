@@ -94,21 +94,36 @@ pub struct PeerInfo {
     pub request_rates: std::collections::HashMap<String, u64>,
 }
 
-/// Scan ~/.models/ for GGUF files and return their stem names.
+/// Directories to scan for GGUF models.
+pub fn model_dirs() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut dirs = vec![home.join(".models")];
+    // Also scan goose's model directory (~/Library/Application Support/Block.goose/models/)
+    if let Some(data_dir) = dirs::data_dir() {
+        let goose_dir = data_dir.join("Block.goose").join("models");
+        if goose_dir.exists() {
+            dirs.push(goose_dir);
+        }
+    }
+    dirs
+}
+
+/// Scan model directories for GGUF files and return their stem names.
 pub fn scan_local_models() -> Vec<String> {
-    let models_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".models");
     let mut names = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Skip draft models (tiny) and partial downloads
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    if size > 500_000_000 { // > 500MB, skip draft models
-                        names.push(stem.to_string());
+    for models_dir in model_dirs() {
+        if let Ok(entries) = std::fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        // Skip draft models (tiny) and partial downloads
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        if size > 500_000_000 { // > 500MB, skip draft models
+                            if !names.contains(&stem.to_string()) {
+                                names.push(stem.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -116,6 +131,23 @@ pub fn scan_local_models() -> Vec<String> {
     }
     names.sort();
     names
+}
+
+/// Find a GGUF model file by stem name, searching all model directories.
+/// Returns the first match found (prefers ~/.models/ over goose dir).
+pub fn find_model_path(stem: &str) -> std::path::PathBuf {
+    let filename = format!("{}.gguf", stem);
+    for dir in model_dirs() {
+        let candidate = dir.join(&filename);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fallback: return ~/.models/ path even if it doesn't exist
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".models")
+        .join(&filename)
 }
 
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM

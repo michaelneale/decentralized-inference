@@ -361,18 +361,20 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
         return Ok(input.to_path_buf());
     }
 
-    // Check ~/.models/ for just a filename
+    // Check all model directories (including goose) for just a filename
     if !s.contains('/') {
-        let in_models = download::models_dir().join(input);
-        if in_models.exists() {
-            return Ok(in_models);
+        for dir in mesh::model_dirs() {
+            let candidate = dir.join(input);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
         // Try catalog match
         if let Some(entry) = download::find_model(&s) {
             return download::download_model(entry).await;
         }
         anyhow::bail!(
-            "Model not found: {}\nNot a local file, not in ~/.models/, not in catalog.\n\
+            "Model not found: {}\nNot a local file, not in ~/.models/ or goose models, not in catalog.\n\
              Use a path, a catalog name (run `mesh-llm download` to list), or a HuggingFace URL.",
             s
         );
@@ -431,7 +433,8 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
     let catalog_entry = download::MODEL_CATALOG.iter().find(|m| m.file == filename)?;
     let draft_name = catalog_entry.draft?;
     let draft_entry = download::MODEL_CATALOG.iter().find(|m| m.name == draft_name)?;
-    let draft_path = download::models_dir().join(draft_entry.file);
+    let draft_stem = draft_entry.file.strip_suffix(".gguf").unwrap_or(draft_entry.file);
+    let draft_path = mesh::find_model_path(draft_stem);
     if draft_path.exists() {
         return Some(draft_path);
     }
@@ -489,7 +492,7 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
     let mut candidates: Vec<String> = Vec::new();
     for m in &mesh_requested {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
-            let model_path = download::models_dir().join(format!("{}.gguf", m));
+            let model_path = mesh::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
             let needed = (model_bytes as f64 * 1.1) as u64;
             if model_bytes > 0 && needed > my_vram {
@@ -521,7 +524,7 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
     for m in &mesh_requested {
         let count = serving_count.get(m).copied().unwrap_or(0);
         if count < max_count && local_models.contains(m) {
-            let model_path = download::models_dir().join(format!("{}.gguf", m));
+            let model_path = mesh::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
             let needed = (model_bytes as f64 * 1.1) as u64;
             if model_bytes > 0 && needed > my_vram {
@@ -578,7 +581,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
     // Priority 1: promote for models with ZERO servers
     for m in &mesh_requested {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
-            let model_path = download::models_dir().join(format!("{}.gguf", m));
+            let model_path = mesh::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
             let needed = (model_bytes as f64 * 1.1) as u64;
             if model_bytes > 0 && needed > my_vram {
@@ -611,7 +614,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
             let demand = *total_demand.get(m).unwrap_or(&0) as f64;
             let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
             if servers > 0.0 && local_models.contains(m) {
-                let model_path = download::models_dir().join(format!("{}.gguf", m));
+                let model_path = mesh::find_model_path(m);
                 let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
                 let needed = (model_bytes as f64 * 1.1) as u64;
                 if model_bytes > 0 && needed > my_vram {
@@ -764,7 +767,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                         .cloned()
                         .unwrap_or_else(|| {
                             // Not in our resolved list but we have it on disk
-                            download::models_dir().join(format!("{}.gguf", name))
+                            mesh::find_model_path(&name)
                         })
                 }
                 None => {
@@ -780,7 +783,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                             resolved_models.iter()
                                 .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(&model_name))
                                 .cloned()
-                                .unwrap_or_else(|| download::models_dir().join(format!("{}.gguf", model_name)))
+                                .unwrap_or_else(|| mesh::find_model_path(&model_name))
                         }
                         None => return Ok(()), // clean shutdown
                     }
@@ -797,7 +800,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         let assignment = pick_model_assignment(&node, &local_models).await;
         if let Some(model_name) = assignment {
             eprintln!("Mesh assigned model: {model_name}");
-            let model_path = download::models_dir().join(format!("{}.gguf", model_name));
+            let model_path = mesh::find_model_path(&model_name);
             if model_path.exists() {
                 model_path
             } else {
@@ -817,7 +820,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             match run_passive(&cli, node.clone(), false).await? {
                 Some(model_name) => {
                     // Promoted! Resolve the model path and continue to serving
-                    let model_path = download::models_dir().join(format!("{}.gguf", model_name));
+                    let model_path = mesh::find_model_path(&model_name);
                     if model_path.exists() {
                         model_path
                     } else {
