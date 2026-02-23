@@ -273,7 +273,7 @@ async fn main() -> Result<()> {
                 } else {
                     // GPU nodes: probe before committing (avoids downloading model for dead mesh)
                     eprintln!("  Probing mesh health...");
-                    match probe_mesh_health(&token).await {
+                    match probe_mesh_health(&token, &cli.relay).await {
                         Ok(()) => {
                             eprintln!("✅ Joining: {} ({} nodes, {} models{})",
                                 mesh.listing.name.as_deref().unwrap_or("unnamed"),
@@ -1595,15 +1595,23 @@ fn update_pi_models_json(model_id: &str, port: u16) {
 /// Resolve Nostr relay URLs from CLI or defaults.
 /// Health probe: try QUIC connect to the mesh's bootstrap node.
 /// Returns Ok if reachable within 10s, Err if not.
-async fn probe_mesh_health(invite_token: &str) -> Result<()> {
+async fn probe_mesh_health(invite_token: &str, relay_urls: &[String]) -> Result<()> {
     use base64::Engine;
     let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
     let addr: iroh::EndpointAddr = serde_json::from_slice(&json)?;
 
     let key = iroh::SecretKey::generate(&mut rand::rng());
-    let ep = iroh::Endpoint::builder()
-        .secret_key(key)
-        .bind().await?;
+    let mut builder = iroh::Endpoint::builder()
+        .secret_key(key);
+    if !relay_urls.is_empty() {
+        use iroh::{RelayConfig, RelayMap};
+        let configs: Vec<RelayConfig> = relay_urls.iter().map(|url| {
+            RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
+        }).collect();
+        let relay_map = RelayMap::from_iter(configs);
+        builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map));
+    }
+    let ep = builder.bind().await?;
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
