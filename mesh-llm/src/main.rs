@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long)]
     model: Vec<PathBuf>,
 
+    /// Declare models the mesh wants but this node won't serve.
+    /// Other nodes joining will see these and may pick them up.
+    /// Does not trigger a download.
+    #[arg(long)]
+    want: Vec<String>,
+
     /// Local HTTP port for the API (default: 9337).
     /// The elected host runs llama-server here; workers proxy to the host.
     #[arg(long, default_value = "9337")]
@@ -339,10 +345,15 @@ async fn main() -> Result<()> {
         resolved_models.push(resolve_model(m).await?);
     }
 
-    // Collect requested model names (what the user explicitly asked for)
-    let requested_model_names: Vec<String> = resolved_models.iter()
+    // Collect requested model names (what the user explicitly asked for + --want)
+    let mut requested_model_names: Vec<String> = resolved_models.iter()
         .filter_map(|m| m.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
         .collect();
+    for w in &cli.want {
+        if !requested_model_names.contains(w) {
+            requested_model_names.push(w.clone());
+        }
+    }
 
     let bin_dir = match &cli.bin_dir {
         Some(d) => d.clone(),
