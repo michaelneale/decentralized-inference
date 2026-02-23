@@ -119,8 +119,8 @@ pub async fn start_llama_server(
         .context("Failed to create llama-server log file")?;
     let log_file2 = log_file.try_clone()?;
 
-    // llama-server always uses --rpc, even solo.
-    // The host's own rpc-server is always in the list.
+    // llama-server uses --rpc only for remote workers.
+    // The host's own GPU is used directly via Metal (no local rpc-server in the list).
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
     ];
