@@ -563,20 +563,20 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
 /// Considers region match, capacity, and model availability.
 /// Freshness is mostly irrelevant since Nostr listings expire at 120s (TTL=2×60s),
 /// so anything we see from discover() is already reasonably fresh.
-pub fn score_mesh(mesh: &DiscoveredMesh, my_region: Option<&str>, _now_secs: u64, last_mesh_id: Option<&str>) -> i64 {
+pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&str>) -> i64 {
     let mut score: i64 = 100; // base score — if we can see it, it's alive
+
+    // Default mesh name: strong bonus for the well-known "mesh-llm" mesh
+    if let Some(ref name) = mesh.listing.name {
+        if name.eq_ignore_ascii_case("mesh-llm") {
+            score += 300; // prefer the default community mesh
+        }
+    }
 
     // Sticky preference: strong bonus for the mesh we were last on
     if let (Some(last_id), Some(mesh_id)) = (last_mesh_id, &mesh.listing.mesh_id) {
         if last_id == mesh_id {
             score += 500; // strong preference, not infinite — dead/degraded mesh loses on other factors
-        }
-    }
-
-    // Region match: strong preference for same region
-    if let (Some(my_r), Some(mesh_r)) = (my_region, &mesh.listing.region) {
-        if my_r.eq_ignore_ascii_case(mesh_r) {
-            score += 200; // same region — low latency
         }
     }
 
@@ -623,7 +623,6 @@ pub enum AutoDecision {
 ///   models appropriate for the node's VRAM
 pub fn smart_auto(
     meshes: &[DiscoveredMesh],
-    my_region: Option<&str>,
     my_vram_gb: f64,
 ) -> AutoDecision {
     let now = std::time::SystemTime::now()
@@ -635,7 +634,7 @@ pub fn smart_auto(
 
     // Score and rank
     let mut scored: Vec<(&DiscoveredMesh, i64)> = meshes.iter()
-        .map(|m| (m, score_mesh(m, my_region, now, last_mesh_id.as_deref())))
+        .map(|m| (m, score_mesh(m, now, last_mesh_id.as_deref())))
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -652,47 +651,6 @@ pub fn smart_auto(
     // No suitable mesh — recommend models for a new one based on VRAM
     let models = default_models_for_vram(my_vram_gb);
     AutoDecision::StartNew { models }
-}
-
-/// Auto-detect region by briefly connecting to iroh's default relay.
-/// iroh picks the closest relay, so the relay URL tells us our region.
-pub async fn detect_region_auto() -> Option<String> {
-    use iroh::Endpoint;
-    let ep = Endpoint::builder()
-        .bind().await.ok()?;
-    // Poll for relay assignment — check every 100ms, up to 1.5s
-    for _ in 0..15 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let addr = ep.addr();
-        for transport_addr in &addr.addrs {
-            if let iroh::TransportAddr::Relay(url) = transport_addr {
-                let region = region_from_relay_url(url.as_str());
-                ep.close().await;
-                return region;
-            }
-        }
-    }
-    ep.close().await;
-    None
-}
-
-/// Extract region code from a relay URL.
-pub fn region_from_relay_url(url: &str) -> Option<String> {
-    // Extract hostname prefix before first dot
-    let host = url.strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let prefix = host.split('.').next()?;
-    // prefix is like "aps1-1" — take first part before the dash-number
-    let region_code = prefix.split('-').next()?;
-    match region_code {
-        "aps1" | "aps2" => Some("AU".into()),  // Asia Pacific South
-        "apn1" | "apn2" => Some("JP".into()),  // Asia Pacific North
-        "usw1" | "usw2" => Some("US".into()),  // US West
-        "use1" | "use2" => Some("US".into()),  // US East
-        "euw1" | "euw2" => Some("EU".into()),  // Europe West
-        "euc1" | "euc2" => Some("EU".into()),  // Europe Central
-        _ => None,
-    }
 }
 
 /// Model tiers by VRAM requirement (approximate loaded size × 1.1 headroom).

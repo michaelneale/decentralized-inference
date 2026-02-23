@@ -229,8 +229,7 @@ async fn main() -> Result<()> {
         };
         let meshes = nostr::discover(&relays, &filter).await?;
 
-        // Region: use explicit if given, otherwise skip (minor scoring factor, not worth the delay)
-        let my_region = cli.region.clone();
+        
         let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -240,7 +239,7 @@ async fn main() -> Result<()> {
         let last_mesh_id = mesh::load_last_mesh_id();
         eprintln!("  Found {} mesh(es)", meshes.len());
         for m in &meshes {
-            let score = nostr::score_mesh(m, my_region.as_deref(), now, last_mesh_id.as_deref());
+            let score = nostr::score_mesh(m, now, last_mesh_id.as_deref());
             eprintln!("  · {} (score: {}, {} nodes, {:.0}GB, {} clients{})",
                 m.listing.name.as_deref().unwrap_or("unnamed"),
                 score,
@@ -250,7 +249,7 @@ async fn main() -> Result<()> {
                 m.listing.region.as_ref().map(|r| format!(", {r}")).unwrap_or_default());
         }
 
-        match nostr::smart_auto(&meshes, my_region.as_deref(), my_vram_gb) {
+        match nostr::smart_auto(&meshes, my_vram_gb) {
             nostr::AutoDecision::Join { token, mesh } => {
                 if cli.client {
                     // Skip health probe for clients — joining itself is the test
@@ -275,7 +274,7 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             eprintln!("⚠️  Best mesh unreachable: {e}");
                             let models = nostr::default_models_for_vram(my_vram_gb);
-                            start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+                            start_new_mesh(&mut cli, &models, my_vram_gb);
                         }
                     }
                 }
@@ -284,7 +283,7 @@ async fn main() -> Result<()> {
                 if cli.client {
                     anyhow::bail!("No meshes found to join. Run without --client to start a new mesh.");
                 }
-                start_new_mesh(&mut cli, &models, my_vram_gb, &my_region);
+                start_new_mesh(&mut cli, &models, my_vram_gb);
             }
         }
     }
@@ -1602,7 +1601,7 @@ async fn probe_mesh_health(invite_token: &str) -> Result<()> {
 }
 
 /// Helper for StartNew path — configure CLI to start a new mesh.
-fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64, my_region: &Option<String>) {
+fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64) {
     eprintln!("🆕 Starting a new mesh");
     eprintln!("   Primary model: {}", models[0]);
     if models.len() > 1 {
@@ -1617,12 +1616,6 @@ fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64, my_region: 
     if !cli.publish {
         cli.publish = true;
         eprintln!("   Auto-enabling --publish for discovery");
-    }
-    if cli.region.is_none() {
-        if let Some(r) = my_region {
-            cli.region = Some(r.clone());
-            eprintln!("   Region: {r} (auto-detected)");
-        }
     }
 }
 
@@ -1673,7 +1666,7 @@ async fn run_discover(
     let last_mesh_id = mesh::load_last_mesh_id();
     eprintln!("Found {} mesh(es):\n", meshes.len());
     for (i, mesh) in meshes.iter().enumerate() {
-        let score = nostr::score_mesh(mesh, filter.region.as_deref(), now, last_mesh_id.as_deref());
+        let score = nostr::score_mesh(mesh, now, last_mesh_id.as_deref());
         let age = now.saturating_sub(mesh.published_at);
         let freshness = if age < 120 { "fresh" } else if age < 300 { "ok" } else { "stale" };
         let capacity = if mesh.listing.max_clients > 0 {

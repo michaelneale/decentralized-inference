@@ -991,7 +991,17 @@ impl Node {
         let addr = self.endpoint.addr();
         for transport_addr in &addr.addrs {
             if let TransportAddr::Relay(url) = transport_addr {
-                return crate::nostr::region_from_relay_url(url.as_str());
+                let host = url.as_str().strip_prefix("https://")
+                    .or_else(|| url.as_str().strip_prefix("http://"))?;
+                let prefix = host.split('.').next()?;
+                let code = prefix.split('-').next()?;
+                return match code {
+                    "aps1" | "aps2" => Some("AU".into()),
+                    "apn1" | "apn2" => Some("JP".into()),
+                    "usw1" | "usw2" | "use1" | "use2" => Some("US".into()),
+                    "euw1" | "euw2" | "euc1" | "euc2" => Some("EU".into()),
+                    _ => None,
+                };
             }
         }
         None
