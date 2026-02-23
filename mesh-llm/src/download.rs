@@ -65,6 +65,14 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
         description: "Google Gemma 3 12B, punches above weight",
         draft: Some("Gemma-3-1B-it-Q4_K_M"),
     },
+    CatalogModel {
+        name: "Hermes-2-Pro-Mistral-7B-Q4_K_M",
+        file: "Hermes-2-Pro-Mistral-7B-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/Hermes-2-Pro-Mistral-7B-GGUF/resolve/main/Hermes-2-Pro-Mistral-7B-Q4_K_M.gguf",
+        size: "4.4GB",
+        description: "Goose default, strong tool calling for agents",
+        draft: None,
+    },
     // ── Medium (11-17GB VRAM) ───────────────────────────────────────
     CatalogModel {
         name: "Qwen3-14B-Q4_K_M",
