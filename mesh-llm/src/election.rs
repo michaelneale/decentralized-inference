@@ -351,12 +351,13 @@ async fn start_llama(
         // Sort by RTT ascending (unknown RTT sorts last)
         candidates.sort_by_key(|p| p.rtt_ms.unwrap_or(u32::MAX));
 
-        // Take just enough peers to cover the VRAM gap
+        // Take just enough peers to cover the VRAM gap.
+        // When --split is forced, always include at least one worker.
         let mut accumulated_vram = my_vram;
         let mut selected = Vec::new();
         for p in &candidates {
-            if accumulated_vram >= min_vram {
-                break; // we have enough VRAM already
+            if accumulated_vram >= min_vram && !(force_split && selected.is_empty()) {
+                break; // we have enough VRAM already (but force at least 1 if --split)
             }
             accumulated_vram += p.vram_bytes;
             let rtt_str = p.rtt_ms.map(|r| format!("{}ms", r)).unwrap_or("?ms".to_string());

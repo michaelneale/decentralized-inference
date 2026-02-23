@@ -687,13 +687,27 @@ pub fn region_from_relay_url(url: &str) -> Option<String> {
 }
 
 /// Model tiers by VRAM requirement (approximate loaded size × 1.1 headroom).
+/// Model tiers for auto-selection, ordered largest-first.
+/// min_vram = file_size * 1.1 rounded up. Prefer Qwen3 over 2.5 at same tier.
 const MODEL_TIERS: &[(&str, f64)] = &[
+    ("Qwen2.5-72B-Instruct-Q4_K_M", 53.0),
+    ("Llama-3.3-70B-Instruct-Q4_K_M", 48.0),
+    ("Llama-4-Scout-Q4_K_M", 26.0),
     ("Qwen3-32B-Q4_K_M", 24.0),
-    ("Qwen2.5-32B-Instruct-Q4_K_M", 24.0),
+    ("GLM-4-32B-0414-Q4_K_M", 24.0),
+    ("Qwen2.5-Coder-32B-Instruct-Q4_K_M", 24.0),
+    ("GLM-4.7-Flash-Q4_K_M", 21.0),
+    ("Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", 21.0),
     ("Gemma-3-27B-it-Q4_K_M", 20.0),
-    ("GLM-4.7-Flash-Q4_K_M", 20.0),
-    ("Qwen2.5-14B-Instruct-Q4_K_M", 11.0),
+    ("Devstral-Small-2505-Q4_K_M", 17.0),
+    ("Mistral-Small-3.1-24B-Instruct-Q4_K_M", 17.0),
+    ("Qwen3-14B-Q4_K_M", 11.0),
+    ("Qwen2.5-Coder-14B-Instruct-Q4_K_M", 11.0),
+    ("DeepSeek-R1-Distill-Qwen-14B-Q4_K_M", 11.0),
+    ("Gemma-3-12B-it-Q4_K_M", 9.0),
+    ("Qwen3-8B-Q4_K_M", 6.0),
     ("Qwen2.5-Coder-7B-Instruct-Q4_K_M", 6.0),
+    ("Qwen3-4B-Q4_K_M", 3.0),
     ("Qwen2.5-3B-Instruct-Q4_K_M", 3.0),
 ];
 
