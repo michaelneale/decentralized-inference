@@ -745,9 +745,11 @@ impl Node {
                     } else {
                         let count = fail_counts.entry(peer_id).or_default();
                         *count += 1;
-                        // Mark as suspect immediately to prevent gossip re-adding
-                        node.state.lock().await.dead_peers.insert(peer_id);
                         if *count >= 2 {
+                            // Only add to dead_peers on confirmed death (2 strikes),
+                            // not on first timeout — a single timeout shouldn't block
+                            // incoming gossip from an otherwise-alive peer.
+                            node.state.lock().await.dead_peers.insert(peer_id);
                             eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
                             fail_counts.remove(&peer_id);
                             node.handle_peer_death(peer_id).await;
@@ -1223,17 +1225,28 @@ impl Node {
 
         // Store connection for stream dispatch (tunneling, route requests, etc.)
         // Don't add to peer list yet — only gossip exchange promotes to peer.
-        {
+        let was_dead = {
             let mut state = self.state.lock().await;
-            if state.dead_peers.remove(&remote) {
+            let was_dead = state.dead_peers.remove(&remote);
+            if was_dead {
                 eprintln!("🔄 Previously dead peer {} reconnected", remote.fmt_short());
             }
             state.connections.insert(remote, conn.clone());
-        }
+            was_dead
+        };
 
-        // Don't auto-gossip: passive nodes (clients/standby) just connect and
-        // send streams. Active peers identify themselves by sending STREAM_GOSSIP.
-        // Gossip exchange in handle_gossip_stream calls add_peer().
+        // If this peer was previously dead, immediately gossip to restore their
+        // serving status in our peer list. Without this, models served by the
+        // reconnecting peer stay invisible until the next heartbeat (up to 60s).
+        if was_dead {
+            let node = self.clone();
+            let gossip_conn = conn.clone();
+            tokio::spawn(async move {
+                if let Err(e) = node.initiate_gossip_inner(gossip_conn, remote, false).await {
+                    tracing::debug!("Reconnect gossip with {} failed: {e}", remote.fmt_short());
+                }
+            });
+        }
 
         self.dispatch_streams(conn, remote).await;
         Ok(())

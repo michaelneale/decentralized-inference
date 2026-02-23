@@ -15,8 +15,10 @@
 - [ ] **Auto-upgrade path**: When a node is solo-serving a starter model and finishes downloading a better one, gracefully switch (stop llama-server, restart with new model). No impact to other mesh nodes.
 
 ## Bugs to Investigate
-- [ ] **Draft model leaking into served models**: Qwen2.5-0.5B-Instruct (a draft model) showing up in `/v1/models` as a served model. Observed when an external node (Canada) joined via `--auto`. Likely causes: (a) external node ran `--auto`, no mesh found, `StartNew` picked 0.5B via `default_models_for_vram` because it was on disk, then somehow merged with our mesh; or (b) `pick_model_assignment` assigned 0.5B from `mesh_wanted` because it was unserved. Fix: filter draft/tiny models (<1GB) from `pick_model_assignment` candidates and from `default_models_for_vram` primary selection. Draft models in `MODEL_CATALOG` should never be assignable as primary serves.
-- [ ] **Hermes disappearing during Mini WiFi flap**: Mini hit 2 heartbeat strikes and got death-broadcast. On reconnect, its `serving` field may not propagate back to all peers immediately, leaving Hermes missing from `/v1/models` on other nodes. Investigate if `regossip()` on reconnect reliably restores the serving field.
+- [x] **Draft model leaking into served models**: Qwen2.5-0.5B-Instruct showing in `/v1/models`. Investigated — external node (Canada) explicitly listed it via `--model`. Not a code bug, deliberate choice by that node.
+- [x] **Hermes disappearing during Mini WiFi flap**: Investigated. Two issues found and fixed:
+  1. Strike 1 added peer to `dead_peers` which blocked incoming gossip — too aggressive. Fixed: only add to `dead_peers` on confirmed death (2 strikes).
+  2. Reconnect path didn't trigger gossip — peer reconnected but sat invisible for up to 60s until next heartbeat. Fixed: immediately initiate gossip exchange on reconnect of previously-dead peer.
 
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`
