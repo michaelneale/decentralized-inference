@@ -302,7 +302,7 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
             // Always route through the API port — it handles model-based
             // routing (local llama-server OR remote via QUIC tunnel)
             let inner = state.inner.lock().await;
-            if !inner.llama_ready {
+            if !inner.llama_ready && !inner.is_client {
                 drop(inner);
                 return respond_error(&mut stream, 503, "LLM not ready").await;
             }

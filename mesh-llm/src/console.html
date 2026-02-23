@@ -153,7 +153,8 @@ function togglePanel() {
 
 function render() {
   renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderMore();
-  const ok = S.llama_ready;
+  const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
+  const ok = S.llama_ready || (S.is_client && hasWarmModel);
   $('inp').disabled = !ok; $('btn').disabled = !ok;
   $('msgs').classList.toggle('off', !ok);
   if (ok) $('msgs').classList.remove('off');
@@ -163,7 +164,8 @@ function render() {
 
 function renderBadge() {
   const e = $('badge');
-  if (S.llama_ready) e.innerHTML = `<span class="badge b-green"><span class="dot"></span>${S.is_host?'Host':'Ready'}</span>`;
+  const clientReady = S.is_client && (S.mesh_models || []).some(m => m.status === 'warm');
+  if (S.llama_ready || clientReady) e.innerHTML = `<span class="badge b-green"><span class="dot"></span>${S.is_host?'Host':S.is_client?'Connected':'Ready'}</span>`;
   else if (S.is_host) e.innerHTML = '<span class="badge b-yellow"><span class="dot"></span>Loading…</span>';
   else if (S.node_id) e.innerHTML = '<span class="badge b-gray"><span class="dot"></span>Waiting</span>';
   else e.innerHTML = '';
@@ -404,7 +406,8 @@ function selectedModel() {
 // ── Chat ──
 
 async function send() {
-  if (!S.llama_ready) return;
+  const clientOk = S.is_client && (S.mesh_models || []).some(m => m.status === 'warm');
+  if (!S.llama_ready && !clientOk) return;
   const inp = $('inp');
   const msg = inp.value.trim(); if (!msg) return;
   inp.value = '';
