@@ -221,9 +221,13 @@ pub async fn publish_loop(
         eprintln!("   Will delist when {} clients connected", cap);
     }
 
-    // Wait for model to be serving before first publish (up to 30s)
-    for _ in 0..60 {
-        if node.serving().await.is_some() {
+    // Wait for model to actually be loaded before first publish (up to 60s).
+    // Check models_being_served() which requires Host role + serving set,
+    // then add a grace period for llama-server to finish loading.
+    for _ in 0..120 {
+        if !node.models_being_served().await.is_empty() {
+            // Give llama-server a moment to finish loading after election
+            tokio::time::sleep(Duration::from_secs(3)).await;
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
