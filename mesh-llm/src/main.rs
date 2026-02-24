@@ -4,6 +4,7 @@ mod election;
 mod launch;
 mod mesh;
 mod nostr;
+mod proxy;
 mod rewrite;
 mod tunnel;
 
@@ -1120,43 +1121,7 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
             };
             let _ = tcp_stream.set_nodelay(true);
             let node = api_node.clone();
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 32768];
-                let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-                // Handle /v1/models — show what's available in mesh (if joined)
-                if is_models_list_request(&buf[..n]) {
-                    let served = node.models_being_served().await;
-                    let _ = send_models_list(tcp_stream, &served).await;
-                    return;
-                }
-                // Try to tunnel to a mesh host if we have peers
-                let target_host = if let Some(ref name) = model_name {
-                    node.host_for_model(name).await.map(|p| p.id)
-                } else {
-                    None
-                };
-                let target_host = match target_host {
-                    Some(id) => id,
-                    None => match node.any_host().await {
-                        Some(p) => p.id,
-                        None => {
-                            let _ = send_503(tcp_stream).await;
-                            return;
-                        }
-                    }
-                };
-                match node.open_http_tunnel(target_host).await {
-                    Ok((quic_send, quic_recv)) => {
-                        if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                            tracing::debug!("HTTP tunnel relay ended: {e}");
-                        }
-                    }
-                    Err(_) => { let _ = send_503(tcp_stream).await; }
-                }
-            });
+            tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, false));
         }
     });
 
@@ -1438,52 +1403,7 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Connection from {addr}");
                 let node = node.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 32768];
-                    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-
-                    // Handle /v1/models locally
-                    if is_models_list_request(&buf[..n]) {
-                        let served = node.models_being_served().await;
-                        let _ = send_models_list(tcp_stream, &served).await;
-                        return;
-                    }
-
-                    // Record request for demand tracking
-                    if let Some(ref name) = model_name {
-                        node.record_request(name);
-                    }
-
-                    // Route to host by model name (hash-based selection)
-                    let target_host = if let Some(ref name) = model_name {
-                        node.host_for_model(name).await.map(|p| p.id)
-                    } else {
-                        None
-                    };
-                    // Fall back to any host in the mesh
-                    let target_host = match target_host {
-                        Some(id) => id,
-                        None => match node.any_host().await {
-                            Some(p) => p.id,
-                            None => {
-                                let _ = send_503(tcp_stream).await;
-                                return;
-                            }
-                        }
-                    };
-
-                    match node.open_http_tunnel(target_host).await {
-                        Ok((quic_send, quic_recv)) => {
-                            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                                tracing::debug!("HTTP tunnel relay ended: {e}");
-                            }
-                        }
-                        Err(e) => tracing::warn!("Failed to open HTTP tunnel to host: {e}"),
-                    }
-                });
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
             }
             Some(model_name) = promote_rx.recv() => {
                 eprintln!("⬆️  Standby promoting to serve: {model_name}");
@@ -1529,27 +1449,24 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
         tokio::spawn(async move {
             // Read the HTTP request to extract the model name
             let mut buf = vec![0u8; 32768];
-            match peek_request(&tcp_stream, &mut buf).await {
+            match proxy::peek_request(&tcp_stream, &mut buf).await {
                 Ok((n, model_name)) => {
-                    // Handle /v1/models ourselves if it's a GET
-                    if is_models_list_request(&buf[..n]) {
+                    if proxy::is_models_list_request(&buf[..n]) {
                         let models: Vec<String> = targets.targets.keys().cloned().collect();
-                        let _ = send_models_list(tcp_stream, &models).await;
+                        let _ = proxy::send_models_list(tcp_stream, &models).await;
                         return;
                     }
 
-                    // Handle /mesh/drop control endpoint
-                    if is_drop_request(&buf[..n]) {
+                    if proxy::is_drop_request(&buf[..n]) {
                         if let Some(ref name) = model_name {
                             let _ = drop_tx.send(name.clone());
-                            let _ = send_json_ok(tcp_stream, &serde_json::json!({"dropped": name})).await;
+                            let _ = proxy::send_json_ok(tcp_stream, &serde_json::json!({"dropped": name})).await;
                         } else {
-                            let _ = send_400(tcp_stream, "missing 'model' field").await;
+                            let _ = proxy::send_400(tcp_stream, "missing 'model' field").await;
                         }
                         return;
                     }
 
-                    // Record request for demand tracking
                     if let Some(ref name) = model_name {
                         node.record_request(name);
                     }
@@ -1566,7 +1483,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         first_available_target(&targets)
                     };
 
-                    route_request(node, tcp_stream, target).await;
+                    proxy::route_to_target(node, tcp_stream, target).await;
                 }
                 Err(_) => return,
             };
@@ -1600,51 +1517,7 @@ async fn bootstrap_proxy(
                 };
                 let _ = tcp_stream.set_nodelay(true);
                 let node = node.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 32768];
-                    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
-                        Ok(v) => v,
-                        Err(_) => return,
-                    };
-
-                    // Handle /v1/models locally
-                    if is_models_list_request(&buf[..n]) {
-                        let served = node.models_being_served().await;
-                        let _ = send_models_list(tcp_stream, &served).await;
-                        return;
-                    }
-
-                    // Record request for demand tracking
-                    if let Some(ref name) = model_name {
-                        node.record_request(name);
-                    }
-
-                    // Route to host by model name
-                    let target_host = if let Some(ref name) = model_name {
-                        node.host_for_model(name).await.map(|p| p.id)
-                    } else {
-                        None
-                    };
-                    let target_host = match target_host {
-                        Some(id) => id,
-                        None => match node.any_host().await {
-                            Some(p) => p.id,
-                            None => {
-                                let _ = send_503(tcp_stream).await;
-                                return;
-                            }
-                        }
-                    };
-
-                    match node.open_http_tunnel(target_host).await {
-                        Ok((quic_send, quic_recv)) => {
-                            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                                tracing::debug!("Bootstrap tunnel relay ended: {e}");
-                            }
-                        }
-                        Err(e) => tracing::warn!("Bootstrap: failed to tunnel to host: {e}"),
-                    }
-                });
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
             }
             resp_tx = stop_rx.recv() => {
                 // Hand over listener to api_proxy
@@ -1665,136 +1538,6 @@ fn first_available_target(targets: &election::ModelTargets) -> election::Inferen
         }
     }
     election::InferenceTarget::None
-}
-
-fn is_drop_request(buf: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(buf);
-    s.starts_with("POST ") && s.contains("/mesh/drop")
-}
-
-fn is_models_list_request(buf: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(buf);
-    s.starts_with("GET ") && (s.contains("/v1/models") || s.contains("/models"))
-        && !s.contains("/v1/models/")
-}
-
-/// Extract model name from a JSON POST body in an HTTP request.
-fn extract_model_from_http(buf: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(buf).ok()?;
-    // Find the JSON body (after \r\n\r\n)
-    let body_start = s.find("\r\n\r\n")? + 4;
-    let body = &s[body_start..];
-    // Simple extraction — look for "model": "..."
-    let model_key = "\"model\"";
-    let pos = body.find(model_key)?;
-    let after_key = &body[pos + model_key.len()..];
-    // Skip whitespace and colon
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_ws = after_colon.trim_start();
-    // Extract quoted string
-    let after_quote = after_ws.strip_prefix('"')?;
-    let end = after_quote.find('"')?;
-    Some(after_quote[..end].to_string())
-}
-
-/// Peek at the request without consuming it. Returns bytes read and optional model name.
-async fn peek_request(stream: &tokio::net::TcpStream, buf: &mut [u8]) -> Result<(usize, Option<String>)> {
-    let n = stream.peek(buf).await?;
-    if n == 0 {
-        anyhow::bail!("Empty request");
-    }
-    let model = extract_model_from_http(&buf[..n]);
-    Ok((n, model))
-}
-
-async fn route_request(node: mesh::Node, tcp_stream: tokio::net::TcpStream, target: election::InferenceTarget) {
-    match target {
-        election::InferenceTarget::Local(llama_port) => {
-            match tokio::net::TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
-                Ok(upstream) => {
-                    let _ = upstream.set_nodelay(true);
-                    if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
-                        tracing::debug!("API proxy (local) ended: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("API proxy: can't reach local llama-server on {llama_port}: {e}");
-                    let _ = send_503(tcp_stream).await;
-                }
-            }
-        }
-        election::InferenceTarget::Remote(host_id) => {
-            match node.open_http_tunnel(host_id).await {
-                Ok((quic_send, quic_recv)) => {
-                    if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                        tracing::debug!("API proxy (remote) ended: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("API proxy: can't tunnel to host {}: {e}", host_id.fmt_short());
-                    let _ = send_503(tcp_stream).await;
-                }
-            }
-        }
-        election::InferenceTarget::None => {
-            let _ = send_503(tcp_stream).await;
-        }
-    }
-}
-
-async fn send_models_list(mut stream: tokio::net::TcpStream, models: &[String]) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let data: Vec<serde_json::Value> = models.iter().map(|m| {
-        serde_json::json!({
-            "id": m,
-            "object": "model",
-            "owned_by": "mesh-llm",
-        })
-    }).collect();
-    let body = serde_json::json!({ "object": "list", "data": data }).to_string();
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-        body.len(), body
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
-}
-
-async fn send_json_ok(mut stream: tokio::net::TcpStream, data: &serde_json::Value) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let body = data.to_string();
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
-}
-
-async fn send_400(mut stream: tokio::net::TcpStream, msg: &str) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let body = format!("{{\"error\":\"{msg}\"}}");
-    let resp = format!(
-        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
-}
-
-async fn send_503(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let body = r#"{"error":"No inference server available — election in progress"}"#;
-    let resp = format!(
-        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.shutdown().await?;
-    Ok(())
 }
 
 fn detect_bin_dir() -> Result<PathBuf> {
