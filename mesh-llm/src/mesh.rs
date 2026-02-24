@@ -338,6 +338,7 @@ pub struct Node {
     request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     last_request_snapshot: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     mesh_id: Arc<Mutex<Option<String>>>,
+    accepting: Arc<(tokio::sync::Notify, std::sync::atomic::AtomicBool)>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -458,6 +459,7 @@ impl Node {
             request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             last_request_snapshot: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
+            accepting: Arc::new((tokio::sync::Notify::new(), std::sync::atomic::AtomicBool::new(false))),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -465,6 +467,8 @@ impl Node {
             tunnel_http_tx,
         };
 
+        // Accept loop starts but waits for start_accepting() before processing connections.
+        // This lets idle mode create a node (for identity/token) without joining any mesh.
         let node2 = node.clone();
         tokio::spawn(async move { node2.accept_loop().await; });
 
@@ -491,6 +495,13 @@ impl Node {
         }
         let json = serde_json::to_vec(&addr).expect("serializable");
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json)
+    }
+
+    /// Enable accepting inbound connections. Call before join() or when ready to participate.
+    /// Until this is called, the accept loop blocks waiting.
+    pub fn start_accepting(&self) {
+        self.accepting.1.store(true, std::sync::atomic::Ordering::Release);
+        self.accepting.0.notify_waiters();
     }
 
     pub async fn join(&self, invite_token: &str) -> Result<()> {
@@ -1206,6 +1217,13 @@ impl Node {
     // --- Connection handling ---
 
     async fn accept_loop(&self) {
+        // Wait until start_accepting() is called before processing any connections.
+        // Check flag first to handle the case where start_accepting() was called before we got here.
+        if !self.accepting.1.load(std::sync::atomic::Ordering::Acquire) {
+            self.accepting.0.notified().await;
+        }
+        tracing::info!("Accept loop: now accepting inbound connections");
+
         loop {
             let incoming = match self.endpoint.accept().await {
                 Some(i) => i,
@@ -1565,11 +1583,12 @@ impl Node {
                     if path_info.is_selected() {
                         let rtt = path_info.rtt();
                         let rtt_ms = rtt.as_millis() as u32;
+                        let path_type = if path_info.is_ip() { "direct" } else { "relay" };
                         if rtt_ms > 0 {
+                            eprintln!("📡 Peer {} RTT: {}ms ({})", remote.fmt_short(), rtt_ms, path_type);
                             let mut state = self.state.lock().await;
                             if let Some(peer) = state.peers.get_mut(&remote) {
                                 peer.rtt_ms = Some(rtt_ms);
-                                tracing::info!("Peer {} RTT: {}ms (QUIC)", remote.fmt_short(), rtt_ms);
                             }
                         }
                         break;

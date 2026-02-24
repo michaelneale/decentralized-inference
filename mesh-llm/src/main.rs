@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-const VERSION: &str = "0.19.0";
+const VERSION: &str = "0.20.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
@@ -325,6 +325,7 @@ async fn main() -> Result<()> {
     // --- Client mode (passive, never serves) ---
     if cli.client {
         let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
+        node.start_accepting();
         // No heartbeat for passive nodes — they don't track peers
 
         let mut joined = false;
@@ -723,6 +724,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 
     // Start mesh node
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
+    node.start_accepting();
     let token = node.invite_token();
 
     // Advertise what we have on disk and what we want the mesh to serve
@@ -1077,12 +1079,11 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     tracing::info!("Local models on disk: {:?}", local_models);
 
     let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
-    eprintln!("🔍 mesh-llm — idle mode ({:.0}GB VRAM, {} models on disk)", my_vram_gb, local_models.len());
+    eprintln!("mesh-llm v{VERSION} — {:.0}GB VRAM, {} models on disk", my_vram_gb, local_models.len());
 
-    // Start mesh node
+    // Start mesh node (dormant — no inbound connections or heartbeat until join)
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
     node.set_available_models(local_models.clone()).await;
-    node.start_heartbeat();
 
     // Channel for console "Join" button → main loop
     let (join_tx, mut join_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1098,13 +1099,25 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
         tokio::spawn(async move {
             api::start(cport, cs2, rx).await;
         });
-        eprintln!("  Console: http://localhost:{cport}");
-        eprintln!("  Open the console to discover and join a mesh.");
         Some(cs)
     } else {
-        eprintln!("⚠ Console is disabled — use --auto or --join to connect to a mesh");
         None
     };
+
+    eprintln!();
+    if let Some(cport) = console_port {
+        eprintln!("  Console: http://localhost:{cport}");
+    }
+    eprintln!();
+    eprintln!("  Or run:");
+    eprintln!("    mesh-llm --auto              discover and join a mesh automatically");
+    eprintln!("    mesh-llm --join <token>      join a mesh by invite token");
+    eprintln!("    mesh-llm --model <name>      serve a model solo");
+    eprintln!("    mesh-llm discover            browse public meshes");
+    eprintln!();
+    if console_port.is_some() {
+        eprintln!("  Waiting for join via console...");
+    }
 
     // API listener — returns 503 until we join a mesh and serve a model
     let api_node = node.clone();
@@ -1113,7 +1126,7 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
             Ok(l) => l,
             Err(e) => { eprintln!("Failed to bind API port {api_port}: {e}"); return; }
         };
-        eprintln!("  API:     http://localhost:{api_port} (waiting for mesh)");
+        // Quiet — main output already printed
         loop {
             let (tcp_stream, _) = match listener.accept().await {
                 Ok(v) => v,
@@ -1136,6 +1149,8 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
 
     // --- Join the mesh ---
     eprintln!("🔗 Joining mesh...");
+    node.start_accepting();
+    node.start_heartbeat();
     node.join(&token).await?;
     eprintln!("Joined mesh");
 

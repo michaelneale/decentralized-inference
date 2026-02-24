@@ -141,10 +141,14 @@ management API is required for discover/join).
 ## Idle Mode
 
 `mesh-llm` with no arguments starts in idle mode:
-1. Starts node + management API (port 3131)
-2. Inference port (9337) returns 503 until joined
+1. Starts node in dormant state — QUIC endpoint bound but not accepting connections, no heartbeat
+2. Management API (port 3131) and inference port (9337) listen — inference returns 503 until joined
 3. User browses meshes via console or `/api/discover`
-4. `/api/join` triggers: connect → gossip → assign model → download if needed → serve
+4. `/api/join` triggers: enable accepting → start heartbeat → connect → gossip → assign model → download if needed → serve
+
+Dormant mode prevents ghost peer problems: peers from previous sessions cannot
+reconnect to an idle node. The persistent node identity (`~/.mesh-llm/key`) is
+preserved for sticky mesh preference, but the node is invisible until it joins.
 
 All join paths converge: `--auto`, `--join TOKEN`, and idle→console join end up
 in the same connect → assign → serve flow.

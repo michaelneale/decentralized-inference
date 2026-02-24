@@ -4,7 +4,7 @@
 - [x] **Mesh identity**: Stable `mesh_id`, gossipped, in Nostr listings. Named: `hash(name+pubkey)`, unnamed: UUID.
 - [x] **Sticky mesh preference**: `~/.mesh-llm/last-mesh` → +500 scoring bonus on `--auto`.
 - [x] **API proxy during GPU bootstrap**: Tunnel-only proxy on `:9337` while GPU loads. Hands off to full proxy when ready.
-- [x] **Idle mode**: `mesh-llm` with no args → console + discover/join flow.
+- [x] **Idle mode**: `mesh-llm` with no args → console + discover/join flow. Dormant QUIC (no inbound connections or heartbeat until join) prevents ghost peer reconnection.
 - [ ] **Uptime signal**: Add `started_at: u64` to `MeshListing`. Score bonus for meshes that have been running longer — a 24h mesh beats a 10-minute test.
 - [ ] **Solo fallback — fast starter model**: When `--auto` finds no mesh, download a small starter model first (Qwen2.5-3B, 2GB, ~1 min), start serving it immediately, then background-download the "real" model for the node's VRAM tier. User is chatting in <2 minutes.
 - [ ] **Score mesh by model quality**: `smart_auto` should weight model quality — a mesh serving Qwen3-32B scores higher than one serving Qwen2.5-3B, all else equal. Use `MODEL_TIERS` VRAM requirements as a proxy for quality.

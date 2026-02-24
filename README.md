@@ -87,6 +87,11 @@ mesh-llm discover                          # browse meshes
 mesh-llm discover --model GLM --region AU  # filter
 ```
 
+### Browse and join interactively
+```bash
+mesh-llm                                   # opens console on :3131 for discovery/joining
+```
+
 ## Web console
 
 ```bash

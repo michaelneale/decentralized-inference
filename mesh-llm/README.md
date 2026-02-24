@@ -50,3 +50,11 @@ mesh-llm --auto
 ```
 
 Smart auto-join scores meshes by: region match, node count, model overlap, VRAM, overload. QUIC health probe before committing. Publish watchdog auto-takes-over if the original publisher dies.
+
+## Idle mode
+
+```bash
+mesh-llm    # no args
+```
+
+Opens the management console (`:3131`) for interactive mesh discovery and joining. The node stays dormant — no inbound QUIC connections or heartbeat — until you join via the console or `/api/join`. Persistent node identity is preserved for sticky mesh preference.

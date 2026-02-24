@@ -178,10 +178,11 @@ mesh-llm --model Qwen2.5-3B
 mesh-llm
 ```
 
-- Log: `🔍 mesh-llm — idle mode (XXGB VRAM, N models on disk)`
+- Log: `mesh-llm v0.19.0 — 52GB VRAM, 7 models on disk` + suggested commands
 - Console on `:3131`, inference port `:9337` returns 503
-- `curl localhost:3131/api/status` → JSON with `model_name: "(idle)"`
+- `curl localhost:3131/api/status` → JSON with `model_name: "(idle)"`, 0 peers
 - `curl localhost:3131/api/discover` → Nostr mesh listings (JSON array)
+- **Dormant QUIC**: peers from previous sessions cannot reconnect (no ghost peers)
 - `--no-console` is overridden with warning (management API required)
 
 ### 22. Join via console
