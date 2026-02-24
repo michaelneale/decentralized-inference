@@ -80,6 +80,10 @@ pub async fn kill_llama_server() {
 }
 
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
+/// `model_bytes` is the total GGUF file size, used to select KV cache quantization:
+///   - < 5GB: FP16 (default) — small models, KV cache is tiny
+///   - 5-50GB: Q8_0 — no measurable quality loss, saves ~50% KV memory
+///   - > 50GB: Q4_0 — slight long-context degradation, but these models need every byte
 pub async fn start_llama_server(
     bin_dir: &Path,
     model: &Path,
@@ -88,6 +92,7 @@ pub async fn start_llama_server(
     tensor_split: Option<&str>,
     draft: Option<&Path>,
     draft_max: u16,
+    model_bytes: u64,
 ) -> Result<()> {
     let llama_server = bin_dir.join("llama-server");
     anyhow::ensure!(
@@ -135,6 +140,24 @@ pub async fn start_llama_server(
         "--host".to_string(), "0.0.0.0".to_string(),
         "--port".to_string(), http_port.to_string(),
     ]);
+    // KV cache quantization based on model size:
+    //   < 5GB: leave default (FP16) — small models, KV cache is negligible
+    //   5-50GB: Q8_0 — essentially lossless, halves KV memory
+    //   > 50GB: Q4_0 — slight long-context quality trade, but critical memory savings
+    const GB: u64 = 1_000_000_000;
+    if model_bytes >= 50 * GB {
+        args.extend_from_slice(&[
+            "--cache-type-k".to_string(), "q4_0".to_string(),
+            "--cache-type-v".to_string(), "q4_0".to_string(),
+        ]);
+        tracing::info!("KV cache: Q4_0 (model > 50GB)");
+    } else if model_bytes >= 5 * GB {
+        args.extend_from_slice(&[
+            "--cache-type-k".to_string(), "q8_0".to_string(),
+            "--cache-type-v".to_string(), "q8_0".to_string(),
+        ]);
+        tracing::info!("KV cache: Q8_0 (model 5-50GB)");
+    }
     if let Some(ts) = tensor_split {
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());

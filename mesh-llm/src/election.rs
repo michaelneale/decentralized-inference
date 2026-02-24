@@ -444,7 +444,7 @@ async fn start_llama(
     };
 
     match launch::start_llama_server(
-        bin_dir, model, llama_port, &rpc_ports, split.as_deref(), draft, draft_max,
+        bin_dir, model, llama_port, &rpc_ports, split.as_deref(), draft, draft_max, model_bytes,
     ).await {
         Ok(()) => Some(llama_port),
         Err(e) => {
