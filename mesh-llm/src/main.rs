@@ -107,6 +107,11 @@ struct Cli {
     #[arg(long, hide = true)]
     no_console: bool,
 
+    /// Bind API and console to 0.0.0.0 instead of 127.0.0.1.
+    /// Use for containers (Docker, Fly.io) where external access is needed.
+    #[arg(long)]
+    listen_all: bool,
+
     /// Publish this mesh to Nostr for discovery by others.
     /// Republishes every 60s so the listing stays fresh.
     #[arg(long)]
@@ -806,7 +811,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         let boot_node = node.clone();
         let boot_port = api_port;
         tokio::spawn(async move {
-            bootstrap_proxy(boot_node, boot_port, stop_rx).await;
+            bootstrap_proxy(boot_node, boot_port, stop_rx, cli.listen_all).await;
         });
         Some(stop_tx)
     } else {
@@ -921,7 +926,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
-        api_proxy(proxy_node, api_port, proxy_rx, drop_tx, existing_listener).await;
+        api_proxy(proxy_node, api_port, proxy_rx, drop_tx, existing_listener, cli.listen_all).await;
     });
 
     // Console (optional)
@@ -952,7 +957,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                     if rx.changed().await.is_err() { break; }
                 }
             });
-            api::start(cport, cs2, adapted_rx).await;
+            api::start(cport, cs2, adapted_rx, cli.listen_all).await;
         });
         Some(cs)
     } else {
@@ -1151,7 +1156,7 @@ async fn run_idle(mut cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     let cs2 = cs.clone();
     let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
     tokio::spawn(async move {
-        api::start(cli.console, cs2, rx).await;
+        api::start(cli.console, cs2, rx, cli.listen_all).await;
     });
 
     tokio::signal::ctrl_c().await?;
@@ -1197,7 +1202,8 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         eprintln!("Models available in mesh: {:?}", served);
     }
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{local_port}")).await
+    let addr = if cli.listen_all { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = tokio::net::TcpListener::bind(format!("{addr}:{local_port}")).await
         .with_context(|| format!("Failed to bind to port {local_port}"))?;
     let mode = if is_client { "client" } else { "standby" };
     eprintln!("Passive {mode} ready:");
@@ -1213,8 +1219,9 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         if is_client { cs.set_client(true).await; }
         cs.update(false, !is_client).await;
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
+        let la = cli.listen_all;
         tokio::spawn(async move {
-            api::start(cport, cs, rx).await;
+            api::start(cport, cs, rx, la).await;
         });
     }
 
@@ -1282,14 +1289,17 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target
 /// if model is not specified or not found.
-async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>, existing_listener: Option<tokio::net::TcpListener>) {
+async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>, existing_listener: Option<tokio::net::TcpListener>, listen_all: bool) {
     let listener = match existing_listener {
         Some(l) => l,
-        None => match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to bind API proxy to port {port}: {e}");
-                return;
+        None => {
+            let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
+            match tokio::net::TcpListener::bind(format!("{addr}:{port}")).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("Failed to bind API proxy to port {port}: {e}");
+                    return;
+                }
             }
         },
     };
@@ -1356,8 +1366,10 @@ async fn bootstrap_proxy(
     node: mesh::Node,
     port: u16,
     mut stop_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>,
+    listen_all: bool,
 ) {
-    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
+    let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = match tokio::net::TcpListener::bind(format!("{addr}:{port}")).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("Bootstrap proxy: failed to bind to port {port}: {e}");

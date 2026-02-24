@@ -27,4 +27,4 @@ COPY --from=builder /src/mesh-llm/target/release/mesh-llm /usr/local/bin/mesh-ll
 
 EXPOSE 3131 9337
 
-CMD ["mesh-llm", "--client", "--auto", "--port", "9337", "--console", "3131"]
+CMD ["mesh-llm", "--client", "--auto", "--port", "9337", "--console", "3131", "--listen-all"]

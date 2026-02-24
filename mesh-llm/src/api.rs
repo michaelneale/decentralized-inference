@@ -266,6 +266,7 @@ pub async fn start(
     port: u16,
     state: MeshApi,
     mut target_rx: watch::Receiver<election::InferenceTarget>,
+    listen_all: bool,
 ) {
     // Watch election target changes
     let state2 = state.clone();
@@ -299,7 +300,8 @@ pub async fn start(
         }
     });
 
-    let listener = match TcpListener::bind(format!("127.0.0.1:{port}")).await {
+    let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = match TcpListener::bind(format!("{addr}:{port}")).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("Management API: failed to bind :{port}: {e}");
