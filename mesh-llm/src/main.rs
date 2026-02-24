@@ -923,6 +923,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let console_state = if let Some(cport) = console_port {
         let model_size_bytes = election::total_model_bytes(&model);
         let cs = api::MeshApi::new(node.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
+        cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if let Some(draft) = &cli.draft {
             let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
             cs.set_draft_name(dn).await;
@@ -1088,6 +1089,7 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     // Console
     let console_state = if let Some(cport) = console_port {
         let mut cs = api::MeshApi::new(node.clone(), "(idle)".into(), api_port, 0);
+        cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         cs.join_tx = Some(join_tx);
         cs.update(false, false).await;
         let cs2 = cs.clone();
@@ -1381,6 +1383,7 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         let cport = cli.console;
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
         let cs = api::MeshApi::new(node.clone(), label, local_port, 0);
+        cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if is_client { cs.set_client(true).await; }
         cs.update(false, !is_client).await;
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
@@ -1942,11 +1945,7 @@ async fn run_discover(
     auto_join: bool,
     relays: Vec<String>,
 ) -> Result<()> {
-    let relays = if relays.is_empty() {
-        nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
-    } else {
-        relays
-    };
+    let relays = nostr_relays(&relays);
 
     let filter = nostr::MeshFilter {
         model,

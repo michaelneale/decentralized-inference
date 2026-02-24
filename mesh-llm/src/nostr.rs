@@ -495,8 +495,15 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
     // Anonymous client for read-only discovery
     let keys = Keys::generate();
     let client = Client::new(keys);
+    let mut added = 0;
     for relay in relays {
-        client.add_relay(relay).await?;
+        match client.add_relay(relay).await {
+            Ok(_) => added += 1,
+            Err(e) => tracing::warn!("Nostr relay {relay}: {e}"),
+        }
+    }
+    if added == 0 {
+        anyhow::bail!("Could not connect to any Nostr relay (tried {})", relays.len());
     }
     client.connect().await;
 
@@ -505,7 +512,13 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
         .custom_tag(SingleLetterTag::lowercase(Alphabet::K), "mesh-llm".to_string())
         .limit(100);
 
-    let events = client.fetch_events(nostr_filter, Duration::from_secs(5)).await?;
+    let events = match client.fetch_events(nostr_filter, Duration::from_secs(5)).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Nostr fetch failed: {e}");
+            return Ok(Vec::new()); // No results rather than hard error
+        }
+    };
 
     let now = Timestamp::now().as_secs();
 

@@ -42,6 +42,7 @@ struct ApiInner {
     api_port: u16,
     model_size_bytes: u64,
     mesh_name: Option<String>,
+    nostr_relays: Vec<String>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -97,6 +98,7 @@ impl MeshApi {
                 api_port,
                 model_size_bytes,
                 mesh_name: None,
+                nostr_relays: nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
                 sse_clients: Vec::new(),
             })),
             join_tx: None,
@@ -117,6 +119,10 @@ impl MeshApi {
 
     pub async fn set_mesh_name(&self, name: String) {
         self.inner.lock().await.mesh_name = Some(name);
+    }
+
+    pub async fn set_nostr_relays(&self, relays: Vec<String>) {
+        self.inner.lock().await.nostr_relays = relays;
     }
 
     pub async fn update(&self, is_host: bool, llama_ready: bool) {
@@ -297,7 +303,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
         // ── Discover meshes via Nostr ──
         "/api/discover" => {
-            let relays: Vec<String> = nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect();
+            let relays = state.inner.lock().await.nostr_relays.clone();
             let filter = nostr::MeshFilter::default();
             match nostr::discover(&relays, &filter).await {
                 Ok(meshes) => {

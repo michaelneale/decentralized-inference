@@ -948,7 +948,8 @@
           </div>`;
         }).join('');
       } catch (e) {
-        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Error: ${esc(e.message)}</div>`;
+        discoverLoaded = false; // Allow retry on next toggle
+        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Could not reach Nostr relays. Check your network connection and try again.</div>`;
       }
     }
 
