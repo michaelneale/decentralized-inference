@@ -595,12 +595,9 @@
       <div id="status"></div>
       <div id="models"></div>
       <div id="agents"></div>
-      <div id="joinHint"></div>
       <div id="discoverHint"></div>
-      <details class="cfg" id="cfg">
-        <summary>Use with agents</summary>
-        <div id="cfgBody"></div>
-      </details>
+      <div id="joinHint"></div>
+      <div id="cfgSection"></div>
     </div>
     <div class="right">
       <div class="chat-hdr">
@@ -826,43 +823,95 @@
 
     // ── Join hint (tiny, expands) ──
 
+    // ── Discover meshes (collapsible, lazy-loads from Nostr) ──
+
+    let discoverLoaded = false;
+    function renderDiscover() {
+      const el = $('discoverHint');
+      if (el.innerHTML && el.querySelector('details[open]')) return;
+      el.innerHTML = `<details class="cfg" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
+        <summary>Discover public meshes</summary>
+        <div id="discoverContent"></div>
+      </details>`;
+    }
+
+    async function loadDiscover() {
+      const el = $('discoverContent');
+      if (!el) return;
+      el.innerHTML = '<div style="color:#666;font-size:0.6rem;padding:0.3rem 0">Searching Nostr…</div>';
+      try {
+        const r = await fetch('/api/discover');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const meshes = await r.json();
+        if (!meshes.length) { el.innerHTML = '<div style="color:#666;font-size:0.6rem;padding:0.3rem 0">No public meshes found.</div>'; return; }
+        const myMeshId = S.mesh_id || '';
+        el.innerHTML = meshes.map(m => {
+          const l = m.listing;
+          const isCurrent = myMeshId && l.mesh_id && l.mesh_id === myMeshId;
+          const served = (l.serving || []).map(shortName).join(', ');
+          const nodes = l.node_count || 0;
+          const vram = l.total_vram_bytes > 0 ? `${(l.total_vram_bytes / 1e9).toFixed(0)}GB` : '';
+          const stats = [nodes + ' node' + (nodes !== 1 ? 's' : ''), vram].filter(Boolean).join(' · ');
+          return `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
+            <div class="discover-item-hdr">
+              <span class="discover-name">${esc(l.name || m.publisher_npub.substring(0, 12))}</span>
+              ${isCurrent ? '<span style="color:#4c4;font-size:0.5rem">✓ connected</span>' : ''}
+              ${l.region ? `<span class="discover-region">${esc(l.region)}</span>` : ''}
+            </div>
+            <div class="discover-stats">${stats}</div>
+            ${served ? `<div class="discover-models" title="${esc((l.serving||[]).join(', '))}">${esc(served)}</div>` : ''}
+            ${isCurrent ? '' : `<button class="discover-btn" onclick="joinMesh('${esc(l.invite_token)}', this)">Join</button>`}
+          </div>`;
+        }).join('');
+      } catch (e) {
+        el.innerHTML = `<div style="color:#c66;font-size:0.6rem;padding:0.3rem 0">Error: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function joinMesh(token, btnEl) {
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Joining…'; }
+      try {
+        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+        if (!r.ok) throw new Error(await r.text());
+        if (btnEl) btnEl.textContent = 'Joined!';
+      } catch (e) {
+        alert('Failed to join: ' + e.message);
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Join'; }
+      }
+    }
+
+    // ── Join / Invite (collapsible) ──
+
     let joinRendered = false;
     function renderJoin() {
       const el = $('joinHint');
-      // Only render once — don't clobber open state or user input
       if (joinRendered) {
-        // Update invite commands if token changed
-        const cmdGpu = document.getElementById('joinCmdGpu');
-        const cmdLite = document.getElementById('joinCmdLite');
-        if (cmdGpu && S.token && S.model_name) {
-          cmdGpu.textContent = `mesh-llm --model ${S.model_name} --join ${S.token}`;
-          cmdLite.textContent = `mesh-llm --client --join ${S.token}`;
-        }
+        // Just update the invite token text if it changed
+        const tok = document.getElementById('inviteToken');
+        if (tok && S.token) tok.textContent = S.token;
         return;
       }
       joinRendered = true;
 
       const token = S.token || '';
-      const model = S.model_name || '';
+      const hasToken = token && S.model_name && S.model_name !== '(idle)';
 
-      let inviteSection = '';
-      if (token && model && model !== '(idle)') {
-        inviteSection = `
-          <div class="section-label" style="margin-top:0.4rem">Invite others to this mesh</div>
-          <div class="cfg-label">GPU node</div>
-          <div class="cmd-sm" id="joinCmdGpu" style="user-select:all">${esc(`mesh-llm --model ${model} --join ${token}`)}</div>
-          <div class="cfg-label" style="margin-top:0.2rem">Lite client</div>
-          <div class="cmd-sm" id="joinCmdLite" style="user-select:all">${esc(`mesh-llm --client --join ${token}`)}</div>`;
-      }
-
-      el.innerHTML = `
-        <div class="section-label">Join a mesh</div>
-        <div style="display:flex;gap:0.3rem;margin-bottom:0.4rem">
-          <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
-            style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#aaa;font-family:monospace;font-size:0.55rem;padding:0.25rem 0.4rem">
-          <button onclick="joinFromInput()" style="background:#1a3a5c;border:1px solid #2a5a8c;border-radius:4px;padding:0.2rem 0.5rem;color:#e0e0e0;cursor:pointer;font-size:0.55rem;white-space:nowrap">Join</button>
+      el.innerHTML = `<details class="cfg">
+        <summary>Join / Invite</summary>
+        <div class="cfg-row">
+          <div class="cfg-label">Join by token</div>
+          <div style="display:flex;gap:0.3rem">
+            <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
+              style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#aaa;font-family:monospace;font-size:0.55rem;padding:0.25rem 0.4rem">
+            <button onclick="joinFromInput()"
+              style="background:#1a3a5c;border:1px solid #2a5a8c;border-radius:4px;padding:0.2rem 0.5rem;color:#e0e0e0;cursor:pointer;font-size:0.55rem;white-space:nowrap">Join</button>
+          </div>
         </div>
-        ${inviteSection}`;
+        ${hasToken ? `<div class="cfg-row" style="margin-top:0.3rem">
+          <div class="cfg-label">This mesh's invite token</div>
+          <div class="cfg-tok" id="inviteToken" style="user-select:all">${esc(token)}</div>
+        </div>` : ''}
+      </details>`;
     }
 
     async function joinFromInput() {
@@ -871,127 +920,31 @@
       if (!token) return;
       inp.disabled = true;
       try {
-        const r = await fetch('/api/join', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token })
-        });
+        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
         if (!r.ok) throw new Error(await r.text());
-        inp.value = '';
-        inp.placeholder = 'Joined!';
-      } catch (e) {
-        alert('Failed to join: ' + e.message);
-      }
+        inp.value = ''; inp.placeholder = 'Joined!';
+      } catch (e) { alert('Failed to join: ' + e.message); }
       inp.disabled = false;
     }
 
-    // ── Discover hint (tiny, expands) ──
-
-    let discoverLoaded = false;
-    async function loadDiscover() {
-      const el = $('discoverContent');
-      if (!el) return;
-      el.innerHTML = '<div style="color:#666;font-size:0.6rem;margin-top:0.4rem;">Searching Nostr...</div>';
-      try {
-        const r = await fetch('/api/discover');
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const meshes = await r.json();
-        if (meshes.length === 0) {
-          el.innerHTML = '<div style="color:#666;font-size:0.6rem;margin-top:0.4rem;">No public meshes found.</div>';
-          return;
-        }
-
-        let html = '';
-        const myMeshId = S.mesh_id || '';
-        for (const m of meshes) {
-          const listing = m.listing;
-          const isCurrent = myMeshId && listing.mesh_id && listing.mesh_id === myMeshId;
-          const region = listing.region ? `<span class="discover-region">${esc(listing.region)}</span>` : '';
-          const vram = listing.total_vram_bytes > 0 ? `${(listing.total_vram_bytes / 1e9).toFixed(0)} GB` : '';
-          const nodes = listing.node_count > 0 ? `${listing.node_count} node${listing.node_count > 1 ? 's' : ''}` : '';
-          const stats = [nodes, vram].filter(Boolean).join(' · ');
-          const servedModels = listing.serving || [];
-          const onDiskModels = listing.on_disk || [];
-          const allModels = [...new Set([...servedModels, ...onDiskModels])];
-          const modelsStr = allModels.map(shortName).join(', ');
-          const currentLabel = isCurrent ? ' <span style="color:#4c4;font-size:0.5rem">✓ current mesh</span>' : '';
-
-          html += `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
-        <div class="discover-item-hdr">
-          <span class="discover-name">${esc(listing.name || m.publisher_npub.substring(0, 12))}${currentLabel}</span>
-          ${region}
-        </div>
-        ${stats ? `<div class="discover-stats">${stats}</div>` : ''}
-        ${modelsStr ? `<div class="discover-models" title="${esc(allModels.join(', '))}">${esc(modelsStr)}</div>` : ''}
-        ${isCurrent ? '<span style="color:#4c4;font-size:0.55rem">Connected</span>' : `<button class="discover-btn" onclick="joinMesh('${esc(listing.invite_token)}', this)">Join</button>`}
-      </div>`;
-        }
-        el.innerHTML = html;
-      } catch (e) {
-        el.innerHTML = `<div style="color:#c66;font-size:0.6rem;margin-top:0.4rem;">Error: ${esc(e.message)}</div>`;
-      }
-    }
-
-    async function joinMesh(token, btnEl) {
-      if (btnEl) {
-        btnEl.disabled = true;
-        btnEl.textContent = 'Joining...';
-      }
-      try {
-        const r = await fetch('/api/join', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token })
-        });
-        if (!r.ok) {
-          const body = await r.text();
-          throw new Error(`HTTP ${r.status}: ${body}`);
-        }
-        if (btnEl) btnEl.textContent = 'Joined!';
-      } catch (e) {
-        alert(`Failed to join: ${e.message}`);
-        if (btnEl) {
-          btnEl.disabled = false;
-          btnEl.textContent = 'Join';
-        }
-      }
-    }
-
-    function renderDiscover() {
-      const el = $('discoverHint');
-      // Don't re-render if it's already open to avoid resetting state while user is interacting
-      if (el.innerHTML && el.querySelector('details[open]')) return;
-
-      el.innerHTML = `<details class="join-details" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }"><summary>Discover meshes</summary>
-    <div id="discoverContent"></div>
-  </details>`;
-    }
-
-    // ── Use with agents (collapsed: pi, goose, curl, models.json, token) ──
+    // ── Use with agents (collapsible) ──
 
     function renderMore() {
-      const el = $('cfgBody');
-      let h = '';
+      const el = $('cfgSection');
+      // Don't re-render if open
+      if (el.innerHTML && el.querySelector('details[open]')) return;
+      let body = '';
       if (S.llama_ready) {
         const m = S.model_name || 'model', p = S.api_port || 9337;
         const pi = S.launch_pi || `pi --provider mesh --model ${m}`;
         const goose = S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`;
-        const json = JSON.stringify({
-          mesh: {
-            baseUrl: `http://localhost:${p}/v1`, api: "openai-completions", apiKey: "mesh",
-            models: [{
-              id: m, name: m, reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 8192,
-              compat: { supportsUsageInStreaming: false, maxTokensField: "max_tokens", supportsDeveloperRole: false }
-            }]
-          }
-        }, null, 2);
-        h += `<div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div></div>
-    <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
-    <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>
-    <details class="cfg-inner"><summary>~/.pi/agent/models.json</summary><pre class="cfg-pre">${esc(json)}</pre></details>`;
+        body += `<div class="cfg-row"><div class="cfg-label">API</div><div class="cfg-val">http://localhost:${p}/v1</div></div>
+          <div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div></div>
+          <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
+          <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>`;
       }
-      if (S.token) {
-        h += `<div class="cfg-row" style="margin-top:0.3rem"><div class="cfg-label">Invite token</div><div class="cfg-tok">${esc(S.token)}</div></div>`;
-      }
-      el.innerHTML = h;
+      if (!body) { el.innerHTML = ''; return; }
+      el.innerHTML = `<details class="cfg"><summary>Use with agents</summary>${body}</details>`;
     }
 
     function shortName(n) { return (n || '').replace(/-Q\w+$/, '').replace(/-Instruct/, ''); }
