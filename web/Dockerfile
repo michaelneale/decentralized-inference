@@ -10,7 +10,7 @@
 # Or run natively (no Docker):
 #   mesh-llm --client --auto
 
-FROM rust:1.85-bookworm AS builder
+FROM rust:latest AS builder
 
 RUN apt-get update && apt-get install -y cmake pkg-config && rm -rf /var/lib/apt/lists/*
 
