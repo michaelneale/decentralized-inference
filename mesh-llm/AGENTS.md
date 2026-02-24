@@ -7,6 +7,8 @@
 - `docs/DESIGN.md` — Architecture, protocols, all features
 - `TODO.md` — Current work items
 
+**Read `docs/TESTING.md` and `docs/DESIGN.md` before making changes.**
+
 ## Testing
 
 **Read `docs/TESTING.md` before running any tests.** It has:
@@ -64,7 +66,10 @@ ssh mini "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server"
 
 ## Key Files to Read
 
-- `src/main.rs` — CLI args, `run_auto()` flow, API proxy, bootstrap proxy
+- `src/main.rs` — CLI args, orchestration: `run_auto()`, `run_idle()`, `run_passive()`
 - `src/mesh.rs` — `Node` struct, gossip, mesh_id, peer management
 - `src/election.rs` — Host election, tensor split calculation
+- `src/proxy.rs` — HTTP proxy plumbing: request parsing, model routing, response helpers
+- `src/api.rs` — Management API (:3131): `/api/status`, `/api/events`, `/api/discover`, `/api/join`
 - `src/nostr.rs` — Nostr discovery, `score_mesh()`, `smart_auto()`
+- `src/download.rs` — Model catalog (`MODEL_CATALOG`), HuggingFace downloads

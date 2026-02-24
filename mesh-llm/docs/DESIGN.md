@@ -9,14 +9,15 @@ just see local TCP sockets.
 
 ```
 src/
-├── main.rs        CLI, API proxy, model routing, bootstrap proxy, demand tracking
+├── main.rs        CLI, orchestration, startup flows (auto, idle, passive)
 ├── mesh.rs        QUIC endpoint, gossip, peer management, mesh identity, request rates
 ├── election.rs    Per-model host election, latency-aware tensor split, llama-server lifecycle
+├── proxy.rs       HTTP proxy plumbing: request parsing, model routing, response helpers
+├── api.rs         Mesh management API (:3131): status, events, discover, join, console HTML
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
-├── console.rs     Web console: status, model picker, chat proxy
-├── console.html   Embedded dashboard with topology view
+├── console.html   Embedded dashboard with topology view and chat
 ├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
 ├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
 ```
@@ -116,6 +117,37 @@ between workers (1 hop) instead of through the host (2 hops):
 1. Each node broadcasts `{EndpointId → tunnel_port}` via `STREAM_TUNNEL_MAP`
 2. `rewrite.rs` intercepts `REGISTER_PEER` and rewrites ports for local tunnels
 3. llama.cpp's `PUSH_TENSOR_TO_PEER` goes directly between workers
+
+## Management API (port 3131)
+
+Separate from the inference API (port 9337). Serves mesh management endpoints
+and an optional HTML console.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/status` | GET | Live mesh state (JSON): node, peers, models, targets |
+| `/api/events` | GET | SSE stream of status updates (2s interval + on change) |
+| `/api/discover` | GET | Browse Nostr-published meshes |
+| `/api/join` | POST | Join a mesh by invite token `{"token":"..."}` |
+| `/api/chat` | POST | Proxy to inference API (`/v1/chat/completions`) |
+| `/` | GET | Console HTML dashboard |
+
+The console HTML is a thin client — everything it shows comes from `/api/status`
+and `/api/events`. Mesh management works without the HTML via curl/scripts.
+
+Enabled by default. `--no-console` disables (overridden in idle mode where the
+management API is required for discover/join).
+
+## Idle Mode
+
+`mesh-llm` with no arguments starts in idle mode:
+1. Starts node + management API (port 3131)
+2. Inference port (9337) returns 503 until joined
+3. User browses meshes via console or `/api/discover`
+4. `/api/join` triggers: connect → gossip → assign model → download if needed → serve
+
+All join paths converge: `--auto`, `--join TOKEN`, and idle→console join end up
+in the same connect → assign → serve flow.
 
 ## Nostr Discovery
 

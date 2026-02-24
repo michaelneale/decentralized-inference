@@ -4,14 +4,15 @@ Rust sidecar for distributed llama.cpp inference over QUIC. See the [project REA
 
 ```
 src/
-├── main.rs        CLI, API proxy (:9337), model routing, demand tracking
+├── main.rs        CLI, orchestration, startup flows (auto, idle, passive)
 ├── mesh.rs        QUIC endpoint, gossip, peer management, request rate sharing
 ├── election.rs    Per-model host election, latency-aware split, llama-server lifecycle
+├── proxy.rs       HTTP proxy plumbing: request parsing, model routing, response helpers
+├── api.rs         Mesh management API (:3131): status, events, discover, join, console HTML
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
-├── console.rs     Web console: status, model picker, chat proxy
-├── console.html   Embedded dashboard with topology view
+├── console.html   Embedded dashboard with topology view and chat
 ├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
 ├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
 ```
