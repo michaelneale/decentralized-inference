@@ -255,6 +255,18 @@ pub fn models_dir() -> PathBuf {
 }
 
 /// Find a catalog model by name (case-insensitive partial match)
+/// Parse a size string like "20GB", "4.4GB", "491MB" into GB as f64.
+pub fn parse_size_gb(s: &str) -> f64 {
+    let s = s.trim();
+    if let Some(gb) = s.strip_suffix("GB") {
+        gb.trim().parse().unwrap_or(0.0)
+    } else if let Some(mb) = s.strip_suffix("MB") {
+        mb.trim().parse::<f64>().unwrap_or(0.0) / 1000.0
+    } else {
+        0.0
+    }
+}
+
 pub fn find_model(query: &str) -> Option<&'static CatalogModel> {
     let q = query.to_lowercase();
     MODEL_CATALOG.iter().find(|m| m.name.to_lowercase() == q)

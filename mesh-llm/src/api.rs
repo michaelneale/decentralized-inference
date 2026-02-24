@@ -11,7 +11,7 @@
 //! The console HTML is a thin client that calls these endpoints.
 //! All functionality works without the HTML — use curl, scripts, etc.
 
-use crate::{election, mesh, nostr};
+use crate::{download, election, mesh, nostr};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -50,6 +50,7 @@ struct ApiInner {
 struct StatusPayload {
     node_id: String,
     token: String,
+    node_status: String,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -82,6 +83,7 @@ struct MeshModelPayload {
     name: String,
     status: String,
     node_count: usize,
+    size_gb: f64,
 }
 
 impl MeshApi {
@@ -172,10 +174,23 @@ impl MeshApi {
             } else {
                 0
             };
+            // Model size: use local knowledge if it's our model, otherwise catalog
+            let size_gb = if *name == my_serving && inner.model_size_bytes > 0 {
+                inner.model_size_bytes as f64 / 1e9
+            } else {
+                download::parse_size_gb(
+                    download::MODEL_CATALOG.iter()
+                        .find(|m| m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
+                            || m.name == name.as_str())
+                        .map(|m| m.size)
+                        .unwrap_or("0")
+                )
+            };
             MeshModelPayload {
                 name: name.clone(),
                 status: if is_warm { "warm".into() } else { "cold".into() },
                 node_count,
+                size_gb,
             }
         }).collect();
 
@@ -190,9 +205,37 @@ impl MeshApi {
 
         let mesh_id = node.mesh_id().await;
 
+        // Derive node status for display
+        let node_status = if inner.is_client {
+            "Client".to_string()
+        } else if inner.is_host && inner.llama_ready {
+            // Check if any peers are workers in our split (serving same model, role=Worker)
+            let has_split_workers = all_peers.iter().any(|p|
+                matches!(p.role, mesh::NodeRole::Worker) &&
+                p.serving.as_deref() == Some(inner.model_name.as_str())
+            );
+            if has_split_workers {
+                "Serving (split)".to_string()
+            } else {
+                "Serving".to_string()
+            }
+        } else if !inner.is_host && inner.model_name != "(idle)" && inner.model_name != "" {
+            // We have a model assigned but aren't host — we're a worker in someone's split
+            "Worker (split)".to_string()
+        } else if inner.model_name == "(idle)" || inner.model_name == "" {
+            if all_peers.is_empty() {
+                "Idle".to_string()
+            } else {
+                "Standby".to_string()
+            }
+        } else {
+            "Standby".to_string()
+        };
+
         StatusPayload {
             node_id,
             token,
+            node_status,
             is_host: inner.is_host,
             is_client: inner.is_client,
             llama_ready: inner.llama_ready,
