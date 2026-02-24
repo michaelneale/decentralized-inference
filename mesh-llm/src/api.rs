@@ -1,15 +1,14 @@
-//! Mesh management API — serves on port 3131 (default).
+//! Mesh management API — read-only dashboard on port 3131 (default).
 //!
 //! Endpoints:
 //!   GET  /api/status    — live mesh state (JSON)
 //!   GET  /api/events    — SSE stream of status updates
 //!   GET  /api/discover  — browse Nostr-published meshes
-//!   POST /api/join      — join a mesh by invite token
 //!   POST /api/chat      — proxy to inference API
-//!   GET  /              — console HTML (optional UI)
+//!   GET  /              — console HTML dashboard
 //!
-//! The console HTML is a thin client that calls these endpoints.
-//! All functionality works without the HTML — use curl, scripts, etc.
+//! The console is read-only — shows status, topology, models.
+//! All mutations happen via CLI flags (--join, --model, --auto).
 
 use crate::{download, election, mesh, nostr};
 use serde::Serialize;
@@ -22,19 +21,10 @@ static CONSOLE_HTML: &str = include_str!("console.html");
 
 // ── Shared state ──
 
-/// Action from console to main loop.
-pub enum ConsoleAction {
-    Join(String),    // invite token
-    Serve(String),   // model name
-}
-
 /// Shared live state — written by the main process, read by API handlers.
 #[derive(Clone)]
 pub struct MeshApi {
     inner: Arc<Mutex<ApiInner>>,
-    /// Channel for console actions to signal the main loop.
-    /// None when already serving.
-    pub action_tx: Option<tokio::sync::mpsc::UnboundedSender<ConsoleAction>>,
 }
 
 struct ApiInner {
@@ -73,7 +63,6 @@ struct StatusPayload {
     mesh_id: Option<String>,
     /// Human-readable mesh name (from Nostr publishing)
     mesh_name: Option<String>,
-    available_models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -110,13 +99,10 @@ impl MeshApi {
                 nostr_relays: nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
                 sse_clients: Vec::new(),
             })),
-            action_tx: None,
+
         }
     }
 
-    pub async fn set_model_name(&self, name: String) {
-        self.inner.lock().await.model_name = name;
-    }
 
     pub async fn set_draft_name(&self, name: String) {
         self.inner.lock().await.draft_name = Some(name);
@@ -257,7 +243,6 @@ impl MeshApi {
             mesh_models,
             mesh_id,
             mesh_name: inner.mesh_name.clone(),
-            available_models: node.available_models().await,
         }
     }
 
@@ -371,78 +356,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                 Err(e) => {
                     respond_error(&mut stream, 500, &format!("Discovery failed: {e}")).await?;
                 }
-            }
-        }
-
-        // ── Join a mesh ──
-        "/api/join" => {
-            if req.starts_with("GET") {
-                return respond_error(&mut stream, 405, "Method Not Allowed").await;
-            }
-            let body = if let Some(pos) = req.find("\r\n\r\n") {
-                req[pos + 4..].to_string()
-            } else {
-                String::new()
-            };
-
-            #[derive(serde::Deserialize)]
-            struct JoinReq { token: String }
-
-            match serde_json::from_str::<JoinReq>(&body) {
-                Ok(jr) => {
-                    if let Some(ref tx) = state.action_tx {
-                        if tx.send(ConsoleAction::Join(jr.token)).is_ok() {
-                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"ok\":true,\"joining\":true}";
-                            stream.write_all(resp.as_bytes()).await?;
-                        } else {
-                            respond_error(&mut stream, 500, "Join channel closed").await?;
-                        }
-                    } else {
-                        // Already serving — direct join (adds peer, no model reassignment)
-                        let inner = state.inner.lock().await;
-                        let node = inner.node.clone();
-                        drop(inner);
-                        if let Err(e) = node.join(&jr.token).await {
-                            respond_error(&mut stream, 500, &format!("Failed to join: {e}")).await?;
-                        } else {
-                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"ok\":true}";
-                            stream.write_all(resp.as_bytes()).await?;
-                        }
-                    }
-                }
-                Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
-            }
-        }
-
-        // ── Start serving a model (creates new private mesh) ──
-        "/api/serve" => {
-            if req.starts_with("GET") {
-                return respond_error(&mut stream, 405, "Method Not Allowed").await;
-            }
-            let body = if let Some(pos) = req.find("\r\n\r\n") {
-                req[pos + 4..].to_string()
-            } else {
-                String::new()
-            };
-
-            #[derive(serde::Deserialize)]
-            struct ServeReq { model: String }
-
-            match serde_json::from_str::<ServeReq>(&body) {
-                Ok(sr) => {
-                    if let Some(ref tx) = state.action_tx {
-                        if tx.send(ConsoleAction::Serve(sr.model)).is_ok() {
-                            let body = "{\"ok\":true}";
-                            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                            stream.write_all(resp.as_bytes()).await?;
-                        } else {
-                            respond_error(&mut stream, 500, "Channel closed").await?;
-                        }
-                    } else {
-                        respond_error(&mut stream, 409, "Already serving").await?;
-                    }
-                }
-                Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
             }
         }
 
