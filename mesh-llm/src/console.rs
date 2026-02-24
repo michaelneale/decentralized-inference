@@ -19,6 +19,9 @@ static HTML: &str = include_str!("console.html");
 #[derive(Clone)]
 pub struct ConsoleState {
     inner: Arc<Mutex<ConsoleInner>>,
+    /// Channel for console UI to signal "join this mesh" to the main loop.
+    /// None if joining isn't supported (e.g. already in a mesh).
+    pub join_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 struct ConsoleInner {
@@ -87,7 +90,13 @@ impl ConsoleState {
                 model_size_bytes,
                 sse_clients: Vec::new(),
             })),
+            join_tx: None,
         }
+    }
+
+    /// Set the model name (for when model changes after initial creation).
+    pub async fn set_model_name(&self, name: String) {
+        self.inner.lock().await.model_name = name;
     }
 
     pub async fn set_draft_name(&self, name: String) {
@@ -268,6 +277,70 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
             );
             stream.write_all(resp.as_bytes()).await?;
         }
+
+        "/api/discover" => {
+            let filter = crate::nostr::MeshFilter::default();
+            // Fetch discovery results inside a block so it doesn't block the async task
+            let relays: Vec<String> = crate::nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect();
+            match crate::nostr::discover(&relays, &filter).await {
+                Ok(meshes) => {
+                    if let Ok(json) = serde_json::to_string(&meshes) {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            json.len(), json
+                        );
+                        stream.write_all(resp.as_bytes()).await?;
+                    } else {
+                        respond_error(&mut stream, 500, "Failed to serialize meshes").await?;
+                    }
+                }
+                Err(e) => {
+                    respond_error(&mut stream, 500, &format!("Discovery failed: {e}")).await?;
+                }
+            }
+        }
+        "/api/join" => {
+            if req.starts_with("GET") {
+                return respond_error(&mut stream, 405, "Method Not Allowed").await;
+            }
+            // Parse POST body
+            let body = if let Some(pos) = req.find("\r\n\r\n") {
+                req[pos + 4..].to_string()
+            } else {
+                req.to_string()
+            };
+
+            #[derive(serde::Deserialize)]
+            struct JoinReq { token: String }
+
+            match serde_json::from_str::<JoinReq>(&body) {
+                Ok(jr) => {
+                    if let Some(ref tx) = state.join_tx {
+                        if tx.send(jr.token).is_ok() {
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"ok\":true,\"joining\":true}";
+                            stream.write_all(resp.as_bytes()).await?;
+                        } else {
+                            respond_error(&mut stream, 500, "Join channel closed").await?;
+                        }
+                    } else {
+                        // No join channel — node is already in a mesh or doesn't support runtime join
+                        // Fall back to direct join (adds peer but doesn't reassign model)
+                        let inner = state.inner.lock().await;
+                        let node = inner.node.clone();
+                        drop(inner);
+
+                        if let Err(e) = node.join(&jr.token).await {
+                            respond_error(&mut stream, 500, &format!("Failed to join mesh: {e}")).await?;
+                        } else {
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"ok\":true}";
+                            stream.write_all(resp.as_bytes()).await?;
+                        }
+                    }
+                }
+                Err(_) => respond_error(&mut stream, 400, "Invalid JSON payload").await?,
+            }
+        }
+
         "/api/status" => {
             let status = state.status().await;
             let json = serde_json::to_string(&status)?;
