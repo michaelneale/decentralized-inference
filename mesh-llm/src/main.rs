@@ -1226,8 +1226,8 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     ).await?;
 
     // Election
-    let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
-    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (target_tx, _target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
+    let (_drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     let node2 = node.clone();
     let tunnel_mgr2 = tunnel_mgr.clone();
@@ -1416,8 +1416,6 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
             }
         }
     }
-
-    Ok(None)
 }
 
 /// Model-aware API proxy. Parses the "model" field from POST request bodies

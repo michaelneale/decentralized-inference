@@ -79,6 +79,7 @@ impl ModelTargets {
     }
 
     /// List all available model names.
+    #[allow(dead_code)]
     pub fn available_models(&self) -> Vec<String> {
         self.targets.keys()
             .filter(|k| !matches!(self.targets[k.as_str()], InferenceTarget::None))
@@ -312,7 +313,7 @@ async fn update_targets(
 async fn start_llama(
     node: &mesh::Node,
     tunnel_mgr: &tunnel::Manager,
-    my_rpc_port: u16,
+    _my_rpc_port: u16,
     bin_dir: &Path,
     model: &Path,
     model_name: &str,

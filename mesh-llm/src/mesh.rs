@@ -668,7 +668,7 @@ impl Node {
     /// Snapshot request rates (requests per minute since last snapshot).
     /// Called every gossip cycle (~60s). Returns rates and resets the counters.
     pub fn snapshot_request_rates(&self) -> std::collections::HashMap<String, u64> {
-        let mut counts = self.request_counts.lock().unwrap();
+        let counts = self.request_counts.lock().unwrap();
         let mut last = self.last_request_snapshot.lock().unwrap();
         let mut rates = std::collections::HashMap::new();
         for (model, &count) in counts.iter() {
@@ -831,6 +831,7 @@ impl Node {
     }
 
     /// Get model source from any peer in the mesh (for auto-download on join).
+    #[allow(dead_code)]
     pub async fn peer_model_source(&self) -> Option<String> {
         let state = self.state.lock().await;
         for p in state.peers.values() {
@@ -894,6 +895,7 @@ impl Node {
 
     /// Get peers serving a specific model (including self if applicable).
     /// Returns (my_serving, peers_serving) — my_serving is true if this node serves it.
+    #[allow(dead_code)]
     pub async fn peers_serving_model(&self, model: &str) -> (bool, Vec<PeerInfo>) {
         let state = self.state.lock().await;
         let my_serving = self.serving.lock().await;
@@ -1014,6 +1016,7 @@ impl Node {
     }
 
     /// Detect region from this node's relay URL.
+    #[allow(dead_code)]
     pub fn detect_region(&self) -> Option<String> {
         use iroh::TransportAddr;
         let addr = self.endpoint.addr();
@@ -1057,6 +1060,7 @@ impl Node {
     }
 
     /// Wait for a peer with Host role to appear. Returns its PeerInfo.
+    #[allow(dead_code)]
     pub async fn wait_for_host(&self) -> Result<PeerInfo> {
         loop {
             let peers = self.peers().await;
