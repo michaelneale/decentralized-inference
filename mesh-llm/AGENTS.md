@@ -1,5 +1,15 @@
 # mesh-llm — Agent Notes
 
+## Console Changes — MANDATORY REVIEW
+
+**NEVER push changes to `console.html` without the user seeing the result first.**
+The console is a visual UI — code review is not sufficient. Changes must be:
+1. Built and running locally
+2. Shown to the user (leave it running, tell them to check localhost:3131)
+3. Explicitly approved before commit/push
+
+This applies to ANY change touching `console.html` or `api.rs` status payloads that affect what the console displays.
+
 ## Project Structure
 
 - `src/` — Rust source (see `README.md` for file map)
