@@ -333,6 +333,23 @@
       cursor: default;
     }
 
+    /* Model cards */
+    .model-card {
+      display: inline-block;
+      background: #0d1117;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 0.35rem 0.55rem;
+      margin: 0.12rem;
+      cursor: pointer;
+      font-size: 0.55rem;
+      font-family: monospace;
+      color: #aaa;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .model-card:hover { border-color: #4c4; color: #ccc; background: #0a1a12; }
+    .model-card .mc-size { color: #555; font-size: 0.48rem; margin-left: 0.25rem; }
+
     /* Collapsible sections */
     details.panel-section {
       border-top: 1px solid #1a1a1a;
@@ -609,6 +626,7 @@
       <div id="status"></div>
       <div id="models"></div>
       <div id="agents"></div>
+      <div id="serveSection"></div>
       <div id="inviteSection"></div>
       <div id="joinSection"></div>
       <div id="discoverSection"></div>
@@ -642,7 +660,7 @@
     }
 
     function render() {
-      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderJoinSection(); renderDiscover(); renderApiSection();
+      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderServeSection(); renderInvite(); renderJoinSection(); renderDiscover(); renderApiSection();
       const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
       const ok = S.llama_ready || (S.is_client && hasWarmModel);
       $('inp').disabled = !ok; $('btn').disabled = !ok;
@@ -822,6 +840,12 @@
         el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
       } else if (S.node_id) {
         el.innerHTML = `<div class="status-line">Waiting for peers…</div>`;
+      } else if (S.node_status === 'Idle') {
+        const vram = S.my_vram_gb ? `${S.my_vram_gb.toFixed(0)}GB VRAM` : '';
+        const nModels = (S.available_models || []).length;
+        const modelsStr = nModels > 0 ? `${nModels} model${nModels > 1 ? 's' : ''} on disk` : '';
+        const parts = [vram, modelsStr].filter(Boolean).join(' · ');
+        el.innerHTML = parts ? `<div class="status-line">${parts}</div>` : '';
       } else {
         el.innerHTML = '';
       }
@@ -832,7 +856,7 @@
     function renderModels() {
       const el = $('models');
       const models = S.mesh_models || [];
-      if (models.length <= 1) { el.innerHTML = ''; return; } // single model — no need to show list
+      if (S.node_status === 'Idle' || models.length <= 1) { el.innerHTML = ''; return; }
       el.innerHTML = '<div class="section-label">Models</div><div class="models-list">' +
         models.map(m => {
           const warm = m.status === 'warm';
@@ -855,6 +879,55 @@
     }
 
     // ── Join hint (tiny, expands) ──
+
+    // ── Invite others ──
+
+    // ── Start a new mesh (idle mode only) ──
+
+    let serveSectionRendered = false;
+    function renderServeSection() {
+      const el = $('serveSection');
+      const isIdle = S.node_status === 'Idle';
+      if (!isIdle) { el.innerHTML = ''; serveSectionRendered = false; return; }
+      if (serveSectionRendered) return;
+      serveSectionRendered = true;
+
+      const models = (S.available_models || []).filter(m => !m.includes('0.5B') && !m.includes('0.6B') && !m.includes('1B-'));
+
+      let cards = '';
+      if (models.length > 0) {
+        cards = models.map(m => {
+          const mm = (S.mesh_models || []).find(x => x.name === m);
+          const sizeGB = mm ? mm.size_gb : 0;
+          const sizeStr = sizeGB > 0 ? `${sizeGB.toFixed(1)}GB` : '';
+          return `<span class="model-card" onclick="startServe('${esc(m)}')">${shortName(m)}${sizeStr ? `<span class="mc-size">${sizeStr}</span>` : ''}</span>`;
+        }).join('');
+      } else {
+        cards = '<span style="color:#555;font-size:0.55rem">No models on disk. Run: <span style="color:#888;user-select:all">mesh-llm download</span></span>';
+      }
+
+      el.innerHTML = `<details class="panel-section">
+        <summary>Start your own mesh</summary>
+        <div class="panel-desc">Pick a model. Others can join with your invite token.</div>
+        <div style="margin:0.3rem 0">${cards}</div>
+      </details>`;
+    }
+
+    async function startServe(name) {
+      document.querySelectorAll('.model-card').forEach(c => { c.style.pointerEvents = 'none'; c.style.opacity = '0.4'; });
+      try {
+        const r = await fetch('/api/serve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: name })
+        });
+        if (!r.ok) {
+          document.querySelectorAll('.model-card').forEach(c => { c.style.pointerEvents = ''; c.style.opacity = ''; });
+        }
+      } catch (e) {
+        document.querySelectorAll('.model-card').forEach(c => { c.style.pointerEvents = ''; c.style.opacity = ''; });
+      }
+    }
 
     // ── Invite others ──
 

@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-const VERSION: &str = "0.20.0";
+const VERSION: &str = "0.21.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
@@ -99,12 +99,12 @@ struct Cli {
     #[arg(long, global = true)]
     bind_port: Option<u16>,
 
-    /// Web console port (default: 3131). Use --no-console to disable.
+    /// Web console port (default: 3131).
     #[arg(long, default_value = "3131")]
     console: u16,
 
-    /// Disable the web console.
-    #[arg(long)]
+    /// Ignored (kept for backward compatibility).
+    #[arg(long, hide = true)]
     no_console: bool,
 
     /// Publish this mesh to Nostr for discovery by others.
@@ -310,16 +310,22 @@ async fn main() -> Result<()> {
     }
     // No args at all = idle mode with console for browsing/joining
     if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
-        if cli.no_console {
-            // Console is the management API — idle mode needs it
-            eprintln!("⚠ Ignoring --no-console: idle mode requires console for discover/join");
-            cli.no_console = false;
+        // Check for saved config from previous console session
+        if let Some(token) = mesh::load_join_token() {
+            eprintln!("📋 Resuming join from saved config (~/.mesh-llm/config.json)");
+            cli.join = vec![token];
+            // Fall through to normal join flow below
+        } else if let Some(model) = mesh::load_serve_model() {
+            eprintln!("📋 Resuming serve from saved config (~/.mesh-llm/config.json)");
+            cli.model = vec![model.into()];
+            // Fall through to normal model resolution below
+        } else {
+            let bin_dir = match &cli.bin_dir {
+                Some(d) => d.clone(),
+                None => detect_bin_dir()?,
+            };
+            return run_idle(cli, bin_dir).await;
         }
-        let bin_dir = match &cli.bin_dir {
-            Some(d) => d.clone(),
-            None => detect_bin_dir()?,
-        };
-        return run_idle(cli, bin_dir).await;
     }
 
     // --- Client mode (passive, never serves) ---
@@ -716,7 +722,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
 /// Auto-election mode: start rpc-server, join mesh, auto-elect host.
 async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_names: Vec<String>, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
-    let console_port = if cli.no_console { None } else { Some(cli.console) };
+    let console_port = Some(cli.console);
 
     // Scan local models on disk
     let local_models = mesh::scan_local_models();
@@ -1074,7 +1080,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 /// Once joined, assigns a model and transitions to the full serving flow.
 async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
-    let console_port = if cli.no_console { None } else { Some(cli.console) };
+    let console_port = Some(cli.console);
     let local_models = mesh::scan_local_models();
     tracing::info!("Local models on disk: {:?}", local_models);
 
@@ -1086,13 +1092,13 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     node.set_available_models(local_models.clone()).await;
 
     // Channel for console "Join" button → main loop
-    let (join_tx, mut join_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<api::ConsoleAction>();
 
     // Console
     let console_state = if let Some(cport) = console_port {
         let mut cs = api::MeshApi::new(node.clone(), "(idle)".into(), api_port, 0);
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
-        cs.join_tx = Some(join_tx);
+        cs.action_tx = Some(action_tx);
         cs.update(false, false).await;
         let cs2 = cs.clone();
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
@@ -1138,70 +1144,79 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
         }
     });
 
-    // Wait for join signal from console, or ctrl-c
-    let token = tokio::select! {
-        Some(token) = join_rx.recv() => token,
+    // Wait for action from console, or ctrl-c
+    let action = tokio::select! {
+        Some(a) = action_rx.recv() => a,
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nShutting down...");
             return Ok(());
         }
     };
 
-    // --- Join the mesh ---
-    eprintln!("🔗 Joining mesh...");
-    node.start_accepting();
-    node.start_heartbeat();
-    node.join(&token).await?;
-    eprintln!("Joined mesh");
+    // Handle action
+    let model = match action {
+        api::ConsoleAction::Join(token) => {
+            eprintln!("🔗 Joining mesh...");
+            node.start_accepting();
+            node.start_heartbeat();
+            node.join(&token).await?;
+            eprintln!("Joined mesh");
 
-    // Save mesh_id for sticky preference
-    {
-        let save_node = node.clone();
-        tokio::spawn(async move {
+            // Save mesh_id for sticky preference
+            {
+                let save_node = node.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    if let Some(id) = save_node.mesh_id().await {
+                        mesh::save_last_mesh_id(&id);
+                    }
+                });
+            }
+
+            // Periodic rejoin
+            let rejoin_node = node.clone();
+            let rejoin_token = token.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let _ = rejoin_node.join(&rejoin_token).await;
+                }
+            });
+
+            // Give gossip a moment to propagate
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if let Some(id) = save_node.mesh_id().await {
-                mesh::save_last_mesh_id(&id);
-            }
-        });
-    }
 
-    // Periodic rejoin
-    let rejoin_node = node.clone();
-    let rejoin_token = token.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let _ = rejoin_node.join(&rejoin_token).await;
-        }
-    });
-
-    // Give gossip a moment to propagate
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-    // Assign a model
-    let model = {
-        eprintln!("Checking which model to serve...");
-        let assignment = pick_model_assignment(&node, &local_models).await;
-        if let Some(model_name) = assignment {
-            eprintln!("📋 Serving: {model_name}");
-            let model_path = mesh::find_model_path(&model_name);
-            if model_path.exists() {
-                model_path
-            } else if let Some(cat) = download::find_model(&model_name) {
-                eprintln!("📥 Downloading {} for mesh...", model_name);
-                download::download_model(cat).await?;
-                download::models_dir().join(format!("{model_name}.gguf"))
+            // Assign a model
+            eprintln!("Checking which model to serve...");
+            let assignment = pick_model_assignment(&node, &local_models).await;
+            if let Some(model_name) = assignment {
+                eprintln!("📋 Serving: {model_name}");
+                let model_path = mesh::find_model_path(&model_name);
+                if model_path.exists() {
+                    model_path
+                } else if let Some(cat) = download::find_model(&model_name) {
+                    eprintln!("📥 Downloading {} for mesh...", model_name);
+                    download::download_model(cat).await?;
+                    download::models_dir().join(format!("{model_name}.gguf"))
+                } else {
+                    model_path
+                }
             } else {
-                model_path
+                eprintln!("💤 No model to serve — staying as proxy for mesh");
+                tokio::signal::ctrl_c().await?;
+                eprintln!("\nShutting down...");
+                node.broadcast_leaving().await;
+                return Ok(());
             }
-        } else {
-            // Nothing to serve — stay as proxy
-            eprintln!("💤 No model to serve — staying as proxy for mesh");
-            // Block until ctrl-c
-            tokio::signal::ctrl_c().await?;
-            eprintln!("\nShutting down...");
-            node.broadcast_leaving().await;
-            return Ok(());
+        }
+        api::ConsoleAction::Serve(model_name) => {
+            eprintln!("🚀 Starting mesh with {model_name}...");
+            mesh::save_serve_model(&model_name);
+            node.start_accepting();
+            node.start_heartbeat();
+
+            let model_path = resolve_model(std::path::Path::new(&model_name)).await?;
+            model_path
         }
     };
 
@@ -1354,12 +1369,10 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
     let mode = if is_client { "client" } else { "standby" };
     eprintln!("Passive {mode} ready:");
     eprintln!("  API:     http://localhost:{local_port}");
-    if !cli.no_console {
-        eprintln!("  Console: http://localhost:{}", cli.console);
-    }
+    eprintln!("  Console: http://localhost:{}", cli.console);
 
     // Console
-    if !cli.no_console {
+    {
         let cport = cli.console;
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
         let cs = api::MeshApi::new(node.clone(), label, local_port, 0);

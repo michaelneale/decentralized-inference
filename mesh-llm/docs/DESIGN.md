@@ -135,8 +135,7 @@ and an optional HTML console.
 The console HTML is a thin client — everything it shows comes from `/api/status`
 and `/api/events`. Mesh management works without the HTML via curl/scripts.
 
-Enabled by default. `--no-console` disables (overridden in idle mode where the
-management API is required for discover/join).
+Always enabled on port 3131 (configurable with `--console <port>`).
 
 ## Idle Mode
 

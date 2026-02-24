@@ -183,7 +183,7 @@ mesh-llm
 - `curl localhost:3131/api/status` → JSON with `model_name: "(idle)"`, 0 peers
 - `curl localhost:3131/api/discover` → Nostr mesh listings (JSON array)
 - **Dormant QUIC**: peers from previous sessions cannot reconnect (no ghost peers)
-- `--no-console` is overridden with warning (management API required)
+
 
 ### 22. Join via console
 

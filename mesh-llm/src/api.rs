@@ -22,13 +22,19 @@ static CONSOLE_HTML: &str = include_str!("console.html");
 
 // ── Shared state ──
 
+/// Action from console to main loop.
+pub enum ConsoleAction {
+    Join(String),    // invite token
+    Serve(String),   // model name
+}
+
 /// Shared live state — written by the main process, read by API handlers.
 #[derive(Clone)]
 pub struct MeshApi {
     inner: Arc<Mutex<ApiInner>>,
-    /// Channel for /api/join to signal the main loop.
-    /// None if runtime joining isn't supported (already serving).
-    pub join_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Channel for console actions to signal the main loop.
+    /// None when already serving.
+    pub action_tx: Option<tokio::sync::mpsc::UnboundedSender<ConsoleAction>>,
 }
 
 struct ApiInner {
@@ -67,6 +73,7 @@ struct StatusPayload {
     mesh_id: Option<String>,
     /// Human-readable mesh name (from Nostr publishing)
     mesh_name: Option<String>,
+    available_models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -103,7 +110,7 @@ impl MeshApi {
                 nostr_relays: nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
                 sse_clients: Vec::new(),
             })),
-            join_tx: None,
+            action_tx: None,
         }
     }
 
@@ -250,6 +257,7 @@ impl MeshApi {
             mesh_models,
             mesh_id,
             mesh_name: inner.mesh_name.clone(),
+            available_models: node.available_models().await,
         }
     }
 
@@ -382,8 +390,9 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
             match serde_json::from_str::<JoinReq>(&body) {
                 Ok(jr) => {
-                    if let Some(ref tx) = state.join_tx {
-                        if tx.send(jr.token).is_ok() {
+                    if let Some(ref tx) = state.action_tx {
+                        mesh::save_join_token(&jr.token);
+                        if tx.send(ConsoleAction::Join(jr.token)).is_ok() {
                             let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"ok\":true,\"joining\":true}";
                             stream.write_all(resp.as_bytes()).await?;
                         } else {
@@ -400,6 +409,38 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                             let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"ok\":true}";
                             stream.write_all(resp.as_bytes()).await?;
                         }
+                    }
+                }
+                Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
+            }
+        }
+
+        // ── Start serving a model (creates new private mesh) ──
+        "/api/serve" => {
+            if req.starts_with("GET") {
+                return respond_error(&mut stream, 405, "Method Not Allowed").await;
+            }
+            let body = if let Some(pos) = req.find("\r\n\r\n") {
+                req[pos + 4..].to_string()
+            } else {
+                String::new()
+            };
+
+            #[derive(serde::Deserialize)]
+            struct ServeReq { model: String }
+
+            match serde_json::from_str::<ServeReq>(&body) {
+                Ok(sr) => {
+                    if let Some(ref tx) = state.action_tx {
+                        if tx.send(ConsoleAction::Serve(sr.model)).is_ok() {
+                            let body = "{\"ok\":true}";
+                            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                            stream.write_all(resp.as_bytes()).await?;
+                        } else {
+                            respond_error(&mut stream, 500, "Channel closed").await?;
+                        }
+                    } else {
+                        respond_error(&mut stream, 409, "Already serving").await?;
                     }
                 }
                 Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
