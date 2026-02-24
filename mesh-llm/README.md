@@ -2,80 +2,59 @@
 
 Rust sidecar for distributed llama.cpp inference over QUIC. See the [project README](../README.md) for usage.
 
-Docs:
-- [docs/DESIGN.md](docs/DESIGN.md) — internals: stream types, B2B rewriting, tunnel manager
-- [docs/MULTI-MODEL.md](docs/MULTI-MODEL.md) — multi-model serving: routing, election groups, gossip
-- [docs/TESTING.md](docs/TESTING.md) — test scenarios and permutations
-
 ```
 src/
-├── main.rs        CLI, startup, API proxy (owns :9337), model routing
-├── mesh.rs        iroh QUIC endpoint, gossip, peer management, routing table
-├── election.rs    Per-model host election, solo/split mode, llama-server lifecycle
+├── main.rs        CLI, orchestration, startup flows (auto, idle, passive)
+├── mesh.rs        QUIC endpoint, gossip, peer management, request rate sharing
+├── election.rs    Per-model host election, latency-aware split, llama-server lifecycle
+├── proxy.rs       HTTP proxy plumbing: request parsing, model routing, response helpers
+├── api.rs         Mesh management API (:3131): status, events, discover, join, console HTML
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
-├── console.rs     Web console: status, model list, chat proxy (--console flag)
-├── console.html   Embedded dashboard with model picker and topology view
-├── download.rs    Model catalog and HuggingFace download
-└── nostr.rs       Nostr publish/discover: mesh listings on public relays
+├── console.html   Embedded dashboard with topology view and chat
+├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
+├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
 ```
 
-## Key design
+## Design
 
-- **mesh-llm owns the API port** (:9337) — never llama-server directly
-- **Model-aware routing** — API proxy peeks at request body, routes by `model` field to the right node
-- **One model per node** — each node loads exactly one model. Multi-model = different nodes serving different things
-- **No accidental split** — if a model fits on one node, it runs solo. Tensor split only when the model doesn't fit or `--split` is forced
-- **Every mesh change = re-evaluate** — but skip restart if election result unchanged (no gossip storms)
-- **Event-driven mesh** — death detected on use (tunnel failure) + 60s heartbeat fallback. Dead peers broadcast to mesh, not re-added by gossip. Scales better than aggressive polling.
-- **Rejoin loop** — reconnects to bootstrap token every 60s if connection drops
-- **Ephemeral client keys** — `--client` gets a unique identity, works alongside GPU nodes on the same machine
-- **Reactive rebalancing** — standby nodes auto-promote when a model loses its last host
-- **Passive scaling** — clients/standby nodes don't gossip, use routing table only, zero per-client server state
+**mesh-llm owns :9337** — never llama-server directly. The API proxy peeks at the `model` field and routes to the right node.
+
+**One model per node** — multi-model = different nodes serving different things. No VRAM double-commitment.
+
+**Solo by default** — if a model fits (VRAM ≥ size × 1.1), it runs solo. Tensor split only when necessary.
+
+**Latency-aware splitting** — when splitting is needed, peers sorted by RTT ascending. Take just enough for the VRAM shortfall. 80ms hard cap — high-latency nodes participate as API clients, not split partners.
+
+**Demand-aware rebalancing** — request rates tracked per model, gossipped every 60s. Standby nodes promote when a model is hot (≥10 req/min, ≥3x imbalance vs coldest) or has zero servers.
+
+**Event-driven** — death detected via tunnel failure + 60s heartbeat. Dead peers broadcast, not re-added by gossip. Cost proportional to topology changes, not node count.
+
+**Passive scaling** — clients don't gossip, use routing tables only. Zero per-client state on servers.
 
 ## Nostr discovery
 
-Meshes can be published to Nostr relays so anyone can find and join them — no out-of-band token exchange needed.
-
-### Publishing
+Opt-in. Without `--publish`, nothing touches Nostr.
 
 ```bash
-# Publish your mesh with a name and region
+# Publish
 mesh-llm --model Qwen2.5-3B --publish --mesh-name "Sydney Lab" --region AU
 
-# With a client cap (delists when full, re-publishes when clients drop)
-mesh-llm --model Qwen2.5-3B --publish --mesh-name "Sydney Lab" --max-clients 5
-```
-
-The listing includes: invite token, served models, wanted models, total VRAM, node count, name, region. Refreshes every 60s. Uses a persistent Nostr key stored in `~/.mesh-llm/nostr.nsec`.
-
-Names are just display text — no collision risk. Each publisher has one listing (Nostr replaceable events, keyed by pubkey).
-
-### Discovering
-
-```bash
-# List available meshes
+# Discover
 mesh-llm discover
+mesh-llm discover --model GLM --region AU
 
-# Filter by model, region, or minimum VRAM
-mesh-llm discover --model GLM --region AU --min-vram 50
-
-# Auto-join the best match
-mesh-llm discover --auto
+# Auto-join (discover + join + serve)
+mesh-llm --auto
 ```
 
-### Auto-join (shorthand)
+Smart auto-join scores meshes by: region match, node count, model overlap, VRAM, overload. QUIC health probe before committing. Publish watchdog auto-takes-over if the original publisher dies.
+
+## Idle mode
 
 ```bash
-# Discover and join in one command
-mesh-llm --auto
-
-# With a model to serve
-mesh-llm --auto --model Qwen2.5-3B
-
-# As a client (no GPU needed)
-mesh-llm --auto --client
+mesh-llm    # no args
 ```
 
-`--auto` is equivalent to `mesh-llm --join $(mesh-llm discover --auto)` — discovers the best mesh via Nostr and joins it.
+Opens the management console (`:3131`) for interactive mesh discovery and joining. The node stays dormant — no inbound QUIC connections or heartbeat — until you join via the console or `/api/join`. Persistent node identity is preserved for sticky mesh preference.

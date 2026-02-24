@@ -1,20 +1,32 @@
 # mesh-llm TODO
 
-## Done
-- [x] Event-driven mesh (60s heartbeat + death broadcasts)
-- [x] Dead peers set, rejoin loop, routing table protocol
-- [x] Unified passive mode (`run_passive()`)
-- [x] Hash-based host selection
-- [x] `--auto` Nostr discovery
-- [x] Passive node scaling (no gossip, routing table only, zero server state)
-- [x] `MESH_LLM_EPHEMERAL_KEY=1` for single-machine testing
-- [x] Tensor split tested locally + cross-network (3-way Brad+Local+Mini)
-- [x] Passive client tested (no gossip, routing table, tunnel inference)
-- [x] Console VRAM usage bar (model_size / node_vram per node)
-- [x] Reactive rebalancing: standby auto-promotes when a model loses its last host
+## First-Time Experience (fast `--auto`)
+- [x] **Mesh identity**: Stable `mesh_id`, gossipped, in Nostr listings. Named: `hash(name+pubkey)`, unnamed: UUID.
+- [x] **Sticky mesh preference**: `~/.mesh-llm/last-mesh` → +500 scoring bonus on `--auto`.
+- [x] **API proxy during GPU bootstrap**: Tunnel-only proxy on `:9337` while GPU loads. Hands off to full proxy when ready.
+- [x] **Idle mode**: `mesh-llm` with no args → console + discover/join flow. Dormant QUIC (no inbound connections or heartbeat until join) prevents ghost peer reconnection.
+- [ ] **Uptime signal**: Add `started_at: u64` to `MeshListing`. Score bonus for meshes that have been running longer — a 24h mesh beats a 10-minute test.
+- [ ] **Solo fallback — fast starter model**: When `--auto` finds no mesh, download a small starter model first (Qwen2.5-3B, 2GB, ~1 min), start serving it immediately, then background-download the "real" model for the node's VRAM tier. User is chatting in <2 minutes.
+- [ ] **Score mesh by model quality**: `smart_auto` should weight model quality — a mesh serving Qwen3-32B scores higher than one serving Qwen2.5-3B, all else equal. Use `MODEL_TIERS` VRAM requirements as a proxy for quality.
 
-## Nice to have
+## Model Catalog Curation
+- [ ] **Opinionated model tiers**: Curate recommended instruct models per VRAM tier. Current `MODEL_TIERS` and `MODEL_CATALOG` are ad-hoc — need a principled "if you have X GB, run Y" recommendation that considers quality, speed, and family diversity.
+- [ ] **Draft model completeness**: Ensure every recommended main model has a draft pairing. Currently GLM-4.7 and DeepSeek have no draft.
+- [ ] **Model quality metadata**: Add quality/benchmark scores to catalog entries so scoring can prefer better models, not just bigger ones.
+- [ ] **Auto-upgrade path**: When a node is solo-serving a starter model and finishes downloading a better one, gracefully switch (stop llama-server, restart with new model). No impact to other mesh nodes.
 
-### Don't download what won't fit
-Before downloading via `--model`, check if node VRAM >= model_size * 1.1.
-Skip download if model won't fit and no split peers available.
+## Bugs to Investigate
+- [x] **Draft model leaking into served models**: Qwen2.5-0.5B-Instruct showing in `/v1/models`. Investigated — external node (Canada) explicitly listed it via `--model`. Not a code bug, deliberate choice by that node.
+- [x] **Hermes disappearing during Mini WiFi flap**: Investigated. Two issues found and fixed:
+  1. Strike 1 added peer to `dead_peers` which blocked incoming gossip — too aggressive. Fixed: only add to `dead_peers` on confirmed death (2 strikes).
+  2. Reconnect path didn't trigger gossip — peer reconnected but sat invisible for up to 60s until next heartbeat. Fixed: immediately initiate gossip exchange on reconnect of previously-dead peer.
+
+## Nice to Have
+- [ ] Don't download what won't fit: check VRAM before downloading via `--model`
+- [ ] Demand tracking in console: show req/min per model in TUI
+- [ ] Request rates in `/api/status` JSON for external tooling
+- [ ] `mesh-llm recommend`: CLI subcommand to suggest models for your hardware
+
+## Future
+- [ ] Demand-based Nostr listings: include request rates so `--auto` joiners can see what's hot
+- [ ] Multi-node tensor split recovery: if one split peer dies, re-split across remaining

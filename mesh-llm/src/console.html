@@ -1,446 +1,1093 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mesh-llm</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
-  a { color: #6cf; text-decoration: none; } a:hover { text-decoration: underline; }
-
-  .top-bar { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 1.25rem; border-bottom: 1px solid #1a1a1a; }
-  .top-bar h1 { font-size: 1rem; font-weight: 600; }
-  .badge { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.65rem; padding: 0.12rem 0.45rem; border-radius: 10px; }
-  .badge .dot { width: 5px; height: 5px; border-radius: 50%; }
-  .b-green { background: #0a1a0a; color: #4c4; } .b-green .dot { background: #4c4; }
-  .b-yellow { background: #1a1a0a; color: #cc4; } .b-yellow .dot { background: #cc4; }
-  .b-gray { background: #151515; color: #666; } .b-gray .dot { background: #555; }
-  .top-right { margin-left: auto; font-size: 0.65rem; color: #555; display: flex; gap: 0.8rem; align-items: center; }
-  .top-right span { color: #888; }
-
-  /* Layout */
-  .main { display: flex; height: calc(100vh - 38px); }
-
-  /* Left panel — collapsible */
-  .left { width: 30%; flex-shrink: 0; padding: 1rem 1.25rem; overflow-y: auto; border-right: 1px solid #1a1a1a; display: flex; flex-direction: column; transition: width 0.25s ease, padding 0.25s ease, opacity 0.2s ease; }
-  .left.collapsed { width: 0; padding: 0; overflow: hidden; opacity: 0; border-right: none; }
-
-  /* Toggle button */
-  .toggle-btn { background: none; border: 1px solid #333; border-radius: 4px; color: #666; cursor: pointer; font-size: 0.65rem; padding: 0.15rem 0.4rem; }
-  .toggle-btn:hover { color: #ccc; border-color: #666; }
-
-  /* Chat — takes remaining space */
-  .right { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #060606; }
-
-  /* Diagram */
-  .diagram { flex-shrink: 0; margin-bottom: 0.75rem; }
-  .diagram svg { width: 100%; display: block; }
-
-  /* Status line */
-  .status-line { font-size: 0.7rem; color: #666; margin-bottom: 0.6rem; }
-  .status-line.ok { color: #4c4; }
-
-  /* Section labels */
-  .section-label { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; margin: 0.6rem 0 0.25rem; }
-
-  /* Agent rows */
-  /* Models list */
-  .models-list { margin-bottom: 0.5rem; }
-  .model-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.65rem; padding: 0.15rem 0; }
-  .model-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-  .model-dot.warm { background: #4c4; }
-  .model-dot.cold { background: #444; }
-  .model-name { color: #aaa; font-family: monospace; }
-  .model-name.warm { color: #ccc; }
-  .model-info { color: #444; font-size: 0.55rem; margin-left: auto; }
-
-  .agent-row { display: flex; gap: 0.4rem; align-items: baseline; margin-bottom: 0.2rem; }
-  .agent-name { font-size: 0.6rem; font-weight: 600; color: #555; min-width: 36px; flex-shrink: 0; }
-  .cmd-sm { font-family: monospace; font-size: 0.55rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 3px; padding: 0.2rem 0.35rem; cursor: text; word-break: break-all; line-height: 1.4; }
-
-  /* Join expand */
-  .join-details { margin-top: 0.4rem; }
-  .join-details > summary { font-size: 0.6rem; color: #444; cursor: pointer; }
-  .join-details > summary:hover { color: #888; }
-
-  /* Config */
-  details.cfg { border-top: 1px solid #1a1a1a; margin-top: 0.5rem; padding-top: 0.4rem; flex-shrink: 0; }
-  details.cfg > summary { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: #444; cursor: pointer; }
-  details.cfg > summary:hover { color: #888; }
-  details.cfg[open] > summary { color: #666; margin-bottom: 0.4rem; }
-  .cfg-row { margin-bottom: 0.4rem; }
-  .cfg-label { font-size: 0.6rem; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.1rem; }
-  .cfg-val { font-family: monospace; font-size: 0.6rem; color: #aaa; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; user-select: all; cursor: text; word-break: break-all; }
-  details.cfg-inner > summary { font-size: 0.55rem; color: #444; cursor: pointer; margin-top: 0.1rem; }
-  details.cfg-inner pre { font-family: monospace; font-size: 0.5rem; color: #555; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; margin-top: 0.1rem; user-select: all; cursor: text; white-space: pre-wrap; }
-  .cfg-tok { font-family: monospace; font-size: 0.5rem; color: #444; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; user-select: all; cursor: text; word-break: break-all; max-height: 2.5rem; overflow-y: auto; }
-  .cfg-pre { font-family: monospace; font-size: 0.5rem; color: #555; background: #080808; border: 1px solid #1a1a1a; border-radius: 4px; padding: 0.25rem 0.5rem; user-select: all; cursor: text; white-space: pre-wrap; }
-
-  /* Chat */
-  .chat-hdr { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1a1a1a; font-size: 0.7rem; color: #555; flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
-  .chat-hdr-title { flex: 1; }
-  .model-picker { background: #0a0a0a; border: 1px solid #222; border-radius: 4px; color: #aaa; font-size: 0.65rem; font-family: monospace; padding: 0.15rem 0.3rem; cursor: pointer; max-width: 180px; }
-  .model-picker:focus { outline: none; border-color: #6cf; }
-  .model-picker option { background: #0a0a0a; color: #ccc; }
-  .chat-msgs { flex: 1; overflow-y: auto; padding: 0.75rem 1rem; font-size: 0.9rem; line-height: 1.6; }
-  .chat-msgs:empty::before { content: "Send a message to test the model…"; color: #222; font-style: italic; font-size: 0.85rem; }
-  .chat-msgs.off:empty::before { content: "Waiting for model to load…"; }
-  .chat-in { display: flex; gap: 0.5rem; padding: 0.6rem 0.75rem; border-top: 1px solid #1a1a1a; flex-shrink: 0; }
-  .chat-in input { flex: 1; background: #0a0a0a; border: 1px solid #222; border-radius: 6px; padding: 0.5rem 0.75rem; color: #e0e0e0; font-size: 0.9rem; }
-  .chat-in input:focus { outline: none; border-color: #6cf; }
-  .chat-in input:disabled { opacity: 0.3; }
-  .chat-in button { background: #1a3a5c; border: 1px solid #2a5a8c; border-radius: 6px; padding: 0.5rem 0.9rem; color: #e0e0e0; cursor: pointer; font-size: 0.85rem; }
-  .chat-in button:hover { background: #2a4a6c; }
-  .chat-in button:disabled { opacity: 0.3; cursor: default; }
-  .mu { color: #6cf; margin-bottom: 0.15rem; }
-  .mb { color: #ccc; margin-bottom: 0.6rem; white-space: pre-wrap; }
-  .me { color: #c66; font-size: 0.75rem; margin-bottom: 0.6rem; }
-
-  .hidden { display: none !important; }
-
-  @media (max-width: 720px) {
-    .main { flex-direction: column; height: auto; }
-    .left { width: 100% !important; border-right: none; border-bottom: 1px solid #1a1a1a; max-height: 50vh; }
-    .left.collapsed { max-height: 0; }
-    .right { width: 100%; min-height: 50vh; }
-  }
-</style>
-</head>
-<body>
-
-<div class="top-bar">
-  <h1>mesh-llm</h1>
-  <span id="badge"></span>
-  <div class="top-right" id="meta"></div>
-</div>
-
-<div class="main">
-  <div class="left" id="leftPanel">
-    <div class="diagram" id="diagram"></div>
-    <div id="status"></div>
-    <div id="models"></div>
-    <div id="agents"></div>
-    <div id="joinHint"></div>
-    <details class="cfg" id="cfg"><summary>Use with agents</summary><div id="cfgBody"></div></details>
-  </div>
-  <div class="right">
-    <div class="chat-hdr">
-      <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
-      <span class="chat-hdr-title" id="chatHdr">Chat</span>
-      <select id="modelPicker" class="model-picker" title="Select model" onchange="renderDiagram()"></select>
-    </div>
-    <div class="chat-msgs" id="msgs"></div>
-    <div class="chat-in">
-      <input type="text" id="inp" placeholder="Say something…" onkeydown="if(event.key==='Enter')send()" disabled>
-      <button id="btn" onclick="send()" disabled>Send</button>
-    </div>
-  </div>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-let S = {};
-let panelOpen = true;
-const sse = new EventSource('/api/events');
-sse.onmessage = e => { S = JSON.parse(e.data); render(); };
-
-function togglePanel() {
-  panelOpen = !panelOpen;
-  $('leftPanel').classList.toggle('collapsed', !panelOpen);
-  $('toggleBtn').textContent = panelOpen ? '◀ Mesh' : '▶ Mesh';
-}
-
-function render() {
-  renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderMore();
-  const ok = S.llama_ready;
-  $('inp').disabled = !ok; $('btn').disabled = !ok;
-  $('msgs').classList.toggle('off', !ok);
-  if (ok) $('msgs').classList.remove('off');
-  updateModelPicker();
-  $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
-}
-
-function renderBadge() {
-  const e = $('badge');
-  if (S.llama_ready) e.innerHTML = `<span class="badge b-green"><span class="dot"></span>${S.is_host?'Host':'Ready'}</span>`;
-  else if (S.is_host) e.innerHTML = '<span class="badge b-yellow"><span class="dot"></span>Loading…</span>';
-  else if (S.node_id) e.innerHTML = '<span class="badge b-gray"><span class="dot"></span>Waiting</span>';
-  else e.innerHTML = '';
-}
-
-function renderMeta() {
-  const p = [];
-  if (S.model_name) p.push(`Model <span>${esc(S.model_name)}</span>`);
-  if (S.draft_name) p.push(`Draft <span>${esc(S.draft_name)}</span>`);
-  if (S.llama_ready) p.push(`API <span>:${S.api_port}</span>`);
-  $('meta').innerHTML = p.join(' · ');
-}
-
-// ── Topology SVG ──
-
-function renderDiagram() {
-  const el = $('diagram');
-  const nodes = [];
-  const isClient = S.is_client;
-  if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb||0, self: true, host: S.is_host, client: isClient, serving: S.model_name||'' });
-  (S.peers||[]).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: /^Host/.test(p.role), client: p.role === 'Client', serving: p.serving||'' }));
-  if (!nodes.length) { el.innerHTML = ''; return; }
-
-  const total = nodes.filter(n => !n.client).reduce((s,n) => s + n.vram, 0);
-  const ok = S.llama_ready;
-  const sel = selectedModel();
-  const W = 320, nW = 140, nH = 76;
-
-  if (nodes.length === 1) {
-    el.innerHTML = mkSvg(W, nH + 16, nBox(W/2 - nW/2, 8, nodes[0], total, ok, sel));
-    return;
-  }
-
-  const host = nodes.find(n => n.host) || nodes[0];
-  const workers = nodes.filter(n => n !== host);
-  const hX = W/2 - nW/2, hY = 10;
-  const wY = nH + 48;
-  const gap = Math.min(160, (W - 20) / workers.length);
-  const wStart = W/2 - (workers.length - 1) * gap / 2 - nW/2;
-
-  let out = '';
-
-  workers.forEach((w, i) => {
-    const wx = wStart + i * gap;
-    const x1 = hX + nW/2, y1 = hY + nH;
-    const x2 = wx + nW/2, y2 = wY;
-    const my = (y1 + y2) / 2, mx = (x1 + x2) / 2;
-
-    const col = ok ? '#2a5a2a' : '#1c1c1c';
-    const dash = ok ? '' : ' stroke-dasharray="4,3"';
-    out += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1.5"${dash}/>`;
-
-    if (ok) {
-      out += `<circle r="2" fill="#4c4" opacity="0.7"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x1},${y1} L${x2},${y2}"/></circle>`;
-      out += `<circle r="2" fill="#6cf" opacity="0.5"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x2},${y2} L${x1},${y1}"/></circle>`;
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mesh-llm</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
     }
 
-    const linkLabel = w.client ? 'QUIC · HTTP' : 'QUIC · RPC';
-    out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">${linkLabel}</text>`;
-  });
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0a0a0a;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
 
-  out += nBox(hX, hY, host, total, ok, sel);
-  workers.forEach((w, i) => {
-    out += nBox(wStart + i * gap, wY, w, total, ok, sel);
-  });
+    a {
+      color: #6cf;
+      text-decoration: none;
+    }
 
-  el.innerHTML = mkSvg(W, wY + nH + 10, out);
-}
+    a:hover {
+      text-decoration: underline;
+    }
 
-function nBox(x, y, n, total, ok, sel) {
-  const pct = n.client ? 0 : (total > 0 ? Math.round(n.vram / total * 100) : 100);
-  const servingSel = !n.client && n.serving === sel;
-  const active = ok && servingSel;
-  const fill = active ? '#0a1a12' : (n.self ? '#0d1a26' : '#10101c');
-  const stroke = active ? '#4c4' : (ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c');
-  const sw = active ? '2' : (ok ? '1.5' : '1');
-  const label = n.self ? `${n.id} (you)` : n.id;
-  const role = n.client ? 'CLIENT' : (n.serving ? shortName(n.serving) : 'IDLE');
-  const rc = n.client ? '#888' : (servingSel ? '#4c4' : '#6cf');
-  const svc = n.client ? 'API tunnel' : (n.host ? 'llama-server' : 'rpc-server');
-  const svcColor = active ? '#4c4' : '#3a3a3a';
-  const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
-  const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
+    .top-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 1.25rem;
+      border-bottom: 1px solid #1a1a1a;
+    }
 
-  // Model usage bar (model_size / node_vram)
-  const modelGB = S.model_size_gb || 0;
-  const usagePct = (!n.client && n.vram > 0 && modelGB > 0) ? Math.min(100, Math.round(modelGB / n.vram * 100)) : 0;
-  const usageLabel = (!n.client && modelGB > 0) ? `${modelGB.toFixed(1)}GB model` : '';
+    .top-bar h1 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #555;
+      letter-spacing: 0.5px;
+    }
 
-  const bW = 112, bH = 4, bX = x + 14, bY = y + 50;
-  const b2Y = bY + bH + 2; // second bar just below first
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.65rem;
+      padding: 0.12rem 0.45rem;
+      border-radius: 10px;
+    }
 
-  let extra = '';
-  if (n.host && ok) {
-    extra = `<rect x="${x+97}" y="${y+3}" width="36" height="12" rx="3" fill="#0a1a0a" stroke="#2a5a2a" stroke-width="0.5"/>
-      <text x="${x+115}" y="${y+12}" text-anchor="middle" fill="#4c4" font-size="6.5" font-family="monospace">:${S.api_port||9337}</text>`;
-  }
+    .badge .dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+    }
 
-  // Second bar: model usage (orange-ish for utilisation)
-  const bar2 = usagePct > 0 ? `
-    <rect x="${bX}" y="${b2Y}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
-    <rect x="${bX}" y="${b2Y}" width="${bW*usagePct/100}" height="${bH}" rx="1.5" fill="${usagePct > 80 ? '#8a4a2a' : '#5a4a2a'}"/>` : '';
+    .b-green {
+      background: #0a1a0a;
+      color: #4c4;
+    }
 
-  return `<g>
-    <rect x="${x}" y="${y}" width="140" height="76" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
-    <text x="${x+70}" y="${y+15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
-    <text x="${x+70}" y="${y+27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
-    <text x="${x+70}" y="${y+38}" text-anchor="middle" fill="${svcColor}" font-size="6.5" font-family="monospace">${svc}</text>
-    <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
-    <rect x="${bX}" y="${bY}" width="${bW*pct/100}" height="${bH}" rx="1.5" fill="${servingSel?'#2a5a2a':'#1a3a5c'}"/>
-    ${bar2}
-    <text x="${bX}" y="${b2Y+bH+9}" fill="#444" font-size="6.5" font-family="monospace">${vram}${usageLabel ? ' · '+usageLabel : ''}</text>
-    <text x="${bX+bW}" y="${b2Y+bH+9}" text-anchor="end" fill="#444" font-size="6.5" font-family="monospace">${usagePct > 0 ? usagePct+'% used' : pctL}</text>
-    ${extra}
-  </g>`;
-}
+    .b-green .dot {
+      background: #4c4;
+    }
 
-function mkSvg(w, h, c) { return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${c}</svg>`; }
+    .b-yellow {
+      background: #1a1a0a;
+      color: #cc4;
+    }
 
-// ── Status line ──
+    .b-yellow .dot {
+      background: #cc4;
+    }
 
-function renderStatus() {
-  const el = $('status');
-  const peers = (S.peers||[]).length;
-  const model = S.model_name || '';
-  const n = peers + 1;
-  const gpuVram = (S.is_client ? 0 : (S.my_vram_gb||0)) + (S.peers||[]).filter(p=>p.role!=='Client').reduce((s,p)=>s+p.vram_gb,0);
-  const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB mesh` : '';
-  if (S.llama_ready) {
-    el.innerHTML = `<div class="status-line ok">✓ Running · ${n} node${n>1?'s':''}${vramStr}</div>`;
-  } else if (S.is_host) {
-    el.innerHTML = `<div class="status-line">Loading ${esc(model)}…${n>1?' · '+n+' nodes'+vramStr:''}</div>`;
-  } else if (peers > 0) {
-    el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
-  } else if (S.node_id) {
-    el.innerHTML = `<div class="status-line">Waiting for peers…</div>`;
-  } else {
-    el.innerHTML = '';
-  }
-}
+    .b-gray {
+      background: #151515;
+      color: #666;
+    }
 
-// ── Models list ──
+    .b-gray .dot {
+      background: #555;
+    }
 
-function renderModels() {
-  const el = $('models');
-  const models = S.mesh_models || [];
-  if (models.length <= 1) { el.innerHTML = ''; return; } // single model — no need to show list
-  el.innerHTML = '<div class="section-label">Models</div><div class="models-list">' +
-    models.map(m => {
-      const warm = m.status === 'warm';
-      const nodes = m.node_count > 0 ? `${m.node_count} node${m.node_count>1?'s':''}` : 'not loaded';
-      return `<div class="model-item">
-        <span class="model-dot ${warm?'warm':'cold'}"></span>
-        <span class="model-name ${warm?'warm':''}">${esc(shortName(m.name))}</span>
-        <span class="model-info">${nodes}</span>
-      </div>`;
-    }).join('') + '</div>';
-}
+    .top-right {
+      margin-left: auto;
+      font-size: 0.65rem;
+      color: #555;
+      display: flex;
+      gap: 0.8rem;
+      align-items: center;
+    }
 
-// ── Agent commands (visible inline: API endpoint only) ──
+    .top-right span {
+      color: #888;
+    }
 
-function renderAgents() {
-  const el = $('agents');
-  if (!S.llama_ready) { el.innerHTML = ''; return; }
-  const p = S.api_port||9337;
-  el.innerHTML = `<div class="agent-row"><span class="agent-name">API</span><div class="cmd-sm" style="user-select:all">http://localhost:${p}/v1</div></div>`;
-}
+    /* Layout */
+    .main {
+      display: flex;
+      height: calc(100vh - 38px);
+    }
 
-// ── Join hint (tiny, expands) ──
+    /* Left panel — collapsible */
+    .left {
+      width: 30%;
+      flex-shrink: 0;
+      padding: 1rem 1.25rem;
+      overflow-y: auto;
+      border-right: 1px solid #1a1a1a;
+      display: flex;
+      flex-direction: column;
+      transition: width 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+    }
 
-function renderJoin() {
-  const el = $('joinHint');
-  const token = S.token || '';
-  const model = S.model_name || '';
-  if (!token) { el.innerHTML = ''; return; }
-  const peers = (S.peers||[]).length;
-  if (peers > 0 && !S.llama_ready) { el.innerHTML = ''; return; }
-  el.innerHTML = `<details class="join-details"><summary>Add a node</summary>
-    <div style="margin-top:0.2rem">
-      <div class="cfg-label">GPU node (contributes VRAM)</div>
-      <div class="cmd-sm" style="user-select:all">mesh-llm --model ${esc(model)} --join ${esc(token)}</div>
-      <div class="cfg-label" style="margin-top:0.3rem">Lite node (API access only, no GPU needed)</div>
-      <div class="cmd-sm" style="user-select:all">mesh-llm --client --join ${esc(token)}</div>
-    </div>
-  </details>`;
-}
+    .left.collapsed {
+      width: 0;
+      padding: 0;
+      overflow: hidden;
+      opacity: 0;
+      border-right: none;
+    }
 
-// ── Use with agents (collapsed: pi, goose, curl, models.json, token) ──
+    /* Toggle button */
+    .toggle-btn {
+      background: none;
+      border: 1px solid #333;
+      border-radius: 4px;
+      color: #666;
+      cursor: pointer;
+      font-size: 0.65rem;
+      padding: 0.15rem 0.4rem;
+    }
 
-function renderMore() {
-  const el = $('cfgBody');
-  let h = '';
-  if (S.llama_ready) {
-    const m = S.model_name||'model', p = S.api_port||9337;
-    const pi = S.launch_pi || `pi --provider mesh --model ${m}`;
-    const goose = S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`;
-    const json = JSON.stringify({
-      mesh:{baseUrl:`http://localhost:${p}/v1`,api:"openai-completions",apiKey:"mesh",
-        models:[{id:m,name:m,reasoning:false,input:["text"],contextWindow:32768,maxTokens:8192,
-          compat:{supportsUsageInStreaming:false,maxTokensField:"max_tokens",supportsDeveloperRole:false}}]}
-    },null,2);
-    h += `<div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div></div>
-    <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
-    <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>
-    <details class="cfg-inner"><summary>~/.pi/agent/models.json</summary><pre class="cfg-pre">${esc(json)}</pre></details>`;
-  }
-  if (S.token) {
-    h += `<div class="cfg-row" style="margin-top:0.3rem"><div class="cfg-label">Invite token</div><div class="cfg-tok">${esc(S.token)}</div></div>`;
-  }
-  el.innerHTML = h;
-}
+    .toggle-btn:hover {
+      color: #ccc;
+      border-color: #666;
+    }
 
-function shortName(n) { return (n||'').replace(/-Q\w+$/,'').replace(/-Instruct/,''); }
+    /* Chat — takes remaining space */
+    .right {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: #060606;
+    }
 
-// ── Model picker ──
+    /* Diagram */
+    .diagram {
+      flex-shrink: 0;
+      margin-bottom: 0.75rem;
+    }
 
-function updateModelPicker() {
-  const sel = $('modelPicker');
-  const warm = (S.mesh_models || []).filter(m => m.status === 'warm').map(m => m.name);
-  // Fall back to just our model if no mesh_models
-  if (!warm.length && S.model_name) warm.push(S.model_name);
-  const prev = sel.value;
-  // Only rebuild if options changed
-  const current = Array.from(sel.options).map(o => o.value).join(',');
-  const next = warm.join(',');
-  if (current !== next) {
-    sel.innerHTML = warm.map(m => `<option value="${esc(m)}">${esc(shortName(m))}</option>`).join('');
-    if (warm.includes(prev)) sel.value = prev;
-  }
-  sel.style.display = warm.length > 1 ? '' : 'none';
-}
+    .diagram svg {
+      width: 100%;
+      display: block;
+    }
 
-function selectedModel() {
-  const sel = $('modelPicker');
-  return sel.value || S.model_name || 'test';
-}
+    /* Status line */
+    .status-line {
+      font-size: 0.7rem;
+      color: #666;
+      margin-bottom: 0.6rem;
+    }
 
-// ── Chat ──
+    .status-line.ok {
+      color: #4c4;
+    }
 
-async function send() {
-  if (!S.llama_ready) return;
-  const inp = $('inp');
-  const msg = inp.value.trim(); if (!msg) return;
-  inp.value = '';
-  const el = $('msgs');
-  const model = selectedModel();
-  const label = shortName(model);
-  el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models||[]).filter(m=>m.status==='warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
-  const bot = document.createElement('div'); bot.className = 'mb';
-  el.appendChild(bot); el.scrollTop = el.scrollHeight;
-  try {
-    const r = await fetch('/api/chat', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model:model,messages:[{role:'user',content:msg}],stream:true}),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const reader = r.body.getReader();
-    const dec = new TextDecoder(); let buf = '';
-    while (true) {
-      const {done,value} = await reader.read(); if (done) break;
-      buf += dec.decode(value,{stream:true});
-      const lines = buf.split('\n'); buf = lines.pop()||'';
-      for (const l of lines) {
-        if (!l.startsWith('data: ')) continue;
-        const d = l.slice(6).trim(); if (d==='[DONE]') continue;
-        try { const c=JSON.parse(d); const t=c.choices?.[0]?.delta?.content||c.choices?.[0]?.delta?.reasoning_content||'';
-          if (t) { bot.textContent += t; el.scrollTop = el.scrollHeight; }
-        } catch{}
+    /* Section labels */
+    .section-label {
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #444;
+      margin: 0.6rem 0 0.25rem;
+    }
+
+    /* Agent rows */
+    /* Models list */
+    .models-list {
+      margin-bottom: 0.5rem;
+    }
+
+    .model-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.65rem;
+      padding: 0.15rem 0;
+    }
+
+    .model-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .model-dot.warm {
+      background: #4c4;
+    }
+
+    .model-dot.cold {
+      background: #444;
+    }
+
+    .model-name {
+      color: #aaa;
+      font-family: monospace;
+    }
+
+    .model-name.warm {
+      color: #ccc;
+    }
+
+    .model-info {
+      color: #444;
+      font-size: 0.55rem;
+      margin-left: auto;
+    }
+
+    .agent-row {
+      display: flex;
+      gap: 0.4rem;
+      align-items: baseline;
+      margin-bottom: 0.2rem;
+    }
+
+    .agent-name {
+      font-size: 0.6rem;
+      font-weight: 600;
+      color: #555;
+      min-width: 36px;
+      flex-shrink: 0;
+    }
+
+    .cmd-sm {
+      font-family: monospace;
+      font-size: 0.55rem;
+      color: #aaa;
+      background: #080808;
+      border: 1px solid #1a1a1a;
+      border-radius: 3px;
+      padding: 0.2rem 0.35rem;
+      cursor: text;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    /* Join expand */
+    .join-details {
+      margin-top: 0.4rem;
+    }
+
+    .join-details>summary {
+      font-size: 0.6rem;
+      color: #444;
+      cursor: pointer;
+    }
+
+    .join-details>summary:hover {
+      color: #888;
+    }
+
+    .discover-item {
+      background: #080808;
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      padding: 0.4rem;
+      margin-top: 0.3rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .discover-item-hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .discover-name {
+      font-size: 0.6rem;
+      font-weight: 600;
+      color: #6cf;
+    }
+
+    .discover-region {
+      font-size: 0.5rem;
+      color: #666;
+      background: #111;
+      padding: 0.1rem 0.25rem;
+      border-radius: 2px;
+    }
+
+    .discover-stats {
+      font-size: 0.55rem;
+      color: #888;
+    }
+
+    .discover-models {
+      font-size: 0.55rem;
+      color: #aaa;
+      font-family: monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .discover-btn {
+      margin-top: 0.2rem;
+      background: #1a3a5c;
+      border: 1px solid #2a5a8c;
+      border-radius: 4px;
+      padding: 0.2rem 0.5rem;
+      color: #e0e0e0;
+      cursor: pointer;
+      font-size: 0.55rem;
+      align-self: flex-start;
+    }
+
+    .discover-btn:hover {
+      background: #2a4a6c;
+    }
+
+    .discover-btn:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    /* Collapsible sections */
+    details.panel-section {
+      border-top: 1px solid #1a1a1a;
+      margin-top: 0.6rem;
+      padding-top: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    details.panel-section > summary {
+      font-size: 0.6rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #888;
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    details.panel-section > summary::-webkit-details-marker { display: none; }
+    details.panel-section > summary::before {
+      content: '▸';
+      font-size: 0.5rem;
+      color: #555;
+      transition: transform 0.15s;
+    }
+    details.panel-section[open] > summary::before {
+      transform: rotate(90deg);
+    }
+
+    details.panel-section > summary:hover {
+      color: #bbb;
+    }
+
+    details.panel-section[open] > summary {
+      color: #aaa;
+      margin-bottom: 0.4rem;
+    }
+
+    .panel-desc {
+      font-size: 0.6rem;
+      color: #777;
+      line-height: 1.5;
+      margin-bottom: 0.5rem;
+    }
+
+    .panel-row {
+      margin-bottom: 0.4rem;
+    }
+
+    .panel-label {
+      font-size: 0.55rem;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.15rem;
+    }
+
+    .panel-val {
+      font-family: monospace;
+      font-size: 0.6rem;
+      color: #ccc;
+      background: #0a0a0a;
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      padding: 0.3rem 0.5rem;
+      user-select: all;
+      cursor: text;
+      word-break: break-all;
+    }
+
+    .panel-tok {
+      font-family: monospace;
+      font-size: 0.5rem;
+      color: #999;
+      background: #0a0a0a;
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      padding: 0.3rem 0.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .panel-btn {
+      background: #1a3a5c;
+      border: 1px solid #2a5a8c;
+      border-radius: 4px;
+      padding: 0.25rem 0.6rem;
+      color: #e0e0e0;
+      cursor: pointer;
+      font-size: 0.55rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .panel-btn:hover { background: #2a4a6c; }
+    .panel-btn:disabled { opacity: 0.3; cursor: default; }
+
+    .copy-btn {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 0.2rem 0.5rem;
+      color: #aaa;
+      cursor: pointer;
+      font-size: 0.55rem;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: #252525; color: #ccc; }
+
+    /* Chat */
+    .chat-hdr {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid #1a1a1a;
+      font-size: 0.7rem;
+      color: #555;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .chat-hdr-title {
+      flex: 1;
+    }
+
+    .model-picker {
+      background: #0a0a0a;
+      border: 1px solid #222;
+      border-radius: 4px;
+      color: #aaa;
+      font-size: 0.65rem;
+      font-family: monospace;
+      padding: 0.15rem 0.3rem;
+      cursor: pointer;
+      max-width: 180px;
+    }
+
+    .model-picker:focus {
+      outline: none;
+      border-color: #6cf;
+    }
+
+    .model-picker option {
+      background: #0a0a0a;
+      color: #ccc;
+    }
+
+    .chat-msgs {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.75rem 1rem;
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    .chat-msgs:empty::before {
+      content: "Send a message to test the model…";
+      color: #222;
+      font-style: italic;
+      font-size: 0.85rem;
+    }
+
+    .chat-msgs.off:empty::before {
+      content: "Waiting for model to load…";
+    }
+
+    .chat-in {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      border-top: 1px solid #1a1a1a;
+      flex-shrink: 0;
+    }
+
+    .chat-in input {
+      flex: 1;
+      background: #0a0a0a;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+      color: #e0e0e0;
+      font-size: 0.9rem;
+    }
+
+    .chat-in input:focus {
+      outline: none;
+      border-color: #6cf;
+    }
+
+    .chat-in input:disabled {
+      opacity: 0.3;
+    }
+
+    .chat-in button {
+      background: #1a3a5c;
+      border: 1px solid #2a5a8c;
+      border-radius: 6px;
+      padding: 0.5rem 0.9rem;
+      color: #e0e0e0;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .chat-in button:hover {
+      background: #2a4a6c;
+    }
+
+    .chat-in button:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .mu {
+      color: #6cf;
+      margin-bottom: 0.15rem;
+    }
+
+    .mb {
+      color: #ccc;
+      margin-bottom: 0.6rem;
+      white-space: pre-wrap;
+    }
+
+    .me {
+      color: #c66;
+      font-size: 0.75rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 720px) {
+      .main {
+        flex-direction: column;
+        height: auto;
+      }
+
+      .left {
+        width: 100% !important;
+        border-right: none;
+        border-bottom: 1px solid #1a1a1a;
+        max-height: 50vh;
+      }
+
+      .left.collapsed {
+        max-height: 0;
+      }
+
+      .right {
+        width: 100%;
+        min-height: 50vh;
       }
     }
-    if (!bot.textContent) bot.textContent = '(empty response)';
-  } catch(e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; }
-  el.scrollTop = el.scrollHeight;
-}
+  </style>
+</head>
 
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-fetch('/api/status').then(r=>r.json()).then(d=>{ S=d; render(); });
-</script>
+<body>
+
+  <div class="top-bar">
+    <h1>mesh·llm</h1>
+    <span id="badge"></span>
+    <span id="meshName" style="font-size:0.7rem;color:#6cf;font-weight:600"></span>
+    <div class="top-right" id="meta"></div>
+  </div>
+
+  <div class="main">
+    <div class="left" id="leftPanel">
+      <div class="diagram" id="diagram"></div>
+      <div id="status"></div>
+      <div id="models"></div>
+      <div id="agents"></div>
+      <div id="inviteSection"></div>
+      <div id="joinSection"></div>
+      <div id="discoverSection"></div>
+      <div id="apiSection"></div>
+    </div>
+    <div class="right">
+      <div class="chat-hdr">
+        <button class="toggle-btn" id="toggleBtn" onclick="togglePanel()" title="Toggle topology panel">◀ Mesh</button>
+        <span class="chat-hdr-title" id="chatHdr">Chat</span>
+        <select id="modelPicker" class="model-picker" title="Select model" onchange="renderDiagram()"></select>
+      </div>
+      <div class="chat-msgs" id="msgs"></div>
+      <div class="chat-in">
+        <input type="text" id="inp" placeholder="Say something…" onkeydown="if(event.key==='Enter')send()" disabled>
+        <button id="btn" onclick="send()" disabled>Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    let S = {};
+    let panelOpen = true;
+    const sse = new EventSource('/api/events');
+    sse.onmessage = e => { S = JSON.parse(e.data); render(); };
+
+    function togglePanel() {
+      panelOpen = !panelOpen;
+      $('leftPanel').classList.toggle('collapsed', !panelOpen);
+      $('toggleBtn').textContent = panelOpen ? '◀ Mesh' : '▶ Mesh';
+    }
+
+    function render() {
+      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderJoinSection(); renderDiscover(); renderApiSection();
+      const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
+      const ok = S.llama_ready || (S.is_client && hasWarmModel);
+      $('inp').disabled = !ok; $('btn').disabled = !ok;
+      $('msgs').classList.toggle('off', !ok);
+      if (ok) $('msgs').classList.remove('off');
+      updateModelPicker();
+      $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
+    }
+
+    function renderMeshName() {
+      const el = $('meshName');
+      const name = S.mesh_name;
+      if (name) {
+        el.innerHTML = 'Mesh: <span style="color:#aaa">' + esc(name) + '</span>';
+      } else if (S.mesh_id && S.peers && S.peers.length > 0) {
+        el.innerHTML = 'Mesh: <span style="color:#aaa">' + S.mesh_id.substring(0, 8) + '</span>';
+      } else {
+        el.textContent = '';
+      }
+    }
+
+    function renderBadge() {
+      const e = $('badge');
+      const st = S.node_status || '';
+      const model = S.model_name && S.model_name !== '(idle)' ? shortName(S.model_name) : '';
+      if (st.startsWith('Serving')) {
+        const color = S.llama_ready ? 'b-green' : 'b-yellow';
+        if (S.llama_ready) {
+          const split = st.includes('split') ? ' (split)' : '';
+          e.innerHTML = `<span class="badge ${color}"><span class="dot"></span>Serving${split}</span> <span style="color:#aaa;font-size:0.7rem">${esc(model)}</span>`;
+        } else {
+          e.innerHTML = `<span class="badge ${color}"><span class="dot"></span>Loading…</span> <span style="color:#666;font-size:0.7rem">${esc(model)}</span>`;
+        }
+      } else if (st === 'Client') {
+        const hasWarm = (S.mesh_models || []).some(m => m.status === 'warm');
+        e.innerHTML = `<span class="badge ${hasWarm ? 'b-green' : 'b-gray'}"><span class="dot"></span>Client</span>`;
+      } else if (st === 'Worker (split)') {
+        e.innerHTML = `<span class="badge b-green"><span class="dot"></span>Worker (split)</span> <span style="color:#aaa;font-size:0.7rem">${esc(model)}</span>`;
+      } else if (st === 'Standby') {
+        e.innerHTML = '<span class="badge b-yellow"><span class="dot"></span>Standby</span>';
+      } else if (st === 'Idle') {
+        e.innerHTML = '<span class="badge b-gray"><span class="dot"></span>Idle</span>';
+      } else {
+        e.innerHTML = '';
+      }
+    }
+
+    function renderMeta() {
+      const p = [];
+      if (S.model_name) p.push(`Model <span>${esc(S.model_name)}</span>`);
+      if (S.draft_name) p.push(`Draft <span>${esc(S.draft_name)}</span>`);
+      if (S.llama_ready) p.push(`API <span>:${S.api_port}</span>`);
+      $('meta').innerHTML = p.join(' · ');
+    }
+
+    // ── Topology SVG ──
+
+    function renderDiagram() {
+      const el = $('diagram');
+      const nodes = [];
+      const isClient = S.is_client;
+      if (S.node_id) nodes.push({ id: S.node_id, vram: S.my_vram_gb || 0, self: true, host: S.is_host, client: isClient, serving: S.model_name || '' });
+      (S.peers || []).forEach(p => nodes.push({ id: p.id, vram: p.vram_gb, self: false, host: /^Host/.test(p.role), client: p.role === 'Client', serving: p.serving || '' }));
+      if (!nodes.length) { el.innerHTML = ''; return; }
+
+      const total = nodes.filter(n => !n.client).reduce((s, n) => s + n.vram, 0);
+      const ok = S.llama_ready;
+      const sel = selectedModel();
+      const W = 320, nW = 140, nH = 76;
+
+      if (nodes.length === 1) {
+        el.innerHTML = mkSvg(W, nH + 16, nBox(W / 2 - nW / 2, 8, nodes[0], total, ok, sel));
+        return;
+      }
+
+      const host = nodes.find(n => n.host) || nodes[0];
+      const workers = nodes.filter(n => n !== host);
+      const hX = W / 2 - nW / 2, hY = 10;
+      const wY = nH + 48;
+      const gap = Math.min(160, (W - 20) / workers.length);
+      const wStart = W / 2 - (workers.length - 1) * gap / 2 - nW / 2;
+
+      let out = '';
+
+      workers.forEach((w, i) => {
+        const wx = wStart + i * gap;
+        const x1 = hX + nW / 2, y1 = hY + nH;
+        const x2 = wx + nW / 2, y2 = wY;
+        const my = (y1 + y2) / 2, mx = (x1 + x2) / 2;
+
+        const col = ok ? '#2a5a2a' : '#1c1c1c';
+        const dash = ok ? '' : ' stroke-dasharray="4,3"';
+        out += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1.5"${dash}/>`;
+
+        if (ok) {
+          out += `<circle r="2" fill="#4c4" opacity="0.7"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x1},${y1} L${x2},${y2}"/></circle>`;
+          out += `<circle r="2" fill="#6cf" opacity="0.5"><animateMotion dur="1.8s" repeatCount="indefinite" path="M${x2},${y2} L${x1},${y1}"/></circle>`;
+        }
+
+        const linkLabel = w.client ? 'QUIC · HTTP' : 'QUIC · RPC';
+        out += `<text x="${mx}" y="${my - 3}" text-anchor="middle" fill="#333" font-size="7.5" font-family="monospace">${linkLabel}</text>`;
+      });
+
+      out += nBox(hX, hY, host, total, ok, sel);
+      workers.forEach((w, i) => {
+        out += nBox(wStart + i * gap, wY, w, total, ok, sel);
+      });
+
+      el.innerHTML = mkSvg(W, wY + nH + 10, out);
+    }
+
+    function nBox(x, y, n, total, ok, sel) {
+      const pct = n.client ? 0 : (total > 0 ? Math.round(n.vram / total * 100) : 100);
+      const servingSel = !n.client && n.serving === sel;
+      const active = ok && servingSel;
+      const fill = active ? '#0a1a12' : (n.self ? '#0d1a26' : '#10101c');
+      const stroke = active ? '#4c4' : (ok ? (n.host ? '#2a5a2a' : n.client ? '#333' : '#1a3a5c') : '#1c1c1c');
+      const sw = active ? '2' : (ok ? '1.5' : '1');
+      const label = n.self ? `${n.id} (you)` : n.id;
+      const role = n.client ? 'CLIENT' : (n.serving ? shortName(n.serving) : 'IDLE');
+      const rc = n.client ? '#888' : (servingSel ? '#4c4' : '#6cf');
+      const svc = n.client ? 'API tunnel' : (n.host ? 'llama-server' : 'rpc-server');
+      const svcColor = active ? '#4c4' : '#3a3a3a';
+      const vram = n.vram > 0 ? `${n.vram.toFixed(0)} GB` : '';
+      const pctL = pct < 100 && total > 0 ? `${pct}%` : '';
+
+      // Model usage bar — look up this node's model size from mesh_models
+      const nodeModel = (S.mesh_models || []).find(m => m.name === n.serving);
+      const modelGB = nodeModel ? nodeModel.size_gb : (n.self ? (S.model_size_gb || 0) : 0);
+      const usagePct = (!n.client && n.vram > 0 && modelGB > 0) ? Math.min(100, Math.round(modelGB / n.vram * 100)) : 0;
+      const usageLabel = (!n.client && modelGB > 0) ? `${modelGB.toFixed(1)}GB model` : '';
+
+      const bW = 112, bH = 4, bX = x + 14, bY = y + 50;
+      const b2Y = bY + bH + 2; // second bar just below first
+
+      let extra = '';
+      if (n.host && ok) {
+        extra = `<rect x="${x + 97}" y="${y + 3}" width="36" height="12" rx="3" fill="#0a1a0a" stroke="#2a5a2a" stroke-width="0.5"/>
+      <text x="${x + 115}" y="${y + 12}" text-anchor="middle" fill="#4c4" font-size="6.5" font-family="monospace">:${S.api_port || 9337}</text>`;
+      }
+
+      // Second bar: model usage (orange-ish for utilisation)
+      const bar2 = usagePct > 0 ? `
+    <rect x="${bX}" y="${b2Y}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
+    <rect x="${bX}" y="${b2Y}" width="${bW * usagePct / 100}" height="${bH}" rx="1.5" fill="${usagePct > 80 ? '#8a4a2a' : '#5a4a2a'}"/>` : '';
+
+      return `<g>
+    <rect x="${x}" y="${y}" width="140" height="76" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
+    <text x="${x + 70}" y="${y + 15}" text-anchor="middle" fill="${rc}" font-size="8" font-family="monospace" font-weight="600">${role}</text>
+    <text x="${x + 70}" y="${y + 27}" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace">${esc(label)}</text>
+    <text x="${x + 70}" y="${y + 38}" text-anchor="middle" fill="${svcColor}" font-size="6.5" font-family="monospace">${svc}</text>
+    <rect x="${bX}" y="${bY}" width="${bW}" height="${bH}" rx="1.5" fill="#151515"/>
+    <rect x="${bX}" y="${bY}" width="${bW * pct / 100}" height="${bH}" rx="1.5" fill="${servingSel ? '#2a5a2a' : '#1a3a5c'}"/>
+    ${bar2}
+    <text x="${bX}" y="${b2Y + bH + 9}" fill="#444" font-size="6.5" font-family="monospace">${vram}${usageLabel ? ' · ' + usageLabel : ''}</text>
+    <text x="${bX + bW}" y="${b2Y + bH + 9}" text-anchor="end" fill="#444" font-size="6.5" font-family="monospace">${usagePct > 0 ? usagePct + '% used' : pctL}</text>
+    ${extra}
+  </g>`;
+    }
+
+    function mkSvg(w, h, c) { return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${c}</svg>`; }
+
+    // ── Status line ──
+
+    function renderStatus() {
+      const el = $('status');
+      const peers = (S.peers || []).length;
+      const model = S.model_name || '';
+      const n = peers + 1;
+      const gpuVram = (S.is_client ? 0 : (S.my_vram_gb || 0)) + (S.peers || []).filter(p => p.role !== 'Client').reduce((s, p) => s + p.vram_gb, 0);
+      const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB mesh` : '';
+      if (S.llama_ready) {
+        el.innerHTML = `<div class="status-line ok">✓ Running · ${n} node${n > 1 ? 's' : ''}${vramStr}</div>`;
+      } else if (S.is_host) {
+        el.innerHTML = `<div class="status-line">Loading ${esc(model)}…${n > 1 ? ' · ' + n + ' nodes' + vramStr : ''}</div>`;
+      } else if (peers > 0) {
+        el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
+      } else if (S.node_id) {
+        el.innerHTML = `<div class="status-line">Waiting for peers…</div>`;
+      } else {
+        el.innerHTML = '';
+      }
+    }
+
+    // ── Models list ──
+
+    function renderModels() {
+      const el = $('models');
+      const models = S.mesh_models || [];
+      if (models.length <= 1) { el.innerHTML = ''; return; } // single model — no need to show list
+      el.innerHTML = '<div class="section-label">Models</div><div class="models-list">' +
+        models.map(m => {
+          const warm = m.status === 'warm';
+          const nodes = m.node_count > 0 ? `${m.node_count} node${m.node_count > 1 ? 's' : ''}` : 'not loaded';
+          return `<div class="model-item">
+        <span class="model-dot ${warm ? 'warm' : 'cold'}"></span>
+        <span class="model-name ${warm ? 'warm' : ''}">${esc(shortName(m.name))}</span>
+        <span class="model-info">${nodes}</span>
+      </div>`;
+        }).join('') + '</div>';
+    }
+
+    // ── Agent commands (visible inline: API endpoint only) ──
+
+    function renderAgents() {
+      const el = $('agents');
+      if (!S.llama_ready) { el.innerHTML = ''; return; }
+      const p = S.api_port || 9337;
+      el.innerHTML = `<div class="agent-row"><span class="agent-name">API</span><div class="cmd-sm" style="user-select:all">http://localhost:${p}/v1</div></div>`;
+    }
+
+    // ── Join hint (tiny, expands) ──
+
+    // ── Invite others ──
+
+    let inviteRendered = false;
+    function renderInvite() {
+      const el = $('inviteSection');
+      const token = S.token || '';
+      const hasToken = token && S.model_name && S.model_name !== '(idle)';
+      if (!hasToken) { el.innerHTML = ''; return; }
+      if (inviteRendered) {
+        const tok = document.getElementById('inviteToken');
+        if (tok) tok.textContent = token;
+        return;
+      }
+      inviteRendered = true;
+      el.innerHTML = `<details class="panel-section">
+        <summary>Invite others to your mesh</summary>
+        <div class="panel-desc">Share this token with others so they can join your mesh. They run <strong style="color:#aaa">mesh-llm --join &lt;token&gt;</strong> or paste it into their console.</div>
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <div class="panel-tok" id="inviteToken" style="flex:1">${esc(token)}</div>
+          <button class="copy-btn" onclick="copyToken(this)" title="Copy invite token">📋 Copy</button>
+        </div>
+      </details>`;
+    }
+
+    function copyToken(btn) {
+      const tok = document.getElementById('inviteToken');
+      if (!tok) return;
+      navigator.clipboard.writeText(tok.textContent).then(() => {
+        const prev = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = prev, 2000);
+      }).catch(() => {
+        const range = document.createRange();
+        range.selectNodeContents(tok);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+      });
+    }
+
+    // ── Join a mesh ──
+
+    let joinSectionRendered = false;
+    function renderJoinSection() {
+      const el = $('joinSection');
+      if (joinSectionRendered) return;
+      joinSectionRendered = true;
+      el.innerHTML = `<details class="panel-section">
+        <summary>Join another mesh</summary>
+        <div class="panel-desc">Paste an invite token from someone else to connect to their mesh.</div>
+        <div style="display:flex;gap:0.3rem">
+          <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
+            style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#ccc;font-family:monospace;font-size:0.55rem;padding:0.3rem 0.5rem">
+          <button class="panel-btn" onclick="joinFromInput()">Join</button>
+        </div>
+      </details>`;
+    }
+
+    async function joinFromInput() {
+      const inp = document.getElementById('joinTokenInput');
+      const token = (inp.value || '').trim();
+      if (!token) return;
+      inp.disabled = true;
+      try {
+        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+        if (!r.ok) throw new Error(await r.text());
+        inp.value = ''; inp.placeholder = 'Joined!';
+      } catch (e) { alert('Failed to join: ' + e.message); }
+      inp.disabled = false;
+    }
+
+    // ── Discover public meshes ──
+
+    let discoverLoaded = false;
+    function renderDiscover() {
+      const el = $('discoverSection');
+      if (el.innerHTML && el.querySelector('details[open]')) return;
+      el.innerHTML = `<details class="panel-section" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
+        <summary>Discover public meshes</summary>
+        <div class="panel-desc">Browse meshes published to Nostr. Anyone can publish their mesh for others to find and join.</div>
+        <div id="discoverContent"></div>
+      </details>`;
+    }
+
+    async function loadDiscover() {
+      const el = $('discoverContent');
+      if (!el) return;
+      el.innerHTML = '<div style="color:#777;font-size:0.6rem;padding:0.3rem 0">Searching Nostr relays…</div>';
+      try {
+        const r = await fetch('/api/discover');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const meshes = await r.json();
+        if (!meshes.length) { el.innerHTML = '<div style="color:#777;font-size:0.6rem">No public meshes found.</div>'; return; }
+        const myMeshId = S.mesh_id || '';
+        el.innerHTML = meshes.map(m => {
+          const l = m.listing;
+          const isCurrent = myMeshId && l.mesh_id && l.mesh_id === myMeshId;
+          const served = (l.serving || []).map(shortName).join(', ');
+          const nodes = l.node_count || 0;
+          const vram = l.total_vram_bytes > 0 ? `${(l.total_vram_bytes / 1e9).toFixed(0)}GB` : '';
+          const stats = [nodes + ' node' + (nodes !== 1 ? 's' : ''), vram].filter(Boolean).join(' · ');
+          return `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
+            <div class="discover-item-hdr">
+              <span class="discover-name">${esc(l.name || m.publisher_npub.substring(0, 12))}</span>
+              ${isCurrent ? '<span style="color:#4c4;font-size:0.5rem;font-weight:600">✓ connected</span>' : ''}
+              ${l.region ? `<span class="discover-region">${esc(l.region)}</span>` : ''}
+            </div>
+            <div class="discover-stats">${stats}</div>
+            ${served ? `<div class="discover-models" title="${esc((l.serving||[]).join(', '))}">${esc(served)}</div>` : ''}
+            ${isCurrent ? '' : `<button class="discover-btn" onclick="joinMesh('${esc(l.invite_token)}', this)">Join</button>`}
+          </div>`;
+        }).join('');
+      } catch (e) {
+        discoverLoaded = false; // Allow retry on next toggle
+        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Could not reach Nostr relays. Check your network connection and try again.</div>`;
+      }
+    }
+
+    async function joinMesh(token, btnEl) {
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Joining…'; }
+      try {
+        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+        if (!r.ok) throw new Error(await r.text());
+        if (btnEl) btnEl.textContent = 'Joined!';
+      } catch (e) {
+        alert('Failed to join: ' + e.message);
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Join'; }
+      }
+    }
+
+    // ── Using your mesh ──
+
+    function renderApiSection() {
+      const el = $('apiSection');
+      if (el.innerHTML && el.querySelector('details[open]')) return;
+      if (!S.llama_ready) { el.innerHTML = ''; return; }
+      const p = S.api_port || 9337;
+      el.innerHTML = `<details class="panel-section"><summary>Using your mesh</summary>
+        <div class="panel-desc">
+          Your mesh exposes an OpenAI-compatible API. Use it with any tool that supports the OpenAI format — pi, goose, Continue, aider, Open WebUI, curl, or anything else.
+        </div>
+        <div class="panel-row">
+          <div class="panel-label">API endpoint</div>
+          <div style="display:flex;align-items:center;gap:0.4rem">
+            <div class="panel-val" style="flex:1" id="apiUrl">http://localhost:${p}/v1</div>
+            <button class="copy-btn" onclick="copyEl('apiUrl', this)">📋 Copy</button>
+          </div>
+        </div>
+        <div style="font-size:0.55rem;color:#777;line-height:1.5;margin-top:0.1rem">
+          API key: <code style="color:#aaa;background:#111;padding:0.1rem 0.3rem;border-radius:2px">mesh</code> · 
+          Model list: <code style="color:#aaa;background:#111;padding:0.1rem 0.3rem;border-radius:2px">/v1/models</code>
+        </div>
+      </details>`;
+    }
+
+    function copyEl(id, btn) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent).then(() => {
+        const prev = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = prev, 2000);
+      });
+    }
+
+    function shortName(n) { return (n || '').replace(/-Q\w+$/, '').replace(/-Instruct/, ''); }
+
+    // ── Model picker ──
+
+    function updateModelPicker() {
+      const sel = $('modelPicker');
+      const warm = (S.mesh_models || []).filter(m => m.status === 'warm').map(m => m.name);
+      // Fall back to just our model if no mesh_models
+      if (!warm.length && S.model_name) warm.push(S.model_name);
+      const prev = sel.value;
+      // Only rebuild if options changed
+      const current = Array.from(sel.options).map(o => o.value).join(',');
+      const next = warm.join(',');
+      if (current !== next) {
+        sel.innerHTML = warm.map(m => `<option value="${esc(m)}">${esc(shortName(m))}</option>`).join('');
+        if (warm.includes(prev)) sel.value = prev;
+      }
+      sel.style.display = warm.length > 1 ? '' : 'none';
+    }
+
+    function selectedModel() {
+      const sel = $('modelPicker');
+      return sel.value || S.model_name || 'test';
+    }
+
+    // ── Chat ──
+
+    async function send() {
+      const clientOk = S.is_client && (S.mesh_models || []).some(m => m.status === 'warm');
+      if (!S.llama_ready && !clientOk) return;
+      const inp = $('inp');
+      const msg = inp.value.trim(); if (!msg) return;
+      inp.value = '';
+      const el = $('msgs');
+      const model = selectedModel();
+      const label = shortName(model);
+      el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models || []).filter(m => m.status === 'warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
+      const bot = document.createElement('div'); bot.className = 'mb';
+      el.appendChild(bot); el.scrollTop = el.scrollHeight;
+      try {
+        const r = await fetch('/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: model, messages: [{ role: 'user', content: msg }], stream: true }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const reader = r.body.getReader();
+        const dec = new TextDecoder(); let buf = '';
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n'); buf = lines.pop() || '';
+          for (const l of lines) {
+            if (!l.startsWith('data: ')) continue;
+            const d = l.slice(6).trim(); if (d === '[DONE]') continue;
+            try {
+              const c = JSON.parse(d); const t = c.choices?.[0]?.delta?.content || c.choices?.[0]?.delta?.reasoning_content || '';
+              if (t) { bot.textContent += t; el.scrollTop = el.scrollHeight; }
+            } catch { }
+          }
+        }
+        if (!bot.textContent) bot.textContent = '(empty response)';
+      } catch (e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; }
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    fetch('/api/status').then(r => r.json()).then(d => { S = d; render(); });
+  </script>
 </body>
+
 </html>

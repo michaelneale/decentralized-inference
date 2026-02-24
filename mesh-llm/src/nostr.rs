@@ -24,28 +24,37 @@ pub const DEFAULT_RELAYS: &[&str] = &[
 pub struct MeshListing {
     /// Base64 invite token (others use this to --join)
     pub invite_token: String,
-    /// Models currently warm (loaded in VRAM)
-    pub models: Vec<String>,
-    /// Models the mesh wants served but nobody has loaded yet
+    /// Models currently loaded and serving inference
+    pub serving: Vec<String>,
+    /// Models the mesh wants but nobody is serving yet (need more GPUs)
     #[serde(default)]
-    pub wanted_models: Vec<String>,
-    /// Models on disk across the mesh (cold — not loaded but available)
+    pub wanted: Vec<String>,
+    /// Models on disk across the mesh (could be loaded if a GPU becomes free)
     #[serde(default)]
-    pub available_models: Vec<String>,
+    pub on_disk: Vec<String>,
     /// Total VRAM across all GPU nodes (bytes)
     pub total_vram_bytes: u64,
     /// Number of GPU nodes in the mesh
     pub node_count: usize,
+    /// Number of connected clients (API-only nodes)
+    #[serde(default)]
+    pub client_count: usize,
+    /// Maximum clients this mesh accepts (0 = unlimited)
+    #[serde(default)]
+    pub max_clients: usize,
     /// Optional human-readable name for the mesh
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Optional geographic region
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Stable mesh identity — all nodes in the same mesh share this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_id: Option<String>,
 }
 
 /// Discovered mesh from Nostr.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiscoveredMesh {
     pub listing: MeshListing,
     pub publisher_npub: String,
@@ -56,14 +65,14 @@ pub struct DiscoveredMesh {
 impl std::fmt::Display for DiscoveredMesh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let vram_gb = self.listing.total_vram_bytes as f64 / 1e9;
-        let models = if self.listing.models.is_empty() {
+        let models = if self.listing.serving.is_empty() {
             "(no models loaded)".to_string()
         } else {
-            self.listing.models.join(", ")
+            self.listing.serving.join(", ")
         };
         write!(
             f,
-            "{}  {} node(s), {:.0}GB VRAM  models: {}",
+            "{}  {} node(s), {:.0}GB VRAM  serving: {}",
             self.listing.name.as_deref().unwrap_or("(unnamed)"),
             self.listing.node_count,
             vram_gb,
@@ -72,8 +81,8 @@ impl std::fmt::Display for DiscoveredMesh {
         if let Some(ref region) = self.listing.region {
             write!(f, "  region: {}", region)?;
         }
-        if !self.listing.wanted_models.is_empty() {
-            write!(f, "  wanted: {}", self.listing.wanted_models.join(", "))?;
+        if !self.listing.wanted.is_empty() {
+            write!(f, "  wanted: {}", self.listing.wanted.join(", "))?;
         }
         Ok(())
     }
@@ -207,10 +216,18 @@ pub async fn publish_loop(
     };
 
     let npub = publisher.npub();
-    eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
     if let Some(cap) = max_clients {
         eprintln!("   Will delist when {} clients connected", cap);
     }
+
+    // Wait for llama-server to be ready before first publish (up to 60s).
+    for _ in 0..120 {
+        if node.is_llama_ready().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    eprintln!("📡 Publishing mesh to Nostr (npub: {}...{})", &npub[..12], &npub[npub.len()-8..]);
 
     let mut delisted = false;
 
@@ -310,24 +327,122 @@ pub async fn publish_loop(
             .count()
             + 1; // +1 for self
 
+        let mesh_id = node.mesh_id().await;
+
         let listing = MeshListing {
             invite_token,
-            models: actually_serving,
-            wanted_models: wanted,
-            available_models: available,
+            serving: actually_serving,
+            wanted: wanted,
+            on_disk: available,
             total_vram_bytes: total_vram,
             node_count,
+            client_count,
+            max_clients: max_clients.unwrap_or(0),
             name: name.clone(),
             region: region.clone(),
+            mesh_id,
         };
 
         let ttl = interval_secs * 2;
         match publisher.publish(&listing, ttl).await {
-            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes, {} clients)", listing.models.len(), listing.node_count, client_count),
+            Ok(()) => tracing::debug!("Published mesh listing ({} models, {} nodes, {} clients)", listing.serving.len(), listing.node_count, client_count),
             Err(e) => tracing::warn!("Failed to publish to Nostr: {e}"),
         }
 
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Publish watchdog — take over publishing if the original publisher dies
+// ---------------------------------------------------------------------------
+
+/// Watch for our mesh's Nostr listing to disappear, then start publishing.
+/// Multiple nodes may start publishing simultaneously — that's fine, each
+/// publishes with their own key and invite token, giving discoverers
+/// multiple entry points to the same mesh.
+///
+/// Only runs on active (non-client) nodes that joined via `--auto`.
+pub async fn publish_watchdog(
+    node: crate::mesh::Node,
+    relays: Vec<String>,
+    mesh_name: Option<String>,
+    region: Option<String>,
+    check_interval_secs: u64,
+) {
+    // Short initial wait with jitter (10-30s) — start watching quickly
+    let jitter = (rand::random::<u64>() % 20) + 10;
+    tokio::time::sleep(Duration::from_secs(jitter)).await;
+
+    loop {
+        // Check if any listing for our mesh exists on Nostr
+        let filter = MeshFilter::default();
+        match discover(&relays, &filter).await {
+            Ok(meshes) => {
+                let our_peers = node.peers().await;
+                let served = node.models_being_served().await;
+
+                // Our mesh is "listed" if any Nostr listing shares at least one
+                // model with what we're currently serving.
+                let mesh_listed = if served.is_empty() {
+                    false
+                } else {
+                    meshes.iter().any(|m| {
+                        served.iter().any(|s| m.listing.serving.contains(s))
+                    })
+                };
+
+                if !mesh_listed && !our_peers.is_empty() {
+                    // Only take over if we're directly reachable (not relay-only)
+                    if !node.has_direct_connection().await {
+                        tracing::debug!("Mesh listing missing but we're relay-only — not taking over");
+                        tokio::time::sleep(Duration::from_secs(check_interval_secs)).await;
+                        continue;
+                    }
+
+                    // Brief backoff with jitter to avoid stampede (3-10s)
+                    let backoff = (rand::random::<u64>() % 7) + 3;
+                    eprintln!("📡 Mesh listing missing from Nostr — waiting {backoff}s before taking over...");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+
+                    // Re-check — maybe another watchdog already took over
+                    if let Ok(recheck) = discover(&relays, &filter).await {
+                        let still_missing = if served.is_empty() {
+                            true
+                        } else {
+                            !recheck.iter().any(|m| {
+                                served.iter().any(|s| m.listing.serving.contains(s))
+                            })
+                        };
+                        if !still_missing {
+                            eprintln!("📡 Someone else took over publishing — standing down");
+                            tokio::time::sleep(Duration::from_secs(check_interval_secs)).await;
+                            continue;
+                        }
+                    }
+
+                    eprintln!("📡 Taking over Nostr publishing for the mesh");
+                    let keys = match load_or_create_keys() {
+                        Ok(k) => k,
+                        Err(e) => {
+                            tracing::warn!("Failed to load Nostr keys for publish takeover: {e}");
+                            tokio::time::sleep(Duration::from_secs(check_interval_secs)).await;
+                            continue;
+                        }
+                    };
+                    // Start publish loop (blocks forever)
+                    publish_loop(node, keys, relays, mesh_name, region, None, 60).await;
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Publish watchdog: Nostr check failed: {e}");
+            }
+        }
+
+        // Check frequently so we catch gaps fast
+        let next_check = (rand::random::<u64>() % 15) + 20; // 20-35s
+        tokio::time::sleep(Duration::from_secs(next_check)).await;
     }
 }
 
@@ -350,9 +465,9 @@ impl MeshFilter {
     pub fn matches(&self, mesh: &DiscoveredMesh) -> bool {
         if let Some(ref model) = self.model {
             let model_lower = model.to_lowercase();
-            let has_model = mesh.listing.models.iter().any(|m| m.to_lowercase().contains(&model_lower))
-                || mesh.listing.wanted_models.iter().any(|m| m.to_lowercase().contains(&model_lower))
-                || mesh.listing.available_models.iter().any(|m| m.to_lowercase().contains(&model_lower));
+            let has_model = mesh.listing.serving.iter().any(|m| m.to_lowercase().contains(&model_lower))
+                || mesh.listing.wanted.iter().any(|m| m.to_lowercase().contains(&model_lower))
+                || mesh.listing.on_disk.iter().any(|m| m.to_lowercase().contains(&model_lower));
             if !has_model {
                 return false;
             }
@@ -380,8 +495,15 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
     // Anonymous client for read-only discovery
     let keys = Keys::generate();
     let client = Client::new(keys);
+    let mut added = 0;
     for relay in relays {
-        client.add_relay(relay).await?;
+        match client.add_relay(relay).await {
+            Ok(_) => added += 1,
+            Err(e) => tracing::warn!("Nostr relay {relay}: {e}"),
+        }
+    }
+    if added == 0 {
+        anyhow::bail!("Could not connect to any Nostr relay (tried {})", relays.len());
     }
     client.connect().await;
 
@@ -390,7 +512,13 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
         .custom_tag(SingleLetterTag::lowercase(Alphabet::K), "mesh-llm".to_string())
         .limit(100);
 
-    let events = client.fetch_events(nostr_filter, Duration::from_secs(10)).await?;
+    let events = match client.fetch_events(nostr_filter, Duration::from_secs(5)).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Nostr fetch failed: {e}");
+            return Ok(Vec::new()); // No results rather than hard error
+        }
+    };
 
     let now = Timestamp::now().as_secs();
 
@@ -446,4 +574,155 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
     });
 
     Ok(meshes)
+}
+
+// ---------------------------------------------------------------------------
+// Smart auto-join: score meshes, detect staleness, prefer geo match
+// ---------------------------------------------------------------------------
+
+/// Score a mesh for auto-join. Higher = better.
+/// Considers region match, capacity, and model availability.
+/// Freshness is mostly irrelevant since Nostr listings expire at 120s (TTL=2×60s),
+/// so anything we see from discover() is already reasonably fresh.
+pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&str>) -> i64 {
+    let mut score: i64 = 100; // base score — if we can see it, it's alive
+
+    // Default mesh name: strong bonus for the well-known "mesh-llm" mesh
+    if let Some(ref name) = mesh.listing.name {
+        if name.eq_ignore_ascii_case("mesh-llm") {
+            score += 300; // prefer the default community mesh
+        }
+    }
+
+    // Sticky preference: strong bonus for the mesh we were last on
+    if let (Some(last_id), Some(mesh_id)) = (last_mesh_id, &mesh.listing.mesh_id) {
+        if last_id == mesh_id {
+            score += 500; // strong preference, not infinite — dead/degraded mesh loses on other factors
+        }
+    }
+
+    // Capacity: prefer meshes that aren't full
+    if mesh.listing.max_clients > 0 {
+        if mesh.listing.client_count >= mesh.listing.max_clients {
+            score -= 1000; // full — don't join
+        } else {
+            let headroom = mesh.listing.max_clients - mesh.listing.client_count;
+            score += (headroom as i64).min(20); // some capacity bonus
+        }
+    }
+
+    // Size: prefer meshes with more nodes (more resilient)
+    score += (mesh.listing.node_count as i64).min(10) * 5;
+
+    // Models: prefer meshes with more warm models
+    score += (mesh.listing.serving.len() as i64) * 10;
+
+    // Wanted models: mesh needs help — bonus if we'd be useful
+    score += (mesh.listing.wanted.len() as i64) * 15;
+
+    score
+}
+
+/// Decision from smart auto-join.
+#[derive(Debug)]
+pub enum AutoDecision {
+    /// Join this mesh's invite token
+    Join { token: String, mesh: DiscoveredMesh },
+    /// No suitable mesh found — start a new one with these models
+    StartNew { models: Vec<String> },
+}
+
+/// Pick the best mesh to join, or decide to start a new one.
+///
+/// - Scores all discovered meshes (freshness, region, capacity)
+/// - Filters out stale/full meshes
+/// - If no good mesh found, recommends starting a new one with
+///   models appropriate for the node's VRAM
+pub fn smart_auto(
+    meshes: &[DiscoveredMesh],
+    my_vram_gb: f64,
+) -> AutoDecision {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let last_mesh_id = crate::mesh::load_last_mesh_id();
+
+    // Score and rank
+    let mut scored: Vec<(&DiscoveredMesh, i64)> = meshes.iter()
+        .map(|m| (m, score_mesh(m, now, last_mesh_id.as_deref())))
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Best mesh must have a positive score (not stale, not full)
+    if let Some((best, score)) = scored.first() {
+        if *score > 0 {
+            return AutoDecision::Join {
+                token: best.listing.invite_token.clone(),
+                mesh: (*best).clone(),
+            };
+        }
+    }
+
+    // No suitable mesh — recommend models for a new one based on VRAM
+    let models = default_models_for_vram(my_vram_gb);
+    AutoDecision::StartNew { models }
+}
+
+/// Model tiers by VRAM requirement (approximate loaded size × 1.1 headroom).
+/// Model tiers for auto-selection, ordered largest-first.
+/// min_vram = file_size * 1.1 rounded up. Prefer Qwen3 over 2.5 at same tier.
+/// Parse a size string like "2.5GB" to GB as f64.
+fn parse_size_gb(s: &str) -> f64 {
+    s.trim_end_matches("GB").parse::<f64>().unwrap_or(0.0)
+}
+
+/// Build model tiers from the catalog, sorted largest first.
+/// Each entry is (model_name, min_vram_gb) where min_vram = file_size * 1.1.
+/// Excludes draft models (< 1GB).
+fn model_tiers() -> Vec<(&'static str, f64)> {
+    let mut tiers: Vec<_> = crate::download::MODEL_CATALOG.iter()
+        .filter(|m| parse_size_gb(m.size) >= 1.0) // skip drafts
+        .map(|m| (m.name, parse_size_gb(m.size) * 1.1))
+        .collect();
+    tiers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    tiers
+}
+
+/// Pick models for a new mesh based on VRAM and what's on disk.
+/// Returns 1-3 model names. The first one is what this node will serve
+/// (largest that fits, preferring on-disk). The rest are "wanted" models
+/// so other joiners know what the mesh could use.
+pub fn default_models_for_vram(vram_gb: f64) -> Vec<String> {
+    let local_models = crate::mesh::scan_local_models();
+    let tiers = model_tiers();
+
+    // Find the largest model that fits AND is already on disk
+    let on_disk_fit = tiers.iter()
+        .find(|(name, min_vram)| *min_vram <= vram_gb && local_models.contains(&name.to_string()));
+
+    // Find the largest model that fits (may need download)
+    let any_fit = tiers.iter()
+        .find(|(_, min_vram)| *min_vram <= vram_gb);
+
+    // Primary: prefer on-disk, fall back to downloadable
+    let primary = on_disk_fit.or(any_fit)
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| "Qwen2.5-3B-Instruct-Q4_K_M".into());
+
+    let mut models = vec![primary.clone()];
+
+    // Add a small model as secondary (for other nodes to serve)
+    if !models.contains(&"Qwen2.5-3B-Instruct-Q4_K_M".into()) {
+        models.push("Qwen2.5-3B-Instruct-Q4_K_M".into());
+    }
+
+    // Add a coder model as tertiary if we have room in the mesh
+    let coder = "Qwen2.5-Coder-7B-Instruct-Q4_K_M".to_string();
+    if !models.contains(&coder) && models.len() < 3 {
+        models.push(coder);
+    }
+
+    models
 }

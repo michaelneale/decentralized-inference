@@ -119,8 +119,8 @@ pub async fn start_llama_server(
         .context("Failed to create llama-server log file")?;
     let log_file2 = log_file.try_clone()?;
 
-    // llama-server always uses --rpc, even solo.
-    // The host's own rpc-server is always in the list.
+    // llama-server uses --rpc only for remote workers.
+    // The host's own GPU is used directly via Metal (no local rpc-server in the list).
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
     ];
@@ -207,13 +207,40 @@ async fn is_port_open(port: u16) -> bool {
 
 /// Detect the best available compute device
 fn detect_device() -> String {
-    // On macOS with Metal, use MTL0. Otherwise CPU.
     if cfg!(target_os = "macos") {
-        "MTL0".to_string()
-    } else {
-        // Could detect CUDA here in the future
-        "CPU".to_string()
+        return "MTL0".to_string();
     }
+
+    // Linux: check for NVIDIA CUDA
+    if let Ok(output) = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name", "--format=csv,noheader"])
+        .output()
+    {
+        if output.status.success() {
+            let gpu_count = String::from_utf8_lossy(&output.stdout)
+                .lines().filter(|l| !l.trim().is_empty()).count();
+            if gpu_count > 0 {
+                return "CUDA0".to_string();
+            }
+        }
+    }
+
+    // Linux: check for AMD ROCm/HIP
+    if std::path::Path::new("/opt/rocm").exists() {
+        return "HIP0".to_string();
+    }
+
+    // Linux: check for Vulkan
+    if let Ok(output) = std::process::Command::new("vulkaninfo")
+        .args(["--summary"])
+        .output()
+    {
+        if output.status.success() {
+            return "Vulkan0".to_string();
+        }
+    }
+
+    "CPU".to_string()
 }
 
 /// Simple HTTP health check (avoid adding reqwest as a dep — just use TCP + raw HTTP)

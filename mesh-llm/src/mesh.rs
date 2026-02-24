@@ -65,6 +65,13 @@ struct PeerAnnouncement {
     /// Models this node wants the mesh to serve (from --model flags)
     #[serde(default)]
     requested_models: Vec<String>,
+    /// Requests per minute by model (from API proxy routing)
+    #[serde(default)]
+    request_rates: std::collections::HashMap<String, u64>,
+    /// Stable mesh identity — shared by all nodes in the same mesh.
+    /// Generated once by the originator, propagated via gossip.
+    #[serde(default)]
+    mesh_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,23 +90,40 @@ pub struct PeerInfo {
     pub available_models: Vec<String>,
     /// Models this node has requested the mesh to serve
     pub requested_models: Vec<String>,
+    /// Requests per minute by model (gossipped from API proxy)
+    pub request_rates: std::collections::HashMap<String, u64>,
 }
 
-/// Scan ~/.models/ for GGUF files and return their stem names.
+/// Directories to scan for GGUF models.
+pub fn model_dirs() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut dirs = vec![home.join(".models")];
+    // Also scan goose's model directory (~/Library/Application Support/Block.goose/models/)
+    if let Some(data_dir) = dirs::data_dir() {
+        let goose_dir = data_dir.join("Block.goose").join("models");
+        if goose_dir.exists() {
+            dirs.push(goose_dir);
+        }
+    }
+    dirs
+}
+
+/// Scan model directories for GGUF files and return their stem names.
 pub fn scan_local_models() -> Vec<String> {
-    let models_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".models");
     let mut names = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&models_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Skip draft models (tiny) and partial downloads
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    if size > 500_000_000 { // > 500MB, skip draft models
-                        names.push(stem.to_string());
+    for models_dir in model_dirs() {
+        if let Ok(entries) = std::fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        // Skip draft models (tiny) and partial downloads
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        if size > 500_000_000 { // > 500MB, skip draft models
+                            if !names.contains(&stem.to_string()) {
+                                names.push(stem.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -109,8 +133,35 @@ pub fn scan_local_models() -> Vec<String> {
     names
 }
 
+/// Find a GGUF model file by stem name, searching all model directories.
+/// Returns the first match found (prefers ~/.models/ over goose dir).
+pub fn find_model_path(stem: &str) -> std::path::PathBuf {
+    let filename = format!("{}.gguf", stem);
+    for dir in model_dirs() {
+        let candidate = dir.join(&filename);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fallback: return ~/.models/ path even if it doesn't exist
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".models")
+        .join(&filename)
+}
+
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
 /// (the rest is reserved for OS/apps on unified memory).
+/// Detect VRAM, capped by max_vram_gb if set.
+pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
+    let mut vram = detect_vram_bytes();
+    if let Some(cap) = max_vram_gb {
+        let cap_bytes = (cap * 1e9) as u64;
+        if cap_bytes < vram { vram = cap_bytes; }
+    }
+    vram
+}
+
 pub fn detect_vram_bytes() -> u64 {
     #[cfg(target_os = "macos")]
     {
@@ -128,6 +179,49 @@ pub fn detect_vram_bytes() -> u64 {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try NVIDIA GPU first (nvidia-smi)
+        let output = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Sum all GPUs (multi-GPU systems), nvidia-smi reports in MiB
+                    let total_mib: u64 = s.lines()
+                        .filter_map(|line| line.trim().parse::<u64>().ok())
+                        .sum();
+                    if total_mib > 0 {
+                        return total_mib * 1024 * 1024;
+                    }
+                }
+            }
+        }
+
+        // Fallback: try AMD ROCm (rocm-smi)
+        let output = std::process::Command::new("rocm-smi")
+            .args(["--showmeminfo", "vram", "--csv"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    // Parse total VRAM from CSV output
+                    for line in s.lines().skip(1) {
+                        if let Some(total) = line.split(',').nth(1) {
+                            if let Ok(bytes) = total.trim().parse::<u64>() {
+                                return bytes;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     0
 }
 
@@ -136,6 +230,9 @@ pub fn detect_vram_bytes() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
     pub hosts: Vec<RouteEntry>,
+    /// Stable mesh identity — shared by all nodes in the same mesh.
+    #[serde(default)]
+    pub mesh_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,8 +332,13 @@ pub struct Node {
     models: Arc<Mutex<Vec<String>>>,
     model_source: Arc<Mutex<Option<String>>>,
     serving: Arc<Mutex<Option<String>>>,
+    llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
+    request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    last_request_snapshot: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    mesh_id: Arc<Mutex<Option<String>>>,
+    accepting: Arc<(tokio::sync::Notify, std::sync::atomic::AtomicBool)>,
     vram_bytes: u64,
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
@@ -252,6 +354,10 @@ struct MeshState {
     /// Peers confirmed dead — don't reconnect from gossip discovery.
     /// Cleared when the peer successfully reconnects via rejoin/join.
     dead_peers: std::collections::HashSet<EndpointId>,
+    /// Mesh-level wanted models — accumulated from all peers' requested_models.
+    /// Survives peer removal so the mesh remembers what it needs even when
+    /// the node that declared the want goes offline.
+    mesh_wanted: std::collections::HashSet<String>,
 }
 
 /// Channels returned by Node::start for inbound tunnel streams.
@@ -341,13 +447,19 @@ impl Node {
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
                 dead_peers: std::collections::HashSet::new(),
+                mesh_wanted: std::collections::HashSet::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
             model_source: Arc::new(Mutex::new(None)),
             serving: Arc::new(Mutex::new(None)),
+            llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_request_snapshot: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            mesh_id: Arc::new(Mutex::new(None)),
+            accepting: Arc::new((tokio::sync::Notify::new(), std::sync::atomic::AtomicBool::new(false))),
             vram_bytes: vram,
             peer_change_tx,
             peer_change_rx,
@@ -355,6 +467,8 @@ impl Node {
             tunnel_http_tx,
         };
 
+        // Accept loop starts but waits for start_accepting() before processing connections.
+        // This lets idle mode create a node (for identity/token) without joining any mesh.
         let node2 = node.clone();
         tokio::spawn(async move { node2.accept_loop().await; });
 
@@ -381,6 +495,13 @@ impl Node {
         }
         let json = serde_json::to_vec(&addr).expect("serializable");
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json)
+    }
+
+    /// Enable accepting inbound connections. Call before join() or when ready to participate.
+    /// Until this is called, the accept loop blocks waiting.
+    pub fn start_accepting(&self) {
+        self.accepting.1.store(true, std::sync::atomic::Ordering::Release);
+        self.accepting.0.notify_waiters();
     }
 
     pub async fn join(&self, invite_token: &str) -> Result<()> {
@@ -429,6 +550,10 @@ impl Node {
 
         // Get initial routing table
         if let Ok(table) = self.request_routing_table(peer_id).await {
+            // Adopt mesh_id from routing table (for passive/client nodes)
+            if let Some(ref id) = table.mesh_id {
+                self.set_mesh_id(id.clone()).await;
+            }
             // Store route entries as lightweight peer info so host_for_model works
             for entry in &table.hosts {
                 self.add_route_entry(entry).await;
@@ -461,6 +586,7 @@ impl Node {
             serving: Some(entry.model.clone()),
             available_models: vec![],
             requested_models: vec![],
+            request_rates: std::collections::HashMap::new(),
         });
     }
 
@@ -509,6 +635,32 @@ impl Node {
         self.serving.lock().await.clone()
     }
 
+    pub async fn set_llama_ready(&self, ready: bool) {
+        *self.llama_ready.lock().await = ready;
+    }
+
+    pub async fn is_llama_ready(&self) -> bool {
+        *self.llama_ready.lock().await
+    }
+
+    pub async fn mesh_id(&self) -> Option<String> {
+        self.mesh_id.lock().await.clone()
+    }
+
+    /// Set the mesh identity. If None was set, adopts the given ID (from gossip).
+    /// If already set, ignores (originator's ID wins).
+    pub async fn set_mesh_id(&self, id: String) {
+        let mut current = self.mesh_id.lock().await;
+        if current.is_none() {
+            *current = Some(id);
+        }
+    }
+
+    /// Set mesh ID unconditionally (for originator).
+    pub async fn set_mesh_id_force(&self, id: String) {
+        *self.mesh_id.lock().await = Some(id);
+    }
+
     pub async fn set_available_models(&self, models: Vec<String>) {
         *self.available_models.lock().await = models;
     }
@@ -517,12 +669,46 @@ impl Node {
         self.available_models.lock().await.clone()
     }
 
+    /// Increment request count for a model (called from API proxy on every routed request).
+    /// Uses std::sync::Mutex (not tokio) so it can be called from sync context too.
+    pub fn record_request(&self, model: &str) {
+        let mut counts = self.request_counts.lock().unwrap();
+        *counts.entry(model.to_string()).or_default() += 1;
+    }
+
+    /// Snapshot request rates (requests per minute since last snapshot).
+    /// Called every gossip cycle (~60s). Returns rates and resets the counters.
+    pub fn snapshot_request_rates(&self) -> std::collections::HashMap<String, u64> {
+        let counts = self.request_counts.lock().unwrap();
+        let mut last = self.last_request_snapshot.lock().unwrap();
+        let mut rates = std::collections::HashMap::new();
+        for (model, &count) in counts.iter() {
+            let prev = last.get(model).copied().unwrap_or(0);
+            if count > prev {
+                rates.insert(model.clone(), count - prev);
+            }
+        }
+        *last = counts.clone();
+        rates
+    }
+
     pub async fn set_requested_models(&self, models: Vec<String>) {
+        // Also accumulate into mesh-level wanted set
+        let mut state = self.state.lock().await;
+        for m in &models {
+            state.mesh_wanted.insert(m.clone());
+        }
+        drop(state);
         *self.requested_models.lock().await = models;
     }
 
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
+    }
+
+    /// Get all models the mesh has ever wanted — survives peer removal.
+    pub async fn mesh_wanted_models(&self) -> std::collections::HashSet<String> {
+        self.state.lock().await.mesh_wanted.clone()
     }
 
     /// Start a background task that periodically checks peer health.
@@ -570,9 +756,11 @@ impl Node {
                     } else {
                         let count = fail_counts.entry(peer_id).or_default();
                         *count += 1;
-                        // Mark as suspect immediately to prevent gossip re-adding
-                        node.state.lock().await.dead_peers.insert(peer_id);
                         if *count >= 2 {
+                            // Only add to dead_peers on confirmed death (2 strikes),
+                            // not on first timeout — a single timeout shouldn't block
+                            // incoming gossip from an otherwise-alive peer.
+                            node.state.lock().await.dead_peers.insert(peer_id);
                             eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
                             fail_counts.remove(&peer_id);
                             node.handle_peer_death(peer_id).await;
@@ -654,6 +842,7 @@ impl Node {
     }
 
     /// Get model source from any peer in the mesh (for auto-download on join).
+    #[allow(dead_code)]
     pub async fn peer_model_source(&self) -> Option<String> {
         let state = self.state.lock().await;
         for p in state.peers.values() {
@@ -670,6 +859,7 @@ impl Node {
         let state = self.state.lock().await;
         let my_available = self.available_models.lock().await;
         let my_requested = self.requested_models.lock().await;
+        let my_serving = self.serving.lock().await;
         let mut all = std::collections::HashSet::new();
         for m in my_available.iter() {
             all.insert(m.clone());
@@ -677,12 +867,18 @@ impl Node {
         for m in my_requested.iter() {
             all.insert(m.clone());
         }
+        if let Some(ref s) = *my_serving {
+            all.insert(s.clone());
+        }
         for p in state.peers.values() {
             for m in &p.available_models {
                 all.insert(m.clone());
             }
             for m in &p.requested_models {
                 all.insert(m.clone());
+            }
+            if let Some(ref s) = p.serving {
+                all.insert(s.clone());
             }
         }
         let mut result: Vec<String> = all.into_iter().collect();
@@ -710,6 +906,7 @@ impl Node {
 
     /// Get peers serving a specific model (including self if applicable).
     /// Returns (my_serving, peers_serving) — my_serving is true if this node serves it.
+    #[allow(dead_code)]
     pub async fn peers_serving_model(&self, model: &str) -> (bool, Vec<PeerInfo>) {
         let state = self.state.lock().await;
         let my_serving = self.serving.lock().await;
@@ -779,7 +976,8 @@ impl Node {
             }
         }
 
-        RoutingTable { hosts }
+        let mesh_id = self.mesh_id.lock().await.clone();
+        RoutingTable { hosts, mesh_id }
     }
 
     /// Request routing table from a connected peer (for passive nodes).
@@ -828,11 +1026,52 @@ impl Node {
         self.vram_bytes
     }
 
+    /// Detect region from this node's relay URL.
+    #[allow(dead_code)]
+    pub fn detect_region(&self) -> Option<String> {
+        use iroh::TransportAddr;
+        let addr = self.endpoint.addr();
+        for transport_addr in &addr.addrs {
+            if let TransportAddr::Relay(url) = transport_addr {
+                let host = url.as_str().strip_prefix("https://")
+                    .or_else(|| url.as_str().strip_prefix("http://"))?;
+                let prefix = host.split('.').next()?;
+                let code = prefix.split('-').next()?;
+                return match code {
+                    "aps1" | "aps2" => Some("AU".into()),
+                    "apn1" | "apn2" => Some("JP".into()),
+                    "usw1" | "usw2" | "use1" | "use2" => Some("US".into()),
+                    "euw1" | "euw2" | "euc1" | "euc2" => Some("EU".into()),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
     pub async fn peers(&self) -> Vec<PeerInfo> {
         self.state.lock().await.peers.values().cloned().collect()
     }
 
+    /// Check if any peer connection is direct (not relayed).
+    /// A node with direct connections is likely reachable from the internet.
+    pub async fn has_direct_connection(&self) -> bool {
+        let conns: Vec<_> = self.state.lock().await
+            .connections.values().cloned().collect();
+        for conn in conns {
+            let mut paths = conn.paths();
+            let path_list = iroh::Watcher::get(&mut paths);
+            for path_info in path_list {
+                if path_info.is_selected() && path_info.is_ip() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Wait for a peer with Host role to appear. Returns its PeerInfo.
+    #[allow(dead_code)]
     pub async fn wait_for_host(&self) -> Result<PeerInfo> {
         loop {
             let peers = self.peers().await;
@@ -978,6 +1217,13 @@ impl Node {
     // --- Connection handling ---
 
     async fn accept_loop(&self) {
+        // Wait until start_accepting() is called before processing any connections.
+        // Check flag first to handle the case where start_accepting() was called before we got here.
+        if !self.accepting.1.load(std::sync::atomic::Ordering::Acquire) {
+            self.accepting.0.notified().await;
+        }
+        tracing::info!("Accept loop: now accepting inbound connections");
+
         loop {
             let incoming = match self.endpoint.accept().await {
                 Some(i) => i,
@@ -1001,17 +1247,28 @@ impl Node {
 
         // Store connection for stream dispatch (tunneling, route requests, etc.)
         // Don't add to peer list yet — only gossip exchange promotes to peer.
-        {
+        let was_dead = {
             let mut state = self.state.lock().await;
-            if state.dead_peers.remove(&remote) {
+            let was_dead = state.dead_peers.remove(&remote);
+            if was_dead {
                 eprintln!("🔄 Previously dead peer {} reconnected", remote.fmt_short());
             }
             state.connections.insert(remote, conn.clone());
-        }
+            was_dead
+        };
 
-        // Don't auto-gossip: passive nodes (clients/standby) just connect and
-        // send streams. Active peers identify themselves by sending STREAM_GOSSIP.
-        // Gossip exchange in handle_gossip_stream calls add_peer().
+        // If this peer was previously dead, immediately gossip to restore their
+        // serving status in our peer list. Without this, models served by the
+        // reconnecting peer stay invisible until the next heartbeat (up to 60s).
+        if was_dead {
+            let node = self.clone();
+            let gossip_conn = conn.clone();
+            tokio::spawn(async move {
+                if let Err(e) = node.initiate_gossip_inner(gossip_conn, remote, false).await {
+                    tracing::debug!("Reconnect gossip with {} failed: {e}", remote.fmt_short());
+                }
+            });
+        }
 
         self.dispatch_streams(conn, remote).await;
         Ok(())
@@ -1326,11 +1583,12 @@ impl Node {
                     if path_info.is_selected() {
                         let rtt = path_info.rtt();
                         let rtt_ms = rtt.as_millis() as u32;
+                        let path_type = if path_info.is_ip() { "direct" } else { "relay" };
                         if rtt_ms > 0 {
+                            eprintln!("📡 Peer {} RTT: {}ms ({})", remote.fmt_short(), rtt_ms, path_type);
                             let mut state = self.state.lock().await;
                             if let Some(peer) = state.peers.get_mut(&remote) {
                                 peer.rtt_ms = Some(rtt_ms);
-                                tracing::info!("Peer {} RTT: {}ms (QUIC)", remote.fmt_short(), rtt_ms);
                             }
                         }
                         break;
@@ -1407,8 +1665,16 @@ impl Node {
     }
 
     async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, ann: &PeerAnnouncement) {
+        // Adopt mesh_id from gossip if we don't have one yet
+        if let Some(ref their_id) = ann.mesh_id {
+            self.set_mesh_id(their_id.clone()).await;
+        }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
+        // Accumulate peer's requested_models into mesh-level wanted set
+        for m in &ann.requested_models {
+            state.mesh_wanted.insert(m.clone());
+        }
         if let Some(existing) = state.peers.get_mut(&id) {
             let role_changed = existing.role != ann.role;
             let serving_changed = existing.serving != ann.serving;
@@ -1424,6 +1690,7 @@ impl Node {
             existing.serving = ann.serving.clone();
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
+            existing.request_rates = ann.request_rates.clone();
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -1443,6 +1710,7 @@ impl Node {
             serving: ann.serving.clone(),
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
+            request_rates: ann.request_rates.clone(),
         });
         let count = state.peers.len();
         drop(state);
@@ -1457,6 +1725,7 @@ impl Node {
         let my_serving = self.serving.lock().await.clone();
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
+        let my_mesh_id = self.mesh_id.lock().await.clone();
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
             .map(|p| PeerAnnouncement {
                 addr: p.addr.clone(),
@@ -1467,8 +1736,11 @@ impl Node {
                 serving: p.serving.clone(),
                 available_models: p.available_models.clone(),
                 requested_models: p.requested_models.clone(),
+                request_rates: p.request_rates.clone(),
+                mesh_id: my_mesh_id.clone(),
             })
             .collect();
+        let my_rates = self.snapshot_request_rates();
         announcements.push(PeerAnnouncement {
             addr: self.endpoint.addr(),
             role: my_role,
@@ -1478,9 +1750,71 @@ impl Node {
             serving: my_serving,
             available_models: my_available,
             requested_models: my_requested,
+            request_rates: my_rates,
+            mesh_id: my_mesh_id,
         });
         announcements
     }
+}
+
+/// Generate a mesh ID for a new mesh.
+/// Named meshes: `sha256("mesh-llm:" + name + ":" + nostr_pubkey)` — deterministic, unique per creator.
+/// Unnamed meshes: random UUID, persisted to `~/.mesh-llm/mesh-id`.
+pub fn generate_mesh_id(name: Option<&str>, nostr_pubkey: Option<&str>) -> String {
+    if let Some(name) = name {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "mesh-llm:".hash(&mut hasher);
+        name.hash(&mut hasher);
+        if let Some(pk) = nostr_pubkey {
+            pk.hash(&mut hasher);
+        }
+        format!("{:016x}", hasher.finish())
+    } else {
+        // Try to load persisted mesh-id
+        let path = mesh_id_path();
+        if let Ok(id) = std::fs::read_to_string(&path) {
+            let id = id.trim().to_string();
+            if !id.is_empty() {
+                return id;
+            }
+        }
+        // Generate new random ID and persist
+        let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &id);
+        id
+    }
+}
+
+fn mesh_id_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("mesh-id")
+}
+
+/// Save the mesh ID of the last mesh we successfully joined.
+pub fn save_last_mesh_id(mesh_id: &str) {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("last-mesh");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, mesh_id);
+}
+
+/// Load the mesh ID of the last mesh we successfully joined.
+pub fn load_last_mesh_id() -> Option<String> {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".mesh-llm")
+        .join("last-mesh");
+    std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Load secret key from ~/.mesh-llm/key, or create a new one and save it.

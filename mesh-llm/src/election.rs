@@ -79,6 +79,7 @@ impl ModelTargets {
     }
 
     /// List all available model names.
+    #[allow(dead_code)]
     pub fn available_models(&self) -> Vec<String> {
         self.targets.keys()
             .filter(|k| !matches!(self.targets[k.as_str()], InferenceTarget::None))
@@ -312,7 +313,7 @@ async fn update_targets(
 async fn start_llama(
     node: &mesh::Node,
     tunnel_mgr: &tunnel::Manager,
-    my_rpc_port: u16,
+    _my_rpc_port: u16,
     bin_dir: &Path,
     model: &Path,
     model_name: &str,
@@ -330,9 +331,10 @@ async fn start_llama(
 
     const MAX_RTT_MS: u32 = 80;
 
-    // Only use workers from our model group
+    // Only use workers from our model group, preferring lowest-latency peers.
+    // Take just enough to cover the VRAM shortfall, sorted by RTT.
     let worker_ids: Vec<_> = if need_split {
-        model_peers.iter()
+        let mut candidates: Vec<_> = model_peers.iter()
             .filter(|p| matches!(p.role, NodeRole::Worker) || p.serving.as_deref() == Some(model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
             .filter(|p| {
@@ -345,8 +347,32 @@ async fn start_llama(
                     _ => true,
                 }
             })
-            .map(|p| p.id)
-            .collect()
+            .collect();
+
+        // Sort by RTT ascending (unknown RTT sorts last)
+        candidates.sort_by_key(|p| p.rtt_ms.unwrap_or(u32::MAX));
+
+        // Take just enough peers to cover the VRAM gap.
+        // When --split is forced, always include at least one worker.
+        let mut accumulated_vram = my_vram;
+        let mut selected = Vec::new();
+        for p in &candidates {
+            if accumulated_vram >= min_vram && !(force_split && selected.is_empty()) {
+                break; // we have enough VRAM already (but force at least 1 if --split)
+            }
+            accumulated_vram += p.vram_bytes;
+            let rtt_str = p.rtt_ms.map(|r| format!("{}ms", r)).unwrap_or("?ms".to_string());
+            eprintln!("  ✓ Adding {} — {:.1}GB VRAM, RTT {rtt_str}",
+                p.id.fmt_short(), p.vram_bytes as f64 / 1e9);
+            selected.push(p.id);
+        }
+        if accumulated_vram < min_vram {
+            eprintln!("  ⚠ Total VRAM {:.1}GB still short of {:.1}GB — using all {} candidates",
+                accumulated_vram as f64 / 1e9, min_vram as f64 / 1e9, candidates.len());
+            // Fall back to all candidates if we can't cover it
+            selected = candidates.iter().map(|p| p.id).collect();
+        }
+        selected
     } else {
         let worker_count = model_peers.iter()
             .filter(|p| !matches!(p.role, NodeRole::Client))
@@ -376,28 +402,32 @@ async fn start_llama(
         tunnel_mgr.update_rewrite_map(&remote_maps).await;
     }
 
-    // Build --rpc list: self first, then remote workers
+    // Build --rpc list: only remote workers.
+    // The host's own GPU is used directly via Metal — no need to route
+    // through the local rpc-server (which would add unnecessary TCP round trips).
     let all_ports = tunnel_mgr.peer_ports_map().await;
-    let mut rpc_ports = vec![my_rpc_port]; // always include self
+    let mut rpc_ports: Vec<u16> = Vec::new();
     for id in &worker_ids {
         if let Some(&port) = all_ports.get(id) {
             rpc_ports.push(port);
         }
     }
 
-    // Calculate tensor split from VRAM
+    // Calculate tensor split from VRAM.
+    // Device order: RPC workers first (matching --rpc order), then Metal (host) last.
     let my_vram_f = my_vram as f64;
-    let mut all_vrams = vec![my_vram_f];
+    let mut all_vrams: Vec<f64> = Vec::new();
     for id in &worker_ids {
         if let Some(peer) = model_peers.iter().find(|p| p.id == *id) {
             all_vrams.push(if peer.vram_bytes > 0 { peer.vram_bytes as f64 } else { my_vram_f });
         }
     }
+    all_vrams.push(my_vram_f); // Metal is last device
     let total: f64 = all_vrams.iter().sum();
-    let split = if total > 0.0 && rpc_ports.len() > 1 {
+    let split = if total > 0.0 && !rpc_ports.is_empty() {
         let s: Vec<String> = all_vrams.iter().map(|v| format!("{:.2}", v / total)).collect();
         let split_str = s.join(",");
-        eprintln!("  Tensor split: {split_str} ({} node(s), {:.0}GB total)", rpc_ports.len(), total / 1e9);
+        eprintln!("  Tensor split: {split_str} ({} node(s), {:.0}GB total)", rpc_ports.len() + 1, total / 1e9);
         Some(split_str)
     } else {
         eprintln!("  Solo mode ({:.0}GB)", my_vram_f / 1e9);
