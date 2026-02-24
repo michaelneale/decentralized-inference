@@ -886,7 +886,6 @@
     function renderJoin() {
       const el = $('joinHint');
       if (joinRendered) {
-        // Just update the invite token text if it changed
         const tok = document.getElementById('inviteToken');
         if (tok && S.token) tok.textContent = S.token;
         return;
@@ -899,7 +898,7 @@
       el.innerHTML = `<details class="cfg">
         <summary>Join / Invite</summary>
         <div class="cfg-row">
-          <div class="cfg-label">Join by token</div>
+          <div class="cfg-label">Join by invite token</div>
           <div style="display:flex;gap:0.3rem">
             <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
               style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#aaa;font-family:monospace;font-size:0.55rem;padding:0.25rem 0.4rem">
@@ -907,11 +906,30 @@
               style="background:#1a3a5c;border:1px solid #2a5a8c;border-radius:4px;padding:0.2rem 0.5rem;color:#e0e0e0;cursor:pointer;font-size:0.55rem;white-space:nowrap">Join</button>
           </div>
         </div>
-        ${hasToken ? `<div class="cfg-row" style="margin-top:0.3rem">
-          <div class="cfg-label">This mesh's invite token</div>
-          <div class="cfg-tok" id="inviteToken" style="user-select:all">${esc(token)}</div>
+        ${hasToken ? `<div class="cfg-row" style="margin-top:0.4rem">
+          <div class="cfg-label">Invite others</div>
+          <div style="display:flex;align-items:center;gap:0.3rem">
+            <div class="cfg-tok" id="inviteToken" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-height:none">${esc(token)}</div>
+            <button onclick="copyToken(this)" title="Copy invite token"
+              style="background:#1a1a1a;border:1px solid #222;border-radius:4px;padding:0.2rem 0.4rem;color:#888;cursor:pointer;font-size:0.6rem;white-space:nowrap;flex-shrink:0">📋 Copy</button>
+          </div>
         </div>` : ''}
       </details>`;
+    }
+
+    function copyToken(btn) {
+      const tok = document.getElementById('inviteToken');
+      if (!tok) return;
+      navigator.clipboard.writeText(tok.textContent).then(() => {
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = '📋 Copy', 2000);
+      }).catch(() => {
+        // Fallback: select all text
+        const range = document.createRange();
+        range.selectNodeContents(tok);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+      });
     }
 
     async function joinFromInput() {
@@ -927,24 +945,23 @@
       inp.disabled = false;
     }
 
-    // ── Use with agents (collapsible) ──
+    // ── Using your mesh (collapsible) ──
 
     function renderMore() {
       const el = $('cfgSection');
-      // Don't re-render if open
       if (el.innerHTML && el.querySelector('details[open]')) return;
-      let body = '';
-      if (S.llama_ready) {
-        const m = S.model_name || 'model', p = S.api_port || 9337;
-        const pi = S.launch_pi || `pi --provider mesh --model ${m}`;
-        const goose = S.launch_goose || `GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:${p} OPENAI_API_KEY=mesh GOOSE_MODEL=${m} goose session`;
-        body += `<div class="cfg-row"><div class="cfg-label">API</div><div class="cfg-val">http://localhost:${p}/v1</div></div>
-          <div class="cfg-row"><div class="cfg-label">pi</div><div class="cfg-val">${esc(pi)}</div></div>
-          <div class="cfg-row"><div class="cfg-label">goose</div><div class="cfg-val">${esc(goose)}</div></div>
-          <div class="cfg-row"><div class="cfg-label">curl</div><div class="cfg-val">curl http://localhost:${p}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"${esc(m)}","messages":[{"role":"user","content":"Hello"}]}'</div></div>`;
-      }
-      if (!body) { el.innerHTML = ''; return; }
-      el.innerHTML = `<details class="cfg"><summary>Use with agents</summary>${body}</details>`;
+      if (!S.llama_ready) { el.innerHTML = ''; return; }
+      const p = S.api_port || 9337;
+      el.innerHTML = `<details class="cfg"><summary>Using your mesh</summary>
+        <div class="cfg-row">
+          <div class="cfg-label">OpenAI-compatible API</div>
+          <div class="cfg-val">http://localhost:${p}/v1</div>
+        </div>
+        <div style="font-size:0.55rem;color:#555;line-height:1.4;margin-top:0.2rem">
+          Works with any tool that supports OpenAI API — pi, goose, Continue, aider, Open WebUI, curl, etc.
+          Use <span style="color:#888">mesh</span> as the API key. Models listed at <span style="color:#888">/v1/models</span>.
+        </div>
+      </details>`;
     }
 
     function shortName(n) { return (n || '').replace(/-Q\w+$/, '').replace(/-Instruct/, ''); }
