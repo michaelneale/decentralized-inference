@@ -224,6 +224,11 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Auto-enable publishing when mesh is named
+    if cli.mesh_name.is_some() && !cli.publish {
+        cli.publish = true;
+    }
+
     // --- Auto-discover ---
     if cli.auto && cli.join.is_empty() {
         eprintln!("🔍 Discovering meshes via Nostr...");
@@ -245,8 +250,9 @@ async fn main() -> Result<()> {
 
         let last_mesh_id = mesh::load_last_mesh_id();
         eprintln!("  Found {} mesh(es)", meshes.len());
+        let target_name = cli.mesh_name.as_deref();
         for m in &meshes {
-            let score = nostr::score_mesh(m, now, last_mesh_id.as_deref());
+            let score = nostr::score_mesh(m, now, last_mesh_id.as_deref(), target_name);
             eprintln!("  · {} (score: {}, {} nodes, {:.0}GB, {} clients{})",
                 m.listing.name.as_deref().unwrap_or("unnamed"),
                 score,
@@ -256,7 +262,7 @@ async fn main() -> Result<()> {
                 m.listing.region.as_ref().map(|r| format!(", {r}")).unwrap_or_default());
         }
 
-        match nostr::smart_auto(&meshes, my_vram_gb) {
+        match nostr::smart_auto(&meshes, my_vram_gb, target_name) {
             nostr::AutoDecision::Join { token, mesh } => {
                 // Carry mesh name from discovery for console display
                 if cli.mesh_name.is_none() {
@@ -1731,7 +1737,7 @@ async fn run_discover(
     let last_mesh_id = mesh::load_last_mesh_id();
     eprintln!("Found {} mesh(es):\n", meshes.len());
     for (i, mesh) in meshes.iter().enumerate() {
-        let score = nostr::score_mesh(mesh, now, last_mesh_id.as_deref());
+        let score = nostr::score_mesh(mesh, now, last_mesh_id.as_deref(), None);
         let age = now.saturating_sub(mesh.published_at);
         let freshness = if age < 120 { "fresh" } else if age < 300 { "ok" } else { "stale" };
         let capacity = if mesh.listing.max_clients > 0 {
