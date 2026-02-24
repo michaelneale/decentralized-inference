@@ -1,4 +1,4 @@
-mod console;
+mod api;
 mod download;
 mod election;
 mod launch;
@@ -257,6 +257,12 @@ async fn main() -> Result<()> {
 
         match nostr::smart_auto(&meshes, my_vram_gb) {
             nostr::AutoDecision::Join { token, mesh } => {
+                // Carry mesh name from discovery for console display
+                if cli.mesh_name.is_none() {
+                    if let Some(ref name) = mesh.listing.name {
+                        cli.mesh_name = Some(name.clone());
+                    }
+                }
                 if cli.client {
                     // Skip health probe for clients — joining itself is the test
                     eprintln!("✅ Joining: {} ({} nodes, {} models{})",
@@ -303,6 +309,11 @@ async fn main() -> Result<()> {
     }
     // No args at all = idle mode with console for browsing/joining
     if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
+        if cli.no_console {
+            // Console is the management API — idle mode needs it
+            eprintln!("⚠ Ignoring --no-console: idle mode requires console for discover/join");
+            cli.no_console = false;
+        }
         let bin_dir = match &cli.bin_dir {
             Some(d) => d.clone(),
             None => detect_bin_dir()?,
@@ -911,10 +922,13 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let model_name_for_console = model_name.clone();
     let console_state = if let Some(cport) = console_port {
         let model_size_bytes = election::total_model_bytes(&model);
-        let cs = console::ConsoleState::new(node.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
+        let cs = api::MeshApi::new(node.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
         if let Some(draft) = &cli.draft {
             let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
             cs.set_draft_name(dn).await;
+        }
+        if let Some(ref name) = cli.mesh_name {
+            cs.set_mesh_name(name.clone()).await;
         }
         let cs2 = cs.clone();
         let console_rx = target_rx.clone();
@@ -931,7 +945,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
                     if rx.changed().await.is_err() { break; }
                 }
             });
-            console::start(cport, cs2, adapted_rx).await;
+            api::start(cport, cs2, adapted_rx).await;
         });
         Some(cs)
     } else {
@@ -1073,13 +1087,13 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
 
     // Console
     let console_state = if let Some(cport) = console_port {
-        let mut cs = console::ConsoleState::new(node.clone(), "(idle)".into(), api_port, 0);
+        let mut cs = api::MeshApi::new(node.clone(), "(idle)".into(), api_port, 0);
         cs.join_tx = Some(join_tx);
         cs.update(false, false).await;
         let cs2 = cs.clone();
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
         tokio::spawn(async move {
-            console::start(cport, cs2, rx).await;
+            api::start(cport, cs2, rx).await;
         });
         eprintln!("  Console: http://localhost:{cport}");
         eprintln!("  Open the console to discover and join a mesh.");
@@ -1366,12 +1380,12 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
     if !cli.no_console {
         let cport = cli.console;
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
-        let cs = console::ConsoleState::new(node.clone(), label, local_port, 0);
+        let cs = api::MeshApi::new(node.clone(), label, local_port, 0);
         if is_client { cs.set_client(true).await; }
         cs.update(false, !is_client).await;
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
         tokio::spawn(async move {
-            console::start(cport, cs, rx).await;
+            api::start(cport, cs, rx).await;
         });
     }
 

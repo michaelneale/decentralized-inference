@@ -1,30 +1,37 @@
-//! Web console — thin status viewer bolted onto the running CLI process.
+//! Mesh management API — serves on port 3131 (default).
 //!
-//! Serves a single-page dashboard with:
-//! - Live mesh status via SSE (peers, VRAM, roles)
-//! - Cluster visualization
-//! - Agent launch commands (pi, goose)
-//! - Built-in chat proxy to the running LLM
+//! Endpoints:
+//!   GET  /api/status    — live mesh state (JSON)
+//!   GET  /api/events    — SSE stream of status updates
+//!   GET  /api/discover  — browse Nostr-published meshes
+//!   POST /api/join      — join a mesh by invite token
+//!   POST /api/chat      — proxy to inference API
+//!   GET  /              — console HTML (optional UI)
+//!
+//! The console HTML is a thin client that calls these endpoints.
+//! All functionality works without the HTML — use curl, scripts, etc.
 
-use crate::{election, mesh};
+use crate::{election, mesh, nostr};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 
-static HTML: &str = include_str!("console.html");
+static CONSOLE_HTML: &str = include_str!("console.html");
 
-/// Shared live state — written by the main process, read by the console.
+// ── Shared state ──
+
+/// Shared live state — written by the main process, read by API handlers.
 #[derive(Clone)]
-pub struct ConsoleState {
-    inner: Arc<Mutex<ConsoleInner>>,
-    /// Channel for console UI to signal "join this mesh" to the main loop.
-    /// None if joining isn't supported (e.g. already in a mesh).
+pub struct MeshApi {
+    inner: Arc<Mutex<ApiInner>>,
+    /// Channel for /api/join to signal the main loop.
+    /// None if runtime joining isn't supported (already serving).
     pub join_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
-struct ConsoleInner {
+struct ApiInner {
     node: mesh::Node,
     is_host: bool,
     is_client: bool,
@@ -34,6 +41,7 @@ struct ConsoleInner {
     draft_name: Option<String>,
     api_port: u16,
     model_size_bytes: u64,
+    mesh_name: Option<String>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -52,8 +60,11 @@ struct StatusPayload {
     peers: Vec<PeerPayload>,
     launch_pi: Option<String>,
     launch_goose: Option<String>,
-    /// All models in the mesh with their status
     mesh_models: Vec<MeshModelPayload>,
+    /// Mesh identity (for matching against discovered meshes)
+    mesh_id: Option<String>,
+    /// Human-readable mesh name (from Nostr publishing)
+    mesh_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -62,23 +73,20 @@ struct PeerPayload {
     role: String,
     models: Vec<String>,
     vram_gb: f64,
-    /// What this peer is currently serving
     serving: Option<String>,
 }
 
 #[derive(Serialize)]
 struct MeshModelPayload {
     name: String,
-    /// "warm" = loaded and serving, "cold" = available on disk but not loaded
     status: String,
-    /// Number of nodes serving this model
     node_count: usize,
 }
 
-impl ConsoleState {
+impl MeshApi {
     pub fn new(node: mesh::Node, model_name: String, api_port: u16, model_size_bytes: u64) -> Self {
-        ConsoleState {
-            inner: Arc::new(Mutex::new(ConsoleInner {
+        MeshApi {
+            inner: Arc::new(Mutex::new(ApiInner {
                 node,
                 is_host: false,
                 is_client: false,
@@ -88,13 +96,13 @@ impl ConsoleState {
                 draft_name: None,
                 api_port,
                 model_size_bytes,
+                mesh_name: None,
                 sse_clients: Vec::new(),
             })),
             join_tx: None,
         }
     }
 
-    /// Set the model name (for when model changes after initial creation).
     pub async fn set_model_name(&self, name: String) {
         self.inner.lock().await.model_name = name;
     }
@@ -105,6 +113,10 @@ impl ConsoleState {
 
     pub async fn set_client(&self, is_client: bool) {
         self.inner.lock().await.is_client = is_client;
+    }
+
+    pub async fn set_mesh_name(&self, name: String) {
+        self.inner.lock().await.mesh_name = Some(name);
     }
 
     pub async fn update(&self, is_host: bool, llama_ready: bool) {
@@ -140,12 +152,9 @@ impl ConsoleState {
             serving: p.serving.clone(),
         }).collect();
 
-        // Build mesh model list: warm (being served) and cold (on disk only)
-        // Note: mesh_catalog and models_being_served need the node's inner locks,
-        // but we already hold inner (ConsoleInner). The Node locks are separate, so this is fine.
         let catalog = node.mesh_catalog().await;
         let served = node.models_being_served().await;
-        let my_serving = inner.model_name.clone(); // what this node is serving
+        let my_serving = inner.model_name.clone();
         let mesh_models: Vec<MeshModelPayload> = catalog.iter().map(|name| {
             let is_warm = served.contains(name);
             let node_count = if is_warm {
@@ -173,6 +182,8 @@ impl ConsoleState {
             )
         } else { (None, None) };
 
+        let mesh_id = node.mesh_id().await;
+
         StatusPayload {
             node_id,
             token,
@@ -188,6 +199,8 @@ impl ConsoleState {
             launch_pi,
             launch_goose,
             mesh_models,
+            mesh_id,
+            mesh_name: inner.mesh_name.clone(),
         }
     }
 
@@ -204,13 +217,15 @@ impl ConsoleState {
     }
 }
 
-/// Start the console web server. Call this from run_auto().
+// ── Server ──
+
+/// Start the mesh management API server.
 pub async fn start(
     port: u16,
-    state: ConsoleState,
+    state: MeshApi,
     mut target_rx: watch::Receiver<election::InferenceTarget>,
 ) {
-    // Watch target changes to update llama_port and readiness
+    // Watch election target changes
     let state2 = state.clone();
     tokio::spawn(async move {
         loop {
@@ -221,10 +236,9 @@ pub async fn start(
                     state2.set_llama_port(Some(port)).await;
                 }
                 election::InferenceTarget::Remote(_) => {
-                    // Worker with host available — API proxy works
                     let mut inner = state2.inner.lock().await;
                     inner.llama_ready = true;
-                    inner.llama_port = None; // no local llama, chat goes through api_port
+                    inner.llama_port = None;
                 }
                 election::InferenceTarget::None => {
                     state2.set_llama_port(None).await;
@@ -234,7 +248,7 @@ pub async fn start(
         }
     });
 
-    // Also push status every 2s for peer changes
+    // Periodic status push (picks up peer changes)
     let state3 = state.clone();
     tokio::spawn(async move {
         loop {
@@ -246,43 +260,46 @@ pub async fn start(
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("Console: failed to bind :{port}: {e}");
+            tracing::error!("Management API: failed to bind :{port}: {e}");
             return;
         }
     };
-    tracing::info!("Console listening on http://localhost:{port}");
+    tracing::info!("Management API on http://localhost:{port}");
 
     loop {
         let Ok((stream, _)) = listener.accept().await else { continue };
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &state).await {
-                tracing::debug!("Console connection error: {e}");
+            if let Err(e) = handle_request(stream, &state).await {
+                tracing::debug!("API connection error: {e}");
             }
         });
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyhow::Result<()> {
+// ── Request dispatch ──
+
+async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Result<()> {
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req.split_whitespace().nth(1).unwrap_or("/");
 
     match path {
+        // ── Console HTML ──
         "/" => {
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                HTML.len(), HTML
+                CONSOLE_HTML.len(), CONSOLE_HTML
             );
             stream.write_all(resp.as_bytes()).await?;
         }
 
+        // ── Discover meshes via Nostr ──
         "/api/discover" => {
-            let filter = crate::nostr::MeshFilter::default();
-            // Fetch discovery results inside a block so it doesn't block the async task
-            let relays: Vec<String> = crate::nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect();
-            match crate::nostr::discover(&relays, &filter).await {
+            let relays: Vec<String> = nostr::DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect();
+            let filter = nostr::MeshFilter::default();
+            match nostr::discover(&relays, &filter).await {
                 Ok(meshes) => {
                     if let Ok(json) = serde_json::to_string(&meshes) {
                         let resp = format!(
@@ -291,7 +308,7 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
                         );
                         stream.write_all(resp.as_bytes()).await?;
                     } else {
-                        respond_error(&mut stream, 500, "Failed to serialize meshes").await?;
+                        respond_error(&mut stream, 500, "Failed to serialize").await?;
                     }
                 }
                 Err(e) => {
@@ -299,15 +316,16 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
                 }
             }
         }
+
+        // ── Join a mesh ──
         "/api/join" => {
             if req.starts_with("GET") {
                 return respond_error(&mut stream, 405, "Method Not Allowed").await;
             }
-            // Parse POST body
             let body = if let Some(pos) = req.find("\r\n\r\n") {
                 req[pos + 4..].to_string()
             } else {
-                req.to_string()
+                String::new()
             };
 
             #[derive(serde::Deserialize)]
@@ -323,24 +341,23 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
                             respond_error(&mut stream, 500, "Join channel closed").await?;
                         }
                     } else {
-                        // No join channel — node is already in a mesh or doesn't support runtime join
-                        // Fall back to direct join (adds peer but doesn't reassign model)
+                        // Already serving — direct join (adds peer, no model reassignment)
                         let inner = state.inner.lock().await;
                         let node = inner.node.clone();
                         drop(inner);
-
                         if let Err(e) = node.join(&jr.token).await {
-                            respond_error(&mut stream, 500, &format!("Failed to join mesh: {e}")).await?;
+                            respond_error(&mut stream, 500, &format!("Failed to join: {e}")).await?;
                         } else {
                             let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"ok\":true}";
                             stream.write_all(resp.as_bytes()).await?;
                         }
                     }
                 }
-                Err(_) => respond_error(&mut stream, 400, "Invalid JSON payload").await?,
+                Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
             }
         }
 
+        // ── Live status ──
         "/api/status" => {
             let status = state.status().await;
             let json = serde_json::to_string(&status)?;
@@ -350,16 +367,15 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
             );
             stream.write_all(resp.as_bytes()).await?;
         }
+
+        // ── SSE event stream ──
         "/api/events" => {
-            // SSE
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
             stream.write_all(header.as_bytes()).await?;
 
-            // Send current state immediately
             let status = state.status().await;
             if let Ok(json) = serde_json::to_string(&status) {
-                let event = format!("data: {json}\n\n");
-                stream.write_all(event.as_bytes()).await?;
+                stream.write_all(format!("data: {json}\n\n").as_bytes()).await?;
             }
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -371,9 +387,9 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
                 }
             }
         }
+
+        // ── Chat proxy (routes through inference API port) ──
         p if p.starts_with("/api/chat") => {
-            // Always route through the API port — it handles model-based
-            // routing (local llama-server OR remote via QUIC tunnel)
             let inner = state.inner.lock().await;
             if !inner.llama_ready && !inner.is_client {
                 drop(inner);
@@ -390,6 +406,7 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
                 respond_error(&mut stream, 502, "Cannot reach LLM server").await?;
             }
         }
+
         _ => {
             respond_error(&mut stream, 404, "Not found").await?;
         }
@@ -400,6 +417,8 @@ async fn handle_connection(mut stream: TcpStream, state: &ConsoleState) -> anyho
 async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::Result<()> {
     let body = format!("{{\"error\":\"{msg}\"}}");
     let status = match code {
+        400 => "Bad Request",
+        405 => "Method Not Allowed",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Not Found",

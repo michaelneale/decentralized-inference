@@ -584,6 +584,7 @@
 
   <div class="top-bar">
     <h1>mesh-llm</h1>
+    <span id="meshName" style="font-size:0.7rem;color:#6cf;font-weight:600"></span>
     <span id="badge"></span>
     <div class="top-right" id="meta"></div>
   </div>
@@ -629,7 +630,7 @@
     }
 
     function render() {
-      renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderDiscover(); renderMore();
+      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderDiscover(); renderMore();
       const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
       const ok = S.llama_ready || (S.is_client && hasWarmModel);
       $('inp').disabled = !ok; $('btn').disabled = !ok;
@@ -637,6 +638,18 @@
       if (ok) $('msgs').classList.remove('off');
       updateModelPicker();
       $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
+    }
+
+    function renderMeshName() {
+      const el = $('meshName');
+      const name = S.mesh_name;
+      if (name) {
+        el.textContent = '· ' + name;
+      } else if (S.mesh_id && S.peers && S.peers.length > 0) {
+        el.textContent = '· mesh ' + S.mesh_id.substring(0, 8);
+      } else {
+        el.textContent = '';
+      }
     }
 
     function renderBadge() {
@@ -847,26 +860,28 @@
         }
 
         let html = '';
+        const myMeshId = S.mesh_id || '';
         for (const m of meshes) {
           const listing = m.listing;
+          const isCurrent = myMeshId && listing.mesh_id && listing.mesh_id === myMeshId;
           const region = listing.region ? `<span class="discover-region">${esc(listing.region)}</span>` : '';
           const vram = listing.total_vram_bytes > 0 ? `${(listing.total_vram_bytes / 1e9).toFixed(0)} GB` : '';
           const nodes = listing.node_count > 0 ? `${listing.node_count} node${listing.node_count > 1 ? 's' : ''}` : '';
           const stats = [nodes, vram].filter(Boolean).join(' · ');
           const servedModels = listing.serving || [];
           const onDiskModels = listing.on_disk || [];
-          // Combine served and on_disk to approximate all models, similar to what you might want to show
           const allModels = [...new Set([...servedModels, ...onDiskModels])];
           const modelsStr = allModels.map(shortName).join(', ');
+          const currentLabel = isCurrent ? ' <span style="color:#4c4;font-size:0.5rem">✓ current mesh</span>' : '';
 
-          html += `<div class="discover-item">
+          html += `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
         <div class="discover-item-hdr">
-          <span class="discover-name">${esc(listing.name || m.publisher_npub.substring(0, 12))}</span>
+          <span class="discover-name">${esc(listing.name || m.publisher_npub.substring(0, 12))}${currentLabel}</span>
           ${region}
         </div>
         ${stats ? `<div class="discover-stats">${stats}</div>` : ''}
         ${modelsStr ? `<div class="discover-models" title="${esc(allModels.join(', '))}">${esc(modelsStr)}</div>` : ''}
-        <button class="discover-btn" onclick="joinMesh('${esc(listing.invite_token)}', this)">Join</button>
+        ${isCurrent ? '<span style="color:#4c4;font-size:0.55rem">Connected</span>' : `<button class="discover-btn" onclick="joinMesh('${esc(listing.invite_token)}', this)">Join</button>`}
       </div>`;
         }
         el.innerHTML = html;
