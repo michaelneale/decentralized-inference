@@ -10,6 +10,10 @@ model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 build:
     #!/usr/bin/env bash
     set -euo pipefail
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "Error: cmake is not installed. Install it first." >&2
+        exit 1
+    fi
     if [ ! -d "{{llama_dir}}" ]; then
         echo "Cloning michaelneale/llama.cpp (rpc-local-gguf branch)..."
         git clone -b rpc-local-gguf https://github.com/michaelneale/llama.cpp.git "{{llama_dir}}"
@@ -22,6 +26,62 @@ build:
         cd "{{mesh_dir}}" && cargo build --release
         echo "Mesh binary: {{mesh_dir}}/target/release/mesh-llm"
     fi
+
+# CI-friendly build for mesh-llm only (cross-platform)
+build-mesh target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustc_cmd="$(command -v rustc)"
+    host_target="$("$rustc_cmd" -vV | awk '/^host: / {print $2}')"
+    cargo_cmd=(cargo)
+    if ! command -v rustup >/dev/null 2>&1; then
+        if [ "{{target}}" != "$host_target" ]; then
+            echo "Error: rustup is required for cross-target builds (missing target: {{target}})." >&2
+            echo "Install rustup, then run: rustup target add {{target}}" >&2
+            exit 1
+        fi
+    elif ! rustup show active-toolchain >/dev/null 2>&1; then
+        echo "Error: rustup is installed but not initialized." >&2
+        echo "Run: rustup default stable" >&2
+        echo "Then: rustup target add {{target}}" >&2
+        exit 1
+    else
+        cargo_cmd=("$(rustup which cargo --toolchain stable)")
+        rustc_cmd="$(rustup which rustc --toolchain stable)"
+        host_target="$("$rustc_cmd" -vV | awk '/^host: / {print $2}')"
+        if ! rustup target list --installed | grep -Fxq "{{target}}"; then
+            echo "Installing Rust target '{{target}}'..."
+            rustup target add "{{target}}"
+        fi
+    fi
+    if [ "{{target}}" = "x86_64-unknown-linux-gnu" ] && [ "$host_target" != "x86_64-unknown-linux-gnu" ]; then
+        if ! command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
+            echo "Error: missing Linux cross C compiler 'x86_64-linux-gnu-gcc' for target {{target}}." >&2
+            echo "Install a Linux cross-toolchain, or build this target on a Linux host/CI runner." >&2
+            exit 1
+        fi
+    fi
+    if [ "{{target}}" = "x86_64-pc-windows-msvc" ] && [ "$host_target" != "x86_64-pc-windows-msvc" ]; then
+        echo "Error: target {{target}} requires a Windows MSVC toolchain and SDK (headers like windows.h)." >&2
+        echo "Build this target on a Windows machine/CI runner (recommended)." >&2
+        exit 1
+    fi
+    cd "{{mesh_dir}}" && RUSTC="$rustc_cmd" "${cargo_cmd[@]}" build --locked --release --target {{target}}
+
+# Initialize rustup and install common cross-build targets for mesh-llm
+setup-rust:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v rustup >/dev/null 2>&1; then
+        echo "Error: rustup is not installed." >&2
+        echo "Install rustup from https://rustup.rs and re-run this command." >&2
+        exit 1
+    fi
+    rustup default stable
+    rustup target add \
+        aarch64-apple-darwin \
+        x86_64-unknown-linux-gnu \
+        x86_64-pc-windows-msvc
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
