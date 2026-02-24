@@ -331,105 +331,117 @@
       cursor: default;
     }
 
-    /* Config */
-    details.cfg {
+    /* Collapsible sections */
+    details.panel-section {
       border-top: 1px solid #1a1a1a;
-      margin-top: 0.5rem;
-      padding-top: 0.4rem;
+      margin-top: 0.6rem;
+      padding-top: 0.5rem;
       flex-shrink: 0;
     }
 
-    details.cfg>summary {
-      font-size: 0.65rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #444;
-      cursor: pointer;
-    }
-
-    details.cfg>summary:hover {
-      color: #888;
-    }
-
-    details.cfg[open]>summary {
-      color: #666;
-      margin-bottom: 0.4rem;
-    }
-
-    .cfg-row {
-      margin-bottom: 0.4rem;
-    }
-
-    .cfg-label {
+    details.panel-section > summary {
       font-size: 0.6rem;
       font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #888;
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    details.panel-section > summary::-webkit-details-marker { display: none; }
+    details.panel-section > summary::before {
+      content: '▸';
+      font-size: 0.5rem;
       color: #555;
+      transition: transform 0.15s;
+    }
+    details.panel-section[open] > summary::before {
+      transform: rotate(90deg);
+    }
+
+    details.panel-section > summary:hover {
+      color: #bbb;
+    }
+
+    details.panel-section[open] > summary {
+      color: #aaa;
+      margin-bottom: 0.4rem;
+    }
+
+    .panel-desc {
+      font-size: 0.6rem;
+      color: #777;
+      line-height: 1.5;
+      margin-bottom: 0.5rem;
+    }
+
+    .panel-row {
+      margin-bottom: 0.4rem;
+    }
+
+    .panel-label {
+      font-size: 0.55rem;
+      font-weight: 600;
+      color: #666;
       text-transform: uppercase;
       letter-spacing: 0.04em;
-      margin-bottom: 0.1rem;
+      margin-bottom: 0.15rem;
     }
 
-    .cfg-val {
+    .panel-val {
       font-family: monospace;
       font-size: 0.6rem;
-      color: #aaa;
-      background: #080808;
+      color: #ccc;
+      background: #0a0a0a;
       border: 1px solid #1a1a1a;
       border-radius: 4px;
-      padding: 0.25rem 0.5rem;
+      padding: 0.3rem 0.5rem;
       user-select: all;
       cursor: text;
       word-break: break-all;
     }
 
-    details.cfg-inner>summary {
-      font-size: 0.55rem;
-      color: #444;
+    .panel-tok {
+      font-family: monospace;
+      font-size: 0.5rem;
+      color: #999;
+      background: #0a0a0a;
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      padding: 0.3rem 0.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .panel-btn {
+      background: #1a3a5c;
+      border: 1px solid #2a5a8c;
+      border-radius: 4px;
+      padding: 0.25rem 0.6rem;
+      color: #e0e0e0;
       cursor: pointer;
-      margin-top: 0.1rem;
+      font-size: 0.55rem;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
+    .panel-btn:hover { background: #2a4a6c; }
+    .panel-btn:disabled { opacity: 0.3; cursor: default; }
 
-    details.cfg-inner pre {
-      font-family: monospace;
-      font-size: 0.5rem;
-      color: #555;
-      background: #080808;
-      border: 1px solid #1a1a1a;
+    .copy-btn {
+      background: #1a1a1a;
+      border: 1px solid #333;
       border-radius: 4px;
-      padding: 0.25rem 0.5rem;
-      margin-top: 0.1rem;
-      user-select: all;
-      cursor: text;
-      white-space: pre-wrap;
+      padding: 0.2rem 0.5rem;
+      color: #aaa;
+      cursor: pointer;
+      font-size: 0.55rem;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
-
-    .cfg-tok {
-      font-family: monospace;
-      font-size: 0.5rem;
-      color: #444;
-      background: #080808;
-      border: 1px solid #1a1a1a;
-      border-radius: 4px;
-      padding: 0.25rem 0.5rem;
-      user-select: all;
-      cursor: text;
-      word-break: break-all;
-      max-height: 2.5rem;
-      overflow-y: auto;
-    }
-
-    .cfg-pre {
-      font-family: monospace;
-      font-size: 0.5rem;
-      color: #555;
-      background: #080808;
-      border: 1px solid #1a1a1a;
-      border-radius: 4px;
-      padding: 0.25rem 0.5rem;
-      user-select: all;
-      cursor: text;
-      white-space: pre-wrap;
-    }
+    .copy-btn:hover { background: #252525; color: #ccc; }
 
     /* Chat */
     .chat-hdr {
@@ -595,9 +607,10 @@
       <div id="status"></div>
       <div id="models"></div>
       <div id="agents"></div>
-      <div id="discoverHint"></div>
-      <div id="joinHint"></div>
-      <div id="cfgSection"></div>
+      <div id="inviteSection"></div>
+      <div id="joinSection"></div>
+      <div id="discoverSection"></div>
+      <div id="apiSection"></div>
     </div>
     <div class="right">
       <div class="chat-hdr">
@@ -627,7 +640,7 @@
     }
 
     function render() {
-      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderJoin(); renderDiscover(); renderMore();
+      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderJoinSection(); renderDiscover(); renderApiSection();
       const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
       const ok = S.llama_ready || (S.is_client && hasWarmModel);
       $('inp').disabled = !ok; $('btn').disabled = !ok;
@@ -823,97 +836,27 @@
 
     // ── Join hint (tiny, expands) ──
 
-    // ── Discover meshes (collapsible, lazy-loads from Nostr) ──
+    // ── Invite others ──
 
-    let discoverLoaded = false;
-    function renderDiscover() {
-      const el = $('discoverHint');
-      if (el.innerHTML && el.querySelector('details[open]')) return;
-      el.innerHTML = `<details class="cfg" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
-        <summary>Discover public meshes</summary>
-        <div id="discoverContent"></div>
-      </details>`;
-    }
-
-    async function loadDiscover() {
-      const el = $('discoverContent');
-      if (!el) return;
-      el.innerHTML = '<div style="color:#666;font-size:0.6rem;padding:0.3rem 0">Searching Nostr…</div>';
-      try {
-        const r = await fetch('/api/discover');
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const meshes = await r.json();
-        if (!meshes.length) { el.innerHTML = '<div style="color:#666;font-size:0.6rem;padding:0.3rem 0">No public meshes found.</div>'; return; }
-        const myMeshId = S.mesh_id || '';
-        el.innerHTML = meshes.map(m => {
-          const l = m.listing;
-          const isCurrent = myMeshId && l.mesh_id && l.mesh_id === myMeshId;
-          const served = (l.serving || []).map(shortName).join(', ');
-          const nodes = l.node_count || 0;
-          const vram = l.total_vram_bytes > 0 ? `${(l.total_vram_bytes / 1e9).toFixed(0)}GB` : '';
-          const stats = [nodes + ' node' + (nodes !== 1 ? 's' : ''), vram].filter(Boolean).join(' · ');
-          return `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
-            <div class="discover-item-hdr">
-              <span class="discover-name">${esc(l.name || m.publisher_npub.substring(0, 12))}</span>
-              ${isCurrent ? '<span style="color:#4c4;font-size:0.5rem">✓ connected</span>' : ''}
-              ${l.region ? `<span class="discover-region">${esc(l.region)}</span>` : ''}
-            </div>
-            <div class="discover-stats">${stats}</div>
-            ${served ? `<div class="discover-models" title="${esc((l.serving||[]).join(', '))}">${esc(served)}</div>` : ''}
-            ${isCurrent ? '' : `<button class="discover-btn" onclick="joinMesh('${esc(l.invite_token)}', this)">Join</button>`}
-          </div>`;
-        }).join('');
-      } catch (e) {
-        el.innerHTML = `<div style="color:#c66;font-size:0.6rem;padding:0.3rem 0">Error: ${esc(e.message)}</div>`;
-      }
-    }
-
-    async function joinMesh(token, btnEl) {
-      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Joining…'; }
-      try {
-        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
-        if (!r.ok) throw new Error(await r.text());
-        if (btnEl) btnEl.textContent = 'Joined!';
-      } catch (e) {
-        alert('Failed to join: ' + e.message);
-        if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Join'; }
-      }
-    }
-
-    // ── Join / Invite (collapsible) ──
-
-    let joinRendered = false;
-    function renderJoin() {
-      const el = $('joinHint');
-      if (joinRendered) {
-        const tok = document.getElementById('inviteToken');
-        if (tok && S.token) tok.textContent = S.token;
-        return;
-      }
-      joinRendered = true;
-
+    let inviteRendered = false;
+    function renderInvite() {
+      const el = $('inviteSection');
       const token = S.token || '';
       const hasToken = token && S.model_name && S.model_name !== '(idle)';
-
-      el.innerHTML = `<details class="cfg">
-        <summary>Join / Invite</summary>
-        <div class="cfg-row">
-          <div class="cfg-label">Join by invite token</div>
-          <div style="display:flex;gap:0.3rem">
-            <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
-              style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#aaa;font-family:monospace;font-size:0.55rem;padding:0.25rem 0.4rem">
-            <button onclick="joinFromInput()"
-              style="background:#1a3a5c;border:1px solid #2a5a8c;border-radius:4px;padding:0.2rem 0.5rem;color:#e0e0e0;cursor:pointer;font-size:0.55rem;white-space:nowrap">Join</button>
-          </div>
+      if (!hasToken) { el.innerHTML = ''; return; }
+      if (inviteRendered) {
+        const tok = document.getElementById('inviteToken');
+        if (tok) tok.textContent = token;
+        return;
+      }
+      inviteRendered = true;
+      el.innerHTML = `<details class="panel-section">
+        <summary>Invite others to your mesh</summary>
+        <div class="panel-desc">Share this token with others so they can join your mesh. They run <strong style="color:#aaa">mesh-llm --join &lt;token&gt;</strong> or paste it into their console.</div>
+        <div style="display:flex;align-items:center;gap:0.4rem">
+          <div class="panel-tok" id="inviteToken" style="flex:1">${esc(token)}</div>
+          <button class="copy-btn" onclick="copyToken(this)" title="Copy invite token">📋 Copy</button>
         </div>
-        ${hasToken ? `<div class="cfg-row" style="margin-top:0.4rem">
-          <div class="cfg-label">Invite others</div>
-          <div style="display:flex;align-items:center;gap:0.3rem">
-            <div class="cfg-tok" id="inviteToken" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-height:none">${esc(token)}</div>
-            <button onclick="copyToken(this)" title="Copy invite token"
-              style="background:#1a1a1a;border:1px solid #222;border-radius:4px;padding:0.2rem 0.4rem;color:#888;cursor:pointer;font-size:0.6rem;white-space:nowrap;flex-shrink:0">📋 Copy</button>
-          </div>
-        </div>` : ''}
       </details>`;
     }
 
@@ -921,15 +864,33 @@
       const tok = document.getElementById('inviteToken');
       if (!tok) return;
       navigator.clipboard.writeText(tok.textContent).then(() => {
+        const prev = btn.textContent;
         btn.textContent = '✓ Copied';
-        setTimeout(() => btn.textContent = '📋 Copy', 2000);
+        setTimeout(() => btn.textContent = prev, 2000);
       }).catch(() => {
-        // Fallback: select all text
         const range = document.createRange();
         range.selectNodeContents(tok);
         window.getSelection().removeAllRanges();
         window.getSelection().addRange(range);
       });
+    }
+
+    // ── Join a mesh ──
+
+    let joinSectionRendered = false;
+    function renderJoinSection() {
+      const el = $('joinSection');
+      if (joinSectionRendered) return;
+      joinSectionRendered = true;
+      el.innerHTML = `<details class="panel-section">
+        <summary>Join another mesh</summary>
+        <div class="panel-desc">Paste an invite token from someone else to connect to their mesh.</div>
+        <div style="display:flex;gap:0.3rem">
+          <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
+            style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#ccc;font-family:monospace;font-size:0.55rem;padding:0.3rem 0.5rem">
+          <button class="panel-btn" onclick="joinFromInput()">Join</button>
+        </div>
+      </details>`;
     }
 
     async function joinFromInput() {
@@ -945,23 +906,97 @@
       inp.disabled = false;
     }
 
-    // ── Using your mesh (collapsible) ──
+    // ── Discover public meshes ──
 
-    function renderMore() {
-      const el = $('cfgSection');
+    let discoverLoaded = false;
+    function renderDiscover() {
+      const el = $('discoverSection');
+      if (el.innerHTML && el.querySelector('details[open]')) return;
+      el.innerHTML = `<details class="panel-section" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
+        <summary>Discover public meshes</summary>
+        <div class="panel-desc">Browse meshes published to Nostr. Anyone can publish their mesh for others to find and join.</div>
+        <div id="discoverContent"></div>
+      </details>`;
+    }
+
+    async function loadDiscover() {
+      const el = $('discoverContent');
+      if (!el) return;
+      el.innerHTML = '<div style="color:#777;font-size:0.6rem;padding:0.3rem 0">Searching Nostr relays…</div>';
+      try {
+        const r = await fetch('/api/discover');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const meshes = await r.json();
+        if (!meshes.length) { el.innerHTML = '<div style="color:#777;font-size:0.6rem">No public meshes found.</div>'; return; }
+        const myMeshId = S.mesh_id || '';
+        el.innerHTML = meshes.map(m => {
+          const l = m.listing;
+          const isCurrent = myMeshId && l.mesh_id && l.mesh_id === myMeshId;
+          const served = (l.serving || []).map(shortName).join(', ');
+          const nodes = l.node_count || 0;
+          const vram = l.total_vram_bytes > 0 ? `${(l.total_vram_bytes / 1e9).toFixed(0)}GB` : '';
+          const stats = [nodes + ' node' + (nodes !== 1 ? 's' : ''), vram].filter(Boolean).join(' · ');
+          return `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
+            <div class="discover-item-hdr">
+              <span class="discover-name">${esc(l.name || m.publisher_npub.substring(0, 12))}</span>
+              ${isCurrent ? '<span style="color:#4c4;font-size:0.5rem;font-weight:600">✓ connected</span>' : ''}
+              ${l.region ? `<span class="discover-region">${esc(l.region)}</span>` : ''}
+            </div>
+            <div class="discover-stats">${stats}</div>
+            ${served ? `<div class="discover-models" title="${esc((l.serving||[]).join(', '))}">${esc(served)}</div>` : ''}
+            ${isCurrent ? '' : `<button class="discover-btn" onclick="joinMesh('${esc(l.invite_token)}', this)">Join</button>`}
+          </div>`;
+        }).join('');
+      } catch (e) {
+        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Error: ${esc(e.message)}</div>`;
+      }
+    }
+
+    async function joinMesh(token, btnEl) {
+      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Joining…'; }
+      try {
+        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+        if (!r.ok) throw new Error(await r.text());
+        if (btnEl) btnEl.textContent = 'Joined!';
+      } catch (e) {
+        alert('Failed to join: ' + e.message);
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Join'; }
+      }
+    }
+
+    // ── Using your mesh ──
+
+    function renderApiSection() {
+      const el = $('apiSection');
       if (el.innerHTML && el.querySelector('details[open]')) return;
       if (!S.llama_ready) { el.innerHTML = ''; return; }
       const p = S.api_port || 9337;
-      el.innerHTML = `<details class="cfg"><summary>Using your mesh</summary>
-        <div class="cfg-row">
-          <div class="cfg-label">OpenAI-compatible API</div>
-          <div class="cfg-val">http://localhost:${p}/v1</div>
+      el.innerHTML = `<details class="panel-section"><summary>Using your mesh</summary>
+        <div class="panel-desc">
+          Your mesh exposes an OpenAI-compatible API. Use it with any tool that supports the OpenAI format — pi, goose, Continue, aider, Open WebUI, curl, or anything else.
         </div>
-        <div style="font-size:0.55rem;color:#555;line-height:1.4;margin-top:0.2rem">
-          Works with any tool that supports OpenAI API — pi, goose, Continue, aider, Open WebUI, curl, etc.
-          Use <span style="color:#888">mesh</span> as the API key. Models listed at <span style="color:#888">/v1/models</span>.
+        <div class="panel-row">
+          <div class="panel-label">API endpoint</div>
+          <div style="display:flex;align-items:center;gap:0.4rem">
+            <div class="panel-val" style="flex:1" id="apiUrl">http://localhost:${p}/v1</div>
+            <button class="copy-btn" onclick="copyEl('apiUrl', this)">📋 Copy</button>
+          </div>
+        </div>
+        <div style="font-size:0.55rem;color:#777;line-height:1.5;margin-top:0.1rem">
+          API key: <code style="color:#aaa;background:#111;padding:0.1rem 0.3rem;border-radius:2px">mesh</code> · 
+          Model list: <code style="color:#aaa;background:#111;padding:0.1rem 0.3rem;border-radius:2px">/v1/models</code>
         </div>
       </details>`;
+    }
+
+    function copyEl(id, btn) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent).then(() => {
+        const prev = btn.textContent;
+        btn.textContent = '✓ Copied';
+        setTimeout(() => btn.textContent = prev, 2000);
+      });
     }
 
     function shortName(n) { return (n || '').replace(/-Q\w+$/, '').replace(/-Instruct/, ''); }
