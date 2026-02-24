@@ -1851,43 +1851,4 @@ async fn load_or_create_key() -> Result<SecretKey> {
     Ok(key)
 }
 
-// ── Persistent config ──
 
-fn config_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".mesh-llm")
-        .join("config.json")
-}
-
-pub fn save_join_token(token: &str) {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let json = format!("{{\"join\":\"{token}\"}}");
-    let _ = std::fs::write(&path, json);
-}
-
-pub fn load_join_token() -> Option<String> {
-    let path = config_path();
-    let data = std::fs::read_to_string(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-    v.get("join")?.as_str().map(|s| s.to_string())
-}
-
-pub fn save_serve_model(model: &str) {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let json = format!("{{\"serve\":\"{model}\"}}");
-    let _ = std::fs::write(&path, json);
-}
-
-pub fn load_serve_model() -> Option<String> {
-    let path = config_path();
-    let data = std::fs::read_to_string(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-    v.get("serve")?.as_str().map(|s| s.to_string())
-}

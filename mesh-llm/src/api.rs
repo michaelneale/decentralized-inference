@@ -391,7 +391,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             match serde_json::from_str::<JoinReq>(&body) {
                 Ok(jr) => {
                     if let Some(ref tx) = state.action_tx {
-                        mesh::save_join_token(&jr.token);
                         if tx.send(ConsoleAction::Join(jr.token)).is_ok() {
                             let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"ok\":true,\"joining\":true}";
                             stream.write_all(resp.as_bytes()).await?;

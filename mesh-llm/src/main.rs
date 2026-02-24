@@ -310,16 +310,7 @@ async fn main() -> Result<()> {
     }
     // No args at all = idle mode with console for browsing/joining
     if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
-        // Check for saved config from previous console session
-        if let Some(token) = mesh::load_join_token() {
-            eprintln!("📋 Resuming join from saved config (~/.mesh-llm/config.json)");
-            cli.join = vec![token];
-            // Fall through to normal join flow below
-        } else if let Some(model) = mesh::load_serve_model() {
-            eprintln!("📋 Resuming serve from saved config (~/.mesh-llm/config.json)");
-            cli.model = vec![model.into()];
-            // Fall through to normal model resolution below
-        } else {
+        {
             let bin_dir = match &cli.bin_dir {
                 Some(d) => d.clone(),
                 None => detect_bin_dir()?,
@@ -1211,7 +1202,6 @@ async fn run_idle(cli: Cli, bin_dir: PathBuf) -> Result<()> {
         }
         api::ConsoleAction::Serve(model_name) => {
             eprintln!("🚀 Starting mesh with {model_name}...");
-            mesh::save_serve_model(&model_name);
             node.start_accepting();
             node.start_heartbeat();
 
