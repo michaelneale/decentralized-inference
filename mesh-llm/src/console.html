@@ -826,21 +826,62 @@
 
     // ── Join hint (tiny, expands) ──
 
+    let joinRendered = false;
     function renderJoin() {
       const el = $('joinHint');
+      // Only render once — don't clobber open state or user input
+      if (joinRendered) {
+        // Update invite commands if token changed
+        const cmdGpu = document.getElementById('joinCmdGpu');
+        const cmdLite = document.getElementById('joinCmdLite');
+        if (cmdGpu && S.token && S.model_name) {
+          cmdGpu.textContent = `mesh-llm --model ${S.model_name} --join ${S.token}`;
+          cmdLite.textContent = `mesh-llm --client --join ${S.token}`;
+        }
+        return;
+      }
+      joinRendered = true;
+
       const token = S.token || '';
       const model = S.model_name || '';
-      if (!token) { el.innerHTML = ''; return; }
-      const peers = (S.peers || []).length;
-      if (peers > 0 && !S.llama_ready) { el.innerHTML = ''; return; }
-      el.innerHTML = `<details class="join-details"><summary>Add a node</summary>
-    <div style="margin-top:0.2rem">
-      <div class="cfg-label">GPU node (contributes VRAM)</div>
-      <div class="cmd-sm" style="user-select:all">mesh-llm --model ${esc(model)} --join ${esc(token)}</div>
-      <div class="cfg-label" style="margin-top:0.3rem">Lite node (API access only, no GPU needed)</div>
-      <div class="cmd-sm" style="user-select:all">mesh-llm --client --join ${esc(token)}</div>
-    </div>
-  </details>`;
+
+      let inviteSection = '';
+      if (token && model && model !== '(idle)') {
+        inviteSection = `
+          <div class="section-label" style="margin-top:0.4rem">Invite others to this mesh</div>
+          <div class="cfg-label">GPU node</div>
+          <div class="cmd-sm" id="joinCmdGpu" style="user-select:all">${esc(`mesh-llm --model ${model} --join ${token}`)}</div>
+          <div class="cfg-label" style="margin-top:0.2rem">Lite client</div>
+          <div class="cmd-sm" id="joinCmdLite" style="user-select:all">${esc(`mesh-llm --client --join ${token}`)}</div>`;
+      }
+
+      el.innerHTML = `
+        <div class="section-label">Join a mesh</div>
+        <div style="display:flex;gap:0.3rem;margin-bottom:0.4rem">
+          <input type="text" id="joinTokenInput" placeholder="Paste invite token…"
+            style="flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;color:#aaa;font-family:monospace;font-size:0.55rem;padding:0.25rem 0.4rem">
+          <button onclick="joinFromInput()" style="background:#1a3a5c;border:1px solid #2a5a8c;border-radius:4px;padding:0.2rem 0.5rem;color:#e0e0e0;cursor:pointer;font-size:0.55rem;white-space:nowrap">Join</button>
+        </div>
+        ${inviteSection}`;
+    }
+
+    async function joinFromInput() {
+      const inp = document.getElementById('joinTokenInput');
+      const token = (inp.value || '').trim();
+      if (!token) return;
+      inp.disabled = true;
+      try {
+        const r = await fetch('/api/join', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+        if (!r.ok) throw new Error(await r.text());
+        inp.value = '';
+        inp.placeholder = 'Joined!';
+      } catch (e) {
+        alert('Failed to join: ' + e.message);
+      }
+      inp.disabled = false;
     }
 
     // ── Discover hint (tiny, expands) ──
