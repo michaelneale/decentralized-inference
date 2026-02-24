@@ -1,0 +1,18 @@
+app = "mesh-llm-console"
+primary_region = "syd"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[build.args]
+
+[http_service]
+  internal_port = 3131
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

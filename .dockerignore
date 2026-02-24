@@ -1,0 +1,6 @@
+target/
+.git/
+llama.cpp/
+macos/
+iroh-relay/
+*.tar.gz
