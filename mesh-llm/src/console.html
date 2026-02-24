@@ -1020,6 +1020,8 @@
 
     // ── Chat ──
 
+    let chatHistory = [];
+
     async function send() {
       const clientOk = S.is_client && (S.mesh_models || []).some(m => m.status === 'warm');
       if (!S.llama_ready && !clientOk) return;
@@ -1030,16 +1032,17 @@
       const model = selectedModel();
       const label = shortName(model);
       el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models || []).filter(m => m.status === 'warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
+      chatHistory.push({ role: 'user', content: msg });
       const bot = document.createElement('div'); bot.className = 'mb';
       el.appendChild(bot); el.scrollTop = el.scrollHeight;
       try {
         const r = await fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: model, messages: [{ role: 'user', content: msg }], stream: true }),
+          body: JSON.stringify({ model: model, messages: chatHistory, stream: true }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const reader = r.body.getReader();
-        const dec = new TextDecoder(); let buf = '';
+        const dec = new TextDecoder(); let buf = ''; let full = '';
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
           buf += dec.decode(value, { stream: true });
@@ -1049,12 +1052,13 @@
             const d = l.slice(6).trim(); if (d === '[DONE]') continue;
             try {
               const c = JSON.parse(d); const t = c.choices?.[0]?.delta?.content || c.choices?.[0]?.delta?.reasoning_content || '';
-              if (t) { bot.textContent += t; el.scrollTop = el.scrollHeight; }
+              if (t) { full += t; bot.textContent += t; el.scrollTop = el.scrollHeight; }
             } catch { }
           }
         }
-        if (!bot.textContent) bot.textContent = '(empty response)';
-      } catch (e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; }
+        if (!full) { bot.textContent = '(empty response)'; }
+        chatHistory.push({ role: 'assistant', content: full || '' });
+      } catch (e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; chatHistory.pop(); }
       el.scrollTop = el.scrollHeight;
     }
 
