@@ -28,5 +28,6 @@
 - [ ] `mesh-llm recommend`: CLI subcommand to suggest models for your hardware
 
 ## Future
+- [ ] **Public named meshes**: `--mesh-name "cool-mesh" --publish` currently gets -200 penalty for random `--auto` users (treated as private group). If someone explicitly passes both `--mesh-name` and `--publish`, add a `public: true` field to the Nostr listing so it scores like an unnamed mesh (no penalty). Lets people give their mesh a fun name without hiding it from discovery.
 - [ ] Demand-based Nostr listings: include request rates so `--auto` joiners can see what's hot
 - [ ] Multi-node tensor split recovery: if one split peer dies, re-split across remaining
