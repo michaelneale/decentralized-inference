@@ -252,7 +252,7 @@ async fn main() -> Result<()> {
         eprintln!("  Found {} mesh(es)", meshes.len());
         let target_name = cli.mesh_name.as_deref();
         for m in &meshes {
-            let score = nostr::score_mesh(m, now, last_mesh_id.as_deref(), target_name);
+            let score = nostr::score_mesh(m, now, last_mesh_id.as_deref());
             eprintln!("  · {} (score: {}, {} nodes, {:.0}GB, {} clients{})",
                 m.listing.name.as_deref().unwrap_or("unnamed"),
                 score,
@@ -1737,7 +1737,7 @@ async fn run_discover(
     let last_mesh_id = mesh::load_last_mesh_id();
     eprintln!("Found {} mesh(es):\n", meshes.len());
     for (i, mesh) in meshes.iter().enumerate() {
-        let score = nostr::score_mesh(mesh, now, last_mesh_id.as_deref(), None);
+        let score = nostr::score_mesh(mesh, now, last_mesh_id.as_deref());
         let age = now.saturating_sub(mesh.published_at);
         let freshness = if age < 120 { "fresh" } else if age < 300 { "ok" } else { "stale" };
         let capacity = if mesh.listing.max_clients > 0 {

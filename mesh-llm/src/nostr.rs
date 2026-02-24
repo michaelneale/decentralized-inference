@@ -584,23 +584,17 @@ pub async fn discover(relays: &[String], filter: &MeshFilter) -> Result<Vec<Disc
 /// Considers region match, capacity, and model availability.
 /// Freshness is mostly irrelevant since Nostr listings expire at 120s (TTL=2×60s),
 /// so anything we see from discover() is already reasonably fresh.
-pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&str>, target_name: Option<&str>) -> i64 {
+pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&str>) -> i64 {
     let mut score: i64 = 100; // base score — if we can see it, it's alive
 
     // Target mesh name: very strong bonus if user asked for a specific mesh
     // Default "mesh-llm" name: moderate bonus for the community mesh
     // Other named meshes: penalty (they're someone's private group)
     if let Some(ref name) = mesh.listing.name {
-        if let Some(target) = target_name {
-            if name.eq_ignore_ascii_case(target) {
-                score += 1000; // user asked for this mesh specifically
-            } else {
-                score -= 200; // named mesh, but not the one we want
-            }
-        } else if name.eq_ignore_ascii_case("mesh-llm") {
+        if name.eq_ignore_ascii_case("mesh-llm") {
             score += 300; // prefer the default community mesh
         } else {
-            score -= 200; // named mesh we didn't ask for — probably private
+            score -= 200; // named mesh — probably someone's private group
         }
     }
 
@@ -660,9 +654,20 @@ pub fn smart_auto(
 
     let last_mesh_id = crate::mesh::load_last_mesh_id();
 
+    // If target name is set, only consider meshes with that exact name
+    let candidates: Vec<&DiscoveredMesh> = if let Some(target) = target_name {
+        meshes.iter().filter(|m| {
+            m.listing.name.as_ref()
+                .map(|n| n.eq_ignore_ascii_case(target))
+                .unwrap_or(false)
+        }).collect()
+    } else {
+        meshes.iter().collect()
+    };
+
     // Score and rank
-    let mut scored: Vec<(&DiscoveredMesh, i64)> = meshes.iter()
-        .map(|m| (m, score_mesh(m, now, last_mesh_id.as_deref(), target_name)))
+    let mut scored: Vec<(&DiscoveredMesh, i64)> = candidates.iter()
+        .map(|m| (*m, score_mesh(m, now, last_mesh_id.as_deref())))
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
 
