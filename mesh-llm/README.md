@@ -51,6 +51,16 @@ mesh-llm --auto
 
 Smart auto-join scores meshes by: region match, node count, model overlap, VRAM, overload. QUIC health probe before committing. Publish watchdog auto-takes-over if the original publisher dies.
 
+## Named meshes (buddy mode)
+
+Create a shared mesh — everyone runs the same command:
+
+```bash
+mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night"
+```
+
+The first person to run it creates the mesh and starts serving. Everyone else discovers "poker-night" and joins automatically. `--mesh-name` implies `--publish` and strictly filters discovery to that name only — your group won't accidentally land in someone else's mesh.
+
 ## Idle mode
 
 ```bash

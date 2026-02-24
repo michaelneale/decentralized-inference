@@ -11,8 +11,8 @@ curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/late
 ```
 
 ```bash
-mesh-llm --model Qwen2.5-32B --console    # downloads model (~20GB), starts API + web console
-mesh-llm --model Qwen2.5-3B --console     # or a small model first (~2GB)
+mesh-llm --model Qwen2.5-32B    # downloads model (~20GB), starts API + web console
+mesh-llm --model Qwen2.5-3B     # or a small model first (~2GB)
 ```
 
 Add another machine:
@@ -87,6 +87,12 @@ mesh-llm discover                          # browse meshes
 mesh-llm discover --model GLM --region AU  # filter
 ```
 
+### Create a shared mesh (buddy mode)
+```bash
+mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night"
+```
+Everyone runs the same command. First person creates the mesh, everyone else discovers it by name and joins. `--mesh-name` implies `--publish`.
+
 ### Browse and join interactively
 ```bash
 mesh-llm                                   # opens console on :3131 for discovery/joining
@@ -95,7 +101,7 @@ mesh-llm                                   # opens console on :3131 for discover
 ## Web console
 
 ```bash
-mesh-llm --model Qwen2.5-32B --console    # opens dashboard on :3131
+mesh-llm --model Qwen2.5-32B    # dashboard at http://localhost:3131
 ```
 
 Live topology, VRAM bars per node, model picker, built-in chat. Everything comes from `/api/status` (JSON) and `/api/events` (SSE).
@@ -155,7 +161,7 @@ mesh-llm [OPTIONS]
   --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
   --max-vram GB        Cap VRAM advertised to mesh
   --split              Force tensor split
-  --console [PORT]     Web dashboard (default: 3131)
+  --console PORT       Web console port (default: 3131)
   --device DEV         GPU device (default: MTL0)
   --draft PATH         Draft model for speculative decoding
   --no-draft           Disable auto draft detection

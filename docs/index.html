@@ -149,6 +149,8 @@
             <span class="cmd">mesh-llm</span> <span class="flag">--join</span> <span class="val">&lt;token&gt;</span><br><br>
             <span class="comment"># Or discover public meshes and join automatically</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--auto</span><br><br>
+            <span class="comment"># Create a shared mesh — everyone runs the same command</span><br>
+            <span class="cmd">mesh-llm</span> <span class="flag">--auto</span> <span class="flag">--model</span> <span class="val">GLM-4.7-Flash</span> <span class="flag">--mesh-name</span> <span class="val">"poker-night"</span><br><br>
             <span class="comment"># Route requests by model name</span><br>
             <span class="cmd">curl</span> localhost:9337/v1/chat/completions <span class="flag">-d</span> <span class="val">'{"model":"GLM-4.7-Flash-Q4_K_M", ...}'</span>
         </div>
