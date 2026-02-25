@@ -49,11 +49,16 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 
 ## Usage
 
-### Start a private mesh
+### Start a mesh
 ```bash
 mesh-llm --model Qwen2.5-32B
 ```
-Serves a model and prints an invite token. Only people with the token can join. Not published anywhere.
+Starts serving a model and prints an invite token. This mesh is **private** — only people you share the token with can join.
+
+To make it **public** (discoverable by others via `--auto`):
+```bash
+mesh-llm --model Qwen2.5-32B --publish
+```
 
 ### Join a mesh
 ```bash
@@ -61,16 +66,16 @@ mesh-llm --join <token>                    # join with invite token (GPU node)
 mesh-llm --client --join <token>           # join as API-only client (no GPU)
 ```
 
-### Create a named mesh (buddy mode)
+### Named mesh (buddy mode)
 ```bash
 mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night"
 ```
-Everyone runs the same command. First person creates it, everyone else discovers it by name and joins. Named meshes are published to the directory so others can find them. Use `--auto` to discover and join automatically.
+Everyone runs the same command. First person creates it, everyone else discovers "poker-night" and joins automatically. `--mesh-name` implies `--publish` — named meshes are always published to the directory.
 
-### Discover and join public meshes
+### Auto-discover
 ```bash
 mesh-llm --auto                            # discover, join, and serve a model
-mesh-llm --client --auto                   # discover and join as API-only client
+mesh-llm --client --auto                   # join as API-only client (no GPU)
 mesh-llm discover                          # browse available meshes
 ```
 
@@ -87,7 +92,7 @@ Different nodes serve different models. The API proxy routes by the `model` fiel
 ```bash
 mesh-llm                                   # no args — shows instructions + console
 ```
-Opens a read-only console on `:3131` for browsing public meshes. Use the CLI to actually join or start one.
+Opens a read-only console on `:3131`. Use the CLI to start or join a mesh.
 
 ## Web console
 
