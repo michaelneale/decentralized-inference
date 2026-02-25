@@ -1077,62 +1077,12 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     Ok(())
 }
 
-/// Idle mode: no args → discover mesh, join as client, show read-only console.
-/// If no mesh found, just show instructions and wait.
-async fn run_idle(mut cli: Cli, _bin_dir: PathBuf) -> Result<()> {
+/// Idle mode: no args → show instructions and read-only console.
+/// Use --auto or --join to actually connect to a mesh.
+async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
     let local_models = mesh::scan_local_models();
     eprintln!("mesh-llm v{VERSION} — {:.0}GB VRAM, {} models on disk", my_vram_gb, local_models.len());
-    eprintln!();
-
-    // Try to discover and auto-join as client
-    eprintln!("🔍 Discovering meshes...");
-    let relays = nostr_relays(&cli.nostr_relay);
-    let filter = nostr::MeshFilter { model: None, min_vram_gb: None, region: None };
-    let meshes = match nostr::discover(&relays, &filter).await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("  Could not reach relays: {e}");
-            vec![]
-        }
-    };
-
-    if !meshes.is_empty() {
-        let target_name = cli.mesh_name.as_deref();
-        match nostr::smart_auto(&meshes, my_vram_gb, target_name) {
-            nostr::AutoDecision::Join { token, mesh } => {
-                eprintln!("✅ Found: {} ({} nodes, {} models)",
-                    mesh.listing.name.as_deref().unwrap_or("unnamed"),
-                    mesh.listing.node_count,
-                    mesh.listing.serving.len());
-                // Join as client
-                cli.client = true;
-                cli.join.push(token);
-            }
-            nostr::AutoDecision::StartNew { .. } => {
-                eprintln!("  No matching meshes found");
-            }
-        }
-    } else {
-        eprintln!("  No meshes found");
-    }
-
-    // If we found a mesh, run as client
-    if !cli.join.is_empty() {
-        eprintln!();
-        // Fall through to client mode — run_passive handles everything
-        let (node, _channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
-        node.set_available_models(local_models).await;
-        node.start_accepting();
-        node.start_heartbeat();
-        for token in &cli.join {
-            node.join(token).await?;
-        }
-        let _ = run_passive(&cli, node, true).await?;
-        return Ok(());
-    }
-
-    // No mesh found — show instructions and console
     eprintln!();
     eprintln!("  Console: http://localhost:{}", cli.console);
     eprintln!();
