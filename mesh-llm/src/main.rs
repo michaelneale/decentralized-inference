@@ -140,8 +140,8 @@ struct Cli {
     #[arg(long)]
     no_benchmark: bool,
 
-    /// Benchmark probe cadence in seconds (default: 60).
-    #[arg(long, default_value = "60")]
+    /// Benchmark probe cadence in seconds (default: 3600 / hourly).
+    #[arg(long, default_value = "3600")]
     benchmark_interval_secs: u64,
 
     /// Optional model override for benchmark probes (defaults to local served model or first /v1/models entry).

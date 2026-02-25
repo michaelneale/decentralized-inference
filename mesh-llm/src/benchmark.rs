@@ -2,7 +2,7 @@ use crate::{mesh, telemetry};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchmarkProbe {
@@ -108,15 +108,45 @@ pub fn spawn_probe_loop(
         let probe_nonstream = analysis_report_v1();
         let probe_stream = analysis_report_v1_stream();
         let mut run_stream_next = false;
+        let poll_every = Duration::from_secs(5);
+        let run_every = Duration::from_secs(interval_secs);
+        let mut next_cadence_at = Instant::now();
+        let mut last_topology_sig = topology_signature(&node).await;
         loop {
+            let topology_sig = topology_signature(&node).await;
+            let topology_changed = topology_sig != last_topology_sig;
+            if topology_changed {
+                last_topology_sig = topology_sig;
+            }
+
+            let cadence_due = Instant::now() >= next_cadence_at;
+            if !cadence_due && !topology_changed {
+                tokio::time::sleep(poll_every).await;
+                continue;
+            }
+
             let probe = if run_stream_next { &probe_stream } else { &probe_nonstream };
             if let Err(e) = run_probe_once(&client, &node, &telemetry, api_port, probe, model_override.as_deref()).await {
                 tracing::debug!("Benchmark probe failed to record: {e}");
+            } else if topology_changed {
+                tracing::debug!("Benchmark probe triggered by mesh topology change");
             }
             run_stream_next = !run_stream_next;
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            next_cadence_at = Instant::now() + run_every;
+            tokio::time::sleep(poll_every).await;
         }
     });
+}
+
+async fn topology_signature(node: &mesh::Node) -> String {
+    let mut ids = node
+        .peers()
+        .await
+        .into_iter()
+        .map(|p| p.id.fmt_short().to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.join(",")
 }
 
 async fn run_probe_once(
