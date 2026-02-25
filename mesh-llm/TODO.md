@@ -21,6 +21,11 @@
   1. Strike 1 added peer to `dead_peers` which blocked incoming gossip — too aggressive. Fixed: only add to `dead_peers` on confirmed death (2 strikes).
   2. Reconnect path didn't trigger gossip — peer reconnected but sat invisible for up to 60s until next heartbeat. Fixed: immediately initiate gossip exchange on reconnect of previously-dead peer.
 
+## Experiments
+- [ ] **SOTA split: Qwen3.5-397B-A17B across 128GB M4 Max + second machine**: [Unsloth GGUF quants](https://unsloth.ai/docs/models/qwen3.5) — 4-bit (Q4_K_XL) is ~219GB, fits across 128GB + 64GB with tensor split. MoE model (397B total, 17B active) so should be fast despite size. Try 2-bit (~149GB) for single-machine fit on 128GB.
+- [ ] **SOTA split: Qwen3.5-122B-A10B**: Smaller MoE, 4-bit should fit on 128GB solo. Good baseline before attempting 397B.
+- [ ] **SOTA dense: try largest dense models that need 2+ machines**: Llama-3.3-70B, Qwen2.5-72B — already have 72B on disk. Benchmark split performance at scale.
+
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`
 - [ ] Demand tracking in console: show req/min per model in TUI
