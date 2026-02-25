@@ -49,54 +49,45 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 
 ## Usage
 
-### Solo
+### Start a private mesh
 ```bash
 mesh-llm --model Qwen2.5-32B
-# API ready at http://localhost:9337
+```
+Serves a model and prints an invite token. Only people with the token can join. Not published anywhere.
+
+### Join a mesh
+```bash
+mesh-llm --join <token>                    # join with invite token (GPU node)
+mesh-llm --client --join <token>           # join as API-only client (no GPU)
 ```
 
-### Distributed
+### Create a named mesh (buddy mode)
 ```bash
-# Machine A
-mesh-llm --model Qwen2.5-32B
-# Prints invite token
+mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night"
+```
+Everyone runs the same command. First person creates it, everyone else discovers it by name and joins. Named meshes are published to the directory so others can find them. Use `--auto` to discover and join automatically.
 
-# Machine B — learns model from gossip, downloads if needed
-mesh-llm --join <token>
+### Discover and join public meshes
+```bash
+mesh-llm --auto                            # discover, join, and serve a model
+mesh-llm --client --auto                   # discover and join as API-only client
+mesh-llm discover                          # browse available meshes
 ```
 
 ### Multi-model
 ```bash
-# Request two models — node picks one based on mesh needs
 mesh-llm --model Qwen2.5-32B --model GLM-4.7-Flash
 
 # Route by model name
 curl localhost:9337/v1/chat/completions -d '{"model":"GLM-4.7-Flash-Q4_K_M", ...}'
 ```
+Different nodes serve different models. The API proxy routes by the `model` field.
 
-### Client (no GPU)
+### Idle mode
 ```bash
-mesh-llm --client --join <token>
-# Proxies to mesh via QUIC
+mesh-llm                                   # no args — shows instructions + console
 ```
-
-### Share via Nostr
-```bash
-mesh-llm --model Qwen2.5-3B --publish --mesh-name "My Mesh" --region AU
-mesh-llm discover                          # browse meshes
-mesh-llm discover --model GLM --region AU  # filter
-```
-
-### Create a shared mesh (buddy mode)
-```bash
-mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night"
-```
-Everyone runs the same command. First person creates the mesh, everyone else discovers it by name and joins. `--mesh-name` implies `--publish`.
-
-### Browse and join interactively
-```bash
-mesh-llm                                   # opens console on :3131 for discovery/joining
-```
+Opens a read-only console on `:3131` for browsing public meshes. Use the CLI to actually join or start one.
 
 ## Web console
 
@@ -150,18 +141,19 @@ Draft pairings for speculative decoding:
 ```
 mesh-llm [OPTIONS]
   --model NAME|PATH    Model to serve (can specify multiple)
-  --client             API-only client (no GPU)
   --join TOKEN         Join mesh via invite token
-  --auto               Discover and join via Nostr
-  --publish            Publish mesh to Nostr relays
-  --mesh-name NAME     Human-readable mesh name
-  --region REGION      Geographic region (AU, US-West, EU-West, ...)
-  --max-clients N      Delist from Nostr when N clients connected
+  --auto               Discover and join via directory
+  --client             API-only client (no GPU)
+  --mesh-name NAME     Name the mesh (implies --publish)
+  --publish            Publish mesh to directory
+  --region REGION      Geographic region tag (AU, US-West, EU-West, ...)
+  --max-clients N      Delist when N clients connected
   --port PORT          API port (default: 9337)
+  --console PORT       Console port (default: 3131)
   --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
+  --listen-all         Bind to 0.0.0.0 (for containers)
   --max-vram GB        Cap VRAM advertised to mesh
   --split              Force tensor split
-  --console PORT       Web console port (default: 3131)
   --device DEV         GPU device (default: MTL0)
   --draft PATH         Draft model for speculative decoding
   --no-draft           Disable auto draft detection

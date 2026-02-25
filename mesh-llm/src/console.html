@@ -312,27 +312,6 @@
       text-overflow: ellipsis;
     }
 
-    .discover-btn {
-      margin-top: 0.2rem;
-      background: #1a3a5c;
-      border: 1px solid #2a5a8c;
-      border-radius: 4px;
-      padding: 0.2rem 0.5rem;
-      color: #e0e0e0;
-      cursor: pointer;
-      font-size: 0.55rem;
-      align-self: flex-start;
-    }
-
-    .discover-btn:hover {
-      background: #2a4a6c;
-    }
-
-    .discover-btn:disabled {
-      opacity: 0.3;
-      cursor: default;
-    }
-
     /* Collapsible sections */
     details.panel-section {
       border-top: 1px solid #1a1a1a;
@@ -611,6 +590,7 @@
       <div id="agents"></div>
       <div id="inviteSection"></div>
       <div id="discoverSection"></div>
+      <div id="gettingStarted"></div>
       <div id="apiSection"></div>
     </div>
     <div class="right">
@@ -641,7 +621,7 @@
     }
 
     function render() {
-      renderMeshName(); renderBadge(); renderMeta(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderDiscover(); renderApiSection();
+      renderMeshName(); renderBadge(); renderMeta(); renderGettingStarted(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderDiscover(); renderApiSection();
       const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
       const ok = S.llama_ready || (S.is_client && hasWarmModel);
       $('inp').disabled = !ok; $('btn').disabled = !ok;
@@ -813,10 +793,13 @@
       const n = peers + 1;
       const gpuVram = (S.is_client ? 0 : (S.my_vram_gb || 0)) + (S.peers || []).filter(p => p.role !== 'Client').reduce((s, p) => s + p.vram_gb, 0);
       const vramStr = gpuVram > 0 ? ` · ${gpuVram.toFixed(0)} GB mesh` : '';
-      if (S.llama_ready) {
-        el.innerHTML = `<div class="status-line ok">✓ Running · ${n} node${n > 1 ? 's' : ''}${vramStr}</div>`;
+      const hasWarm = (S.mesh_models || []).some(m => m.status === 'warm');
+      if (S.llama_ready || (S.is_client && hasWarm)) {
+        el.innerHTML = `<div class="status-line ok">✓ Connected · ${n} node${n > 1 ? 's' : ''}${vramStr}</div>`;
       } else if (S.is_host) {
         el.innerHTML = `<div class="status-line">Loading ${esc(model)}…${n > 1 ? ' · ' + n + ' nodes' + vramStr : ''}</div>`;
+      } else if (S.is_client && peers > 0) {
+        el.innerHTML = `<div class="status-line">Connecting · ${n} nodes${vramStr}</div>`;
       } else if (peers > 0) {
         el.innerHTML = `<div class="status-line">Waiting for host · ${n} nodes${vramStr}</div>`;
       } else if (S.node_id) {
@@ -856,6 +839,32 @@
     // ── Join hint (tiny, expands) ──
 
     // ── Invite others ──
+
+    // ── Getting started (idle mode only) ──
+
+    let gettingStartedRendered = false;
+    function renderGettingStarted() {
+      const el = $('gettingStarted');
+      if (S.node_status !== 'Idle') { el.innerHTML = ''; gettingStartedRendered = false; return; }
+      if (gettingStartedRendered) return;
+      gettingStartedRendered = true;
+      el.innerHTML = `
+        <details class="panel-section">
+          <summary>Start a mesh</summary>
+          <div class="panel-desc">Serve a model from this machine. Others can join with your invite token.</div>
+          <pre style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.55rem;color:#8c8;margin:0.3rem 0;overflow-x:auto;white-space:pre-wrap">mesh-llm --model Qwen2.5-32B</pre>
+          <div class="panel-desc" style="margin-top:0.3rem">Or create a named mesh everyone can join with the same command:</div>
+          <pre style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.55rem;color:#8c8;margin:0.3rem 0;overflow-x:auto;white-space:pre-wrap">mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "my-mesh"</pre>
+        </details>
+        <details class="panel-section">
+          <summary>Join a mesh</summary>
+          <div class="panel-desc">Discover public meshes and join automatically, or paste an invite token.</div>
+          <pre style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.55rem;color:#8c8;margin:0.3rem 0;overflow-x:auto;white-space:pre-wrap">mesh-llm --auto</pre>
+          <pre style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.55rem;color:#8c8;margin:0.3rem 0;overflow-x:auto;white-space:pre-wrap">mesh-llm --join &lt;token&gt;</pre>
+          <div class="panel-desc" style="margin-top:0.3rem">Join as API-only client (no GPU):</div>
+          <pre style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.4rem 0.6rem;font-size:0.55rem;color:#8c8;margin:0.3rem 0;overflow-x:auto;white-space:pre-wrap">mesh-llm --client --auto</pre>
+        </details>`;
+    }
 
     // ── Invite others ──
 
@@ -908,8 +917,8 @@
       if (S.is_client) { el.innerHTML = ''; return; }
       if (el.innerHTML && el.querySelector('details[open]')) return;
       el.innerHTML = `<details class="panel-section" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
-        <summary>Discover public meshes</summary>
-        <div class="panel-desc">Browse meshes published to Nostr. Anyone can publish their mesh for others to find and join.</div>
+        <summary>Public meshes</summary>
+        <div class="panel-desc">Meshes published to the directory. Run the command to join one.</div>
         <div id="discoverContent"></div>
       </details>`;
     }
@@ -917,7 +926,7 @@
     async function loadDiscover() {
       const el = $('discoverContent');
       if (!el) return;
-      el.innerHTML = '<div style="color:#777;font-size:0.6rem;padding:0.3rem 0">Searching Nostr relays…</div>';
+      el.innerHTML = '<div style="color:#777;font-size:0.6rem;padding:0.3rem 0">Searching…</div>';
       try {
         const r = await fetch('/api/discover');
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -931,6 +940,7 @@
           const nodes = l.node_count || 0;
           const vram = l.total_vram_bytes > 0 ? `${(l.total_vram_bytes / 1e9).toFixed(0)}GB` : '';
           const stats = [nodes + ' node' + (nodes !== 1 ? 's' : ''), vram].filter(Boolean).join(' · ');
+          const joinCmd = `mesh-llm --join ${l.invite_token.substring(0, 20)}…`;
           return `<div class="discover-item" style="${isCurrent ? 'border-color:#2a5a2a' : ''}">
             <div class="discover-item-hdr">
               <span class="discover-name">${esc(l.name || m.publisher_npub.substring(0, 12))}</span>
@@ -939,24 +949,12 @@
             </div>
             <div class="discover-stats">${stats}</div>
             ${served ? `<div class="discover-models" title="${esc((l.serving||[]).join(', '))}">${esc(served)}</div>` : ''}
-            ${isCurrent ? '' : `<button class="discover-btn" onclick="joinMesh('${esc(l.invite_token)}', this)">Join</button>`}
+            ${isCurrent ? '' : `<pre onclick="navigator.clipboard.writeText('mesh-llm --join ${esc(l.invite_token)}')" title="Click to copy" style="cursor:pointer;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;padding:0.3rem 0.5rem;font-size:0.5rem;color:#8c8;margin:0.2rem 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(joinCmd)} <span style="color:#555">📋</span></pre>`}
           </div>`;
         }).join('');
       } catch (e) {
-        discoverLoaded = false; // Allow retry on next toggle
-        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Could not reach Nostr relays. Check your network connection and try again.</div>`;
-      }
-    }
-
-    async function joinMesh(token, btnEl) {
-      if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Joining…'; }
-      try {
-        const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
-        if (!r.ok) throw new Error(await r.text());
-        if (btnEl) btnEl.textContent = 'Joined!';
-      } catch (e) {
-        alert('Failed to join: ' + e.message);
-        if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Join'; }
+        discoverLoaded = false;
+        el.innerHTML = `<div style="color:#c66;font-size:0.6rem">Could not reach directory. Check your network connection and try again.</div>`;
       }
     }
 
