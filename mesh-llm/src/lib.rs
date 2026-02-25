@@ -33,24 +33,48 @@ use tokio::sync::{mpsc, Mutex};
 /// Chat message: (role, content).
 pub type Message<'a> = (&'a str, &'a str);
 
+/// Token usage statistics.
+#[derive(Clone, Debug, Default)]
+pub struct Usage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+}
+
 /// Token stream from a generation request.
 pub struct TokenStream {
     rx: mpsc::Receiver<String>,
+    usage_rx: tokio::sync::oneshot::Receiver<Usage>,
+    usage: Option<Usage>,
 }
 
 impl TokenStream {
     /// Receive the next token piece, or None when generation is done.
     pub async fn next(&mut self) -> Option<String> {
-        self.rx.recv().await
+        match self.rx.recv().await {
+            Some(tok) => Some(tok),
+            None => {
+                // Stream done — grab usage
+                if self.usage.is_none() {
+                    self.usage = self.usage_rx.try_recv().ok();
+                }
+                None
+            }
+        }
     }
 
     /// Collect all tokens into a single string.
     pub async fn collect(mut self) -> String {
         let mut out = String::new();
-        while let Some(tok) = self.rx.recv().await {
+        while let Some(tok) = self.next().await {
             out.push_str(&tok);
         }
         out
+    }
+
+    /// Token usage (available after stream completes).
+    pub fn usage(&self) -> Option<&Usage> {
+        self.usage.as_ref()
     }
 }
 
@@ -156,6 +180,7 @@ impl Engine {
     /// Send a chat completion request. Returns a stream of token pieces.
     pub fn chat(&self, messages: &[Message<'_>]) -> TokenStream {
         let (tx, rx) = mpsc::channel(256);
+        let (usage_tx, usage_rx) = tokio::sync::oneshot::channel();
         let backend = self.backend.clone();
         let msgs: Vec<(String, String)> = messages
             .iter()
@@ -171,12 +196,13 @@ impl Engine {
                         if let Backend::Solo(ref inner) = *backend2 {
                             let mut eng = inner.blocking_lock();
                             match eng.generate(&msgs, 4096) {
-                                Ok(pieces) => {
+                                Ok((pieces, usage)) => {
                                     for piece in pieces {
                                         if tx2.blocking_send(piece).is_err() {
                                             break;
                                         }
                                     }
+                                    let _ = usage_tx.send(usage);
                                 }
                                 Err(e) => {
                                     let _ = tx2.blocking_send(format!("[error: {e}]"));
@@ -194,7 +220,9 @@ impl Engine {
                 } => {
                     let body = build_request_body(&msgs, model.as_deref(), true);
                     match stream_sse(client, base_url, &body, &tx).await {
-                        Ok(()) => {}
+                        Ok(usage) => {
+                            let _ = usage_tx.send(usage);
+                        }
                         Err(e) => {
                             let _ = tx.send(format!("[error: {e}]")).await;
                         }
@@ -203,7 +231,7 @@ impl Engine {
             }
         });
 
-        TokenStream { rx }
+        TokenStream { rx, usage_rx, usage: None }
     }
 
     /// Non-streaming chat completion. Returns the full response text.
@@ -218,7 +246,7 @@ impl Engine {
                 tokio::task::spawn_blocking(move || {
                     if let Backend::Solo(ref inner) = *backend {
                         let mut eng = inner.blocking_lock();
-                        let pieces = eng.generate(&msgs, 4096)?;
+                        let (pieces, _usage) = eng.generate(&msgs, 4096)?;
                         Ok(pieces.join(""))
                     } else {
                         unreachable!()
@@ -268,11 +296,15 @@ fn build_request_body(
         .iter()
         .map(|(r, c)| serde_json::json!({"role": r, "content": c}))
         .collect();
-    serde_json::json!({
+    let mut req = serde_json::json!({
         "model": model.unwrap_or("default"),
         "messages": msgs,
         "stream": stream,
-    })
+    });
+    if stream {
+        req["stream_options"] = serde_json::json!({"include_usage": true});
+    }
+    req
     .to_string()
 }
 
@@ -281,7 +313,7 @@ async fn stream_sse(
     base_url: &str,
     body: &str,
     tx: &mpsc::Sender<String>,
-) -> Result<(), String> {
+) -> Result<Usage, String> {
     let resp = client
         .post(format!("{base_url}/v1/chat/completions"))
         .header("Content-Type", "application/json")
@@ -296,32 +328,38 @@ async fn stream_sse(
 
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
+    let mut usage = Usage::default();
 
     use tokio_stream::StreamExt;
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| e.to_string())?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
-        // Parse SSE lines
         while let Some(line_end) = buf.find('\n') {
             let line = buf[..line_end].trim_end_matches('\r').to_string();
             buf = buf[line_end + 1..].to_string();
 
             if line == "data: [DONE]" {
-                return Ok(());
+                return Ok(usage);
             }
             if let Some(json_str) = line.strip_prefix("data: ") {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                     if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
                         if !content.is_empty() && tx.send(content.to_string()).await.is_err() {
-                            return Ok(()); // receiver dropped
+                            return Ok(usage);
                         }
+                    }
+                    // llama-server sends usage in the final chunk
+                    if let Some(u) = v.get("usage") {
+                        usage.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as usize;
+                        usage.completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as usize;
+                        usage.total_tokens = u["total_tokens"].as_u64().unwrap_or(0) as usize;
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(usage)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -393,7 +431,7 @@ impl SoloInner {
         &mut self,
         messages: &[(String, String)],
         max_tokens: usize,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<(Vec<String>, Usage), String> {
         let prompt = self.apply_chat_template(messages)?;
         let tokens = self.tokenize(&prompt, false);
         let n_prompt = tokens.len();
@@ -425,6 +463,7 @@ impl SoloInner {
         // Generate
         let effective_max = max_tokens.min((self.n_ctx as usize).saturating_sub(n_prompt));
         let mut pieces = Vec::new();
+        let mut n_gen = 0usize;
 
         for _ in 0..effective_max {
             let token = unsafe { llama_sampler_sample(self.sampler, self.ctx, -1) };
@@ -433,6 +472,7 @@ impl SoloInner {
                 break;
             }
 
+            n_gen += 1;
             pieces.push(self.token_to_str(token));
 
             let batch = unsafe { llama_batch_get_one(&token as *const _, 1) };
@@ -441,7 +481,11 @@ impl SoloInner {
             }
         }
 
-        Ok(pieces)
+        Ok((pieces, Usage {
+            prompt_tokens: n_prompt,
+            completion_tokens: n_gen,
+            total_tokens: n_prompt + n_gen,
+        }))
     }
 
     fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String, String> {

@@ -45,7 +45,12 @@ async fn main() {
     while let Some(token) = stream.next().await {
         eprint!("{}", token);
     }
-    eprintln!("\n--- Done ---");
+    if let Some(usage) = stream.usage() {
+        eprintln!("\n--- Done (prompt: {}, completion: {}, total: {}) ---",
+            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+    } else {
+        eprintln!("\n--- Done ---");
+    }
 }
 
 async fn run_multi_turn(engine: &Engine) {
