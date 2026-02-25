@@ -261,6 +261,49 @@ pub async fn publish_loop(
             continue;
         }
 
+        // ── Split-heal: if we're solo, check if a bigger mesh exists with our mesh_id ──
+        // This handles the case where a node temporarily loses connectivity,
+        // goes solo, and starts publishing independently. When the bigger mesh
+        // is still out there, we should rejoin it instead of fragmenting.
+        let gpu_peers = peers.iter()
+            .filter(|p| !matches!(p.role, crate::mesh::NodeRole::Client))
+            .count();
+        if gpu_peers == 0 {
+            let my_mesh_id = node.mesh_id().await;
+            if let Some(ref mid) = my_mesh_id {
+                let filter = MeshFilter::default();
+                if let Ok(listings) = discover(&relays, &filter).await {
+                    let my_npub = publisher.npub();
+                    // Find a listing for our mesh_id from a different publisher with more nodes
+                    let bigger = listings.iter().find(|m| {
+                        m.listing.mesh_id.as_deref() == Some(mid.as_str())
+                            && m.publisher_npub != my_npub
+                            && m.listing.node_count > 1
+                    });
+                    if let Some(target) = bigger {
+                        eprintln!("📡 Found larger mesh '{}' ({} nodes) — rejoining instead of publishing solo",
+                            target.listing.name.as_deref().unwrap_or("unnamed"),
+                            target.listing.node_count);
+                        // Stop publishing our solo listing
+                        if let Err(e) = publisher.unpublish().await {
+                            tracing::warn!("Failed to unpublish solo listing: {e}");
+                        }
+                        // Rejoin the bigger mesh
+                        if let Err(e) = node.join(&target.listing.invite_token).await {
+                            tracing::warn!("Split-heal rejoin failed: {e}");
+                            // Continue publishing as fallback
+                            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                            continue;
+                        }
+                        eprintln!("📡 Rejoined mesh — resuming publish as member");
+                        // Brief pause to let gossip settle before next publish cycle
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // "Actually serving" = a Host node has llama-server running for this model.
         let my_role = node.role().await;
         let my_serving = node.serving().await;
