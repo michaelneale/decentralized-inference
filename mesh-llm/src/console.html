@@ -691,7 +691,7 @@
 
     function renderMeta() {
       const p = [];
-      if (S.model_name) p.push(`Model <span>${esc(S.model_name)}</span>`);
+      if (S.model_name && !S.is_client && S.model_name !== '(idle)') p.push(`Model <span>${esc(S.model_name)}</span>`);
       if (S.draft_name) p.push(`Draft <span>${esc(S.draft_name)}</span>`);
       if (S.llama_ready) p.push(`API <span>:${S.api_port}</span>`);
       $('meta').innerHTML = p.join(' · ');
@@ -862,6 +862,7 @@
     let inviteRendered = false;
     function renderInvite() {
       const el = $('inviteSection');
+      if (S.is_client) { el.innerHTML = ''; return; }
       const token = S.token || '';
       const hasToken = token && S.model_name && S.model_name !== '(idle)';
       if (!hasToken) { el.innerHTML = ''; return; }
@@ -904,6 +905,7 @@
     let discoverLoaded = false;
     function renderDiscover() {
       const el = $('discoverSection');
+      if (S.is_client) { el.innerHTML = ''; return; }
       if (el.innerHTML && el.querySelector('details[open]')) return;
       el.innerHTML = `<details class="panel-section" ontoggle="if(this.open && !discoverLoaded) { discoverLoaded = true; loadDiscover(); }">
         <summary>Discover public meshes</summary>
