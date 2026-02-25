@@ -3,6 +3,7 @@
 llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
 mesh_dir := "mesh-llm"
+ui_dir := mesh_dir / "ui"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
@@ -19,7 +20,11 @@ build:
     echo "Build complete: {{build_dir}}/bin/"
     if [ -d "{{mesh_dir}}" ]; then
         echo "Building mesh-llm..."
-        cd "{{mesh_dir}}" && cargo build --release
+        if [ -d "{{ui_dir}}" ]; then
+            echo "Building mesh-llm UI..."
+            (cd "{{ui_dir}}" && npm ci && npm run build)
+        fi
+        (cd "{{mesh_dir}}" && cargo build --release)
         echo "Mesh binary: {{mesh_dir}}/target/release/mesh-llm"
     fi
 

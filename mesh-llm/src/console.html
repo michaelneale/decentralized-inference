@@ -730,7 +730,7 @@
   <script>
     const $ = id => document.getElementById(id);
     let S = {};
-    let T = { live: null, nodes: [], rollup: [], nodeHistory: [], benchmarks: [], selectedNodeId: null, rangeMinutes: 180, loading: false, loadedOnce: false, err: null, lastLoadMs: 0 };
+    let T = { live: null, nodes: [], rollup: [], nodeHistory: [], benchmarks: [], selectedNodeId: null, rangeMinutes: 180, benchProbe: 'all', benchOutcome: 'all', loading: false, loadedOnce: false, err: null, lastLoadMs: 0 };
     let telemetrySse = null;
     let panelOpen = true;
     const sse = new EventSource('/api/events');
@@ -844,6 +844,7 @@
       if (!T.loadedOnce && !T.loading) loadTelemetry();
       const roll = T.rollup || [];
       const rollLast = roll[roll.length - 1] || null;
+      const p95Exact = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_exact || null)) : null;
       const p95Avg = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_avg_nodes || null)) : null;
       const p95Max = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_max_nodes || null)) : null;
       const reqLast = rollLast ? rollLast.requests : 0;
@@ -855,7 +856,8 @@
       const selectedRow = nodes.find(n => n.source_node_id === selectedId) || null;
       const nodeHist = T.nodeHistory || [];
       const benches = T.benchmarks || [];
-      const benchLatestByProbe = latestBy(benches, b => b.probe_name);
+      const benchFiltered = filterBenchmarks(benches);
+      const benchLatestByProbe = latestBy(benchFiltered, b => b.probe_name);
 
       el.innerHTML = `<details class="panel-section" open>
         <summary>Telemetry</summary>
@@ -871,12 +873,12 @@
           ${metricCard('Req/min', fmtInt(reqLast), `${rollLast ? rollLast.node_count : 0} nodes · ${freshCount} fresh`)}
           ${metricCard('Errors', rollLast ? `${fmtInt(rollLast.errors)} (${errRate.toFixed(1)}%)` : '0', '')}
           ${metricCard('Util Avg', `${(util || 0).toFixed(1)}%`, 'avg across reporting nodes')}
-          ${metricCard('Latency p95', p95Avg != null ? `${fmtMaybeMs(p95Avg)} avg` : 'n/a', p95Max != null ? `max ${fmtMaybeMs(p95Max)}` : '')}
+          ${metricCard('Latency p95', p95Exact != null ? `${fmtMaybeMs(p95Exact)} exact` : (p95Avg != null ? `${fmtMaybeMs(p95Avg)} avg` : 'n/a'), p95Max != null ? `max ${fmtMaybeMs(p95Max)}` : '')}
           ${metricCard('Tunnel Bytes', rollLast ? fmtBytes(rollLast.tunnel_bytes_total) : '0 B', 'sum / min')}
         </div>
         ${miniChart('Requests/min', roll.map(r => r.requests), '#6cf')}
         ${miniChart('Utilization avg %', roll.map(r => r.utilization_pct_avg_nodes), '#cc8')}
-        ${miniChart('Latency p95 avg nodes (ms)', roll.map(r => r.latency_p95_ms_avg_nodes), '#8c8')}
+        ${miniChart('Latency p95 exact rollup (ms)', roll.map(r => r.latency_p95_ms_exact != null ? r.latency_p95_ms_exact : r.latency_p95_ms_avg_nodes), '#8c8')}
         ${miniChart('Errors/min', roll.map(r => r.errors), '#c66')}
         <div class="section-label" style="margin-top:0.55rem">All Nodes</div>
         ${renderNodesTable(nodes, selectedId)}
@@ -887,13 +889,17 @@
             ${metricCard('Util', `${(selectedRow.utilization_pct || 0).toFixed(1)}%`, `peak act ${fmtInt(selectedRow.active_requests_peak || 0)}`)}
             ${metricCard('Latency p95', fmtMaybeMs(selectedRow.latency_p95_ms), `p50 ${fmtMaybeMs(selectedRow.latency_p50_ms)}`)}
             ${metricCard('Route split', `${fmtInt(selectedRow.requests_local || 0)}L / ${fmtInt(selectedRow.requests_remote || 0)}R`, '')}
+            ${metricCard('TTFT p95', fmtMaybeMs(selectedRow.ttft_p95_ms), `p50 ${fmtMaybeMs(selectedRow.ttft_p50_ms)}`)}
+            ${metricCard('Throughput', selectedRow.tps_avg != null ? `${Number(selectedRow.tps_avg).toFixed(1)} tok/s` : 'n/a', `${fmtInt(selectedRow.completion_tokens_total || 0)} tok/min`)}
           </div>
           ${miniChart('Node requests/min', nodeHist.map(r => r.requests), '#6cf')}
           ${miniChart('Node utilization %', nodeHist.map(r => r.utilization_pct), '#cc8')}
           ${miniChart('Node latency p95 ms', nodeHist.map(r => r.latency_p95_ms), '#8c8')}
+          ${miniChart('Node TTFT p95 ms', nodeHist.map(r => r.ttft_p95_ms), '#9c8')}
+          ${miniChart('Node avg tok/s', nodeHist.map(r => r.tps_avg), '#c8a')}
         ` : `<div style="color:#666;font-size:0.58rem">No node metrics yet.</div>`}
         <div class="section-label" style="margin-top:0.55rem">Benchmarks</div>
-        ${renderBenchmarkSummary(benchLatestByProbe, benches)}
+        ${renderBenchmarkSummary(benchLatestByProbe, benchFiltered, benches)}
       </details>`;
     }
 
@@ -963,12 +969,27 @@
       </div>`;
     }
 
-    function renderBenchmarkSummary(latestRows, rows) {
-      if (!rows.length) return '<div style="color:#666;font-size:0.58rem">No benchmark runs yet.</div>';
+    function renderBenchmarkSummary(latestRows, rows, allRows) {
+      if (!allRows.length) return '<div style="color:#666;font-size:0.58rem">No benchmark runs yet.</div>';
+      const probes = Array.from(new Set((allRows || []).map(r => r.probe_name))).sort();
+      const controls = `
+        <div style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;margin:0.2rem 0 0.45rem">
+          <select class="model-picker" style="max-width:220px" onchange="setBenchmarkProbeFilter(this.value)">
+            <option value="all" ${T.benchProbe==='all'?'selected':''}>All probes</option>
+            ${probes.map(p => `<option value="${escAttr(p)}" ${T.benchProbe===p?'selected':''}>${esc(p)}</option>`).join('')}
+          </select>
+          <select class="model-picker" style="max-width:130px" onchange="setBenchmarkOutcomeFilter(this.value)">
+            <option value="all" ${T.benchOutcome==='all'?'selected':''}>All outcomes</option>
+            <option value="ok" ${T.benchOutcome==='ok'?'selected':''}>Success only</option>
+            <option value="fail" ${T.benchOutcome==='fail'?'selected':''}>Failures only</option>
+          </select>
+          <button class="copy-btn" onclick="exportBenchmarkCsv()">Export CSV</button>
+        </div>`;
+      if (!rows.length) return controls + '<div style="color:#666;font-size:0.58rem">No benchmark rows match filters.</div>';
       const sortedLatest = [...latestRows].sort((a,b) => a.probe_name.localeCompare(b.probe_name));
       const streamRows = rows.filter(r => r.stream);
       const nonstreamRows = rows.filter(r => !r.stream);
-      return `
+      return controls + `
         <div class="metrics-grid">
           ${sortedLatest.map(r => metricCard(
             r.probe_name.replace(/^analysis_report_v1_?/, 'probe '),
@@ -991,6 +1012,46 @@
             </tr>`).join('')}
           </tbody>
         </table>`;
+    }
+
+    function filterBenchmarks(rows) {
+      return (rows || []).filter(r => {
+        if (T.benchProbe !== 'all' && r.probe_name !== T.benchProbe) return false;
+        if (T.benchOutcome === 'ok' && !r.success) return false;
+        if (T.benchOutcome === 'fail' && r.success) return false;
+        return true;
+      });
+    }
+
+    function setBenchmarkProbeFilter(v) {
+      T.benchProbe = v || 'all';
+      renderTelemetry();
+    }
+
+    function setBenchmarkOutcomeFilter(v) {
+      T.benchOutcome = v || 'all';
+      renderTelemetry();
+    }
+
+    function exportBenchmarkCsv() {
+      const rows = filterBenchmarks(T.benchmarks || []);
+      const cols = ['ts','source_node_id','model','probe_name','probe_type','stream','success','status_code','latency_ms','ttft_ms','completion_tokens','tokens_per_sec','error_kind','observed_at'];
+      const escCsv = v => {
+        if (v == null) return '';
+        const s = String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csv = [cols.join(',')]
+        .concat(rows.map(r => cols.map(c => escCsv(r[c])).join(',')))
+        .join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `mesh-llm-benchmarks-${T.rangeMinutes || 180}m.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 500);
     }
 
     function renderMeshName() {
@@ -1479,6 +1540,11 @@
           : Math.max(1, Math.round((full || '').length / 4)); // rough fallback
         const tps = tokenCount / genSecs;
         meta.textContent = `${tokenCount} tok · ${tps.toFixed(1)} tok/s avg · TTFT ${ttftMs}ms`;
+        fetch('/api/metrics/chat-sample', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ttft_ms: ttftMs, completion_tokens: tokenCount, tokens_per_sec: tps })
+        }).catch(() => {});
         chatHistory.push({ role: 'assistant', content: full || '' });
       } catch (e) { bot.remove(); meta.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; chatHistory.pop(); }
       el.scrollTop = el.scrollHeight;

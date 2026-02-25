@@ -6,6 +6,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const LATENCY_HIST_BUCKETS_MS: &[u32] = &[
+    25, 50, 75, 100, 150, 200, 300, 400, 600, 800, 1_000, 1_500, 2_000, 3_000, 5_000, 10_000,
+];
+
 #[derive(Clone)]
 pub struct Telemetry {
     inner: Arc<Inner>,
@@ -27,6 +31,9 @@ struct State {
     active_requests: u32,
     active_requests_peak: u32,
     latency_ms_samples: Vec<u32>,
+    ttft_ms_samples: Vec<u32>,
+    tps_samples: Vec<f64>,
+    completion_tokens_total: u64,
     tunnel_bytes_minute_start: u64,
 }
 
@@ -72,6 +79,12 @@ pub struct NodeMetricRow {
     pub latency_p50_ms: Option<f64>,
     pub latency_p95_ms: Option<f64>,
     pub latency_p99_ms: Option<f64>,
+    pub ttft_p50_ms: Option<f64>,
+    pub ttft_p95_ms: Option<f64>,
+    pub completion_tokens_total: u64,
+    pub tps_avg: Option<f64>,
+    pub tps_p50: Option<f64>,
+    pub tps_p95: Option<f64>,
     pub tunnel_bytes_total: u64,
     pub observed_at: i64,
 }
@@ -90,6 +103,8 @@ pub struct NodeMetricSummary {
     pub latency_p50_ms: Option<f64>,
     pub latency_p95_ms: Option<f64>,
     pub latency_p99_ms: Option<f64>,
+    #[serde(default)]
+    pub latency_hist_counts: Vec<u32>,
     pub tunnel_bytes_total: u64,
     pub observed_at: i64,
 }
@@ -108,6 +123,9 @@ pub struct RollupMetricRow {
     pub tunnel_bytes_total: u64,
     pub latency_p95_ms_avg_nodes: Option<f64>,
     pub latency_p95_ms_max_nodes: Option<f64>,
+    pub latency_p50_ms_exact: Option<f64>,
+    pub latency_p95_ms_exact: Option<f64>,
+    pub latency_p99_ms_exact: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -168,6 +186,13 @@ struct FlushRow {
     latency_p50_ms: Option<f64>,
     latency_p95_ms: Option<f64>,
     latency_p99_ms: Option<f64>,
+    latency_hist_counts: Vec<u32>,
+    ttft_p50_ms: Option<f64>,
+    ttft_p95_ms: Option<f64>,
+    tps_avg: Option<f64>,
+    tps_p50: Option<f64>,
+    tps_p95: Option<f64>,
+    completion_tokens_total: u64,
     tunnel_bytes_total: u64,
     observed_at: i64,
 }
@@ -194,11 +219,15 @@ impl Telemetry {
                     active_requests: 0,
                     active_requests_peak: 0,
                     latency_ms_samples: Vec::new(),
+                    ttft_ms_samples: Vec::new(),
+                    tps_samples: Vec::new(),
+                    completion_tokens_total: 0,
                     tunnel_bytes_minute_start: tunnel_bytes,
                 }),
             }),
         };
         telemetry.start_flush_loop();
+        telemetry.start_retention_loop();
         Ok(telemetry)
     }
 
@@ -228,6 +257,21 @@ impl Telemetry {
         state.request_time_ms_total = state.request_time_ms_total.saturating_add(ms as u64);
         state.latency_ms_samples.push(ms);
         state.active_requests = state.active_requests.saturating_sub(1);
+    }
+
+    pub fn record_generation_metrics(&self, ttft_ms: Option<u32>, completion_tokens: Option<u32>, tps: Option<f64>) {
+        let mut state = self.inner.state.lock().expect("telemetry state mutex poisoned");
+        if let Some(ttft) = ttft_ms {
+            state.ttft_ms_samples.push(ttft);
+        }
+        if let Some(tokens) = completion_tokens {
+            state.completion_tokens_total = state.completion_tokens_total.saturating_add(tokens as u64);
+        }
+        if let Some(v) = tps {
+            if v.is_finite() && v >= 0.0 {
+                state.tps_samples.push(v);
+            }
+        }
     }
 
     pub fn snapshot(&self) -> LiveSnapshot {
@@ -332,6 +376,17 @@ impl Telemetry {
         });
     }
 
+    fn start_retention_loop(&self) {
+        let db_path = self.inner.db_path.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                let db_path = db_path.clone();
+                let _ = tokio::task::spawn_blocking(move || run_retention(&db_path, 30, 14)).await;
+            }
+        });
+    }
+
     async fn maybe_flush(&self) -> Result<()> {
         let now_minute = unix_minute_now();
         let tunnel_now = tunnel::bytes_transferred();
@@ -349,6 +404,9 @@ impl Telemetry {
             state.request_time_ms_total = 0;
             state.active_requests_peak = state.active_requests;
             state.latency_ms_samples.clear();
+            state.ttft_ms_samples.clear();
+            state.tps_samples.clear();
+            state.completion_tokens_total = 0;
             state.tunnel_bytes_minute_start = tunnel_now;
             row
         };
@@ -384,6 +442,7 @@ impl From<FlushRow> for NodeMetricSummary {
             latency_p50_ms: row.latency_p50_ms,
             latency_p95_ms: row.latency_p95_ms,
             latency_p99_ms: row.latency_p99_ms,
+            latency_hist_counts: row.latency_hist_counts,
             tunnel_bytes_total: row.tunnel_bytes_total,
             observed_at: row.observed_at,
         }
@@ -403,6 +462,11 @@ impl Drop for RequestSpan {
 fn flush_row_from_state(node_id: &str, state: &State, tunnel_now: u64) -> FlushRow {
     let mut sorted = state.latency_ms_samples.clone();
     sorted.sort_unstable();
+    let mut ttft_sorted = state.ttft_ms_samples.clone();
+    ttft_sorted.sort_unstable();
+    let mut tps_sorted = state.tps_samples.clone();
+    tps_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let latency_hist_counts = latency_histogram_counts(&sorted);
     FlushRow {
         ts_minute: state.current_minute,
         source_node_id: node_id.to_string(),
@@ -416,6 +480,13 @@ fn flush_row_from_state(node_id: &str, state: &State, tunnel_now: u64) -> FlushR
         latency_p50_ms: percentile(&sorted, 0.50),
         latency_p95_ms: percentile(&sorted, 0.95),
         latency_p99_ms: percentile(&sorted, 0.99),
+        latency_hist_counts,
+        ttft_p50_ms: percentile(&ttft_sorted, 0.50),
+        ttft_p95_ms: percentile(&ttft_sorted, 0.95),
+        tps_avg: if tps_sorted.is_empty() { None } else { Some(tps_sorted.iter().sum::<f64>() / tps_sorted.len() as f64) },
+        tps_p50: percentile_f64(&tps_sorted, 0.50),
+        tps_p95: percentile_f64(&tps_sorted, 0.95),
+        completion_tokens_total: state.completion_tokens_total,
         tunnel_bytes_total: tunnel_now.saturating_sub(state.tunnel_bytes_minute_start),
         observed_at: unix_ts_now(),
     }
@@ -427,6 +498,33 @@ fn percentile(samples: &[u32], q: f64) -> Option<f64> {
     }
     let idx = ((samples.len() - 1) as f64 * q).round() as usize;
     samples.get(idx).map(|v| *v as f64)
+}
+
+fn percentile_f64(samples: &[f64], q: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let idx = ((samples.len() - 1) as f64 * q).round() as usize;
+    samples.get(idx).copied()
+}
+
+fn latency_histogram_counts(samples_sorted: &[u32]) -> Vec<u32> {
+    let mut out = vec![0u32; LATENCY_HIST_BUCKETS_MS.len() + 1];
+    for &v in samples_sorted {
+        let mut placed = false;
+        for (i, &upper) in LATENCY_HIST_BUCKETS_MS.iter().enumerate() {
+            if v <= upper {
+                out[i] = out[i].saturating_add(1);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            let last = out.len() - 1;
+            out[last] = out[last].saturating_add(1);
+        }
+    }
+    out
 }
 
 fn telemetry_db_path() -> PathBuf {
@@ -445,6 +543,16 @@ fn unix_ts_now() -> i64 {
 
 fn unix_minute_now() -> i64 {
     unix_ts_now() / 60
+}
+
+fn run_retention(db_path: &PathBuf, node_metrics_days: i64, benchmark_days: i64) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    let minute_cutoff = unix_minute_now() - node_metrics_days * 24 * 60;
+    let ts_cutoff = unix_ts_now() - benchmark_days * 24 * 60 * 60;
+    conn.execute("DELETE FROM node_metrics_1m WHERE ts_minute < ?1", params![minute_cutoff])?;
+    conn.execute("DELETE FROM node_metric_hist_1m WHERE ts_minute < ?1", params![minute_cutoff])?;
+    conn.execute("DELETE FROM benchmark_runs WHERE ts < ?1", params![ts_cutoff])?;
+    Ok(())
 }
 
 fn init_db(db_path: &PathBuf) -> Result<()> {
@@ -466,12 +574,30 @@ fn init_db(db_path: &PathBuf) -> Result<()> {
             latency_p50_ms REAL,
             latency_p95_ms REAL,
             latency_p99_ms REAL,
+            ttft_p50_ms REAL,
+            ttft_p95_ms REAL,
+            completion_tokens_total INTEGER NOT NULL DEFAULT 0,
+            tps_avg REAL,
+            tps_p50 REAL,
+            tps_p95 REAL,
             tunnel_bytes_total INTEGER NOT NULL,
             observed_at INTEGER NOT NULL,
             PRIMARY KEY (ts_minute, source_node_id)
         );
         CREATE INDEX IF NOT EXISTS idx_node_metrics_time ON node_metrics_1m (ts_minute);
         CREATE INDEX IF NOT EXISTS idx_node_metrics_node_time ON node_metrics_1m (source_node_id, ts_minute);
+
+        CREATE TABLE IF NOT EXISTS node_metric_hist_1m (
+            ts_minute INTEGER NOT NULL,
+            source_node_id TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            bucket_idx INTEGER NOT NULL,
+            bucket_upper_ms INTEGER,
+            count INTEGER NOT NULL,
+            observed_at INTEGER NOT NULL,
+            PRIMARY KEY (ts_minute, source_node_id, metric_name, bucket_idx)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_hist_time ON node_metric_hist_1m (ts_minute, metric_name);
 
         CREATE TABLE IF NOT EXISTS benchmark_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -506,6 +632,26 @@ fn init_db(db_path: &PathBuf) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_benchmark_runs_probe_time ON benchmark_runs (probe_name, ts);
         "#,
     )?;
+    // Lightweight migrations for existing DBs.
+    ensure_column(&conn, "node_metrics_1m", "ttft_p50_ms", "REAL")?;
+    ensure_column(&conn, "node_metrics_1m", "ttft_p95_ms", "REAL")?;
+    ensure_column(&conn, "node_metrics_1m", "completion_tokens_total", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "node_metrics_1m", "tps_avg", "REAL")?;
+    ensure_column(&conn, "node_metrics_1m", "tps_p50", "REAL")?;
+    ensure_column(&conn, "node_metrics_1m", "tps_p95", "REAL")?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, spec: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(());
+        }
+    }
+    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"), [])?;
     Ok(())
 }
 
@@ -516,8 +662,10 @@ fn insert_node_metric(db_path: &PathBuf, row: &FlushRow) -> Result<()> {
         INSERT INTO node_metrics_1m (
             ts_minute, source_node_id, requests, errors, requests_local, requests_remote,
             request_time_ms_total, utilization_pct, active_requests_peak,
-            latency_p50_ms, latency_p95_ms, latency_p99_ms, tunnel_bytes_total, observed_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            latency_p50_ms, latency_p95_ms, latency_p99_ms,
+            ttft_p50_ms, ttft_p95_ms, completion_tokens_total, tps_avg, tps_p50, tps_p95,
+            tunnel_bytes_total, observed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
         ON CONFLICT(ts_minute, source_node_id) DO UPDATE SET
             requests = excluded.requests,
             errors = excluded.errors,
@@ -529,6 +677,12 @@ fn insert_node_metric(db_path: &PathBuf, row: &FlushRow) -> Result<()> {
             latency_p50_ms = excluded.latency_p50_ms,
             latency_p95_ms = excluded.latency_p95_ms,
             latency_p99_ms = excluded.latency_p99_ms,
+            ttft_p50_ms = excluded.ttft_p50_ms,
+            ttft_p95_ms = excluded.ttft_p95_ms,
+            completion_tokens_total = excluded.completion_tokens_total,
+            tps_avg = excluded.tps_avg,
+            tps_p50 = excluded.tps_p50,
+            tps_p95 = excluded.tps_p95,
             tunnel_bytes_total = excluded.tunnel_bytes_total,
             observed_at = excluded.observed_at
         "#,
@@ -545,10 +699,17 @@ fn insert_node_metric(db_path: &PathBuf, row: &FlushRow) -> Result<()> {
             row.latency_p50_ms,
             row.latency_p95_ms,
             row.latency_p99_ms,
+            row.ttft_p50_ms,
+            row.ttft_p95_ms,
+            row.completion_tokens_total,
+            row.tps_avg,
+            row.tps_p50,
+            row.tps_p95,
             row.tunnel_bytes_total,
             row.observed_at,
         ],
     )?;
+    upsert_latency_histogram(&conn, row)?;
     Ok(())
 }
 
@@ -559,8 +720,10 @@ fn insert_node_metric_summary(db_path: &PathBuf, row: &NodeMetricSummary) -> Res
         INSERT INTO node_metrics_1m (
             ts_minute, source_node_id, requests, errors, requests_local, requests_remote,
             request_time_ms_total, utilization_pct, active_requests_peak,
-            latency_p50_ms, latency_p95_ms, latency_p99_ms, tunnel_bytes_total, observed_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            latency_p50_ms, latency_p95_ms, latency_p99_ms,
+            ttft_p50_ms, ttft_p95_ms, completion_tokens_total, tps_avg, tps_p50, tps_p95,
+            tunnel_bytes_total, observed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, NULL, 0, NULL, NULL, NULL, ?13, ?14)
         ON CONFLICT(ts_minute, source_node_id) DO UPDATE SET
             requests = excluded.requests,
             errors = excluded.errors,
@@ -592,6 +755,45 @@ fn insert_node_metric_summary(db_path: &PathBuf, row: &NodeMetricSummary) -> Res
             row.observed_at,
         ],
     )?;
+    upsert_latency_histogram_from_counts(&conn, row.ts_minute, &row.source_node_id, &row.latency_hist_counts, row.observed_at)?;
+    Ok(())
+}
+
+fn upsert_latency_histogram(conn: &Connection, row: &FlushRow) -> Result<()> {
+    upsert_latency_histogram_from_counts(conn, row.ts_minute, &row.source_node_id, &row.latency_hist_counts, row.observed_at)
+}
+
+fn upsert_latency_histogram_from_counts(
+    conn: &Connection,
+    ts_minute: i64,
+    source_node_id: &str,
+    counts: &[u32],
+    observed_at: i64,
+) -> Result<()> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for (idx, &count) in counts.iter().enumerate() {
+        let upper = if idx < LATENCY_HIST_BUCKETS_MS.len() {
+            Some(LATENCY_HIST_BUCKETS_MS[idx] as i64)
+        } else {
+            None
+        };
+        tx.execute(
+            r#"
+            INSERT INTO node_metric_hist_1m (
+                ts_minute, source_node_id, metric_name, bucket_idx, bucket_upper_ms, count, observed_at
+            ) VALUES (?1, ?2, 'latency_ms', ?3, ?4, ?5, ?6)
+            ON CONFLICT(ts_minute, source_node_id, metric_name, bucket_idx) DO UPDATE SET
+                bucket_upper_ms = excluded.bucket_upper_ms,
+                count = excluded.count,
+                observed_at = excluded.observed_at
+            "#,
+            params![ts_minute, source_node_id, idx as i64, upper, count, observed_at],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -656,7 +858,9 @@ fn query_node_history(db_path: &PathBuf, node_id: &str, minutes: u32) -> Result<
         SELECT
             ts_minute, source_node_id, requests, errors, requests_local, requests_remote,
             request_time_ms_total, utilization_pct, active_requests_peak,
-            latency_p50_ms, latency_p95_ms, latency_p99_ms, tunnel_bytes_total, observed_at
+            latency_p50_ms, latency_p95_ms, latency_p99_ms,
+            ttft_p50_ms, ttft_p95_ms, completion_tokens_total, tps_avg, tps_p50, tps_p95,
+            tunnel_bytes_total, observed_at
         FROM node_metrics_1m
         WHERE source_node_id = ?1 AND ts_minute >= ?2
         ORDER BY ts_minute ASC
@@ -692,6 +896,7 @@ fn query_node_history_exact_minutes(
         )?;
         let mut rows = stmt.query(params![node_id, minute])?;
         if let Some(row) = rows.next()? {
+            let latency_hist_counts = load_latency_hist_counts(&conn, *minute, node_id).unwrap_or_default();
             out.push(NodeMetricSummary {
                 ts_minute: row.get(0)?,
                 source_node_id: row.get(1)?,
@@ -705,12 +910,34 @@ fn query_node_history_exact_minutes(
                 latency_p50_ms: row.get(9)?,
                 latency_p95_ms: row.get(10)?,
                 latency_p99_ms: row.get(11)?,
+                latency_hist_counts,
                 tunnel_bytes_total: row.get(12)?,
                 observed_at: row.get(13)?,
             });
         }
     }
     Ok(out)
+}
+
+fn load_latency_hist_counts(conn: &Connection, ts_minute: i64, source_node_id: &str) -> Result<Vec<u32>> {
+    let mut counts = vec![0u32; LATENCY_HIST_BUCKETS_MS.len() + 1];
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT bucket_idx, count
+        FROM node_metric_hist_1m
+        WHERE ts_minute = ?1 AND source_node_id = ?2 AND metric_name = 'latency_ms'
+        ORDER BY bucket_idx ASC
+        "#,
+    )?;
+    let mut rows = stmt.query(params![ts_minute, source_node_id])?;
+    while let Some(row) = rows.next()? {
+        let idx: usize = row.get::<_, i64>(0)? as usize;
+        let count: u32 = row.get::<_, i64>(1)? as u32;
+        if idx < counts.len() {
+            counts[idx] = count;
+        }
+    }
+    Ok(counts)
 }
 
 fn query_all_nodes_latest(db_path: &PathBuf, minutes: u32) -> Result<Vec<NodeMetricRow>> {
@@ -720,7 +947,9 @@ fn query_all_nodes_latest(db_path: &PathBuf, minutes: u32) -> Result<Vec<NodeMet
         r#"
         SELECT m.ts_minute, m.source_node_id, m.requests, m.errors, m.requests_local, m.requests_remote,
                m.request_time_ms_total, m.utilization_pct, m.active_requests_peak,
-               m.latency_p50_ms, m.latency_p95_ms, m.latency_p99_ms, m.tunnel_bytes_total, m.observed_at
+               m.latency_p50_ms, m.latency_p95_ms, m.latency_p99_ms,
+               m.ttft_p50_ms, m.ttft_p95_ms, m.completion_tokens_total, m.tps_avg, m.tps_p50, m.tps_p95,
+               m.tunnel_bytes_total, m.observed_at
         FROM node_metrics_1m m
         INNER JOIN (
             SELECT source_node_id, MAX(ts_minute) AS max_ts
@@ -762,7 +991,7 @@ fn query_rollup_history(db_path: &PathBuf, minutes: u32) -> Result<Vec<RollupMet
         ORDER BY ts_minute ASC
         "#,
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![cutoff], |row| {
             Ok(RollupMetricRow {
                 ts_minute: row.get(0)?,
@@ -777,10 +1006,69 @@ fn query_rollup_history(db_path: &PathBuf, minutes: u32) -> Result<Vec<RollupMet
                 tunnel_bytes_total: row.get(9)?,
                 latency_p95_ms_avg_nodes: row.get(10)?,
                 latency_p95_ms_max_nodes: row.get(11)?,
+                latency_p50_ms_exact: None,
+                latency_p95_ms_exact: None,
+                latency_p99_ms_exact: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let hist = query_rollup_latency_hist(&conn, cutoff)?;
+    for r in &mut rows {
+        if let Some(counts) = hist.get(&r.ts_minute) {
+            r.latency_p50_ms_exact = histogram_percentile(counts, 0.50);
+            r.latency_p95_ms_exact = histogram_percentile(counts, 0.95);
+            r.latency_p99_ms_exact = histogram_percentile(counts, 0.99);
+        }
+    }
     Ok(rows)
+}
+
+fn query_rollup_latency_hist(conn: &Connection, cutoff_minute: i64) -> Result<std::collections::HashMap<i64, Vec<u64>>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT ts_minute, bucket_idx, COALESCE(SUM(count), 0) AS count_sum
+        FROM node_metric_hist_1m
+        WHERE metric_name = 'latency_ms' AND ts_minute >= ?1
+        GROUP BY ts_minute, bucket_idx
+        ORDER BY ts_minute ASC, bucket_idx ASC
+        "#,
+    )?;
+    let mut out: std::collections::HashMap<i64, Vec<u64>> = std::collections::HashMap::new();
+    let mut rows = stmt.query(params![cutoff_minute])?;
+    while let Some(row) = rows.next()? {
+        let ts_minute: i64 = row.get(0)?;
+        let bucket_idx: usize = row.get::<_, i64>(1)? as usize;
+        let count_sum: u64 = row.get(2)?;
+        let entry = out.entry(ts_minute).or_insert_with(|| vec![0u64; LATENCY_HIST_BUCKETS_MS.len() + 1]);
+        if bucket_idx < entry.len() {
+            entry[bucket_idx] = count_sum;
+        }
+    }
+    Ok(out)
+}
+
+fn histogram_percentile(counts: &[u64], q: f64) -> Option<f64> {
+    let total: u64 = counts.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let target = ((total - 1) as f64 * q).round() as u64;
+    let mut seen = 0u64;
+    for (i, &c) in counts.iter().enumerate() {
+        seen = seen.saturating_add(c);
+        if seen > target {
+            return Some(hist_bucket_upper_ms(i));
+        }
+    }
+    Some(hist_bucket_upper_ms(counts.len().saturating_sub(1)))
+}
+
+fn hist_bucket_upper_ms(idx: usize) -> f64 {
+    if idx < LATENCY_HIST_BUCKETS_MS.len() {
+        LATENCY_HIST_BUCKETS_MS[idx] as f64
+    } else {
+        (LATENCY_HIST_BUCKETS_MS.last().copied().unwrap_or(10_000) * 2) as f64
+    }
 }
 
 fn query_benchmark_history(db_path: &PathBuf, minutes: u32, limit: u32) -> Result<Vec<BenchmarkRunRow>> {
@@ -834,7 +1122,13 @@ fn map_node_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeMetricRow> {
         latency_p50_ms: row.get(9)?,
         latency_p95_ms: row.get(10)?,
         latency_p99_ms: row.get(11)?,
-        tunnel_bytes_total: row.get(12)?,
-        observed_at: row.get(13)?,
+        ttft_p50_ms: row.get(12)?,
+        ttft_p95_ms: row.get(13)?,
+        completion_tokens_total: row.get(14)?,
+        tps_avg: row.get(15)?,
+        tps_p50: row.get(16)?,
+        tps_p95: row.get(17)?,
+        tunnel_bytes_total: row.get(18)?,
+        observed_at: row.get(19)?,
     })
 }
