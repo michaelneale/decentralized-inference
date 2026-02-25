@@ -6,6 +6,10 @@ High-level directions for mesh-llm. Not promises — just things we're thinking 
 
 Currently mesh-llm uses iroh's default public relays for NAT traversal. These work but we don't control them — availability, latency, and capacity are someone else's problem. For production use we need our own relays, either via iroh's paid relay service or self-hosted on something like Fly.io (with proper end-to-end TLS — a plain reverse proxy won't work since iroh needs TLS termination at the relay itself). Dedicated relays in key regions (US, EU, AU) would improve connectivity reliability and let us tune for our traffic patterns. The mesh binary would ship with these as default relays instead of iroh's public ones.
 
+## Mobile client
+
+The QUIC transport and relay infrastructure already handle NAT traversal — a phone could join a mesh as a client the same way the Fly.io web app does. Start with client-only mode: discover a mesh, connect via relay, chat with models running on real hardware elsewhere. No GPU needed on the device. iOS and Android both have good QUIC support. The existing `--client --auto` code path is exactly what this would use under the hood.
+
 ## Single binary distribution
 
 Currently mesh-llm ships alongside `llama-server` and `rpc-server` as separate binaries (the `just bundle` tarball). [llama-cpp-2](https://crates.io/crates/llama-cpp-2) demonstrates static linking of llama.cpp into a Rust binary at build time. We could do the same — compile llama.cpp (with Metal/CUDA) directly into `mesh-llm` so the entire thing is one binary. No bundle, no `--bin-dir`, just `mesh-llm`.
