@@ -1,5 +1,86 @@
 # mesh-llm TODO
 
+## Crate API experiment (`crate-api` branch)
+
+**Status**: Working but incomplete. In-process inference via safe Rust wrappers. Mesh binary unchanged.
+
+### What this branch does
+
+Adds `src/lib.rs` as a Rust crate API with three modes:
+- `Engine::solo(path)` — loads GGUF in-process via `llama-cpp-2`, direct Metal GPU inference
+- `Engine::connect(url)` — HTTP client to any OpenAI-compatible endpoint (mesh or standalone)
+- `Engine::auto(path)` — probes localhost:9337 for running mesh, falls back to solo
+
+Also adds `Engine::chat_with_tools()` for native tool calling via `apply_chat_template_with_tools_oaicompat()`.
+
+### What this branch does NOT do
+
+- Mesh binary (`src/main.rs`) is **unchanged** — still spawns llama-server + rpc-server as child processes
+- Still 3 binaries to distribute (mesh-llm, llama-server, rpc-server) — not a single binary
+- Goose has NOT been migrated to use `Engine` API — only a Cargo.toml dep swap to share the llama.cpp build
+
+### Dependency chain
+
+```
+mesh-llm (this crate)
+  └── llama-cpp-2 (our fork: michaelneale/llama-cpp-rs, branch mesh-llm-fork)
+        └── llama-cpp-sys-2
+              └── llama.cpp submodule → our fork (michaelneale/llama.cpp)
+                    with 3 RPC patches rebased onto upstream pin 1051ecd28
+
+goose (local Cargo.toml change on branch mesh-llm-integration)
+  ├── mesh-llm (path dep → this crate)
+  └── llama-cpp-2 (path dep → same fork, so one native lib, no conflict)
+```
+
+### How to reconstruct this setup
+
+```bash
+# 1. Clone the llama-cpp-rs fork
+cd /path/to/deez
+git clone git@github.com:michaelneale/llama-cpp-rs.git
+cd llama-cpp-rs
+git checkout mesh-llm-fork
+git submodule update --init --recursive
+
+# 2. Checkout this branch
+cd /path/to/deez
+git checkout crate-api
+
+# 3. Build + test
+cd mesh-llm
+cargo build --release --example solo
+./target/release/examples/solo ~/.models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+
+# 4. (Optional) Point goose at the fork
+# In goose/crates/goose/Cargo.toml, replace:
+#   llama-cpp-2 = { version = "0.1.133", ... }
+# with:
+#   llama-cpp-2 = { path = "/path/to/deez/llama-cpp-rs/llama-cpp-2", ... }
+#   mesh-llm = { path = "/path/to/deez/mesh-llm" }
+```
+
+### Build impact
+
+- Mesh binary size: **unchanged** (28MB) — llama symbols stripped by linker
+- Clean build time: **+23s** (47s → 70s) — llama-cpp-sys-2 compiles llama.cpp C++ even though mesh binary doesn't use it
+- Could be fixed with a cargo feature flag (`solo = ["llama-cpp-2"]`) to make it optional for mesh-only builds
+
+### What was deleted
+
+- `src/llama_ffi.rs` (150 lines raw unsafe FFI) — replaced by llama-cpp-2 safe wrappers
+- `csrc/chat_shim.h` — abandoned earlier experiment
+
+### Related branches
+
+| Repo | Branch | What |
+|------|--------|------|
+| `michaelneale/decentralized-inference` | `crate-api` | This branch — Engine crate API |
+| `michaelneale/llama-cpp-rs` | `mesh-llm-fork` | llama-cpp-rs with submodule pointing at our llama.cpp fork |
+| `block/goose` (local) | `mesh-llm-integration` | Cargo.toml pointing llama-cpp-2 + mesh-llm at local paths |
+
+---
+
 ## First-Time Experience (fast `--auto`)
 - [x] **Mesh identity**: Stable `mesh_id`, gossipped, in Nostr listings. Named: `hash(name+pubkey)`, unnamed: UUID.
 - [x] **Sticky mesh preference**: `~/.mesh-llm/last-mesh` → +500 scoring bonus on `--auto`.

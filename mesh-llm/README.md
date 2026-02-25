@@ -1,5 +1,10 @@
 # mesh-llm
 
+> **⚠️ Branch: `crate-api`** — Experimental Rust crate API for in-process inference via `llama-cpp-2`.
+> This branch adds `Engine::solo()`, `Engine::connect()`, `Engine::auto()` in `src/lib.rs`.
+> The mesh binary (`src/main.rs`) is **unchanged** — still spawns llama-server/rpc-server as child processes.
+> See [TODO.md](TODO.md) for full state and reconstruction steps.
+
 Rust sidecar for distributed llama.cpp inference over QUIC. See the [project README](../README.md) for usage.
 
 ```
