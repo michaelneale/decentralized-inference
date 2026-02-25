@@ -3,7 +3,7 @@
 //! Used by the API proxy (port 9337), bootstrap proxy, and passive mode.
 //! All inference traffic flows through these functions.
 
-use crate::{election, mesh, tunnel};
+use crate::{election, mesh, telemetry, tunnel};
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -54,7 +54,12 @@ pub fn is_drop_request(buf: &[u8]) -> bool {
 /// by model name (or falls back to any host), and tunnels the request via QUIC.
 ///
 /// Set `track_demand` to record requests for demand-based rebalancing.
-pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_demand: bool) {
+pub async fn handle_mesh_request(
+    node: mesh::Node,
+    tcp_stream: TcpStream,
+    track_demand: bool,
+    telemetry: telemetry::Telemetry,
+) {
     let mut buf = vec![0u8; 32768];
     let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
         Ok(v) => v,
@@ -86,22 +91,29 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
         None => match node.any_host().await {
             Some(p) => p.id,
             None => {
+                let span = telemetry.start_request(telemetry::RouteKind::Remote);
                 let _ = send_503(tcp_stream).await;
+                span.finish(false);
                 return;
             }
         },
     };
 
     // Tunnel via QUIC
+    let span = telemetry.start_request(telemetry::RouteKind::Remote);
     match node.open_http_tunnel(target_host).await {
         Ok((quic_send, quic_recv)) => {
             if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
                 tracing::debug!("HTTP tunnel relay ended: {e}");
+                span.finish(false);
+                return;
             }
+            span.finish(true);
         }
         Err(e) => {
             tracing::warn!("Failed to tunnel to host {}: {e}", target_host.fmt_short());
             let _ = send_503(tcp_stream).await;
+            span.finish(false);
         }
     }
 }
@@ -109,37 +121,54 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
 /// Route a request to a known inference target (local llama-server or remote host).
 ///
 /// Used by the API proxy after election has determined the target.
-pub async fn route_to_target(node: mesh::Node, tcp_stream: TcpStream, target: election::InferenceTarget) {
+pub async fn route_to_target(
+    node: mesh::Node,
+    tcp_stream: TcpStream,
+    target: election::InferenceTarget,
+    telemetry: telemetry::Telemetry,
+) {
     match target {
         election::InferenceTarget::Local(llama_port) => {
+            let span = telemetry.start_request(telemetry::RouteKind::Local);
             match TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
                 Ok(upstream) => {
                     let _ = upstream.set_nodelay(true);
                     if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
                         tracing::debug!("API proxy (local) ended: {e}");
+                        span.finish(false);
+                        return;
                     }
+                    span.finish(true);
                 }
                 Err(e) => {
                     tracing::warn!("API proxy: can't reach llama-server on {llama_port}: {e}");
                     let _ = send_503(tcp_stream).await;
+                    span.finish(false);
                 }
             }
         }
         election::InferenceTarget::Remote(host_id) => {
+            let span = telemetry.start_request(telemetry::RouteKind::Remote);
             match node.open_http_tunnel(host_id).await {
                 Ok((quic_send, quic_recv)) => {
                     if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
                         tracing::debug!("API proxy (remote) ended: {e}");
+                        span.finish(false);
+                        return;
                     }
+                    span.finish(true);
                 }
                 Err(e) => {
                     tracing::warn!("API proxy: can't tunnel to host {}: {e}", host_id.fmt_short());
                     let _ = send_503(tcp_stream).await;
+                    span.finish(false);
                 }
             }
         }
         election::InferenceTarget::None => {
+            let span = telemetry.start_request(telemetry::RouteKind::Remote);
             let _ = send_503(tcp_stream).await;
+            span.finish(false);
         }
     }
 }

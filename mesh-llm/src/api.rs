@@ -10,14 +10,15 @@
 //! The console is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
-use crate::{download, election, mesh, nostr};
+use crate::{download, election, mesh, nostr, telemetry};
+use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 
-static CONSOLE_HTML: &str = include_str!("console.html");
+static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 // ── Shared state ──
 
@@ -29,6 +30,7 @@ pub struct MeshApi {
 
 struct ApiInner {
     node: mesh::Node,
+    telemetry: telemetry::Telemetry,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -82,11 +84,37 @@ struct MeshModelPayload {
     size_gb: f64,
 }
 
+#[derive(Serialize)]
+struct TelemetryEventsPayload {
+    live: telemetry::LiveSnapshot,
+    nodes: Vec<telemetry::NodeMetricRow>,
+    rollup: Vec<telemetry::RollupMetricRow>,
+    node_history: Vec<telemetry::NodeMetricRow>,
+    benchmarks: Vec<telemetry::BenchmarkRunRow>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatSampleIngest {
+    #[serde(default)]
+    ttft_ms: Option<u32>,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
+    #[serde(default)]
+    tokens_per_sec: Option<f64>,
+}
+
 impl MeshApi {
-    pub fn new(node: mesh::Node, model_name: String, api_port: u16, model_size_bytes: u64) -> Self {
+    pub fn new(
+        node: mesh::Node,
+        telemetry: telemetry::Telemetry,
+        model_name: String,
+        api_port: u16,
+        model_size_bytes: u64,
+    ) -> Self {
         MeshApi {
             inner: Arc::new(Mutex::new(ApiInner {
                 node,
+                telemetry,
                 is_host: false,
                 is_client: false,
                 llama_ready: false,
@@ -328,15 +356,21 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
     let n = stream.read(&mut buf).await?;
     let req = String::from_utf8_lossy(&buf[..n]);
     let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let path_only = path.split('?').next().unwrap_or(path);
 
-    match path {
+    match path_only {
         // ── Console HTML ──
         "/" => {
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                CONSOLE_HTML.len(), CONSOLE_HTML
-            );
-            stream.write_all(resp.as_bytes()).await?;
+            if !respond_console_index(&mut stream).await? {
+                respond_error(&mut stream, 500, "Console bundle missing").await?;
+            }
+        }
+
+        // ── Frontend static assets ──
+        p if p.starts_with("/assets/") => {
+            if !respond_console_asset(&mut stream, p).await? {
+                respond_error(&mut stream, 404, "Not found").await?;
+            }
         }
 
         // ── Discover meshes via Nostr ──
@@ -372,6 +406,154 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             stream.write_all(resp.as_bytes()).await?;
         }
 
+        // ── Telemetry: local live snapshot ──
+        "/api/metrics/live" => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let json = serde_json::to_string(&telemetry.snapshot())?;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                json.len(), json
+            );
+            stream.write_all(resp.as_bytes()).await?;
+        }
+
+        // ── Telemetry: ingest chat generation sample (console client) ──
+        "/api/metrics/chat-sample" => {
+            if !req.starts_with("POST ") {
+                respond_error(&mut stream, 405, "Method not allowed").await?;
+            } else if let Some(body) = http_body(&req) {
+                let telemetry = state.inner.lock().await.telemetry.clone();
+                match serde_json::from_str::<ChatSampleIngest>(body) {
+                    Ok(sample) => {
+                        telemetry.record_generation_metrics(sample.ttft_ms, sample.completion_tokens, sample.tokens_per_sec);
+                        let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+                        stream.write_all(resp.as_bytes()).await?;
+                    }
+                    Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
+                }
+            } else {
+                respond_error(&mut stream, 400, "Missing body").await?;
+            }
+        }
+
+        // ── Telemetry SSE stream (full package for UI) ──
+        p if p.starts_with("/api/metrics/events") => {
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+            stream.write_all(header.as_bytes()).await?;
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let minutes = query_param_u32(path, "minutes").unwrap_or(180).clamp(1, 7 * 24 * 60);
+            let node_id = query_param(path, "id").map(|s| s.to_string());
+            let limit = query_param_u32(path, "limit").unwrap_or(300).clamp(1, 2000);
+            loop {
+                let node_history = if let Some(id) = node_id.clone() {
+                    telemetry.node_history_for(id, minutes).await
+                } else {
+                    telemetry.node_history(minutes).await
+                };
+                let payload = match (
+                    telemetry.all_nodes_latest(minutes).await,
+                    telemetry.rollup_history(minutes).await,
+                    node_history,
+                    telemetry.benchmark_history(minutes, limit).await,
+                ) {
+                    (Ok(nodes), Ok(rollup), Ok(node_history), Ok(benchmarks)) => TelemetryEventsPayload {
+                        live: telemetry.snapshot(),
+                        nodes,
+                        rollup,
+                        node_history,
+                        benchmarks,
+                    },
+                    _ => {
+                        if stream.write_all(b"event: error\ndata: {\"error\":\"telemetry query failed\"}\n\n").await.is_err() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+                let json = serde_json::to_string(&payload)?;
+                if stream.write_all(format!("data: {json}\n\n").as_bytes()).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+
+        // ── Telemetry: local node history (SQLite) ──
+        p if p.starts_with("/api/metrics/node") => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 24 * 60);
+            let node_id = query_param(path, "id").map(|s| s.to_string());
+            let result = if let Some(id) = node_id {
+                telemetry.node_history_for(id, minutes).await
+            } else {
+                telemetry.node_history(minutes).await
+            };
+            match result {
+                Ok(rows) => {
+                    let json = serde_json::to_string(&rows)?;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json.len(), json
+                    );
+                    stream.write_all(resp.as_bytes()).await?;
+                }
+                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
+            }
+        }
+
+        // ── Telemetry: latest row per known node (SQLite, local DB) ──
+        p if p.starts_with("/api/metrics/nodes") => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let minutes = query_param_u32(path, "minutes").unwrap_or(180).clamp(1, 7 * 24 * 60);
+            match telemetry.all_nodes_latest(minutes).await {
+                Ok(rows) => {
+                    let json = serde_json::to_string(&rows)?;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json.len(), json
+                    );
+                    stream.write_all(resp.as_bytes()).await?;
+                }
+                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
+            }
+        }
+
+        // ── Telemetry: rollup history across rows in local DB ──
+        p if p.starts_with("/api/metrics/rollup") => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 7 * 24 * 60);
+            match telemetry.rollup_history(minutes).await {
+                Ok(rows) => {
+                    let json = serde_json::to_string(&rows)?;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json.len(), json
+                    );
+                    stream.write_all(resp.as_bytes()).await?;
+                }
+                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
+            }
+        }
+
+        // ── Telemetry: benchmark run history (raw local rows, recent only) ──
+        p if p.starts_with("/api/metrics/benchmarks") => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 7 * 24 * 60);
+            let limit = query_param_u32(path, "limit").unwrap_or(200).clamp(1, 2000);
+            match telemetry.benchmark_history(minutes, limit).await {
+                Ok(rows) => {
+                    let json = serde_json::to_string(&rows)?;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json.len(), json
+                    );
+                    stream.write_all(resp.as_bytes()).await?;
+                }
+                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
+            }
+        }
+
         // ── SSE event stream ──
         "/api/events" => {
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
@@ -394,10 +576,14 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
         // ── Chat proxy (routes through inference API port) ──
         p if p.starts_with("/api/chat") => {
+            let telemetry = state.inner.lock().await.telemetry.clone();
+            let span = telemetry.start_request(telemetry::RouteKind::Local);
             let inner = state.inner.lock().await;
             if !inner.llama_ready && !inner.is_client {
                 drop(inner);
-                return respond_error(&mut stream, 503, "LLM not ready").await;
+                let res = respond_error(&mut stream, 503, "LLM not ready").await;
+                span.finish(false);
+                return res;
             }
             let port = inner.api_port;
             drop(inner);
@@ -405,9 +591,13 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             if let Ok(mut upstream) = TcpStream::connect(&target).await {
                 let rewritten = req.replacen("/api/chat", "/v1/chat/completions", 1);
                 upstream.write_all(rewritten.as_bytes()).await?;
-                tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+                let result = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                span.finish(result.is_ok());
+                result?;
             } else {
-                respond_error(&mut stream, 502, "Cannot reach LLM server").await?;
+                let res = respond_error(&mut stream, 502, "Cannot reach LLM server").await;
+                span.finish(false);
+                res?;
             }
         }
 
@@ -418,11 +608,31 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
     Ok(())
 }
 
+fn query_param_u32(path: &str, key: &str) -> Option<u32> {
+    query_param(path, key)?.parse::<u32>().ok()
+}
+
+fn query_param<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    let (_, query) = path.split_once('?')?;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        if k == key {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn http_body(req: &str) -> Option<&str> {
+    req.split_once("\r\n\r\n").map(|(_, b)| b)
+}
+
 async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::Result<()> {
     let body = format!("{{\"error\":\"{msg}\"}}");
     let status = match code {
         400 => "Bad Request",
         405 => "Method Not Allowed",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Not Found",
@@ -432,5 +642,52 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
         body.len(), body
     );
     stream.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+async fn respond_console_index(stream: &mut TcpStream) -> anyhow::Result<bool> {
+    if let Some(file) = CONSOLE_DIST.get_file("index.html") {
+        respond_bytes(stream, 200, "OK", "text/html; charset=utf-8", file.contents()).await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn respond_console_asset(stream: &mut TcpStream, path: &str) -> anyhow::Result<bool> {
+    let rel = path.trim_start_matches('/');
+    if rel.contains("..") {
+        return Ok(false);
+    }
+    let Some(file) = CONSOLE_DIST.get_file(rel) else {
+        return Ok(false);
+    };
+    let content_type = match rel.rsplit('.').next().unwrap_or("") {
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    respond_bytes(stream, 200, "OK", content_type, file.contents()).await?;
+    Ok(true)
+}
+
+async fn respond_bytes(
+    stream: &mut TcpStream,
+    code: u16,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> anyhow::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
     Ok(())
 }

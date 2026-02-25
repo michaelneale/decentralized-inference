@@ -1,4 +1,5 @@
 mod api;
+mod benchmark;
 mod download;
 mod election;
 mod launch;
@@ -6,6 +7,7 @@ mod mesh;
 mod nostr;
 mod proxy;
 mod rewrite;
+mod telemetry;
 mod tunnel;
 
 use anyhow::{Context, Result};
@@ -133,6 +135,18 @@ struct Cli {
     /// Nostr relay URLs for publishing/discovery (default: damus, nos.lol, nostr.band).
     #[arg(long)]
     nostr_relay: Vec<String>,
+
+    /// Disable the synthetic benchmark probe runner (enabled by default).
+    #[arg(long)]
+    no_benchmark: bool,
+
+    /// Benchmark probe cadence in seconds (default: 3600 / hourly).
+    #[arg(long, default_value = "3600")]
+    benchmark_interval_secs: u64,
+
+    /// Optional model override for benchmark probes (defaults to local served model or first /v1/models entry).
+    #[arg(long)]
+    benchmark_model: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -732,6 +746,8 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 
     // Start mesh node
     let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
+    let telemetry = telemetry::Telemetry::new(node.id().fmt_short().to_string()).await?;
+    node.set_telemetry(telemetry.clone());
     node.start_accepting();
     let token = node.invite_token();
 
@@ -809,9 +825,10 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let mut bootstrap_listener_tx = if !cli.join.is_empty() {
         let (stop_tx, stop_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>(1);
         let boot_node = node.clone();
+        let boot_telemetry = telemetry.clone();
         let boot_port = api_port;
         tokio::spawn(async move {
-            bootstrap_proxy(boot_node, boot_port, stop_rx, cli.listen_all).await;
+            bootstrap_proxy(boot_node, boot_telemetry, boot_port, stop_rx, cli.listen_all).await;
         });
         Some(stop_tx)
     } else {
@@ -924,16 +941,27 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
 
     // API proxy: model-aware routing
     let proxy_node = node.clone();
+    let proxy_telemetry = telemetry.clone();
     let proxy_rx = target_rx.clone();
     tokio::spawn(async move {
-        api_proxy(proxy_node, api_port, proxy_rx, drop_tx, existing_listener, cli.listen_all).await;
+        api_proxy(proxy_node, proxy_telemetry, api_port, proxy_rx, drop_tx, existing_listener, cli.listen_all).await;
     });
+
+    if !cli.no_benchmark {
+        benchmark::spawn_probe_loop(
+            node.clone(),
+            telemetry.clone(),
+            api_port,
+            cli.benchmark_interval_secs,
+            cli.benchmark_model.clone(),
+        );
+    }
 
     // Console (optional)
     let model_name_for_console = model_name.clone();
     let console_state = if let Some(cport) = console_port {
         let model_size_bytes = election::total_model_bytes(&model);
-        let cs = api::MeshApi::new(node.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
+        let cs = api::MeshApi::new(node.clone(), telemetry.clone(), model_name_for_console.clone(), api_port, model_size_bytes);
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if let Some(draft) = &cli.draft {
             let dn = draft.file_stem().unwrap_or_default().to_string_lossy().to_string();
@@ -1099,8 +1127,10 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     // Start a dormant node just for the console
     let (node, _channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
     node.set_available_models(local_models).await;
+    let telemetry = telemetry::Telemetry::new(node.id().fmt_short().to_string()).await?;
+    node.set_telemetry(telemetry.clone());
 
-    let cs = api::MeshApi::new(node.clone(), "(idle)".into(), cli.port, 0);
+    let cs = api::MeshApi::new(node.clone(), telemetry, "(idle)".into(), cli.port, 0);
     cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
     cs.update(false, false).await;
     let cs2 = cs.clone();
@@ -1121,6 +1151,8 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
 /// Returns Ok(None) on clean shutdown.
 async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Option<String>> {
     let local_port = cli.port;
+    let telemetry = telemetry::Telemetry::new(node.id().fmt_short().to_string()).await?;
+    node.set_telemetry(telemetry.clone());
 
     // Nostr publishing (if --publish, for idle GPU nodes advertising capacity)
     if cli.publish && !is_client {
@@ -1164,7 +1196,7 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
     {
         let cport = cli.console;
         let label = if is_client { "(client)".to_string() } else { "(standby)".to_string() };
-        let cs = api::MeshApi::new(node.clone(), label, local_port, 0);
+        let cs = api::MeshApi::new(node.clone(), telemetry.clone(), label, local_port, 0);
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if is_client { cs.set_client(true).await; }
         cs.update(false, !is_client).await;
@@ -1173,6 +1205,16 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         tokio::spawn(async move {
             api::start(cport, cs, rx, la).await;
         });
+    }
+
+    if !cli.no_benchmark {
+        benchmark::spawn_probe_loop(
+            node.clone(),
+            telemetry.clone(),
+            local_port,
+            cli.benchmark_interval_secs,
+            cli.benchmark_model.clone(),
+        );
     }
 
     // Reactive rebalancing: watch for topology changes and promote if needed.
@@ -1221,7 +1263,8 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Connection from {addr}");
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                let telemetry = telemetry.clone();
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, telemetry));
             }
             Some(model_name) = promote_rx.recv() => {
                 eprintln!("⬆️  Standby promoting to serve: {model_name}");
@@ -1239,7 +1282,15 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target
 /// if model is not specified or not found.
-async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::Receiver<election::ModelTargets>, drop_tx: tokio::sync::mpsc::UnboundedSender<String>, existing_listener: Option<tokio::net::TcpListener>, listen_all: bool) {
+async fn api_proxy(
+    node: mesh::Node,
+    telemetry: telemetry::Telemetry,
+    port: u16,
+    target_rx: tokio::sync::watch::Receiver<election::ModelTargets>,
+    drop_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    existing_listener: Option<tokio::net::TcpListener>,
+    listen_all: bool,
+) {
     let listener = match existing_listener {
         Some(l) => l,
         None => {
@@ -1265,6 +1316,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
         let node = node.clone();
 
         let drop_tx = drop_tx.clone();
+        let telemetry = telemetry.clone();
         tokio::spawn(async move {
             // Read the HTTP request to extract the model name
             let mut buf = vec![0u8; 32768];
@@ -1302,7 +1354,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         first_available_target(&targets)
                     };
 
-                    proxy::route_to_target(node, tcp_stream, target).await;
+                    proxy::route_to_target(node, tcp_stream, target, telemetry).await;
                 }
                 Err(_) => return,
             };
@@ -1314,6 +1366,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
 /// Returns the TcpListener when signaled to stop (so api_proxy can take it over).
 async fn bootstrap_proxy(
     node: mesh::Node,
+    telemetry: telemetry::Telemetry,
     port: u16,
     mut stop_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>,
     listen_all: bool,
@@ -1338,7 +1391,8 @@ async fn bootstrap_proxy(
                 };
                 let _ = tcp_stream.set_nodelay(true);
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                let telemetry = telemetry.clone();
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, telemetry));
             }
             resp_tx = stop_rx.recv() => {
                 // Hand over listener to api_proxy

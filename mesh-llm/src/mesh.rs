@@ -3,6 +3,7 @@
 //! Single ALPN, single connection per peer. Bi-streams multiplexed by
 //! first byte: 0x01 = gossip, 0x02 = tunnel (RPC), 0x03 = tunnel map, 0x04 = tunnel (HTTP).
 
+use crate::telemetry;
 use anyhow::Result;
 use base64::Engine;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
@@ -72,6 +73,9 @@ struct PeerAnnouncement {
     /// Generated once by the originator, propagated via gossip.
     #[serde(default)]
     mesh_id: Option<String>,
+    /// Compact recent telemetry summaries (local historian rows for this node).
+    #[serde(default)]
+    telemetry_summaries: Vec<telemetry::NodeMetricSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +348,7 @@ pub struct Node {
     pub peer_change_rx: watch::Receiver<usize>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     tunnel_http_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    telemetry: Arc<std::sync::Mutex<Option<telemetry::Telemetry>>>,
 }
 
 struct MeshState {
@@ -465,6 +470,7 @@ impl Node {
             peer_change_rx,
             tunnel_tx,
             tunnel_http_tx,
+            telemetry: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // Accept loop starts but waits for start_accepting() before processing connections.
@@ -704,6 +710,10 @@ impl Node {
 
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
+    }
+
+    pub fn set_telemetry(&self, telemetry: telemetry::Telemetry) {
+        *self.telemetry.lock().unwrap() = Some(telemetry);
     }
 
     /// Get all models the mesh has ever wanted — survives peer removal.
@@ -1509,6 +1519,7 @@ impl Node {
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
         let their_announcements: Vec<PeerAnnouncement> = serde_json::from_slice(&buf)?;
+        self.ingest_gossip_telemetry(&their_announcements).await;
 
         // Wait for stream to fully close, then small delay for accept_bi to re-arm
         let _ = recv.read_to_end(0).await;
@@ -1555,6 +1566,7 @@ impl Node {
         let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await?;
         let their_announcements: Vec<PeerAnnouncement> = serde_json::from_slice(&buf)?;
+        self.ingest_gossip_telemetry(&their_announcements).await;
 
         // Send our announcements
         let our_announcements = self.collect_announcements().await;
@@ -1718,6 +1730,12 @@ impl Node {
     }
 
     async fn collect_announcements(&self) -> Vec<PeerAnnouncement> {
+        let telemetry_handle = { self.telemetry.lock().unwrap().clone() };
+        let telemetry_summaries = if let Some(t) = telemetry_handle {
+            t.latest_summaries_for_gossip().await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let state = self.state.lock().await;
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
@@ -1738,6 +1756,7 @@ impl Node {
                 requested_models: p.requested_models.clone(),
                 request_rates: p.request_rates.clone(),
                 mesh_id: my_mesh_id.clone(),
+                telemetry_summaries: Vec::new(),
             })
             .collect();
         let my_rates = self.snapshot_request_rates();
@@ -1752,8 +1771,24 @@ impl Node {
             requested_models: my_requested,
             request_rates: my_rates,
             mesh_id: my_mesh_id,
+            telemetry_summaries,
         });
         announcements
+    }
+
+    async fn ingest_gossip_telemetry(&self, anns: &[PeerAnnouncement]) {
+        let telemetry_handle = { self.telemetry.lock().unwrap().clone() };
+        let Some(t) = telemetry_handle else { return; };
+        let mut summaries = Vec::new();
+        for ann in anns {
+            summaries.extend(ann.telemetry_summaries.iter().cloned());
+        }
+        if summaries.is_empty() {
+            return;
+        }
+        if let Err(e) = t.upsert_peer_summaries(&summaries).await {
+            tracing::debug!("Telemetry gossip upsert failed: {e}");
+        }
     }
 }
 
@@ -1850,5 +1885,3 @@ async fn load_or_create_key() -> Result<SecretKey> {
     tracing::info!("Generated new key, saved to {}", key_path.display());
     Ok(key)
 }
-
-

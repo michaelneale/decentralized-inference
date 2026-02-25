@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(148, 163, 184, 0.08), transparent 45%),
+    radial-gradient(circle at 100% 0%, rgba(59, 130, 246, 0.05), transparent 45%),
+    radial-gradient(circle at 50% 100%, rgba(34, 197, 94, 0.03), transparent 55%),
+    #030303;
+  color: #e2e8f0;
+}
+
+#root {
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}

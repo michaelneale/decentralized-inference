@@ -162,7 +162,7 @@
 
     /* Status line */
     .status-line {
-      font-size: 0.7rem;
+      font-size: 0.78rem;
       color: #666;
       margin-bottom: 0.6rem;
     }
@@ -173,7 +173,7 @@
 
     /* Section labels */
     .section-label {
-      font-size: 0.6rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: #444;
@@ -190,7 +190,7 @@
       display: flex;
       align-items: center;
       gap: 0.4rem;
-      font-size: 0.65rem;
+      font-size: 0.72rem;
       padding: 0.15rem 0;
     }
 
@@ -220,7 +220,7 @@
 
     .model-info {
       color: #444;
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       margin-left: auto;
     }
 
@@ -232,7 +232,7 @@
     }
 
     .agent-name {
-      font-size: 0.6rem;
+      font-size: 0.68rem;
       font-weight: 600;
       color: #555;
       min-width: 36px;
@@ -241,7 +241,7 @@
 
     .cmd-sm {
       font-family: monospace;
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       color: #aaa;
       background: #080808;
       border: 1px solid #1a1a1a;
@@ -258,7 +258,7 @@
     }
 
     .join-details>summary {
-      font-size: 0.6rem;
+      font-size: 0.68rem;
       color: #444;
       cursor: pointer;
     }
@@ -285,13 +285,13 @@
     }
 
     .discover-name {
-      font-size: 0.6rem;
+      font-size: 0.68rem;
       font-weight: 600;
       color: #6cf;
     }
 
     .discover-region {
-      font-size: 0.5rem;
+      font-size: 0.58rem;
       color: #666;
       background: #111;
       padding: 0.1rem 0.25rem;
@@ -299,12 +299,12 @@
     }
 
     .discover-stats {
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       color: #888;
     }
 
     .discover-models {
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       color: #aaa;
       font-family: monospace;
       white-space: nowrap;
@@ -321,7 +321,7 @@
     }
 
     details.panel-section > summary {
-      font-size: 0.6rem;
+      font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.04em;
       color: #888;
@@ -352,7 +352,7 @@
     }
 
     .panel-desc {
-      font-size: 0.6rem;
+      font-size: 0.7rem;
       color: #777;
       line-height: 1.5;
       margin-bottom: 0.5rem;
@@ -363,7 +363,7 @@
     }
 
     .panel-label {
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       font-weight: 600;
       color: #666;
       text-transform: uppercase;
@@ -373,7 +373,7 @@
 
     .panel-val {
       font-family: monospace;
-      font-size: 0.6rem;
+      font-size: 0.68rem;
       color: #ccc;
       background: #0a0a0a;
       border: 1px solid #1a1a1a;
@@ -386,7 +386,7 @@
 
     .panel-tok {
       font-family: monospace;
-      font-size: 0.5rem;
+      font-size: 0.6rem;
       color: #999;
       background: #0a0a0a;
       border: 1px solid #1a1a1a;
@@ -404,7 +404,7 @@
       padding: 0.25rem 0.6rem;
       color: #e0e0e0;
       cursor: pointer;
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       white-space: nowrap;
       flex-shrink: 0;
     }
@@ -418,7 +418,7 @@
       padding: 0.2rem 0.5rem;
       color: #aaa;
       cursor: pointer;
-      font-size: 0.55rem;
+      font-size: 0.62rem;
       white-space: nowrap;
       flex-shrink: 0;
     }
@@ -544,9 +544,124 @@
       margin-bottom: 0.6rem;
     }
 
+    .mmeta {
+      color: #666;
+      font-size: 0.72rem;
+      margin-top: -0.35rem;
+      margin-bottom: 0.7rem;
+      font-family: monospace;
+    }
+
     .hidden {
       display: none !important;
     }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.35rem;
+      margin: 0.35rem 0 0.55rem;
+    }
+
+    .metric-card {
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      background: #090909;
+      padding: 0.35rem 0.45rem;
+    }
+
+    .metric-k {
+      color: #555;
+      font-size: 0.58rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.1rem;
+    }
+
+    .metric-v {
+      color: #ccc;
+      font-family: monospace;
+      font-size: 0.84rem;
+    }
+
+    .metric-sub {
+      color: #666;
+      font-size: 0.58rem;
+      margin-top: 0.1rem;
+    }
+
+    .telemetry-chart {
+      border: 1px solid #1a1a1a;
+      border-radius: 4px;
+      background: #090909;
+      padding: 0.3rem 0.35rem;
+      margin: 0.35rem 0;
+    }
+
+    .telemetry-chart .label {
+      color: #666;
+      font-size: 0.6rem;
+      margin-bottom: 0.2rem;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .telemetry-chart svg {
+      width: 100%;
+      height: 36px;
+      display: block;
+    }
+
+    .telemetry-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.64rem;
+      margin-top: 0.3rem;
+    }
+
+    .telemetry-table th {
+      color: #555;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid #1a1a1a;
+      padding: 0.2rem 0.18rem;
+      font-size: 0.56rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .telemetry-table td {
+      color: #aaa;
+      border-bottom: 1px solid #111;
+      padding: 0.22rem 0.18rem;
+      font-family: monospace;
+      vertical-align: middle;
+    }
+
+    .telemetry-row {
+      cursor: pointer;
+    }
+
+    .telemetry-row:hover td {
+      background: #0d0d0d;
+    }
+
+    .telemetry-row.sel td {
+      background: #0d141a;
+      color: #cce9ff;
+    }
+
+    .fresh-dot {
+      display: inline-block;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      margin-right: 0.28rem;
+      background: #444;
+    }
+    .fresh-dot.ok { background: #4c4; }
+    .fresh-dot.warn { background: #cc4; }
+    .fresh-dot.stale { background: #c66; }
 
     @media (max-width: 720px) {
       .main {
@@ -568,6 +683,10 @@
       .right {
         width: 100%;
         min-height: 50vh;
+      }
+
+      .metrics-grid {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -592,6 +711,7 @@
       <div id="discoverSection"></div>
       <div id="gettingStarted"></div>
       <div id="apiSection"></div>
+      <div id="metricsSection"></div>
     </div>
     <div class="right">
       <div class="chat-hdr">
@@ -610,6 +730,8 @@
   <script>
     const $ = id => document.getElementById(id);
     let S = {};
+    let T = { live: null, nodes: [], rollup: [], nodeHistory: [], benchmarks: [], selectedNodeId: null, rangeMinutes: 180, benchProbe: 'all', benchOutcome: 'all', loading: false, loadedOnce: false, err: null, lastLoadMs: 0 };
+    let telemetrySse = null;
     let panelOpen = true;
     const sse = new EventSource('/api/events');
     sse.onmessage = e => { S = JSON.parse(e.data); render(); };
@@ -621,7 +743,7 @@
     }
 
     function render() {
-      renderMeshName(); renderBadge(); renderMeta(); renderGettingStarted(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderDiscover(); renderApiSection();
+      renderMeshName(); renderBadge(); renderMeta(); renderGettingStarted(); renderDiagram(); renderStatus(); renderModels(); renderAgents(); renderInvite(); renderDiscover(); renderApiSection(); renderTelemetry();
       const hasWarmModel = (S.mesh_models || []).some(m => m.status === 'warm');
       const ok = S.llama_ready || (S.is_client && hasWarmModel);
       $('inp').disabled = !ok; $('btn').disabled = !ok;
@@ -629,6 +751,307 @@
       if (ok) $('msgs').classList.remove('off');
       updateModelPicker();
       $('chatHdr').textContent = ok ? 'Chat' : 'Chat';
+    }
+
+    async function loadTelemetry(force = false) {
+      if (T.loading) return;
+      const now = Date.now();
+      if (!force && now - (T.lastLoadMs || 0) < 8000) return;
+      T.loading = true;
+      T.lastLoadMs = now;
+      try {
+        const selected = T.selectedNodeId || S.node_id || '';
+        const m = T.rangeMinutes || 180;
+        const [liveR, nodesR, rollupR, nodeR, benchR] = await Promise.all([
+          fetch('/api/metrics/live'),
+          fetch(`/api/metrics/nodes?minutes=${m}`),
+          fetch(`/api/metrics/rollup?minutes=${m}`),
+          fetch(`/api/metrics/node?minutes=${m}${selected ? `&id=${encodeURIComponent(selected)}` : ''}`),
+          fetch(`/api/metrics/benchmarks?minutes=${m}&limit=300`),
+        ]);
+        if (!liveR.ok || !nodesR.ok || !rollupR.ok || !nodeR.ok || !benchR.ok) throw new Error('metrics fetch failed');
+        T.live = await liveR.json();
+        T.nodes = await nodesR.json();
+        T.rollup = await rollupR.json();
+        T.nodeHistory = await nodeR.json();
+        T.benchmarks = await benchR.json();
+        if (!T.selectedNodeId) {
+          T.selectedNodeId = S.node_id || (T.nodes[0] && T.nodes[0].source_node_id) || null;
+        }
+        T.err = null;
+        T.loadedOnce = true;
+      } catch (e) {
+        T.err = e.message || String(e);
+      } finally {
+        T.loading = false;
+        renderTelemetry();
+      }
+    }
+
+    function telemetryEventsUrl() {
+      const m = T.rangeMinutes || 180;
+      const sel = T.selectedNodeId || S.node_id || '';
+      const q = new URLSearchParams();
+      q.set('minutes', String(m));
+      q.set('limit', '300');
+      if (sel) q.set('id', sel);
+      return `/api/metrics/events?${q.toString()}`;
+    }
+
+    function connectTelemetrySse() {
+      const url = telemetryEventsUrl();
+      if (telemetrySse && telemetrySse._url === url) return;
+      if (telemetrySse) {
+        telemetrySse.close();
+        telemetrySse = null;
+      }
+      try {
+        const es = new EventSource(url);
+        es._url = url;
+        es.onmessage = e => {
+          try {
+            const d = JSON.parse(e.data);
+            T.live = d.live || null;
+            T.nodes = d.nodes || [];
+            T.rollup = d.rollup || [];
+            T.nodeHistory = d.node_history || [];
+            T.benchmarks = d.benchmarks || [];
+            if (!T.selectedNodeId) T.selectedNodeId = S.node_id || (T.nodes[0] && T.nodes[0].source_node_id) || null;
+            T.err = null;
+            T.loadedOnce = true;
+            renderTelemetry();
+          } catch (err) {
+            T.err = 'bad telemetry SSE payload';
+            renderTelemetry();
+          }
+        };
+        es.onerror = () => {
+          T.err = 'telemetry stream disconnected';
+          renderTelemetry();
+          // Keep a fetch fallback so the panel still updates if SSE is flaky.
+          loadTelemetry(true);
+        };
+        telemetrySse = es;
+      } catch (e) {
+        T.err = 'telemetry SSE unavailable';
+        loadTelemetry(true);
+      }
+    }
+
+    function renderTelemetry() {
+      const el = $('metricsSection');
+      if (!el) return;
+      if (!T.loadedOnce && !T.loading) loadTelemetry();
+      const roll = T.rollup || [];
+      const rollLast = roll[roll.length - 1] || null;
+      const p95Exact = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_exact || null)) : null;
+      const p95Avg = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_avg_nodes || null)) : null;
+      const p95Max = rollLast ? latestDefined(roll.map(r => r.latency_p95_ms_max_nodes || null)) : null;
+      const reqLast = rollLast ? rollLast.requests : 0;
+      const errRate = rollLast && rollLast.requests > 0 ? (rollLast.errors / rollLast.requests * 100) : 0;
+      const util = rollLast ? rollLast.utilization_pct_avg_nodes : 0;
+      const nodes = T.nodes || [];
+      const freshCount = nodes.filter(n => freshnessClass(n.observed_at) === 'ok').length;
+      const selectedId = T.selectedNodeId || (S.node_id || '');
+      const selectedRow = nodes.find(n => n.source_node_id === selectedId) || null;
+      const nodeHist = T.nodeHistory || [];
+      const benches = T.benchmarks || [];
+      const benchFiltered = filterBenchmarks(benches);
+      const benchLatestByProbe = latestBy(benchFiltered, b => b.probe_name);
+
+      el.innerHTML = `<details class="panel-section" open>
+        <summary>Telemetry</summary>
+        <div style="display:flex;align-items:center;gap:0.4rem;margin:0.25rem 0 0.45rem">
+          <div style="font-size:0.55rem;color:#666;text-transform:uppercase;letter-spacing:0.04em">Range</div>
+          <select class="model-picker" style="max-width:90px" onchange="setTelemetryRange(this.value)">
+            ${[15,60,180,1440].map(v => `<option value="${v}" ${T.rangeMinutes===v?'selected':''}>${v >= 60 ? (v===1440?'24h':(v/60)+'h') : v+'m'}</option>`).join('')}
+          </select>
+          <button class="copy-btn" onclick="loadTelemetry(true)">Refresh</button>
+        </div>
+        ${T.err ? `<div style="color:#c66;font-size:0.58rem;margin-bottom:0.35rem">Metrics unavailable: ${esc(T.err)}</div>` : ''}
+        <div class="metrics-grid">
+          ${metricCard('Req/min', fmtInt(reqLast), `${rollLast ? rollLast.node_count : 0} nodes · ${freshCount} fresh`)}
+          ${metricCard('Errors', rollLast ? `${fmtInt(rollLast.errors)} (${errRate.toFixed(1)}%)` : '0', '')}
+          ${metricCard('Util Avg', `${(util || 0).toFixed(1)}%`, 'avg across reporting nodes')}
+          ${metricCard('Latency p95', p95Exact != null ? `${fmtMaybeMs(p95Exact)} exact` : (p95Avg != null ? `${fmtMaybeMs(p95Avg)} avg` : 'n/a'), p95Max != null ? `max ${fmtMaybeMs(p95Max)}` : '')}
+          ${metricCard('Tunnel Bytes', rollLast ? fmtBytes(rollLast.tunnel_bytes_total) : '0 B', 'sum / min')}
+        </div>
+        ${miniChart('Requests/min', roll.map(r => r.requests), '#6cf')}
+        ${miniChart('Utilization avg %', roll.map(r => r.utilization_pct_avg_nodes), '#cc8')}
+        ${miniChart('Latency p95 exact rollup (ms)', roll.map(r => r.latency_p95_ms_exact != null ? r.latency_p95_ms_exact : r.latency_p95_ms_avg_nodes), '#8c8')}
+        ${miniChart('Errors/min', roll.map(r => r.errors), '#c66')}
+        <div class="section-label" style="margin-top:0.55rem">All Nodes</div>
+        ${renderNodesTable(nodes, selectedId)}
+        <div class="section-label" style="margin-top:0.55rem">Node Detail ${selectedId ? `<span style="color:#555;font-family:monospace;text-transform:none">${esc(selectedId)}</span>` : ''}</div>
+        ${selectedRow ? `
+          <div class="metrics-grid">
+            ${metricCard('Req/min', fmtInt(selectedRow.requests), `errors ${fmtInt(selectedRow.errors)}`)}
+            ${metricCard('Util', `${(selectedRow.utilization_pct || 0).toFixed(1)}%`, `peak act ${fmtInt(selectedRow.active_requests_peak || 0)}`)}
+            ${metricCard('Latency p95', fmtMaybeMs(selectedRow.latency_p95_ms), `p50 ${fmtMaybeMs(selectedRow.latency_p50_ms)}`)}
+            ${metricCard('Route split', `${fmtInt(selectedRow.requests_local || 0)}L / ${fmtInt(selectedRow.requests_remote || 0)}R`, '')}
+            ${metricCard('TTFT p95', fmtMaybeMs(selectedRow.ttft_p95_ms), `p50 ${fmtMaybeMs(selectedRow.ttft_p50_ms)}`)}
+            ${metricCard('Throughput', selectedRow.tps_avg != null ? `${Number(selectedRow.tps_avg).toFixed(1)} tok/s` : 'n/a', `${fmtInt(selectedRow.completion_tokens_total || 0)} tok/min`)}
+          </div>
+          ${miniChart('Node requests/min', nodeHist.map(r => r.requests), '#6cf')}
+          ${miniChart('Node utilization %', nodeHist.map(r => r.utilization_pct), '#cc8')}
+          ${miniChart('Node latency p95 ms', nodeHist.map(r => r.latency_p95_ms), '#8c8')}
+          ${miniChart('Node TTFT p95 ms', nodeHist.map(r => r.ttft_p95_ms), '#9c8')}
+          ${miniChart('Node avg tok/s', nodeHist.map(r => r.tps_avg), '#c8a')}
+        ` : `<div style="color:#666;font-size:0.58rem">No node metrics yet.</div>`}
+        <div class="section-label" style="margin-top:0.55rem">Benchmarks</div>
+        ${renderBenchmarkSummary(benchLatestByProbe, benchFiltered, benches)}
+      </details>`;
+    }
+
+    function renderNodesTable(rows, selectedId) {
+      if (!rows.length) return '<div style="color:#666;font-size:0.58rem">No node rows in local historian yet.</div>';
+      return `<table class="telemetry-table">
+        <thead><tr>
+          <th>Node</th><th>Req</th><th>Err</th><th>Util</th><th>P95</th><th>Route</th><th>Seen</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => {
+            const cls = freshnessClass(r.observed_at);
+            const selected = r.source_node_id === selectedId ? ' sel' : '';
+            return `<tr class="telemetry-row${selected}" onclick="selectTelemetryNode('${escAttr(r.source_node_id)}')">
+              <td><span class="fresh-dot ${cls}"></span>${esc(r.source_node_id)}</td>
+              <td>${fmtInt(r.requests)}</td>
+              <td>${fmtInt(r.errors)}</td>
+              <td>${(r.utilization_pct || 0).toFixed(1)}%</td>
+              <td>${fmtMaybeMs(r.latency_p95_ms)}</td>
+              <td>${fmtInt(r.requests_local || 0)}/${fmtInt(r.requests_remote || 0)}</td>
+              <td>${fmtAgeSec(r.observed_at)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    }
+
+    function selectTelemetryNode(nodeId) {
+      T.selectedNodeId = nodeId;
+      connectTelemetrySse();
+      loadTelemetry(true);
+      renderTelemetry();
+    }
+
+    function setTelemetryRange(v) {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) return;
+      T.rangeMinutes = n;
+      connectTelemetrySse();
+      loadTelemetry(true);
+      renderTelemetry();
+    }
+
+    function metricCard(k, v, sub) {
+      return `<div class="metric-card"><div class="metric-k">${esc(k)}</div><div class="metric-v">${esc(v)}</div>${sub ? `<div class="metric-sub">${esc(sub)}</div>` : ''}</div>`;
+    }
+
+    function miniChart(label, valsRaw, color) {
+      const vals = (valsRaw || []).map(v => (v == null ? null : Number(v))).slice(-60);
+      const nums = vals.filter(v => Number.isFinite(v));
+      if (!nums.length) return `<div class="telemetry-chart"><div class="label"><span>${esc(label)}</span><span>n/a</span></div><svg viewBox="0 0 220 36"><rect x="0" y="0" width="220" height="36" fill="#090909"/></svg></div>`;
+      const min = Math.min(...nums);
+      const max = Math.max(...nums);
+      const span = Math.max(1e-6, max - min);
+      const pts = vals.map((v, i) => {
+        if (!Number.isFinite(v)) return null;
+        const x = vals.length <= 1 ? 0 : (i / (vals.length - 1)) * 220;
+        const y = 34 - ((v - min) / span) * 30;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).filter(Boolean).join(' ');
+      return `<div class="telemetry-chart">
+        <div class="label"><span>${esc(label)}</span><span>${esc(fmtMetricRange(min, max))}</span></div>
+        <svg viewBox="0 0 220 36" preserveAspectRatio="none">
+          <line x1="0" y1="34" x2="220" y2="34" stroke="#1a1a1a" stroke-width="1"/>
+          <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}"/>
+        </svg>
+      </div>`;
+    }
+
+    function renderBenchmarkSummary(latestRows, rows, allRows) {
+      if (!allRows.length) return '<div style="color:#666;font-size:0.58rem">No benchmark runs yet.</div>';
+      const probes = Array.from(new Set((allRows || []).map(r => r.probe_name))).sort();
+      const controls = `
+        <div style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;margin:0.2rem 0 0.45rem">
+          <select class="model-picker" style="max-width:220px" onchange="setBenchmarkProbeFilter(this.value)">
+            <option value="all" ${T.benchProbe==='all'?'selected':''}>All probes</option>
+            ${probes.map(p => `<option value="${escAttr(p)}" ${T.benchProbe===p?'selected':''}>${esc(p)}</option>`).join('')}
+          </select>
+          <select class="model-picker" style="max-width:130px" onchange="setBenchmarkOutcomeFilter(this.value)">
+            <option value="all" ${T.benchOutcome==='all'?'selected':''}>All outcomes</option>
+            <option value="ok" ${T.benchOutcome==='ok'?'selected':''}>Success only</option>
+            <option value="fail" ${T.benchOutcome==='fail'?'selected':''}>Failures only</option>
+          </select>
+          <button class="copy-btn" onclick="exportBenchmarkCsv()">Export CSV</button>
+        </div>`;
+      if (!rows.length) return controls + '<div style="color:#666;font-size:0.58rem">No benchmark rows match filters.</div>';
+      const sortedLatest = [...latestRows].sort((a,b) => a.probe_name.localeCompare(b.probe_name));
+      const streamRows = rows.filter(r => r.stream);
+      const nonstreamRows = rows.filter(r => !r.stream);
+      return controls + `
+        <div class="metrics-grid">
+          ${sortedLatest.map(r => metricCard(
+            r.probe_name.replace(/^analysis_report_v1_?/, 'probe '),
+            r.success ? (r.stream ? `${fmtMaybeMs(r.ttft_ms)} TTFT` : fmtMaybeMs(r.latency_ms)) : 'fail',
+            r.success ? `${fmtMaybeMs(r.latency_ms)} total${r.tokens_per_sec ? ' · '+Number(r.tokens_per_sec).toFixed(1)+' tok/s' : ''}` : (r.error_kind || 'error')
+          )).join('')}
+        </div>
+        ${miniChart('Benchmark non-stream latency (ms)', nonstreamRows.slice().reverse().map(r => r.latency_ms), '#6cf')}
+        ${miniChart('Benchmark stream TTFT (ms)', streamRows.slice().reverse().map(r => r.ttft_ms), '#8c8')}
+        <table class="telemetry-table" style="margin-top:0.35rem">
+          <thead><tr><th>Probe</th><th>OK</th><th>Latency</th><th>TTFT</th><th>Tok/s</th><th>When</th></tr></thead>
+          <tbody>
+            ${rows.slice(0, 10).map(r => `<tr>
+              <td>${esc(r.probe_name)}</td>
+              <td style="color:${r.success ? '#8c8' : '#c66'}">${r.success ? 'yes' : 'no'}</td>
+              <td>${fmtMaybeMs(r.latency_ms)}</td>
+              <td>${fmtMaybeMs(r.ttft_ms)}</td>
+              <td>${r.tokens_per_sec != null ? Number(r.tokens_per_sec).toFixed(1) : 'n/a'}</td>
+              <td>${fmtAgeSec(r.observed_at)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    function filterBenchmarks(rows) {
+      return (rows || []).filter(r => {
+        if (T.benchProbe !== 'all' && r.probe_name !== T.benchProbe) return false;
+        if (T.benchOutcome === 'ok' && !r.success) return false;
+        if (T.benchOutcome === 'fail' && r.success) return false;
+        return true;
+      });
+    }
+
+    function setBenchmarkProbeFilter(v) {
+      T.benchProbe = v || 'all';
+      renderTelemetry();
+    }
+
+    function setBenchmarkOutcomeFilter(v) {
+      T.benchOutcome = v || 'all';
+      renderTelemetry();
+    }
+
+    function exportBenchmarkCsv() {
+      const rows = filterBenchmarks(T.benchmarks || []);
+      const cols = ['ts','source_node_id','model','probe_name','probe_type','stream','success','status_code','latency_ms','ttft_ms','completion_tokens','tokens_per_sec','error_kind','observed_at'];
+      const escCsv = v => {
+        if (v == null) return '';
+        const s = String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csv = [cols.join(',')]
+        .concat(rows.map(r => cols.map(c => escCsv(r[c])).join(',')))
+        .join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `mesh-llm-benchmarks-${T.rangeMinutes || 180}m.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 500);
     }
 
     function renderMeshName() {
@@ -994,6 +1417,47 @@
     }
 
     function shortName(n) { return (n || '').replace(/-Q\w+$/, '').replace(/-Instruct/, ''); }
+    function fmtInt(n) { return Number(n || 0).toLocaleString(); }
+    function fmtMaybeMs(v) { return (v == null || !Number.isFinite(Number(v))) ? 'n/a' : `${Number(v).toFixed(0)}ms`; }
+    function fmtMetricRange(min, max) {
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return 'n/a';
+      if (Math.abs(max - min) < 0.001) return `${max.toFixed(1)}`;
+      return `${min.toFixed(1)}-${max.toFixed(1)}`;
+    }
+    function latestDefined(arr) {
+      for (let i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i];
+      return null;
+    }
+    function latestBy(rows, keyFn) {
+      const m = new Map();
+      for (const r of rows || []) {
+        const k = keyFn(r);
+        const prev = m.get(k);
+        if (!prev || Number(r.ts || 0) > Number(prev.ts || 0)) m.set(k, r);
+      }
+      return Array.from(m.values());
+    }
+    function fmtBytes(n) {
+      n = Number(n || 0);
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(i ? 1 : 0)} ${units[i]}`;
+    }
+    function fmtAgeSec(ts) {
+      if (!ts) return 'n/a';
+      const d = Math.max(0, Math.floor(Date.now() / 1000 - Number(ts)));
+      if (d < 60) return `${d}s`;
+      const m = Math.floor(d / 60);
+      return `${m}m`;
+    }
+    function freshnessClass(observedAt) {
+      const age = Math.max(0, Math.floor(Date.now() / 1000 - Number(observedAt || 0)));
+      if (age <= 90) return 'ok';
+      if (age <= 180) return 'warn';
+      return 'stale';
+    }
+    function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
     // ── Model picker ──
 
@@ -1034,15 +1498,20 @@
       el.innerHTML += `<div class="mu">› ${esc(msg)}${(S.mesh_models || []).filter(m => m.status === 'warm').length > 1 ? ` <span style="color:#444;font-size:0.7rem">${esc(label)}</span>` : ''}</div>`;
       chatHistory.push({ role: 'user', content: msg });
       const bot = document.createElement('div'); bot.className = 'mb';
+      const meta = document.createElement('div'); meta.className = 'mmeta';
       el.appendChild(bot); el.scrollTop = el.scrollHeight;
+      el.appendChild(meta); el.scrollTop = el.scrollHeight;
+      const reqStart = performance.now();
       try {
         const r = await fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: model, messages: chatHistory, stream: true }),
+          body: JSON.stringify({ model: model, messages: chatHistory, stream: true, stream_options: { include_usage: true } }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const reader = r.body.getReader();
         const dec = new TextDecoder(); let buf = ''; let full = '';
+        let completionTokens = null;
+        let firstTokenAt = null;
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
           buf += dec.decode(value, { stream: true });
@@ -1051,19 +1520,40 @@
             if (!l.startsWith('data: ')) continue;
             const d = l.slice(6).trim(); if (d === '[DONE]') continue;
             try {
-              const c = JSON.parse(d); const t = c.choices?.[0]?.delta?.content || c.choices?.[0]?.delta?.reasoning_content || '';
-              if (t) { full += t; bot.textContent += t; el.scrollTop = el.scrollHeight; }
+              const c = JSON.parse(d);
+              if (c.usage && Number.isFinite(c.usage.completion_tokens)) completionTokens = c.usage.completion_tokens;
+              const t = c.choices?.[0]?.delta?.content || c.choices?.[0]?.delta?.reasoning_content || '';
+              if (t) {
+                if (firstTokenAt == null) firstTokenAt = performance.now();
+                full += t; bot.textContent += t; el.scrollTop = el.scrollHeight;
+              }
             } catch { }
           }
         }
         if (!full) { bot.textContent = '(empty response)'; }
+        const endAt = performance.now();
+        const genStart = firstTokenAt ?? reqStart;
+        const genSecs = Math.max(0.001, (endAt - genStart) / 1000);
+        const ttftMs = Math.max(0, Math.round((firstTokenAt ?? endAt) - reqStart));
+        const tokenCount = Number.isFinite(completionTokens)
+          ? completionTokens
+          : Math.max(1, Math.round((full || '').length / 4)); // rough fallback
+        const tps = tokenCount / genSecs;
+        meta.textContent = `${tokenCount} tok · ${tps.toFixed(1)} tok/s avg · TTFT ${ttftMs}ms`;
+        fetch('/api/metrics/chat-sample', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ttft_ms: ttftMs, completion_tokens: tokenCount, tokens_per_sec: tps })
+        }).catch(() => {});
         chatHistory.push({ role: 'assistant', content: full || '' });
-      } catch (e) { bot.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; chatHistory.pop(); }
+      } catch (e) { bot.remove(); meta.remove(); el.innerHTML += `<div class="me">Error: ${esc(e.message)}</div>`; chatHistory.pop(); }
       el.scrollTop = el.scrollHeight;
     }
 
     function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
     fetch('/api/status').then(r => r.json()).then(d => { S = d; render(); });
+    loadTelemetry();
+    connectTelemetrySse();
   </script>
 </body>
 

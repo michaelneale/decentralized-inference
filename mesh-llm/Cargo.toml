@@ -16,7 +16,9 @@ rand = "0.9"
 base64 = "0.22"
 dirs = "6.0.0"
 hex = "0.4.3"
+include_dir = "0.7"
 nostr-sdk = { version = "0.44.1", default-features = false }
 rustls = "0.23.36"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 tokio-stream = "0.1"
+rusqlite = "0.32"
