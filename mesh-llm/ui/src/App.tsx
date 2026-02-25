@@ -14,6 +14,9 @@ import {
   User,
   Wifi,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
 
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './components/ui/accordion';
 import { Badge } from './components/ui/badge';
@@ -563,7 +566,6 @@ function ChatPage(props: {
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center gap-3">
             <CardTitle className="text-base">Chat</CardTitle>
-            <Badge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300">Streaming Chat UI</Badge>
             <div className="ml-auto flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Model</span>
               <Select value={selectedModel || warmModels[0] || ''} onValueChange={setSelectedModel} disabled={!warmModels.length}>
@@ -712,6 +714,14 @@ function MeshPage({
   topologyNodes: TopologyNode[];
   selectedModel: string;
 }) {
+  const [modelFilter, setModelFilter] = useState<'all' | 'warm' | 'cold'>('all');
+  const filteredModels = useMemo(() => {
+    const models = status?.mesh_models ?? [];
+    return [...models]
+      .filter((m) => (modelFilter === 'all' ? true : m.status === modelFilter))
+      .sort((a, b) => (b.node_count - a.node_count) || a.name.localeCompare(b.name));
+  }, [status?.mesh_models, modelFilter]);
+
   return (
     <div className="grid h-full min-h-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_420px]">
       <Card className="flex min-h-0 flex-col overflow-hidden border-border/80 bg-card/85 backdrop-blur">
@@ -764,13 +774,28 @@ function MeshPage({
               </Card>
               <Card className="min-h-0 shadow-none">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">Models</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-sm">Models</CardTitle>
+                    <div className="ml-auto flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Filter</span>
+                      <Select value={modelFilter} onValueChange={(v) => setModelFilter(v as 'all' | 'warm' | 'cold')}>
+                        <SelectTrigger className="h-8 w-[110px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All</SelectItem>
+                          <SelectItem value="warm">Warm</SelectItem>
+                          <SelectItem value="cold">Cold</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent className="min-h-0 pt-0">
                   <ScrollArea className="h-[28rem] pr-3 lg:h-full">
                     <div className="space-y-2 pr-2">
-                      {(status?.mesh_models.length ?? 0) > 0 ? (
-                        status!.mesh_models.map((model) => (
+                      {filteredModels.length > 0 ? (
+                        filteredModels.map((model) => (
                           <div key={model.name} className="rounded-lg border border-border/70 bg-muted/20 p-3">
                             <div className="flex items-center gap-2">
                               <Circle className={cn('h-3.5 w-3.5 fill-current', model.status === 'warm' ? 'text-emerald-500' : 'text-zinc-600')} />
@@ -785,9 +810,9 @@ function MeshPage({
                               <span>{model.size_gb.toFixed(1)} GB</span>
                             </div>
                           </div>
-                        ))
+                          ))
                       ) : (
-                        <EmptyPanel text="No mesh model metadata yet." />
+                        <EmptyPanel text={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models.` : 'No mesh model metadata yet.'} />
                       )}
                     </div>
                   </ScrollArea>
@@ -1337,6 +1362,34 @@ function normalizeLen(values: number[], len: number) {
   return [...pad, ...values];
 }
 
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <div
+      className={cn(
+        '[&_a]:underline [&_a]:underline-offset-2',
+        '[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:italic',
+        '[&_code]:rounded [&_code]:bg-background/70 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]',
+        '[&_h1]:mb-2 [&_h1]:mt-3 [&_h1]:text-base [&_h1]:font-semibold [&_h1:first-child]:mt-0',
+        '[&_h2]:mb-2 [&_h2]:mt-3 [&_h2]:text-sm [&_h2]:font-semibold [&_h2:first-child]:mt-0',
+        '[&_hr]:my-3 [&_hr]:border-border',
+        '[&_li]:my-0.5',
+        '[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5',
+        '[&_p]:my-2 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0',
+        '[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border/70 [&_pre]:bg-background/80 [&_pre]:p-3',
+        '[&_pre_code]:bg-transparent [&_pre_code]:p-0',
+        '[&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_table]:text-xs',
+        '[&_td]:border [&_td]:border-border/60 [&_td]:px-2 [&_td]:py-1',
+        '[&_th]:border [&_th]:border-border/60 [&_th]:bg-muted/40 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left',
+        '[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5',
+      )}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function ChatBubble({
   message,
   reasoningOpen,
@@ -1365,7 +1418,7 @@ function ChatBubble({
                 : 'border-border bg-card',
           )}
         >
-          {message.content || (!isUser ? '...' : '')}
+          {message.content ? <MarkdownMessage content={message.content} /> : !isUser ? '...' : ''}
         </div>
         {message.reasoning ? (
           <Card className="mt-2 shadow-none">
