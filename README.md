@@ -4,6 +4,8 @@
 
 Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights).
 
+**[Try it now](https://mesh-llm-console.fly.dev/)** — live console connected to a public mesh. Chat with models running on real hardware.
+
 ## Quick start (macOS Apple Silicon)
 
 ```bash
@@ -22,8 +24,8 @@ mesh-llm --join <token>                    # token printed by the first machine
 
 Or discover and join public meshes:
 ```bash
-mesh-llm --auto                            # find and join the best mesh via Nostr
-mesh-llm --auto --client                   # join as API-only client (no GPU)
+mesh-llm --auto                            # find and join the best mesh
+mesh-llm --client --auto                   # join as API-only client (no GPU)
 ```
 
 ## How it works

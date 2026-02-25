@@ -8,7 +8,7 @@ src/
 ├── mesh.rs        QUIC endpoint, gossip, peer management, request rate sharing
 ├── election.rs    Per-model host election, latency-aware split, llama-server lifecycle
 ├── proxy.rs       HTTP proxy plumbing: request parsing, model routing, response helpers
-├── api.rs         Mesh management API (:3131): status, events, discover, join, console HTML
+├── api.rs         Mesh management API (:3131): status, events, discover, chat proxy, console HTML
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
@@ -49,7 +49,7 @@ mesh-llm discover --model GLM --region AU
 mesh-llm --auto
 ```
 
-Smart auto-join scores meshes by: region match, node count, model overlap, VRAM, overload. QUIC health probe before committing. Publish watchdog auto-takes-over if the original publisher dies.
+Smart auto-join scores meshes by: name match, node count, model coverage, sticky preference, overload. QUIC health probe before committing. Publish watchdog auto-takes-over if the original publisher dies.
 
 ## Named meshes (buddy mode)
 
@@ -67,4 +67,8 @@ The first person to run it creates the mesh and starts serving. Everyone else di
 mesh-llm    # no args
 ```
 
-Opens the management console (`:3131`) for interactive mesh discovery and joining. The node stays dormant — no inbound QUIC connections or heartbeat — until you join via the console or `/api/join`. Persistent node identity is preserved for sticky mesh preference.
+Shows getting-started instructions and opens a read-only console on `:3131`. The node stays dormant — no inbound QUIC connections or heartbeat — until you start or join a mesh via CLI flags.
+
+## Live demo
+
+**[Try it now](https://mesh-llm-console.fly.dev/)** — web console connected to the default public mesh. Runs as a client on Fly.io, no GPU.
