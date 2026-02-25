@@ -194,3 +194,5 @@ just bundle           # portable tarball
 |---|---|
 | `llama.cpp/` | [Fork](https://github.com/michaelneale/llama.cpp/tree/rpc-local-gguf) with zero-transfer RPC patches |
 | `mesh-llm/` | Rust QUIC mesh ([internals](mesh-llm/README.md)) |
+
+## [Roadmap](ROADMAP.md)
