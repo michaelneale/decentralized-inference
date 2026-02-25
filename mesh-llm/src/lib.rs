@@ -21,14 +21,12 @@
 //! # });
 //! ```
 
-mod llama_ffi;
-
-use llama_ffi::*;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+
+// Re-export llama-cpp-2 for consumers who need lower-level access
+pub use llama_cpp_2;
 
 /// Chat message: (role, content).
 pub type Message<'a> = (&'a str, &'a str);
@@ -54,7 +52,6 @@ impl TokenStream {
         match self.rx.recv().await {
             Some(tok) => Some(tok),
             None => {
-                // Stream done — grab usage
                 if self.usage.is_none() {
                     self.usage = self.usage_rx.try_recv().ok();
                 }
@@ -90,9 +87,7 @@ pub struct Engine {
 }
 
 enum Backend {
-    /// In-process: direct llama.cpp FFI.
     Solo(Mutex<SoloInner>),
-    /// Remote: HTTP client to an OpenAI-compatible endpoint.
     Remote {
         base_url: String,
         client: reqwest::Client,
@@ -101,8 +96,6 @@ enum Backend {
 }
 
 impl Engine {
-    // ── Solo: in-process inference ──
-
     /// Load a model for solo (in-process) inference.
     pub fn solo(model_path: impl AsRef<Path>) -> Result<Self, String> {
         Self::solo_with_ctx(model_path, 8192)
@@ -123,16 +116,7 @@ impl Engine {
         })
     }
 
-    // ── Connect: remote server ──
-
     /// Connect to a running mesh-llm instance (or any OpenAI-compatible server).
-    ///
-    /// ```no_run
-    /// # tokio_test::block_on(async {
-    /// let engine = mesh_llm::Engine::connect("http://localhost:9337", None)?;
-    /// # Ok::<(), String>(())
-    /// # });
-    /// ```
     pub fn connect(base_url: &str, model: Option<&str>) -> Result<Self, String> {
         let client = reqwest::Client::new();
         let base = base_url.trim_end_matches('/').to_string();
@@ -150,14 +134,8 @@ impl Engine {
         })
     }
 
-    // ── Auto: mesh if available, else solo ──
-
     /// Try to connect to a local mesh-llm instance, fall back to solo.
-    ///
-    /// Checks `localhost:9337` for a running mesh. If found, uses it.
-    /// Otherwise loads the model in-process.
     pub async fn auto(model_path: impl AsRef<Path>) -> Result<Self, String> {
-        // Quick probe: is mesh-llm running?
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(500))
             .build()
@@ -175,10 +153,13 @@ impl Engine {
         }
     }
 
-    // ── Inference API (same for all backends) ──
-
     /// Send a chat completion request. Returns a stream of token pieces.
     pub fn chat(&self, messages: &[Message<'_>]) -> TokenStream {
+        self.chat_with_tools(messages, None)
+    }
+
+    /// Send a chat completion with tools (OpenAI-format JSON array string).
+    pub fn chat_with_tools(&self, messages: &[Message<'_>], tools_json: Option<&str>) -> TokenStream {
         let (tx, rx) = mpsc::channel(256);
         let (usage_tx, usage_rx) = tokio::sync::oneshot::channel();
         let backend = self.backend.clone();
@@ -186,6 +167,7 @@ impl Engine {
             .iter()
             .map(|(r, c)| (r.to_string(), c.to_string()))
             .collect();
+        let tools = tools_json.map(|s| s.to_string());
 
         tokio::spawn(async move {
             match &*backend {
@@ -195,7 +177,7 @@ impl Engine {
                     tokio::task::spawn_blocking(move || {
                         if let Backend::Solo(ref inner) = *backend2 {
                             let mut eng = inner.blocking_lock();
-                            match eng.generate(&msgs, 4096) {
+                            match eng.generate(&msgs, tools.as_deref(), 4096) {
                                 Ok((pieces, usage)) => {
                                     for piece in pieces {
                                         if tx2.blocking_send(piece).is_err() {
@@ -218,7 +200,7 @@ impl Engine {
                     client,
                     model,
                 } => {
-                    let body = build_request_body(&msgs, model.as_deref(), true);
+                    let body = build_request_body(&msgs, model.as_deref(), tools.as_deref(), true);
                     match stream_sse(client, base_url, &body, &tx).await {
                         Ok(usage) => {
                             let _ = usage_tx.send(usage);
@@ -246,7 +228,7 @@ impl Engine {
                 tokio::task::spawn_blocking(move || {
                     if let Backend::Solo(ref inner) = *backend {
                         let mut eng = inner.blocking_lock();
-                        let (pieces, _usage) = eng.generate(&msgs, 4096)?;
+                        let (pieces, _usage) = eng.generate(&msgs, None, 4096)?;
                         Ok(pieces.join(""))
                     } else {
                         unreachable!()
@@ -264,7 +246,7 @@ impl Engine {
                     .iter()
                     .map(|(r, c)| (r.to_string(), c.to_string()))
                     .collect();
-                let body = build_request_body(&msgs, model.as_deref(), false);
+                let body = build_request_body(&msgs, model.as_deref(), None, false);
                 let resp = client
                     .post(format!("{base_url}/v1/chat/completions"))
                     .header("Content-Type", "application/json")
@@ -290,6 +272,7 @@ impl Engine {
 fn build_request_body(
     messages: &[(String, String)],
     model: Option<&str>,
+    tools: Option<&str>,
     stream: bool,
 ) -> String {
     let msgs: Vec<serde_json::Value> = messages
@@ -304,8 +287,12 @@ fn build_request_body(
     if stream {
         req["stream_options"] = serde_json::json!({"include_usage": true});
     }
-    req
-    .to_string()
+    if let Some(tools_str) = tools {
+        if let Ok(tools_val) = serde_json::from_str::<serde_json::Value>(tools_str) {
+            req["tools"] = tools_val;
+        }
+    }
+    req.to_string()
 }
 
 async fn stream_sse(
@@ -349,7 +336,6 @@ async fn stream_sse(
                             return Ok(usage);
                         }
                     }
-                    // llama-server sends usage in the final chunk
                     if let Some(u) = v.get("usage") {
                         usage.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as usize;
                         usage.completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as usize;
@@ -363,271 +349,178 @@ async fn stream_sse(
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// Solo backend — direct llama.cpp FFI
+// Solo backend — llama-cpp-2 safe wrappers
 // ══════════════════════════════════════════════════════════════════════
 
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
+use std::num::NonZeroU32;
+
 struct SoloInner {
-    model: *mut llama_model,
-    ctx: *mut llama_context,
-    vocab: *const llama_vocab,
-    sampler: *mut llama_sampler,
-    chat_template: Option<CString>,
+    backend: LlamaBackend,
+    model: LlamaModel,
+    template: LlamaChatTemplate,
     n_ctx: u32,
 }
 
+// LlamaBackend and LlamaModel are Send but not marked as such in all versions
 unsafe impl Send for SoloInner {}
 
 impl SoloInner {
     fn load(path: &Path, n_ctx: u32) -> Result<Self, String> {
-        let path_cstr =
-            CString::new(path.to_str().ok_or("invalid path")?).map_err(|e| e.to_string())?;
-
-        unsafe {
-            llama_backend_init();
-
-            let mparams = llama_model_default_params();
-            let model = llama_model_load_from_file(path_cstr.as_ptr(), mparams);
-            if model.is_null() {
-                return Err(format!("failed to load: {}", path.display()));
-            }
-
-            let mut cparams = llama_context_default_params();
-            cparams.n_ctx = n_ctx;
-            let ctx = llama_init_from_model(model, cparams);
-            if ctx.is_null() {
-                llama_model_free(model);
-                return Err("failed to create context".into());
-            }
-
-            let vocab = llama_model_get_vocab(model);
-            let actual_ctx = llama_n_ctx(ctx);
-
-            let tmpl_ptr = llama_model_chat_template(model, std::ptr::null());
-            let chat_template = if !tmpl_ptr.is_null() {
-                Some(CString::new(CStr::from_ptr(tmpl_ptr).to_bytes()).unwrap())
-            } else {
-                None
-            };
-
-            let sparams = llama_sampler_chain_default_params();
-            let sampler = llama_sampler_chain_init(sparams);
-            llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_dist(rand::random::<u32>()));
-
-            Ok(SoloInner {
-                model,
-                ctx,
-                vocab,
-                sampler,
-                chat_template,
-                n_ctx: actual_ctx,
-            })
+        if !path.exists() {
+            return Err(format!("model not found: {}", path.display()));
         }
+
+        let backend = LlamaBackend::init().map_err(|e| format!("backend init: {e}"))?;
+        let params = LlamaModelParams::default();
+        let model = LlamaModel::load_from_file(&backend, path, &params)
+            .map_err(|e| format!("load model: {e}"))?;
+
+        let template = match model.chat_template(None) {
+            Ok(t) => t,
+            Err(_) => LlamaChatTemplate::new("chatml")
+                .map_err(|e| format!("fallback template: {e}"))?,
+        };
+
+        let actual_ctx = model.n_ctx_train().min(n_ctx);
+
+        Ok(SoloInner {
+            backend,
+            model,
+            template,
+            n_ctx: actual_ctx,
+        })
     }
 
     fn generate(
         &mut self,
         messages: &[(String, String)],
+        tools_json: Option<&str>,
         max_tokens: usize,
     ) -> Result<(Vec<String>, Usage), String> {
-        let prompt = self.apply_chat_template(messages)?;
-        let tokens = self.tokenize(&prompt, false);
+        // Build chat messages
+        let chat_messages: Vec<LlamaChatMessage> = messages
+            .iter()
+            .map(|(r, c)| LlamaChatMessage::new(r.clone(), c.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("message error: {e}"))?;
+
+        // Apply template — with tools if provided
+        let (prompt, additional_stops) = if tools_json.is_some() {
+            // Use tools-aware template (jinja + grammar)
+            let result = self
+                .model
+                .apply_chat_template_with_tools_oaicompat(
+                    &self.template,
+                    &chat_messages,
+                    tools_json,
+                    None,
+                    true,
+                )
+                .map_err(|e| format!("template with tools: {e}"))?;
+            (result.prompt, result.additional_stops)
+        } else {
+            // Basic template — no tools
+            let prompt = self
+                .model
+                .apply_chat_template(&self.template, &chat_messages, true)
+                .map_err(|e| format!("template: {e}"))?;
+            (prompt, Vec::new())
+        };
+
+        // Tokenize
+        let tokens = self
+            .model
+            .str_to_token(&prompt, AddBos::Never)
+            .map_err(|e| format!("tokenize: {e}"))?;
         let n_prompt = tokens.len();
 
         if tokens.is_empty() {
             return Err("empty prompt".into());
         }
-        if n_prompt >= self.n_ctx as usize {
-            return Err(format!(
-                "prompt ({n_prompt}) exceeds context ({})",
-                self.n_ctx
-            ));
-        }
 
-        // Clear KV cache
-        unsafe {
-            let mem = llama_get_memory(self.ctx);
-            if !mem.is_null() {
-                llama_memory_clear(mem, true);
-            }
-        }
+        let effective_ctx = (n_prompt + max_tokens).min(self.n_ctx as usize);
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(effective_ctx as u32));
+
+        let mut ctx = self
+            .model
+            .new_context(&self.backend, ctx_params)
+            .map_err(|e| format!("create context: {e}"))?;
 
         // Prefill
-        let batch = unsafe { llama_batch_get_one(tokens.as_ptr(), tokens.len() as i32) };
-        if unsafe { llama_decode(self.ctx, batch) } != 0 {
-            return Err("prefill decode failed".into());
+        let n_batch = ctx.n_batch() as usize;
+        for chunk in tokens.chunks(n_batch) {
+            let mut batch = LlamaBatch::get_one(chunk)
+                .map_err(|e| format!("batch: {e}"))?;
+            ctx.decode(&mut batch)
+                .map_err(|e| format!("prefill: {e}"))?;
         }
 
         // Generate
-        let effective_max = max_tokens.min((self.n_ctx as usize).saturating_sub(n_prompt));
+        let mut sampler = build_sampler();
+        let effective_max = max_tokens.min(effective_ctx.saturating_sub(n_prompt));
         let mut pieces = Vec::new();
-        let mut n_gen = 0usize;
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut generated_text = String::new();
 
         for _ in 0..effective_max {
-            let token = unsafe { llama_sampler_sample(self.sampler, self.ctx, -1) };
+            let token = sampler.sample(&ctx, -1);
+            sampler.accept(token);
 
-            if unsafe { llama_vocab_is_eog(self.vocab, token) } {
+            if self.model.is_eog_token(token) {
                 break;
             }
 
-            n_gen += 1;
-            pieces.push(self.token_to_str(token));
+            let piece = self
+                .model
+                .token_to_piece(token, &mut decoder, false, None)
+                .map_err(|e| format!("detokenize: {e}"))?;
 
-            let batch = unsafe { llama_batch_get_one(&token as *const _, 1) };
-            if unsafe { llama_decode(self.ctx, batch) } != 0 {
-                return Err("decode failed".into());
+            if !piece.is_empty() {
+                generated_text.push_str(&piece);
+                pieces.push(piece);
             }
-        }
 
-        Ok((pieces, Usage {
-            prompt_tokens: n_prompt,
-            completion_tokens: n_gen,
-            total_tokens: n_prompt + n_gen,
-        }))
-    }
-
-    fn apply_chat_template(&self, messages: &[(String, String)]) -> Result<String, String> {
-        let c_roles: Vec<CString> = messages
-            .iter()
-            .map(|(r, _)| CString::new(r.as_str()).unwrap())
-            .collect();
-        let c_contents: Vec<CString> = messages
-            .iter()
-            .map(|(_, c)| CString::new(c.as_str()).unwrap())
-            .collect();
-        let c_msgs: Vec<llama_chat_message> = c_roles
-            .iter()
-            .zip(c_contents.iter())
-            .map(|(r, c)| llama_chat_message {
-                role: r.as_ptr(),
-                content: c.as_ptr(),
-            })
-            .collect();
-
-        let tmpl_ptr = self
-            .chat_template
-            .as_ref()
-            .map(|t| t.as_ptr())
-            .unwrap_or(std::ptr::null());
-
-        let needed = unsafe {
-            llama_chat_apply_template(
-                tmpl_ptr,
-                c_msgs.as_ptr(),
-                c_msgs.len(),
-                true,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-
-        if needed < 0 {
-            let mut prompt = String::new();
-            for (role, content) in messages {
-                prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+            // Check additional stop sequences
+            if additional_stops
+                .iter()
+                .any(|stop| !stop.is_empty() && generated_text.ends_with(stop))
+            {
+                break;
             }
-            prompt.push_str("<|im_start|>assistant\n");
-            return Ok(prompt);
+
+            let next = [token];
+            let mut batch = LlamaBatch::get_one(&next)
+                .map_err(|e| format!("batch: {e}"))?;
+            ctx.decode(&mut batch)
+                .map_err(|e| format!("decode: {e}"))?;
         }
 
-        let mut buf = vec![0u8; (needed + 1) as usize];
-        let written = unsafe {
-            llama_chat_apply_template(
-                tmpl_ptr,
-                c_msgs.as_ptr(),
-                c_msgs.len(),
-                true,
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len() as i32,
-            )
-        };
-        if written < 0 {
-            return Err("chat template failed".into());
-        }
-        buf.truncate(written as usize);
-        Ok(String::from_utf8_lossy(&buf).into_owned())
-    }
-
-    fn tokenize(&self, text: &str, add_special: bool) -> Vec<llama_token> {
-        let ctext = CString::new(text).unwrap();
-        let mut tokens = vec![0i32; text.len() + 128];
-        let n = unsafe {
-            llama_tokenize(
-                self.vocab,
-                ctext.as_ptr(),
-                text.len() as i32,
-                tokens.as_mut_ptr(),
-                tokens.len() as i32,
-                add_special,
-                true,
-            )
-        };
-        if n < 0 {
-            tokens.resize((-n) as usize, 0);
-            let n2 = unsafe {
-                llama_tokenize(
-                    self.vocab,
-                    ctext.as_ptr(),
-                    text.len() as i32,
-                    tokens.as_mut_ptr(),
-                    tokens.len() as i32,
-                    add_special,
-                    true,
-                )
-            };
-            tokens.truncate(n2.max(0) as usize);
-        } else {
-            tokens.truncate(n as usize);
-        }
-        tokens
-    }
-
-    fn token_to_str(&self, token: llama_token) -> String {
-        unsafe {
-            let mut buf = vec![0u8; 256];
-            let n = llama_token_to_piece(
-                self.vocab,
-                token,
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len() as i32,
-                0,
-                false,
-            );
-            if n < 0 {
-                buf.resize((-n) as usize, 0);
-                let n2 = llama_token_to_piece(
-                    self.vocab,
-                    token,
-                    buf.as_mut_ptr() as *mut c_char,
-                    buf.len() as i32,
-                    0,
-                    false,
-                );
-                buf.truncate(n2.max(0) as usize);
-            } else {
-                buf.truncate(n as usize);
-            }
-            String::from_utf8_lossy(&buf).into_owned()
-        }
+        let n_gen = pieces.len();
+        Ok((
+            pieces,
+            Usage {
+                prompt_tokens: n_prompt,
+                completion_tokens: n_gen,
+                total_tokens: n_prompt + n_gen,
+            },
+        ))
     }
 }
 
-impl Drop for SoloInner {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.sampler.is_null() {
-                llama_sampler_free(self.sampler);
-            }
-            if !self.ctx.is_null() {
-                llama_free(self.ctx);
-            }
-            if !self.model.is_null() {
-                llama_model_free(self.model);
-            }
-        }
-    }
+fn build_sampler() -> LlamaSampler {
+    LlamaSampler::chain_simple([
+        LlamaSampler::temp(0.7),
+        LlamaSampler::top_p(0.9, 1),
+        LlamaSampler::min_p(0.05, 1),
+        LlamaSampler::dist(rand::random::<u32>()),
+    ])
 }
 
 #[cfg(test)]
