@@ -762,18 +762,34 @@ impl Node {
                         }
                         fail_counts.remove(&peer_id);
                     } else {
-                        let count = fail_counts.entry(peer_id).or_default();
-                        *count += 1;
-                        if *count >= 2 {
-                            // Only add to dead_peers on confirmed death (2 strikes),
-                            // not on first timeout — a single timeout shouldn't block
-                            // incoming gossip from an otherwise-alive peer.
-                            node.state.lock().await.dead_peers.insert(peer_id);
-                            eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
-                            fail_counts.remove(&peer_id);
-                            node.handle_peer_death(peer_id).await;
+                        // Check if peer has contacted US recently (inbound gossip).
+                        // If so, peer is alive — we just can't reach them outbound (NAT).
+                        let recently_seen = {
+                            let state = node.state.lock().await;
+                            state.peers.get(&peer_id)
+                                .map(|p| p.last_seen.elapsed().as_secs() < PEER_STALE_SECS)
+                                .unwrap_or(false)
+                        };
+                        if recently_seen {
+                            // Peer is alive via inbound, don't count as failure
+                            if fail_counts.contains_key(&peer_id) {
+                                eprintln!("💚 Heartbeat: {} outbound failed but seen recently (inbound alive)", peer_id.fmt_short());
+                                fail_counts.remove(&peer_id);
+                            }
                         } else {
-                            eprintln!("💛 Heartbeat: {} unreachable ({}/2), will retry", peer_id.fmt_short(), count);
+                            let count = fail_counts.entry(peer_id).or_default();
+                            *count += 1;
+                            if *count >= 2 {
+                                // Only add to dead_peers on confirmed death (2 strikes),
+                                // not on first timeout — a single timeout shouldn't block
+                                // incoming gossip from an otherwise-alive peer.
+                                node.state.lock().await.dead_peers.insert(peer_id);
+                                eprintln!("💔 Heartbeat: {} unreachable ({} failures), removing + broadcasting death", peer_id.fmt_short(), count);
+                                fail_counts.remove(&peer_id);
+                                node.handle_peer_death(peer_id).await;
+                            } else {
+                                eprintln!("💛 Heartbeat: {} unreachable ({}/2), will retry", peer_id.fmt_short(), count);
+                            }
                         }
                     }
                 }
