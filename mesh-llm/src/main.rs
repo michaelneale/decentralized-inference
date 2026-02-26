@@ -189,9 +189,11 @@ async fn main() -> Result<()> {
 
     let mut cli = Cli::parse();
 
-    // Clean up orphan processes from previous runs
-    launch::kill_llama_server().await;
-    launch::kill_orphan_rpc_servers().await;
+    // Clean up orphan processes from previous runs (skip for client — never runs llama-server)
+    if !cli.client {
+        launch::kill_llama_server().await;
+        launch::kill_orphan_rpc_servers().await;
+    }
 
     // Background version check (non-blocking)
     tokio::spawn(async {
@@ -317,9 +319,6 @@ async fn main() -> Result<()> {
     }
 
     // --- Validation ---
-    if cli.client && cli.join.is_empty() {
-        anyhow::bail!("--client requires --join to connect to a mesh");
-    }
     if cli.client && !cli.model.is_empty() {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
@@ -332,43 +331,6 @@ async fn main() -> Result<()> {
             };
             return run_idle(cli, bin_dir).await;
         }
-    }
-
-    // --- Client mode (passive, never serves) ---
-    if cli.client {
-        let (node, _channels) = mesh::Node::start(NodeRole::Client, &cli.relay, cli.bind_port, None).await?;
-        node.start_accepting();
-        // No heartbeat for passive nodes — they don't track peers
-
-        let mut joined = false;
-        for t in &cli.join {
-            match node.join_passive(t).await {
-                Ok(()) => { eprintln!("Joined mesh (passive)"); joined = true; break; }
-                Err(e) => tracing::warn!("Failed to join via token: {e}"),
-            }
-        }
-        if !joined {
-            anyhow::bail!("Failed to join any peer in the mesh");
-        }
-
-        // Periodic route table refresh + reconnect (instead of gossip heartbeat)
-        let refresh_node = node.clone();
-        let refresh_tokens: Vec<String> = cli.join.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                // Reconnect if needed
-                for t in &refresh_tokens {
-                    let _ = refresh_node.join_passive(t).await;
-                }
-                // Refresh routing table from any connected peer
-                refresh_node.refresh_routing_table().await;
-            }
-        });
-
-        // Client never promotes — discard the return
-        run_passive(&cli, node, true).await?;
-        return Ok(());
     }
 
     // --- Resolve models from CLI ---
@@ -729,13 +691,17 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
 async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_names: Vec<String>, bin_dir: PathBuf) -> Result<()> {
     let api_port = cli.port;
     let console_port = Some(cli.console);
+    let is_client = cli.client;
 
     // Scan local models on disk
-    let local_models = mesh::scan_local_models();
+    let local_models = if is_client { vec![] } else { mesh::scan_local_models() };
     tracing::info!("Local models on disk: {:?}", local_models);
 
-    // Start mesh node
-    let (node, channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
+    // Start mesh node — clients use ephemeral key (unique identity per run)
+    let role = if is_client { NodeRole::Client } else { NodeRole::Worker };
+    // Clients report 0 VRAM so they're never assigned a model to serve
+    let max_vram = if is_client { Some(0.0) } else { cli.max_vram };
+    let (node, channels) = mesh::Node::start(role, &cli.relay, cli.bind_port, max_vram).await?;
     node.start_accepting();
     let token = node.invite_token();
 
@@ -856,10 +822,14 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             drop(bootstrap_listener_tx.take());
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             // If a model becomes unserved while we're standby, we'll promote
-            eprintln!("💤 No matching model on disk — running as standby GPU node");
-            eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, local_models);
-            eprintln!("   Proxying requests to other nodes. Will activate when needed.");
-            match run_passive(&cli, node.clone(), false).await? {
+            if is_client {
+                eprintln!("📡 Running as client — proxying requests to mesh");
+            } else {
+                eprintln!("💤 No matching model on disk — running as standby GPU node");
+                eprintln!("   VRAM: {:.1}GB, models on disk: {:?}", node.vram_bytes() as f64 / 1e9, local_models);
+                eprintln!("   Proxying requests to other nodes. Will activate when needed.");
+            }
+            match run_passive(&cli, node.clone(), is_client).await? {
                 Some(model_name) => {
                     // Promoted! Resolve the model path and continue to serving
                     let model_path = mesh::find_model_path(&model_name);
@@ -1175,13 +1145,17 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         let cs = api::MeshApi::new(node.clone(), label, local_port, 0);
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if is_client { cs.set_client(true).await; }
-        cs.update(false, !is_client).await;
+        // Both clients and standby nodes can proxy requests through the mesh
+        cs.update(false, true).await;
         let (_tx, rx) = tokio::sync::watch::channel(election::InferenceTarget::None);
         let la = cli.listen_all;
         tokio::spawn(async move {
             api::start(cport, cs, rx, la).await;
         });
     }
+
+    // Heartbeat (started in run_auto) handles periodic gossip via random-K.
+    // No extra gossip loop needed here.
 
     // Reactive rebalancing: watch for topology changes and promote if needed.
     // Only for standby GPU nodes (not clients — they never serve).

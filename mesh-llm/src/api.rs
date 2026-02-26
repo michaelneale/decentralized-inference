@@ -348,6 +348,31 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             let filter = nostr::MeshFilter::default();
             match nostr::discover(&relays, &filter).await {
                 Ok(meshes) => {
+                    // Dedup: named meshes grouped by name (keep best — most nodes, freshest).
+                    // Unnamed meshes shown individually.
+                    let meshes = {
+                        let mut by_name: std::collections::HashMap<String, nostr::DiscoveredMesh> = std::collections::HashMap::new();
+                        let mut unnamed = Vec::new();
+                        for m in meshes {
+                            if let Some(ref name) = m.listing.name {
+                                let key = name.to_lowercase();
+                                let existing = by_name.get(&key);
+                                let dominated = existing.is_some_and(|e|
+                                    e.listing.node_count > m.listing.node_count ||
+                                    (e.listing.node_count == m.listing.node_count && e.published_at >= m.published_at)
+                                );
+                                if !dominated {
+                                    by_name.insert(key, m);
+                                }
+                            } else {
+                                unnamed.push(m);
+                            }
+                        }
+                        let mut result: Vec<nostr::DiscoveredMesh> = by_name.into_values().collect();
+                        result.extend(unnamed);
+                        result.sort_by(|a, b| b.listing.node_count.cmp(&a.listing.node_count));
+                        result
+                    };
                     if let Ok(json) = serde_json::to_string(&meshes) {
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
