@@ -106,11 +106,25 @@ Live topology, VRAM bars per node, model picker, built-in chat. Everything comes
 
 ## Using with agents
 
-mesh-llm prints launch commands when ready:
+mesh-llm exposes an OpenAI-compatible API on `localhost:9337`. Any tool that supports custom OpenAI endpoints works:
+
+```bash
+# goose
+GOOSE_PROVIDER=openai OPENAI_API_KEY=dummy OPENAI_HOST=http://localhost:9337 GOOSE_MODEL=GLM-4.7-Flash-Q4_K_M goose session
+
+# pi (via ~/.pi/agent/models.json — see pi docs for custom providers)
+pi --provider mesh --model Qwen2.5-32B-Instruct-Q4_K_M
+
+# opencode (via ~/.config/opencode/opencode.json)
+OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://localhost:9337/v1 opencode -m openai/GLM-4.7-Flash-Q4_K_M
+
+# any OpenAI-compatible client
+curl http://localhost:9337/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'
 ```
-pi:    pi --provider mesh --model Qwen2.5-32B-Instruct-Q4_K_M
-goose: GOOSE_PROVIDER=openai OPENAI_HOST=http://localhost:9337 OPENAI_API_KEY=mesh GOOSE_MODEL=Qwen2.5-32B-Instruct-Q4_K_M goose session
-```
+
+`/v1/models` lists all models available in the mesh. The `model` field in requests routes to the right node.
 
 ## Benchmarks
 
