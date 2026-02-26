@@ -411,7 +411,7 @@ impl Node {
                 relay_urls.to_vec()
             };
             // Our relay(s) for traffic (no QUIC/STUN — behind Fly HTTP proxy)
-            let mut configs: Vec<RelayConfig> = urls.iter().map(|url| {
+            let configs: Vec<RelayConfig> = urls.iter().map(|url| {
                 RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
             }).collect();
             let relay_map = RelayMap::from_iter(configs);
@@ -538,83 +538,6 @@ impl Node {
     /// Connect to a peer without gossip exchange — for passive nodes (clients/standby).
     /// Establishes QUIC connection and stores it, but doesn't add to peer list.
     /// The passive node can then use route requests and HTTP tunnels.
-    pub async fn join_passive(&self, invite_token: &str) -> Result<()> {
-        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(invite_token)?;
-        let addr: EndpointAddr = serde_json::from_slice(&json)?;
-        let peer_id = addr.id;
-        if peer_id == self.endpoint.id() { return Ok(()); }
-
-        // Already have a connection? Done.
-        {
-            let state = self.state.lock().await;
-            if state.connections.contains_key(&peer_id) { return Ok(()); }
-        }
-
-        tracing::info!("Passive connect to {}...", peer_id.fmt_short());
-        let conn = match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            self.endpoint.connect(addr.clone(), ALPN),
-        ).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => anyhow::bail!("Failed to connect: {e}"),
-            Err(_) => anyhow::bail!("Timeout connecting (15s)"),
-        };
-
-        {
-            let mut state = self.state.lock().await;
-            state.connections.insert(peer_id, conn.clone());
-        }
-
-        // Start stream dispatcher (for responses to our requests)
-        let node = self.clone();
-        tokio::spawn(async move {
-            node.dispatch_streams(conn, peer_id).await;
-        });
-
-        // Get initial routing table
-        if let Ok(table) = self.request_routing_table(peer_id).await {
-            // Adopt mesh_id from routing table (for passive/client nodes)
-            if let Some(ref id) = table.mesh_id {
-                self.set_mesh_id(id.clone()).await;
-            }
-            // Store route entries as lightweight peer info so host_for_model works
-            for entry in &table.hosts {
-                self.add_route_entry(entry).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Add a route entry as a lightweight peer (from routing table, not gossip).
-    async fn add_route_entry(&self, entry: &RouteEntry) {
-        let mut state = self.state.lock().await;
-        if entry.endpoint_id == self.endpoint.id() { return; }
-        // Only add/update if we don't already have full peer info from gossip
-        if let Some(existing) = state.peers.get_mut(&entry.endpoint_id) {
-            // Update serving info from route table
-            existing.serving = Some(entry.model.clone());
-            return;
-        }
-        // Add a minimal peer entry for routing purposes
-        state.peers.insert(entry.endpoint_id, PeerInfo {
-            id: entry.endpoint_id,
-            addr: EndpointAddr { id: entry.endpoint_id, addrs: Default::default() },
-            tunnel_port: None,
-            role: NodeRole::Host { http_port: 0 },
-            models: vec![entry.model.clone()],
-            vram_bytes: (entry.vram_gb * 1e9) as u64,
-            rtt_ms: None,
-            model_source: None,
-            serving: Some(entry.model.clone()),
-            available_models: vec![],
-            requested_models: vec![],
-            request_rates: std::collections::HashMap::new(),
-            last_seen: std::time::Instant::now(),
-            version: None,
-        });
-    }
-
     #[allow(dead_code)]
     pub fn endpoint(&self) -> &Endpoint { &self.endpoint }
     pub fn id(&self) -> EndpointId { self.endpoint.id() }
@@ -1004,13 +927,6 @@ impl Node {
 
     /// Find a host for a specific model, using hash-based selection for load distribution.
     /// When multiple hosts serve the same model, picks one based on our node ID hash.
-    pub async fn host_for_model(&self, model: &str) -> Option<PeerInfo> {
-        let hosts = self.hosts_for_model(model).await;
-        if hosts.is_empty() { return None; }
-        let state = self.state.lock().await;
-        state.peers.get(&hosts[0]).cloned()
-    }
-
     /// All host IDs serving a model, with hash-preferred host first.
     /// Used for retry: if the first host fails, try the next.
     pub async fn hosts_for_model(&self, model: &str) -> Vec<EndpointId> {
@@ -1078,46 +994,6 @@ impl Node {
     }
 
     /// Request routing table from a connected peer (for passive nodes).
-    pub async fn request_routing_table(&self, peer_id: EndpointId) -> Result<RoutingTable> {
-        let conn = {
-            let state = self.state.lock().await;
-            state.connections.get(&peer_id).cloned()
-                .ok_or_else(|| anyhow::anyhow!("No connection to peer"))?
-        };
-        let (mut send, mut recv) = conn.open_bi().await?;
-        send.write_all(&[STREAM_ROUTE_REQUEST]).await?;
-        send.finish()?;
-
-        let data = recv.read_to_end(64 * 1024).await?;
-        let table: RoutingTable = serde_json::from_slice(&data)?;
-        Ok(table)
-    }
-
-    /// Refresh routing table from any connected peer (for passive nodes).
-    /// Updates local peer info with current host/model mappings.
-    pub async fn refresh_routing_table(&self) {
-        let connected: Vec<EndpointId> = {
-            self.state.lock().await.connections.keys().cloned().collect()
-        };
-        for peer_id in connected {
-            match self.request_routing_table(peer_id).await {
-                Ok(table) => {
-                    for entry in &table.hosts {
-                        self.add_route_entry(entry).await;
-                    }
-                    // Remove peers no longer in routing table
-                    let active_ids: std::collections::HashSet<EndpointId> =
-                        table.hosts.iter().map(|e| e.endpoint_id).collect();
-                    let mut state = self.state.lock().await;
-                    state.peers.retain(|id, _| active_ids.contains(id) || *id == peer_id);
-                    return; // Got table from one peer, that's enough
-                }
-                Err(e) => {
-                    tracing::debug!("Route table refresh from {} failed: {e}", peer_id.fmt_short());
-                }
-            }
-        }
-    }
 
     pub fn vram_bytes(&self) -> u64 {
         self.vram_bytes
@@ -1785,7 +1661,7 @@ impl Node {
                 tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, ann.role);
                 existing.role = ann.role.clone();
             }
-            // Update addr if the new one has addresses (ours might be empty from add_route_entry)
+            // Update addr if the new one has more info
             if !addr.addrs.is_empty() {
                 existing.addr = addr;
             }
