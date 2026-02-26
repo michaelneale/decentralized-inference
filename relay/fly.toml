@@ -1,0 +1,19 @@
+app = "mesh-llm-relay"
+primary_region = "syd"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Fly terminates TLS → forwards plain HTTP to iroh-relay on 8080.
+# iroh clients connect to https://mesh-llm-relay.fly.dev/ and get Fly's TLS.
+# The relay WebSocket upgrade works fine through Fly's HTTP proxy.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

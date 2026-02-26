@@ -1,0 +1,29 @@
+# iroh-relay server configuration
+# https://github.com/n0-computer/iroh/tree/main/iroh-relay
+#
+# Fly.io terminates TLS at the edge and forwards plain HTTP to this server.
+# iroh clients connect via https:// — Fly handles the cert, relay sees plain HTTP.
+
+enable_relay = true
+enable_metrics = true
+
+# Fly forwards to this port after TLS termination
+http_bind_addr = "[::]:8080"
+metrics_bind_addr = "[::]:9090"
+
+# No [tls] section — Fly handles TLS. Relay runs plain HTTP.
+# QUIC address discovery is disabled (requires server-side TLS, not possible behind Fly's proxy).
+# Peers still discover addresses via STUN to Google/Cloudflare — this relay just handles relay traffic.
+enable_quic_addr_discovery = false
+
+# Rate limits
+[limits]
+accept_conn_limit = 100.0
+accept_conn_burst = 200
+
+[limits.client.rx]
+bytes_per_second = 2000000
+max_burst_bytes = 10000000
+
+# Open to all
+access = "everyone"
