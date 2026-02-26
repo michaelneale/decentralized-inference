@@ -1697,6 +1697,11 @@ impl Node {
         }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
+        // Don't re-add peers we've confirmed dead
+        if state.dead_peers.contains(&id) {
+            tracing::debug!("Ignoring add_peer for dead peer {}", id.fmt_short());
+            return;
+        }
         // Accumulate peer's requested_models into mesh-level wanted set
         for m in &ann.requested_models {
             state.mesh_wanted.insert(m.clone());
