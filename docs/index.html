@@ -209,12 +209,94 @@
         </div>
     </section>
 
+    <section id="install">
+        <div class="section-tag">Quick start</div>
+        <h2>Install &amp; run</h2>
+        <p class="section-lead">macOS Apple Silicon. One command to install, one to run.</p>
+
+        <div class="code-block">
+            <span class="comment"># Install (downloads ~18MB bundle)</span><br>
+            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="val">https://raw.githubusercontent.com/michaelneale/decentralized-inference/main/install.sh</span> | <span class="cmd">bash</span><br><br>
+            <span class="comment"># Join the public mesh — instant chat, zero config</span><br>
+            <span class="cmd">mesh-llm</span> <span class="flag">--auto</span><br><br>
+            <span class="comment"># Or start your own mesh with a model</span><br>
+            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">GLM-4.7-Flash-Q4_K_M</span>
+        </div>
+    </section>
+
+    <section id="agents">
+        <div class="section-tag">Integrations</div>
+        <h2>Use with coding agents</h2>
+        <p class="section-lead">Standard OpenAI API on <code>localhost:9337</code>. Works with anything.</p>
+
+        <details style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ goose</summary>
+            <div class="code-block" style="margin-top:0.5rem;">
+                <span class="cmd">GOOSE_PROVIDER</span>=openai <span class="cmd">OPENAI_API_KEY</span>=dummy <span class="cmd">OPENAI_HOST</span>=<span class="val">http://localhost:9337</span> \<br>
+                &nbsp;&nbsp;<span class="cmd">GOOSE_MODEL</span>=<span class="val">GLM-4.7-Flash-Q4_K_M</span> goose session
+            </div>
+        </details>
+
+        <details style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ pi</summary>
+            <p style="font-size:0.8rem; color:var(--text2); margin:0.5rem 0;">Add to <code>~/.pi/agent/models.json</code>:</p>
+            <div class="code-block" style="margin-top:0.5rem; font-size:0.75rem;">
+<span class="val">{</span><br>
+&nbsp;&nbsp;<span class="flag">"providers"</span>: {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"mesh"</span>: {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"api"</span>: <span class="val">"openai-completions"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"apiKey"</span>: <span class="val">"dummy"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"baseUrl"</span>: <span class="val">"http://localhost:9337/v1"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"models"</span>: [{<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"id"</span>: <span class="val">"GLM-4.7-Flash-Q4_K_M"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"name"</span>: <span class="val">"GLM 4.7 Flash (mesh)"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"contextWindow"</span>: 32768, <span class="flag">"maxTokens"</span>: 8192,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"reasoning"</span>: false, <span class="flag">"input"</span>: [<span class="val">"text"</span>],<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"cost"</span>: { <span class="flag">"input"</span>: 0, <span class="flag">"output"</span>: 0, <span class="flag">"cacheRead"</span>: 0, <span class="flag">"cacheWrite"</span>: 0 },<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="flag">"compat"</span>: { <span class="flag">"maxTokensField"</span>: <span class="val">"max_tokens"</span>, <span class="flag">"supportsDeveloperRole"</span>: false, <span class="flag">"supportsUsageInStreaming"</span>: false }<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;}<br>
+<span class="val">}</span>
+            </div>
+            <div class="code-block" style="margin-top:0.5rem;">
+                <span class="cmd">pi</span> <span class="flag">--provider</span> <span class="val">mesh</span> <span class="flag">--model</span> <span class="val">GLM-4.7-Flash-Q4_K_M</span>
+            </div>
+        </details>
+
+        <details style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ opencode</summary>
+            <div class="code-block" style="margin-top:0.5rem;">
+                <span class="cmd">OPENAI_API_KEY</span>=dummy <span class="cmd">OPENAI_BASE_URL</span>=<span class="val">http://localhost:9337/v1</span> \<br>
+                &nbsp;&nbsp;opencode <span class="flag">-m</span> <span class="val">openai/GLM-4.7-Flash-Q4_K_M</span>
+            </div>
+        </details>
+
+        <details style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ claude code (via proxy)</summary>
+            <p style="font-size:0.8rem; color:var(--text2); margin:0.5rem 0;">Claude Code uses Anthropic's API format. Use <a href="https://github.com/1rgs/claude-code-proxy">claude-code-proxy</a> or <a href="https://docs.litellm.ai/docs/tutorials/claude_responses_api">litellm</a> to translate.</p>
+            <div class="code-block" style="margin-top:0.5rem;">
+                <span class="comment"># Start the proxy, then:</span><br>
+                <span class="cmd">ANTHROPIC_BASE_URL</span>=<span class="val">http://localhost:8082</span> claude
+            </div>
+        </details>
+
+        <details style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ curl / any OpenAI client</summary>
+            <div class="code-block" style="margin-top:0.5rem;">
+                <span class="cmd">curl</span> <span class="val">http://localhost:9337/v1/chat/completions</span> \<br>
+                &nbsp;&nbsp;<span class="flag">-H</span> <span class="val">"Content-Type: application/json"</span> \<br>
+                &nbsp;&nbsp;<span class="flag">-d</span> <span class="val">'{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'</span>
+            </div>
+        </details>
+    </section>
+
     <section class="cta-section">
         <h2>Try it</h2>
         <p>One binary. macOS Apple Silicon and Linux. MIT licensed.</p>
         <div class="cta-buttons">
             <a href="https://mesh-llm-console.fly.dev/" class="btn btn-primary">Try it now</a>
-            <a href="https://github.com/michaelneale/decentralized-inference#quick-start-macos-apple-silicon" class="btn btn-secondary">Install</a>
+            <a href="#install" class="btn btn-secondary">Install</a>
             <a href="https://github.com/michaelneale/decentralized-inference" class="btn btn-secondary">GitHub →</a>
             <a href="https://github.com/michaelneale/decentralized-inference/blob/main/ROADMAP.md" class="btn btn-secondary">Roadmap</a>
         </div>
