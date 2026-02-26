@@ -189,6 +189,9 @@ async fn main() -> Result<()> {
 
     let mut cli = Cli::parse();
 
+    // Clean up orphan processes from previous runs
+    launch::kill_orphan_rpc_servers().await;
+
     // Background version check (non-blocking)
     tokio::spawn(async {
         check_for_update().await;
@@ -896,6 +899,9 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         }
     }
 
+    // Clean up stale processes from previous runs
+    launch::kill_orphan_rpc_servers().await;
+
     // Start rpc-server
     let rpc_port = launch::start_rpc_server(
         &bin_dir, cli.device.as_deref(), Some(&model),
@@ -1074,6 +1080,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     }
 
     launch::kill_llama_server().await;
+    launch::kill_orphan_rpc_servers().await;
     Ok(())
 }
 

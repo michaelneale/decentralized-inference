@@ -60,6 +60,37 @@ pub async fn start_rpc_server(bin_dir: &Path, device: Option<&str>, gguf_path: O
     anyhow::bail!("rpc-server failed to start on port {port} within 15s");
 }
 
+/// Kill orphan rpc-server processes from previous mesh-llm runs.
+/// Only kills rpc-servers with PPID 1 (parent died, adopted by init).
+/// Safe to call while a live mesh-llm has its own rpc-server child.
+pub async fn kill_orphan_rpc_servers() {
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-eo", "pid,ppid,comm"])
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut killed = 0;
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3
+                && parts[2].contains("rpc-server")
+                && parts[1] == "1"
+            {
+                if let Ok(pid) = parts[0].parse::<u32>() {
+                    let _ = std::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .status();
+                    killed += 1;
+                }
+            }
+        }
+        if killed > 0 {
+            eprintln!("🧹 Cleaned up {killed} orphan rpc-server process(es)");
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+}
+
 /// Kill all running llama-server processes.
 pub async fn kill_llama_server() {
     let _ = std::process::Command::new("pkill").args(["-f", "llama-server"]).status();
