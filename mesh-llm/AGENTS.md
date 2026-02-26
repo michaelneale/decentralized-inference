@@ -67,6 +67,33 @@ pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server
 ssh mini "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server"
 ```
 
+## Deploy Checklist — MANDATORY
+
+**Every deploy to test machines MUST follow this checklist. No shortcuts.**
+
+### Before starting nodes
+1. **Bump VERSION** — Change `VERSION` in `main.rs` to a new tentative version so you can verify the running binary is actually the new code.
+2. **Build and bundle** — `cargo build --release && just bundle`
+3. **Kill ALL processes on ALL nodes** — `pkill -9 -f mesh-llm; pkill -9 -f llama-server; pkill -9 -f rpc-server` on Local, Mini, AND Brad.
+4. **Verify clean** — Run `ps -eo pid,args | grep -E 'mesh-llm|llama-server|rpc-server' | grep -v grep` on EVERY node. Must return empty.
+5. **Deploy bundle** — scp + tar + codesign on Mini and Brad.
+6. **Verify version on disk** — Run `mesh-llm --version` on EVERY node. Must show the new version.
+
+### After starting nodes
+7. **Verify exactly 1 mesh-llm process per node** — `ps -eo pid,ppid,args | grep mesh-llm | grep -v grep` on EVERY node. Must show exactly 1 process, properly parented.
+8. **Verify child processes** — Each mesh-llm should have at most 1 rpc-server and 1 llama-server as children (check ppid matches mesh-llm pid). No orphans.
+9. **Verify API responds on every node** — `curl -s http://localhost:3131/api/status` must return valid JSON on EVERY node. Don't assume — check.
+10. **Verify version in gossip** — Check `/api/status` peers list. New-code nodes must show the new version string. Old-code nodes show null/missing (that's expected).
+11. **Verify peer count** — Every node should see the expected number of peers. If a node is missing, investigate immediately — don't assume "it'll show up".
+12. **Test inference through every model** — Send a request to EVERY model listed in `/v1/models`. Verify non-empty, valid response. Empty responses must be investigated (check `reasoning_content` for reasoning models like GLM).
+13. **Test `/v1/` passthrough on 3131** — Verify `/v1/models` and `/v1/chat/completions` both work on port 3131, not just 9337.
+
+### Common failures to watch for
+- **nohup over SSH doesn't stick** — Use `bash -c "nohup ... & disown"` pattern. Always verify the process is still running 5+ seconds after SSH disconnects.
+- **Stale binary on Brad** — Brad copies from `/tmp/mesh-bundle/` to `~/bin/`. If you forget `cp`, Brad runs the old binary.
+- **Duplicate processes** — If a previous run wasn't killed cleanly, you get 2 mesh-llm processes fighting for ports. Always kill-verify-start.
+- **codesign changes the hash** — Don't compare MD5 of Local build vs codesigned remote binary. Compare Mini vs Brad (both codesigned from same bundle).
+
 ### Brad Constraints
 
 - **Must be originator** (NAT prevents inbound connections when joining)

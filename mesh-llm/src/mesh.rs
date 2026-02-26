@@ -72,6 +72,9 @@ struct PeerAnnouncement {
     /// Generated once by the originator, propagated via gossip.
     #[serde(default)]
     mesh_id: Option<String>,
+    /// mesh-llm version string (e.g. "0.23.0")
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +98,8 @@ pub struct PeerInfo {
     /// Last time we directly communicated with this peer (gossip, heartbeat, tunnel).
     /// Peers not seen in PEER_STALE_SECS are pruned from gossip and eventually removed.
     pub last_seen: std::time::Instant,
+    /// mesh-llm version (e.g. "0.23.0")
+    pub version: Option<String>,
 }
 
 /// Peers not directly verified within this window are considered stale
@@ -600,6 +605,7 @@ impl Node {
             requested_models: vec![],
             request_rates: std::collections::HashMap::new(),
             last_seen: std::time::Instant::now(),
+            version: None,
         });
     }
 
@@ -1734,6 +1740,10 @@ impl Node {
                 tracing::info!("Peer {} role updated: {:?} → {:?}", id.fmt_short(), existing.role, ann.role);
                 existing.role = ann.role.clone();
             }
+            // Update addr if the new one has addresses (ours might be empty from add_route_entry)
+            if !addr.addrs.is_empty() {
+                existing.addr = addr;
+            }
             existing.models = ann.models.clone();
             existing.vram_bytes = ann.vram_bytes;
             if ann.model_source.is_some() {
@@ -1744,6 +1754,7 @@ impl Node {
             existing.requested_models = ann.requested_models.clone();
             existing.request_rates = ann.request_rates.clone();
             existing.last_seen = std::time::Instant::now();
+            if ann.version.is_some() { existing.version = ann.version.clone(); }
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -1765,6 +1776,7 @@ impl Node {
             requested_models: ann.requested_models.clone(),
             request_rates: ann.request_rates.clone(),
             last_seen: std::time::Instant::now(),
+            version: ann.version.clone(),
         });
         let count = state.peers.len();
         drop(state);
@@ -1794,6 +1806,7 @@ impl Node {
                 requested_models: p.requested_models.clone(),
                 request_rates: p.request_rates.clone(),
                 mesh_id: my_mesh_id.clone(),
+                version: p.version.clone(),
             })
             .collect();
         let my_rates = self.snapshot_request_rates();
@@ -1808,6 +1821,7 @@ impl Node {
             requested_models: my_requested,
             request_rates: my_rates,
             mesh_id: my_mesh_id,
+            version: Some(crate::VERSION.to_string()),
         });
         announcements
     }

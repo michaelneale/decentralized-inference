@@ -72,6 +72,8 @@ struct PeerPayload {
     models: Vec<String>,
     vram_gb: f64,
     serving: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -151,6 +153,7 @@ impl MeshApi {
             models: p.models.clone(),
             vram_gb: p.vram_bytes as f64 / 1e9,
             serving: p.serving.clone(),
+            version: p.version.clone(),
         }).collect();
 
         let catalog = node.mesh_catalog().await;
@@ -405,6 +408,24 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             if let Ok(mut upstream) = TcpStream::connect(&target).await {
                 let rewritten = req.replacen("/api/chat", "/v1/chat/completions", 1);
                 upstream.write_all(rewritten.as_bytes()).await?;
+                tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
+            } else {
+                respond_error(&mut stream, 502, "Cannot reach LLM server").await?;
+            }
+        }
+
+        // ── OpenAI-compatible API passthrough ──
+        p if p.starts_with("/v1/") => {
+            let inner = state.inner.lock().await;
+            if !inner.llama_ready && !inner.is_client {
+                drop(inner);
+                return respond_error(&mut stream, 503, "LLM not ready").await;
+            }
+            let port = inner.api_port;
+            drop(inner);
+            let target = format!("127.0.0.1:{port}");
+            if let Ok(mut upstream) = TcpStream::connect(&target).await {
+                upstream.write_all(req.as_bytes()).await?;
                 tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
             } else {
                 respond_error(&mut stream, 502, "Cannot reach LLM server").await?;
