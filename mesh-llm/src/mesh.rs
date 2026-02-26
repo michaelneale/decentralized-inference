@@ -92,7 +92,14 @@ pub struct PeerInfo {
     pub requested_models: Vec<String>,
     /// Requests per minute by model (gossipped from API proxy)
     pub request_rates: std::collections::HashMap<String, u64>,
+    /// Last time we directly communicated with this peer (gossip, heartbeat, tunnel).
+    /// Peers not seen in PEER_STALE_SECS are pruned from gossip and eventually removed.
+    pub last_seen: std::time::Instant,
 }
+
+/// Peers not directly verified within this window are considered stale
+/// and excluded from gossip propagation. After 2x this duration they're removed entirely.
+const PEER_STALE_SECS: u64 = 180; // 3 minutes
 
 /// Directories to scan for GGUF models.
 pub fn model_dirs() -> Vec<std::path::PathBuf> {
@@ -587,6 +594,7 @@ impl Node {
             available_models: vec![],
             requested_models: vec![],
             request_rates: std::collections::HashMap::new(),
+            last_seen: std::time::Instant::now(),
         });
     }
 
@@ -768,6 +776,24 @@ impl Node {
                             eprintln!("💛 Heartbeat: {} unreachable ({}/2), will retry", peer_id.fmt_short(), count);
                         }
                     }
+                }
+
+                // Prune stale peers: no direct contact in 2× the stale window.
+                // These are ghost records propagated via gossip from other nodes
+                // but never directly verified by us.
+                let prune_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS * 2);
+                let stale_peers: Vec<EndpointId> = {
+                    let state = node.state.lock().await;
+                    state.peers.iter()
+                        .filter(|(_, p)| p.last_seen < prune_cutoff)
+                        .map(|(id, _)| *id)
+                        .collect()
+                };
+                for stale_id in stale_peers {
+                    eprintln!("🧹 Pruning stale peer {} (no direct contact in {}s)", stale_id.fmt_short(), PEER_STALE_SECS * 2);
+                    node.remove_peer(stale_id).await;
+                    // Also close any lingering connection
+                    node.state.lock().await.connections.remove(&stale_id);
                 }
 
             }
@@ -1691,6 +1717,7 @@ impl Node {
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
             existing.request_rates = ann.request_rates.clone();
+            existing.last_seen = std::time::Instant::now();
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -1711,6 +1738,7 @@ impl Node {
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
             request_rates: ann.request_rates.clone(),
+            last_seen: std::time::Instant::now(),
         });
         let count = state.peers.len();
         drop(state);
@@ -1726,7 +1754,9 @@ impl Node {
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
         let my_mesh_id = self.mesh_id.lock().await.clone();
+        let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS);
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
+            .filter(|p| p.last_seen >= stale_cutoff) // skip stale peers
             .map(|p| PeerAnnouncement {
                 addr: p.addr.clone(),
                 role: p.role.clone(),
