@@ -31,6 +31,7 @@
 - [ ] Demand tracking in console: show req/min per model in TUI
 - [ ] Request rates in `/api/status` JSON for external tooling
 - [ ] `mesh-llm recommend`: CLI subcommand to suggest models for your hardware
+- [ ] **Revisit `--publish` flag experience**: Bare `--publish` without `--mesh-name` is vestigial — publishes an unnamed mesh to Nostr that's hard to discover/filter. Consider: require `--mesh-name` with `--publish`, or auto-generate a name, or just document that `--mesh-name` is the intended way.
 
 ## Future
 - [ ] **Public named meshes**: `--mesh-name "cool-mesh" --publish` currently gets -200 penalty for random `--auto` users (treated as private group). If someone explicitly passes both `--mesh-name` and `--publish`, add a `public: true` field to the Nostr listing so it scores like an unnamed mesh (no penalty). Lets people give their mesh a fun name without hiding it from discovery.
