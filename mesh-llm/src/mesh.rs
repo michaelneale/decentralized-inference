@@ -734,10 +734,12 @@ impl Node {
     /// Probes each peer by attempting a gossip exchange. If the probe fails
     /// (connection dead, peer unresponsive), removes the peer immediately
     /// rather than waiting for QUIC idle timeout.
-    /// Start a slow heartbeat (60s) to catch silent failures.
-    /// Unlike the old aggressive health check (15s full gossip), this just
-    /// verifies connections are alive. Death detection mostly happens on use
-    /// (tunnel open fails → broadcast_peer_down).
+    /// Start a slow heartbeat (60s) that gossips with a random subset of peers.
+    /// At small mesh sizes (≤5 peers), talks to everyone. At larger sizes,
+    /// picks K random peers per cycle. Information propagates infectiously —
+    /// changes reach all nodes in O(log N) cycles.
+    /// Death detection primarily happens on the data path (tunnel fails →
+    /// broadcast_peer_down), not via heartbeat.
     pub fn start_heartbeat(&self) {
         let node = self.clone();
         tokio::spawn(async move {
@@ -746,13 +748,23 @@ impl Node {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-                let peers_and_conns: Vec<(EndpointId, Option<Connection>)> = {
+                let mut peers_and_conns: Vec<(EndpointId, Option<Connection>)> = {
                     let state = node.state.lock().await;
                     state.peers.keys().map(|id| {
                         let conn = state.connections.get(id).cloned();
                         (*id, conn)
                     }).collect()
                 };
+
+                // Random-K gossip: pick a subset at larger mesh sizes.
+                // At ≤5 peers, talk to everyone (backward compat with current behavior).
+                // At larger sizes, pick 5 random peers per cycle.
+                const GOSSIP_K: usize = 5;
+                if peers_and_conns.len() > GOSSIP_K {
+                    use rand::seq::SliceRandom;
+                    peers_and_conns.shuffle(&mut rand::rng());
+                    peers_and_conns.truncate(GOSSIP_K);
+                }
 
                 for (peer_id, conn) in peers_and_conns {
                     let alive = if let Some(conn) = conn {
