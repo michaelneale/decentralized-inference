@@ -398,13 +398,18 @@ impl Node {
             .alpns(vec![ALPN.to_vec()])
             .transport_config(transport_config);
 
-        if !relay_urls.is_empty() {
+        {
             use iroh::{RelayConfig, RelayMap};
-            let configs: Vec<RelayConfig> = relay_urls.iter().map(|url| {
+            let urls: Vec<String> = if relay_urls.is_empty() {
+                vec!["https://mesh-llm-relay.fly.dev./".into()]
+            } else {
+                relay_urls.to_vec()
+            };
+            let configs: Vec<RelayConfig> = urls.iter().map(|url| {
                 RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
             }).collect();
             let relay_map = RelayMap::from_iter(configs);
-            tracing::info!("Using custom relay URLs: {:?}", relay_urls);
+            tracing::info!("Relay: {:?}", urls);
             builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map));
         }
         if let Some(port) = bind_port {

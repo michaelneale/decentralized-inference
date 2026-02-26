@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-const VERSION: &str = "0.22.2";
+const VERSION: &str = "0.23.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION, about = "P2P mesh for distributed llama.cpp inference over QUIC")]
@@ -190,6 +190,7 @@ async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
     // Clean up orphan processes from previous runs
+    launch::kill_llama_server().await;
     launch::kill_orphan_rpc_servers().await;
 
     // Background version check (non-blocking)
