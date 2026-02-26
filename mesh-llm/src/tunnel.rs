@@ -372,6 +372,34 @@ async fn relay_quic_to_tcp(
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
     tracing::debug!("QUIC→TCP: starting relay, about to first read");
+
+    // First-byte timeout: if remote doesn't respond within 10s, it's dead.
+    // After first byte arrives, no timeout (streaming responses can take minutes).
+    let first_read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        quic_recv.read(&mut buf),
+    ).await;
+    match first_read {
+        Err(_) => {
+            anyhow::bail!("QUIC→TCP: no response within 10s — host likely dead");
+        }
+        Ok(Ok(Some(n))) => {
+            tcp_write.write_all(&buf[..n]).await?;
+            total += n as u64;
+            BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
+            tracing::debug!("QUIC→TCP: first read {n} bytes");
+        }
+        Ok(Ok(None)) => {
+            tracing::info!("QUIC→TCP: stream end immediately (0 bytes)");
+            return Ok(());
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("QUIC→TCP: error on first read: {e}");
+            return Err(e.into());
+        }
+    }
+
+    // After first byte, relay without timeout
     loop {
         match quic_recv.read(&mut buf).await {
             Ok(Some(n)) => {

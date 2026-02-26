@@ -189,9 +189,11 @@ async fn main() -> Result<()> {
 
     let mut cli = Cli::parse();
 
-    // Clean up orphan processes from previous runs
-    launch::kill_llama_server().await;
-    launch::kill_orphan_rpc_servers().await;
+    // Clean up orphan processes from previous runs (skip for client — never runs llama-server)
+    if !cli.client {
+        launch::kill_llama_server().await;
+        launch::kill_orphan_rpc_servers().await;
+    }
 
     // Background version check (non-blocking)
     tokio::spawn(async {
@@ -1180,6 +1182,19 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
         let la = cli.listen_all;
         tokio::spawn(async move {
             api::start(cport, cs, rx, la).await;
+        });
+    }
+
+    // Lightweight periodic gossip for standby/idle GPU nodes.
+    // Keeps demand data fresh for promotion decisions.
+    // Clients don't need this — data-path retry handles stale routing.
+    if !is_client {
+        let gossip_node = node.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                gossip_node.gossip_one_peer().await;
+            }
         });
     }
 

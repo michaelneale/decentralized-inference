@@ -410,10 +410,16 @@ impl Node {
             } else {
                 relay_urls.to_vec()
             };
-            let configs: Vec<RelayConfig> = urls.iter().map(|url| {
+            // Our relay(s) for traffic (no QUIC/STUN — behind Fly HTTP proxy)
+            let mut configs: Vec<RelayConfig> = urls.iter().map(|url| {
                 RelayConfig { url: url.parse().expect("invalid relay URL"), quic: None }
             }).collect();
             let relay_map = RelayMap::from_iter(configs);
+            // Add iroh's default relays for STUN/UDP discovery.
+            // Our Fly relay can't do STUN (HTTP-only proxy), but iroh's relays can.
+            // This gives us working UDP path discovery while using our relay for data.
+            // STUN is raw UDP (no TLS certs), so cert-constrained machines work fine.
+            relay_map.extend(&iroh::defaults::prod::default_relay_map());
             tracing::info!("Relay: {:?}", urls);
             builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map));
         }
@@ -647,6 +653,19 @@ impl Node {
                     tracing::debug!("Regossip to {} failed: {e}", peer_id.fmt_short());
                 }
             });
+        }
+    }
+
+    /// Gossip with one connected peer to update routing table.
+    /// Used by: (1) passive nodes' periodic 60s heartbeat, (2) background
+    /// refresh on tunnel failure so future requests have fresh routing.
+    pub async fn gossip_one_peer(&self) {
+        let conn = {
+            let state = self.state.lock().await;
+            state.connections.iter().next().map(|(id, c)| (*id, c.clone()))
+        };
+        if let Some((peer_id, conn)) = conn {
+            let _ = self.initiate_gossip_inner(conn, peer_id, false).await;
         }
     }
 
@@ -986,18 +1005,30 @@ impl Node {
     /// Find a host for a specific model, using hash-based selection for load distribution.
     /// When multiple hosts serve the same model, picks one based on our node ID hash.
     pub async fn host_for_model(&self, model: &str) -> Option<PeerInfo> {
-        let state = self.state.lock().await;
-        let mut hosts: Vec<&PeerInfo> = state.peers.values()
-            .filter(|p| matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model))
-            .collect();
+        let hosts = self.hosts_for_model(model).await;
         if hosts.is_empty() { return None; }
-        // Sort for deterministic ordering, then hash-select
-        hosts.sort_by_key(|p| p.id);
-        let my_id = self.endpoint.id();
-        let my_id_bytes = my_id.as_bytes();
-        let hash = my_id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let idx = (hash as usize) % hosts.len();
-        Some(hosts[idx].clone())
+        let state = self.state.lock().await;
+        state.peers.get(&hosts[0]).cloned()
+    }
+
+    /// All host IDs serving a model, with hash-preferred host first.
+    /// Used for retry: if the first host fails, try the next.
+    pub async fn hosts_for_model(&self, model: &str) -> Vec<EndpointId> {
+        let state = self.state.lock().await;
+        let mut hosts: Vec<EndpointId> = state.peers.values()
+            .filter(|p| matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model))
+            .map(|p| p.id)
+            .collect();
+        hosts.sort();
+        // Put the hash-preferred host first so normal path tries it first
+        if !hosts.is_empty() {
+            let my_id = self.endpoint.id();
+            let id_bytes = my_id.as_bytes();
+            let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let idx = (hash as usize) % hosts.len();
+            hosts.rotate_left(idx);
+        }
+        hosts
     }
 
     /// Find ANY host in the mesh (fallback when no model match).
@@ -1023,6 +1054,7 @@ impl Node {
                     node_id: format!("{}", self.endpoint.id().fmt_short()),
                     endpoint_id: self.endpoint.id(),
                     vram_gb: self.vram_bytes as f64 / 1e9,
+
                 });
             }
         }
@@ -1177,11 +1209,12 @@ impl Node {
                 }
             }
         };
-        let result = async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (mut send, recv) = conn.open_bi().await?;
             send.write_all(&[STREAM_TUNNEL_HTTP]).await?;
             Ok::<_, anyhow::Error>((send, recv))
-        }.await;
+        }).await
+            .map_err(|_| anyhow::anyhow!("Timeout opening tunnel to {}", peer_id.fmt_short()))?;
 
         if result.is_err() {
             // Connection failed — peer is likely dead, broadcast it

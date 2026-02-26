@@ -75,35 +75,54 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
         }
     }
 
-    // Resolve target host by model name, fall back to any host
-    let target_host = if let Some(ref name) = model_name {
-        node.host_for_model(name).await.map(|p| p.id)
+    // Resolve target hosts by model name, fall back to any host
+    let target_hosts = if let Some(ref name) = model_name {
+        node.hosts_for_model(name).await
     } else {
-        None
+        vec![]
     };
-    let target_host = match target_host {
-        Some(id) => id,
-        None => match node.any_host().await {
-            Some(p) => p.id,
+    let target_hosts = if target_hosts.is_empty() {
+        match node.any_host().await {
+            Some(p) => vec![p.id],
             None => {
                 let _ = send_503(tcp_stream).await;
                 return;
             }
-        },
+        }
+    } else {
+        target_hosts
     };
 
-    // Tunnel via QUIC
-    match node.open_http_tunnel(target_host).await {
-        Ok((quic_send, quic_recv)) => {
-            if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                tracing::debug!("HTTP tunnel relay ended: {e}");
+    // Try each host in order — if tunnel fails, retry with next.
+    // On first failure, trigger background gossip refresh so future requests
+    // have a fresh routing table (doesn't block the retry loop).
+    let mut last_err = None;
+    let mut refreshed = false;
+    for target_host in &target_hosts {
+        match node.open_http_tunnel(*target_host).await {
+            Ok((quic_send, quic_recv)) => {
+                if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
+                    tracing::debug!("HTTP tunnel relay ended: {e}");
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to tunnel to host {}: {e}, trying next", target_host.fmt_short());
+                last_err = Some(e);
+                // Background refresh on first failure — non-blocking
+                if !refreshed {
+                    let refresh_node = node.clone();
+                    tokio::spawn(async move { refresh_node.gossip_one_peer().await; });
+                    refreshed = true;
+                }
             }
         }
-        Err(e) => {
-            tracing::warn!("Failed to tunnel to host {}: {e}", target_host.fmt_short());
-            let _ = send_503(tcp_stream).await;
-        }
     }
+    // All hosts failed
+    if let Some(e) = last_err {
+        tracing::warn!("All hosts failed for model {:?}: {e}", model_name);
+    }
+    let _ = send_503(tcp_stream).await;
 }
 
 /// Route a request to a known inference target (local llama-server or remote host).
