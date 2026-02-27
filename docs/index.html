@@ -13,7 +13,8 @@
         a { color:var(--blue); text-decoration:none; } a:hover { text-decoration:underline; }
         code,.mono { font-family:"SF Mono","Fira Code",monospace; }
         nav { position:fixed; top:0; left:0; right:0; z-index:100; background:rgba(10,10,10,0.85); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); padding:0.7rem 2rem; display:flex; align-items:center; gap:1rem; }
-        nav .logo { font-weight:700; font-size:1.05rem; color:#fff; letter-spacing:-0.02em; } nav .logo span { color:var(--green); }
+        nav .logo { display:flex; align-items:center; }
+        nav .logo img { height:30px; width:auto; display:block; }
         nav .links { margin-left:auto; display:flex; gap:1.5rem; font-size:0.8rem; } nav .links a { color:var(--text2); } nav .links a:hover { color:#fff; text-decoration:none; }
         section { max-width:860px; margin:0 auto; padding:4rem 2rem; }
         .hero { min-height:85vh; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding-top:5rem; }
@@ -53,7 +54,7 @@
 </head>
 <body>
     <nav>
-        <div class="logo">mesh-<span>llm</span></div>
+        <a class="logo" href="#"><img src="mesh-llm-logo.svg" alt="mesh-llm"></a>
         <div class="links">
             <a href="#how">How it works</a>
             <a href="#features">Features</a>

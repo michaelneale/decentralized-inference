@@ -124,6 +124,73 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     rm -rf "$DIR"
     echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"
 
+# Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
+ui-dev api="http://127.0.0.1:3131" port="5173":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{ui_dir}}"
+    MESH_UI_API_ORIGIN="{{api}}" npm run dev -- --host 127.0.0.1 --port {{port}}
+
+# Run a prebuilt mesh-llm binary for local development (no Rust compile).
+# Defaults to idle mode with API+console on :3131.
+mesh-dev bin=mesh_bin args="--port 9337 --console 3131":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN="{{bin}}"
+    if [ ! -x "$BIN" ]; then
+        echo "mesh-llm binary not found or not executable: $BIN" >&2
+        echo "Build once with: just build" >&2
+        exit 1
+    fi
+    exec "$BIN" {{args}}
+
+# Run mesh-llm and UI dev server together for a full local dev loop.
+dev-ui mesh_bin_path=mesh_bin mesh_args="--port 9337 --console 3131" ui_port="5173" api="http://127.0.0.1:3131":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kill_tree() {
+        local root="$1"
+        local sig="${2:-TERM}"
+        [ -n "${root:-}" ] || return 0
+        if ! kill -0 "$root" 2>/dev/null; then
+            return 0
+        fi
+        local children
+        children="$(pgrep -P "$root" 2>/dev/null || true)"
+        for child in $children; do
+            kill_tree "$child" "$sig"
+        done
+        kill "-$sig" "$root" 2>/dev/null || true
+    }
+    cleanup() {
+        set +e
+        kill_tree "${UI_PID:-}" TERM
+        kill_tree "${MESH_PID:-}" TERM
+        sleep 0.25
+        kill_tree "${UI_PID:-}" KILL
+        kill_tree "${MESH_PID:-}" KILL
+    }
+    trap cleanup EXIT INT TERM HUP
+    BIN="{{mesh_bin_path}}"
+    if [ ! -x "$BIN" ]; then
+        echo "mesh-llm binary not found or not executable: $BIN" >&2
+        echo "Build once with: just build" >&2
+        exit 1
+    fi
+    ("$BIN" {{mesh_args}}) &
+    MESH_PID=$!
+    sleep 2
+    (cd "{{ui_dir}}" && MESH_UI_API_ORIGIN="{{api}}" npm run dev -- --host 127.0.0.1 --port {{ui_port}}) &
+    UI_PID=$!
+    echo "mesh-llm PID: $MESH_PID"
+    echo "UI dev server PID: $UI_PID"
+    echo "Open: http://127.0.0.1:{{ui_port}}"
+    while kill -0 "$MESH_PID" 2>/dev/null && kill -0 "$UI_PID" 2>/dev/null; do
+        sleep 1
+    done
+    wait "$MESH_PID" 2>/dev/null || true
+    wait "$UI_PID" 2>/dev/null || true
+
 # Start a lite client — no GPU, no model, just a local HTTP proxy to the mesh host.
 # Only needs the mesh-llm binary (no llama.cpp binaries or model).
 mesh-client join="" port="9337":

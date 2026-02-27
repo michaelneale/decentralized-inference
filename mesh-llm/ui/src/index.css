@@ -2,31 +2,82 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-}
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 211 39% 16%;
+    --card: 0 0% 100%;
+    --card-foreground: 211 39% 16%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 211 39% 16%;
+    --primary: 211 82% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 94.5%;
+    --secondary-foreground: 211 39% 16%;
+    --muted: 180 5% 93.3%;
+    --muted-foreground: 211 17% 42%;
+    --accent: 204 99% 61%;
+    --accent-foreground: 211 39% 16%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 180 5% 93.3%;
+    --input: 180 5% 93.3%;
+    --ring: 204 99% 61%;
+    --chart-1: 211 82% 55%;
+    --chart-2: 204 99% 61%;
+    --chart-3: 211 39% 35%;
+    --chart-4: 0 0% 94.5%;
+    --chart-5: 180 5% 93.3%;
+    --radius: 0.5rem;
+  }
 
-html,
-body {
-  height: 100%;
-  margin: 0;
-}
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 211 82% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 204 99% 61%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 204 99% 61%;
+    --chart-1: 211 82% 55%;
+    --chart-2: 204 99% 61%;
+    --chart-3: 211 39% 70%;
+    --chart-4: 0 0% 83.1%;
+    --chart-5: 0 0% 63.9%;
+  }
 
-body {
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 0% 0%, rgba(148, 163, 184, 0.08), transparent 45%),
-    radial-gradient(circle at 100% 0%, rgba(59, 130, 246, 0.05), transparent 45%),
-    radial-gradient(circle at 50% 100%, rgba(34, 197, 94, 0.03), transparent 55%),
-    #030303;
-  color: #e2e8f0;
-}
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
 
-#root {
-  height: 100%;
-}
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
 
-* {
-  box-sizing: border-box;
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
 }

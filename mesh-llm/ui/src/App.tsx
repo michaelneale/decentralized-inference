@@ -1,4 +1,15 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  Position,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps,
+} from '@xyflow/react';
 import {
   BarChart3,
   Bot,
@@ -7,10 +18,14 @@ import {
   Copy,
   Cpu,
   Gauge,
+  Link2,
   Loader2,
+  MonitorCog,
+  Moon,
   Network,
   Send,
   Sparkles,
+  Sun,
   User,
   Wifi,
 } from 'lucide-react';
@@ -30,6 +45,8 @@ import { Separator } from './components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Textarea } from './components/ui/textarea';
+import { BrandIcon } from './components/brand-icon';
+import { MeshLlmWordmark } from './components/mesh-llm-wordmark';
 import { cn } from './lib/utils';
 
 type MeshModel = {
@@ -182,8 +199,33 @@ type SeriesPoint = {
   value: number;
 };
 
+type ThemeMode = 'auto' | 'light' | 'dark';
+
+const THEME_STORAGE_KEY = 'mesh-llm-theme';
+
+function readThemeMode(): ThemeMode {
+  if (typeof window === 'undefined') return 'auto';
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return stored === 'light' || stored === 'dark' || stored === 'auto' ? stored : 'auto';
+}
+
+function applyThemeMode(mode: ThemeMode) {
+  if (typeof window === 'undefined') return;
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const dark = mode === 'dark' || (mode === 'auto' && media.matches);
+  document.documentElement.classList.toggle('dark', dark);
+  document.documentElement.style.colorScheme = mode === 'auto' ? 'light dark' : dark ? 'dark' : 'light';
+}
+
+function nextThemeMode(mode: ThemeMode): ThemeMode {
+  if (mode === 'auto') return 'light';
+  if (mode === 'light') return 'dark';
+  return 'auto';
+}
+
 export function App() {
   const [section, setSection] = useState<TopSection>('chat');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [metrics, setMetrics] = useState<LiveMetrics | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryEventsPayload | null>(null);
@@ -196,6 +238,7 @@ export function App() {
   const [isSending, setIsSending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
+  const [apiCopied, setApiCopied] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const warmModels = useMemo(() => {
@@ -204,10 +247,36 @@ export function App() {
     return list;
   }, [status]);
 
+  const openApiUrl = useMemo(() => {
+    if (!status?.api_port) return '';
+    const host =
+      typeof window !== 'undefined' && window.location?.hostname
+        ? window.location.hostname
+        : 'localhost';
+    const protocol =
+      typeof window !== 'undefined' && window.location?.protocol
+        ? window.location.protocol
+        : 'http:';
+    return `${protocol}//${host}:${status.api_port}/v1`;
+  }, [status?.api_port]);
+
   useEffect(() => {
     if (!warmModels.length) return;
     if (!selectedModel || !warmModels.includes(selectedModel)) setSelectedModel(warmModels[0]);
   }, [warmModels, selectedModel]);
+
+  useEffect(() => {
+    applyThemeMode(themeMode);
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+  }, [themeMode]);
+
+  useEffect(() => {
+    if (themeMode !== 'auto') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => applyThemeMode('auto');
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, [themeMode]);
 
   useEffect(() => {
     let stop = false;
@@ -228,17 +297,7 @@ export function App() {
         });
     };
 
-    const loadMetrics = () => {
-      fetch('/api/metrics/live')
-        .then((r) => (r.ok ? (r.json() as Promise<LiveMetrics>) : null))
-        .then((data) => {
-          if (!stop && data) setMetrics(data);
-        })
-        .catch(() => undefined);
-    };
-
     loadStatus();
-    loadMetrics();
 
     const statusEvents = new EventSource('/api/events');
     statusEvents.onmessage = (event) => {
@@ -252,39 +311,11 @@ export function App() {
     };
     statusEvents.onerror = () => setStatusError('Status stream disconnected. Retrying...');
 
-    const metricsPoll = window.setInterval(loadMetrics, 5000);
     return () => {
       stop = true;
-      window.clearInterval(metricsPoll);
       statusEvents.close();
     };
   }, []);
-
-  useEffect(() => {
-    let closed = false;
-    setTelemetryError(null);
-    const es = new EventSource(`/api/metrics/events?minutes=${encodeURIComponent(metricsMinutes)}&limit=300`);
-
-    es.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as TelemetryEventsPayload;
-        if (!closed) {
-          setTelemetry(payload);
-          setTelemetryError(null);
-        }
-      } catch {
-        // ignore malformed payloads
-      }
-    };
-    es.onerror = () => {
-      if (!closed) setTelemetryError('Telemetry stream disconnected. Retrying...');
-    };
-
-    return () => {
-      closed = true;
-      es.close();
-    };
-  }, [metricsMinutes]);
 
   useEffect(() => {
     const el = chatScrollRef.current;
@@ -383,11 +414,6 @@ export function App() {
         ),
       );
 
-      void fetch('/api/metrics/chat-sample', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ttft_ms: ttftMs, completion_tokens: tokenCount, tokens_per_sec: tps }),
-      }).catch(() => undefined);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content: `Error: ${message}`, error: true } : m)));
@@ -434,45 +460,85 @@ export function App() {
     void sendMessage(input);
   }
 
+  async function copyOpenApiUrl() {
+    if (!openApiUrl) return;
+    try {
+      await navigator.clipboard.writeText(openApiUrl);
+      setApiCopied(true);
+      window.setTimeout(() => setApiCopied(false), 1400);
+    } catch {
+      setApiCopied(false);
+    }
+  }
+
   return (
-    <div className="h-screen overflow-hidden bg-grid [background-size:18px_18px]">
-      <div className="mx-auto flex h-full w-full max-w-[1680px] flex-col gap-4 overflow-hidden p-4 md:p-5">
-        <Card className="border-border/80 bg-card/85 backdrop-blur">
-          <CardContent className="flex flex-wrap items-center gap-3 p-4">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <Bot className="h-5 w-5" />
+    <div className="min-h-screen overflow-x-hidden overflow-y-auto bg-grid [background-size:18px_18px]">
+      <div className="mx-auto flex min-h-screen w-full max-w-[1680px] flex-col gap-4 p-4 md:p-5">
+        <Card className="relative overflow-hidden border-border/80 bg-card/85 backdrop-blur">
+          <div className="pointer-events-none absolute -right-6 -top-8 text-primary/10">
+            <BrandIcon className="h-28 w-28 rotate-12" />
+          </div>
+          <div className="pointer-events-none absolute -bottom-8 -left-6 text-accent/10">
+            <BrandIcon className="h-24 w-24 -rotate-12" />
+          </div>
+          <CardContent className="relative flex flex-wrap items-center gap-3 p-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-border bg-background/80 text-primary shadow-sm">
+              <BrandIcon className="h-6 w-6" />
             </div>
             <div className="min-w-0">
-              <div className="truncate text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">mesh-llm console</div>
-              <div className="truncate text-sm text-foreground">
-                {status?.mesh_name ? `Mesh ${status.mesh_name}` : 'Local Dashboard'}
-                {status?.node_id ? ` · Node ${status.node_id}` : ''}
-                {status ? ` · ${status.is_host ? 'Host' : status.is_client ? 'Client' : 'Worker'}` : ''}
+              <div className="truncate text-sm font-semibold tracking-tight text-foreground">
+                <MeshLlmWordmark />
+              </div>
+              <div className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
+                <span className="truncate">{status?.mesh_name ? `Mesh ${status.mesh_name}` : 'Local Dashboard'}</span>
+                {status?.node_id ? <span aria-hidden="true">·</span> : null}
+                {status?.node_id ? <span className="truncate font-mono">Node {status.node_id}</span> : null}
+                {status ? <span aria-hidden="true">·</span> : null}
+                {status ? <span>{status.is_host ? 'Host' : status.is_client ? 'Client' : 'Worker'}</span> : null}
               </div>
             </div>
             <Tabs value={section} onValueChange={(v) => setSection(v as TopSection)} className="ml-auto">
-              <TabsList className="grid h-10 grid-cols-3 rounded-xl border border-border/80 bg-black/50 p-1 shadow-inner shadow-black/20">
+              <TabsList className="h-auto gap-2 rounded-none border-0 bg-transparent p-0 text-sm">
                 <TabsTrigger
                   value="chat"
-                  className="rounded-lg px-4 text-sm data-[state=active]:bg-background data-[state=active]:text-primary data-[state=active]:shadow-none"
+                  className="h-auto rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-none"
                 >
                   Chat
                 </TabsTrigger>
                 <TabsTrigger
                   value="mesh"
-                  className="rounded-lg px-4 text-sm data-[state=active]:bg-background data-[state=active]:text-primary data-[state=active]:shadow-none"
+                  className="h-auto rounded-md px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-none"
                 >
                   Mesh
-                </TabsTrigger>
-                <TabsTrigger
-                  value="metrics"
-                  className="rounded-lg px-4 text-sm data-[state=active]:bg-background data-[state=active]:text-primary data-[state=active]:shadow-none"
-                >
-                  Metrics
                 </TabsTrigger>
               </TabsList>
             </Tabs>
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 bg-background/70"
+                title={openApiUrl ? `Copy ${openApiUrl}` : 'API URL unavailable'}
+                onClick={() => void copyOpenApiUrl()}
+                disabled={!openApiUrl}
+              >
+                {apiCopied ? <Check className="mr-1 h-3.5 w-3.5" /> : <Link2 className="mr-1 h-3.5 w-3.5" />}
+                {apiCopied ? 'Copied' : 'API URL'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 bg-background/70"
+                title={`Theme: ${themeMode} (click to cycle)`}
+                aria-label={`Theme ${themeMode}. Click to cycle Auto, Light, Dark`}
+                onClick={() => setThemeMode((prev) => nextThemeMode(prev))}
+              >
+                {themeMode === 'auto' ? <MonitorCog className="h-4 w-4" /> : null}
+                {themeMode === 'light' ? <Sun className="h-4 w-4" /> : null}
+                {themeMode === 'dark' ? <Moon className="h-4 w-4" /> : null}
+              </Button>
               <Badge>
                 <Network className="mr-1 h-3.5 w-3.5" />
                 {`${nodeCount} node${nodeCount === 1 ? '' : 's'}`}
@@ -482,14 +548,13 @@ export function App() {
                 {`${availableModelCount} model${availableModelCount === 1 ? '' : 's'}`}
               </Badge>
               <InvitePopover token={status?.token ?? ''} selectedModel={selectedModel || warmModels[0] || status?.model_name || ''} />
-              <ApiEndpointPopover port={status?.api_port ?? null} />
               <StatusBadge ready={!!status?.llama_ready} />
               {statusError ? <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-200">{statusError}</Badge> : null}
             </div>
           </CardContent>
         </Card>
 
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="flex-1">
           {section === 'chat' ? (
             <ChatPage
               inviteToken={status?.token ?? ''}
@@ -509,20 +574,14 @@ export function App() {
           ) : null}
 
           {section === 'mesh' ? (
-            <MeshPage status={status} metrics={metrics} topologyNodes={topologyNodes} selectedModel={selectedModel || status?.model_name || ''} />
-          ) : null}
-
-          {section === 'metrics' ? (
-            <MetricsPage
-              telemetry={telemetry}
-              telemetryError={telemetryError}
-              metricsMinutes={metricsMinutes}
-              setMetricsMinutes={setMetricsMinutes}
-              benchmarkFilter={benchmarkFilter}
-              setBenchmarkFilter={setBenchmarkFilter}
-              filteredBenchmarks={filteredBenchmarks}
+            <MeshPage
+              status={status}
+              metrics={metrics}
+              topologyNodes={topologyNodes}
+              selectedModel={selectedModel || status?.model_name || ''}
             />
           ) : null}
+
         </div>
       </div>
     </div>
@@ -723,7 +782,7 @@ function MeshPage({
   }, [status?.mesh_models, modelFilter]);
 
   return (
-    <div className="grid h-full min-h-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_420px]">
+    <div className="grid h-full min-h-0 gap-4">
       <Card className="flex min-h-0 flex-col overflow-hidden border-border/80 bg-card/85 backdrop-blur">
         <CardHeader className="pb-3">
           <div className="flex items-center gap-2">
@@ -734,10 +793,70 @@ function MeshPage({
         </CardHeader>
         <Separator />
         <CardContent className="min-h-0 flex-1 p-4">
-          <div className="grid h-full min-h-0 gap-4 lg:grid-rows-[auto_minmax(0,1fr)]">
+          <div className="grid h-full min-h-0 gap-4 lg:grid-rows-[auto_320px_minmax(0,1fr)] xl:grid-rows-[auto_360px_minmax(0,1fr)]">
             <Card className="shadow-none">
+              <CardContent className="space-y-3 p-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="flex items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+                    <Network className="h-4 w-4 text-primary" />
+                    <div className="text-xs">
+                      <div className="text-muted-foreground">Nodes</div>
+                      <div className="font-semibold text-foreground">{topologyNodes.length}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+                    <Sparkles className="h-4 w-4 text-emerald-500" />
+                    <div className="text-xs">
+                      <div className="text-muted-foreground">Warm Models</div>
+                      <div className="font-semibold text-foreground">{(status?.mesh_models ?? []).filter((m) => m.status === 'warm').length}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+                    <Cpu className="h-4 w-4 text-cyan-500" />
+                    <div className="text-xs">
+                      <div className="text-muted-foreground">Mesh VRAM</div>
+                      <div className="font-semibold text-foreground">{meshGpuVram(status).toFixed(1)} GB</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+                    <Gauge className="h-4 w-4 text-amber-500" />
+                    <div className="text-xs">
+                      <div className="text-muted-foreground">Inflight</div>
+                      <div className="font-semibold text-foreground">{metrics?.requests_inflight ?? 0}</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge className="gap-1 border-border/70 bg-background/70">
+                    <Circle className="h-3 w-3 fill-current" />
+                    {status?.node_status ?? 'n/a'}
+                  </Badge>
+                  <Badge className="gap-1 border-border/70 bg-background/70">
+                    <Sparkles className="h-3 w-3" />
+                    {selectedModel ? shortName(selectedModel) : 'n/a'}
+                  </Badge>
+                  <Badge className="gap-1 border-border/70 bg-background/70">
+                    <Gauge className="h-3 w-3" />
+                    TTFT {fmtMs(metrics?.p95_ttft_ms)}
+                  </Badge>
+                  <Badge className="gap-1 border-border/70 bg-background/70">
+                    <Wifi className="h-3 w-3" />
+                    Rate {fmtRate(metrics?.p95_tokens_per_sec)}
+                  </Badge>
+                  <Badge className="gap-1 border-border/70 bg-background/70">
+                    <Cpu className="h-3 w-3" />
+                    {fmtBytes(metrics?.local_bytes_tx)} / {fmtBytes(metrics?.local_bytes_rx)}
+                  </Badge>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="shadow-none overflow-hidden">
               <CardContent className="p-4">
-                <MeshTopologyDiagram status={status} nodes={topologyNodes} selectedModel={selectedModel} />
+                <MeshTopologyDiagram
+                  status={status}
+                  nodes={topologyNodes}
+                  selectedModel={selectedModel}
+                />
               </CardContent>
             </Card>
             <div className="grid min-h-0 gap-4 lg:grid-cols-2">
@@ -819,34 +938,6 @@ function MeshPage({
                 </CardContent>
               </Card>
             </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="flex min-h-0 flex-col overflow-hidden border-border/80 bg-card/85 backdrop-blur">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Mesh Summary</CardTitle>
-        </CardHeader>
-        <CardContent className="min-h-0 flex-1 space-y-4 pt-0">
-          <div className="grid grid-cols-2 gap-3">
-            <StatCard title="Nodes" value={`${topologyNodes.length}`} icon={<Network className="h-4 w-4" />} />
-            <StatCard title="Warm Models" value={`${(status?.mesh_models ?? []).filter((m) => m.status === 'warm').length}`} icon={<Sparkles className="h-4 w-4" />} />
-            <StatCard title="VRAM Mesh" value={`${meshGpuVram(status).toFixed(1)} GB`} icon={<Cpu className="h-4 w-4" />} />
-            <StatCard title="Inflight" value={`${metrics?.requests_inflight ?? 0}`} icon={<Gauge className="h-4 w-4" />} />
-          </div>
-          <Separator />
-          <div className="space-y-2">
-            <SectionLabel>Status</SectionLabel>
-            <MetricLine label="Node status" value={status?.node_status ?? 'n/a'} />
-            <MetricLine label="Selected model" value={selectedModel ? shortName(selectedModel) : 'n/a'} />
-            <MetricLine label="TTFT p95" value={fmtMs(metrics?.p95_ttft_ms)} />
-            <MetricLine label="Token rate p95" value={fmtRate(metrics?.p95_tokens_per_sec)} />
-            <MetricLine label="TX / RX" value={`${fmtBytes(metrics?.local_bytes_tx)} / ${fmtBytes(metrics?.local_bytes_rx)}`} />
-          </div>
-          <Separator />
-          <div className="space-y-2">
-            <SectionLabel>Invite Token</SectionLabel>
-            <Input readOnly value={status?.token ?? ''} className="font-mono text-xs" />
           </div>
         </CardContent>
       </Card>
@@ -1090,128 +1181,308 @@ function MetricsPage({
   );
 }
 
-function MeshTopologyDiagram({ status, nodes, selectedModel }: { status: StatusPayload | null; nodes: TopologyNode[]; selectedModel: string }) {
-  if (!status || !nodes.length) return <EmptyPanel text="No topology data yet." />;
+type PositionedTopologyNode = TopologyNode & {
+  x: number;
+  y: number;
+  bucket: 'center' | 'serving' | 'worker' | 'client';
+};
 
-  const totalGpuVram = nodes.filter((n) => !n.client).reduce((s, n) => s + (n.vram || 0), 0);
-  const ok = !!status.llama_ready;
-  const W = 760;
-  const nW = 180;
-  const nH = 96;
+type TopologyNodeInfo = {
+  role: string;
+  servingLabel: string;
+  fullServing: string;
+  vramSharePct: number;
+  modelUsagePct: number;
+  modelGb: number;
+};
 
-  if (nodes.length === 1) {
-    return (
-      <svg viewBox={`0 0 ${W} ${nH + 20}`} className="w-full" role="img" aria-label="Mesh topology">
-        {renderNodeBox({ x: W / 2 - nW / 2, y: 10, node: nodes[0], totalGpuVram, ok, selectedModel, status, w: nW, h: nH })}
-      </svg>
-    );
-  }
+type TopologyFlowNodeData = {
+  node: PositionedTopologyNode;
+  info: TopologyNodeInfo;
+  selected: boolean;
+};
 
-  const host = nodes.find((n) => n.host) || nodes[0];
-  const workers = nodes.filter((n) => n !== host);
-  const hX = W / 2 - nW / 2;
-  const hY = 14;
-  const wY = nH + 70;
-  const gap = Math.min(220, Math.max(190, (W - 40) / Math.max(1, workers.length)));
-  const wStart = W / 2 - ((workers.length - 1) * gap) / 2 - nW / 2;
+function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
+  const isCenter = data.node.bucket === 'center';
+  const dotClass = isCenter
+    ? 'bg-blue-500 border-blue-300'
+    : data.node.bucket === 'serving'
+      ? 'bg-emerald-500 border-emerald-300'
+      : data.node.bucket === 'worker'
+        ? 'bg-cyan-500 border-cyan-300'
+        : 'bg-slate-400 border-slate-200';
+  const vramWidth = Math.max(0, Math.min(100, data.info.vramSharePct));
+  const modelWidth = Math.max(0, Math.min(100, data.info.modelUsagePct));
 
   return (
-    <svg viewBox={`0 0 ${W} ${wY + nH + 20}`} className="w-full" role="img" aria-label="Mesh topology">
-      {workers.map((w, i) => {
-        const wx = wStart + i * gap;
-        const x1 = hX + nW / 2;
-        const y1 = hY + nH;
-        const x2 = wx + nW / 2;
-        const y2 = wY;
-        const mx = (x1 + x2) / 2;
-        const my = (y1 + y2) / 2;
-        return (
-          <g key={`edge-${w.id}`}>
-            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ok ? '#1f3b2f' : '#293241'} strokeWidth={1.5} strokeDasharray={ok ? undefined : '4 4'} />
-            {ok ? (
-              <>
-                <circle r="2" fill="#4ade80" opacity="0.8">
-                  <animateMotion dur="1.8s" repeatCount="indefinite" path={`M${x1},${y1} L${x2},${y2}`} />
-                </circle>
-                <circle r="2" fill="#60a5fa" opacity="0.7">
-                  <animateMotion dur="1.8s" repeatCount="indefinite" path={`M${x2},${y2} L${x1},${y1}`} />
-                </circle>
-              </>
-            ) : null}
-            <text x={mx} y={my - 4} textAnchor="middle" fill="#64748b" fontSize="9" fontFamily="monospace">
-              {w.client ? 'QUIC · HTTP' : 'QUIC · RPC'}
-            </text>
-          </g>
-        );
-      })}
+    <div className="w-[208px]">
+      <Handle type="target" position={Position.Top} style={{ opacity: 0, width: 1, height: 1, border: 0, pointerEvents: 'none' }} />
+      <Handle type="source" position={Position.Bottom} style={{ opacity: 0, width: 1, height: 1, border: 0, pointerEvents: 'none' }} />
 
-      {renderNodeBox({ x: hX, y: hY, node: host, totalGpuVram, ok, selectedModel, status, w: nW, h: nH })}
-      {workers.map((w, i) => renderNodeBox({ x: wStart + i * gap, y: wY, node: w, totalGpuVram, ok, selectedModel, status, w: nW, h: nH }))}
-    </svg>
+      <div className={cn('mx-auto h-7 w-7 rounded-full border-2 shadow-sm', dotClass)} />
+      <div className="mt-1 break-all text-center font-mono text-[10px] leading-3 text-foreground">
+        {data.node.self ? `${data.node.id} (you)` : data.node.id}
+      </div>
+
+      <div
+        className={cn(
+          'mt-1 rounded-md border bg-card/95 px-2 py-1.5 shadow-sm backdrop-blur',
+          data.selected ? 'border-ring ring-1 ring-ring/50' : 'border-border/90',
+        )}
+      >
+        <div className="truncate font-mono text-[10px] leading-3 text-foreground/90">
+          {data.info.role} · {data.info.servingLabel}
+        </div>
+
+        <div className="mt-1 flex items-center gap-1">
+          <span className="text-[9px] text-sky-500">●</span>
+          <div className="h-1 flex-1 rounded bg-muted">
+            <div className="h-1 rounded bg-sky-500" style={{ width: `${vramWidth}%` }} />
+          </div>
+          <span className="font-mono text-[10px] text-sky-600 dark:text-sky-400">{data.info.vramSharePct}%</span>
+        </div>
+
+        <div className="mt-0.5 flex items-center gap-1">
+          <span className="text-[9px] text-amber-500">◆</span>
+          <div className="h-1 flex-1 rounded bg-muted">
+            <div className="h-1 rounded bg-amber-500" style={{ width: `${modelWidth}%` }} />
+          </div>
+          <span className="font-mono text-[10px] text-amber-600 dark:text-amber-400">{data.info.modelUsagePct}%</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
-function renderNodeBox(args: {
-  x: number;
-  y: number;
-  node: TopologyNode;
-  totalGpuVram: number;
-  ok: boolean;
+const topologyNodeTypes = { topologyNode: TopologyFlowNode };
+
+function MeshTopologyDiagram({
+  status,
+  nodes,
+  selectedModel,
+}: {
+  status: StatusPayload | null;
+  nodes: TopologyNode[];
   selectedModel: string;
-  status: StatusPayload;
-  w: number;
-  h: number;
 }) {
-  const { x, y, node, totalGpuVram, ok, selectedModel, status, w, h } = args;
-  const pct = node.client ? 0 : totalGpuVram > 0 ? Math.round((node.vram / totalGpuVram) * 100) : 100;
-  const servingSel = !node.client && !!selectedModel && node.serving === selectedModel;
-  const active = ok && servingSel;
-  const fill = active ? '#0c1f17' : node.self ? '#0c1728' : '#0b1220';
-  const stroke = active ? '#22c55e' : ok ? (node.host ? '#1f6b48' : node.client ? '#334155' : '#1d4f91') : '#233047';
-  const role = node.client ? 'CLIENT' : node.serving ? shortName(node.serving) : 'IDLE';
-  const roleColor = node.client ? '#94a3b8' : servingSel ? '#4ade80' : '#60a5fa';
-  const label = node.self ? `${node.id} (you)` : node.id;
-  const service = node.client ? 'API tunnel' : node.host ? 'llama-server' : 'rpc-server';
-  const svcColor = active ? '#86efac' : '#64748b';
-  const nodeModel = (status.mesh_models || []).find((m) => m.name === node.serving);
-  const modelGB = nodeModel ? nodeModel.size_gb : node.self ? status.model_size_gb || 0 : 0;
-  const usagePct = !node.client && node.vram > 0 && modelGB > 0 ? Math.min(100, Math.round((modelGB / node.vram) * 100)) : 0;
-  const vramLabel = node.vram > 0 ? `${node.vram.toFixed(0)} GB` : '';
-  const usageLabel = modelGB > 0 ? `${modelGB.toFixed(1)}GB model` : '';
-  const barX = x + 16;
-  const barW = w - 32;
-  const barY = y + 62;
-  const bar2Y = barY + 10;
+  if (!status || !nodes.length) return <EmptyPanel text="No topology data yet." />;
+
+  const center = nodes.find((n) => n.host) || nodes.find((n) => n.self) || nodes[0];
+  const others = nodes.filter((n) => n.id !== center.id).sort((a, b) => (b.vram - a.vram) || a.id.localeCompare(b.id));
+  const focusModel = selectedModel || status.model_name || '';
+  const serving = others.filter((n) => !n.client && !!n.serving && (!focusModel || n.serving === focusModel));
+  const servingIds = new Set(serving.map((n) => n.id));
+  const clients = others.filter((n) => n.client);
+  const workers = others.filter((n) => !n.client && !servingIds.has(n.id));
+
+  const total = nodes.length;
+  const nodeRadius = total >= 500 ? 3.6 : total >= 280 ? 4.8 : total >= 160 ? 6.2 : total >= 90 ? 7.4 : total >= 50 ? 8.8 : 10.4;
+  const positioned = layoutTopologyNodes(center, serving, workers, clients, nodeRadius);
+  const maxCoord = positioned.reduce((m, p) => Math.max(m, Math.hypot(p.x, p.y)), 0);
+  const frame = Math.max(220, maxCoord + 230);
+  const clientEdgeStride = total > 320 ? 6 : total > 220 ? 4 : total > 120 ? 2 : 1;
+  const gpuNodeCount = nodes.filter((n) => !n.client).length;
+  const meshVramGb = nodes.filter((n) => !n.client).reduce((sum, n) => sum + Math.max(0, n.vram), 0);
+  const servingCount = nodes.filter((n) => !n.client && n.serving && n.serving !== '(idle)').length;
+
+  const [selectedNodeId, setSelectedNodeId] = useState(center.id);
+
+  useEffect(() => {
+    setSelectedNodeId((prev) => (nodes.some((n) => n.id === prev) ? prev : center.id));
+  }, [nodes, center.id]);
+
+  const modelSizeByName = useMemo(() => new Map((status.mesh_models ?? []).map((m) => [m.name, m.size_gb])), [status.mesh_models]);
+  const nodeInfoById = useMemo(() => {
+    const out = new Map<string, TopologyNodeInfo>();
+    for (const node of nodes) {
+      const servingModel = !node.client && node.serving && node.serving !== '(idle)' ? node.serving : '';
+      const role = node.client ? 'Client' : node.host ? 'Host' : servingModel ? 'Worker' : 'Idle';
+      const modelGb = servingModel
+        ? (modelSizeByName.get(servingModel) ?? (node.self ? status.model_size_gb || 0 : 0))
+        : 0;
+      const vramSharePct = !node.client && meshVramGb > 0 ? Math.round((Math.max(0, node.vram) / meshVramGb) * 100) : 0;
+      const modelUsagePct = !node.client && node.vram > 0 && modelGb > 0
+        ? Math.min(100, Math.round((modelGb / node.vram) * 100))
+        : 0;
+      out.set(node.id, {
+        role,
+        servingLabel: node.client ? 'CLIENT' : servingModel ? shortName(servingModel) : 'IDLE',
+        fullServing: servingModel,
+        vramSharePct,
+        modelUsagePct,
+        modelGb,
+      });
+    }
+    return out;
+  }, [nodes, modelSizeByName, status.model_size_gb, meshVramGb]);
+  const selectedInfo = nodeInfoById.get(selectedNodeId) ?? nodeInfoById.get(center.id);
+
+  const flowNodes = useMemo<Node<TopologyFlowNodeData>[]>(() => {
+    return positioned.map((p) => ({
+      id: p.id,
+      type: 'topologyNode',
+      position: { x: p.x + frame, y: p.y + frame },
+      origin: [0.5, 0],
+      data: {
+        node: p,
+        info: nodeInfoById.get(p.id) ?? {
+          role: 'Node',
+          servingLabel: 'IDLE',
+          fullServing: '',
+          vramSharePct: 0,
+          modelUsagePct: 0,
+          modelGb: 0,
+        },
+        selected: p.id === selectedNodeId,
+      },
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      zIndex: p.id === center.id ? 10 : 1,
+    }));
+  }, [positioned, frame, nodeInfoById, selectedNodeId, center.id]);
+
+  const flowEdges = useMemo<Edge[]>(() => {
+    const outer = positioned.filter((p) => p.id !== center.id);
+    return outer
+      .filter((p, idx) => !(p.bucket === 'client' && idx % clientEdgeStride !== 0))
+      .map((p) => {
+        const stroke =
+          p.bucket === 'serving'
+            ? 'rgba(34,197,94,0.35)'
+            : p.bucket === 'worker'
+              ? 'rgba(56,189,248,0.3)'
+              : 'rgba(148,163,184,0.22)';
+        return {
+          id: `edge-${center.id}-${p.id}`,
+          source: center.id,
+          target: p.id,
+          type: 'straight',
+          animated: status.llama_ready,
+          style: {
+            stroke,
+            strokeWidth: 1.2,
+            strokeDasharray: p.bucket === 'client' ? '4 5' : undefined,
+          },
+        };
+      });
+  }, [positioned, center.id, clientEdgeStride, status.llama_ready]);
 
   return (
-    <g key={`node-${node.id}`}>
-      <rect x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={active ? 2 : 1.4} />
-      <text x={x + w / 2} y={y + 16} textAnchor="middle" fill={roleColor} fontSize="9" fontFamily="monospace" fontWeight={600}>{role}</text>
-      <text x={x + w / 2} y={y + 30} textAnchor="middle" fill="#bfdbfe" fontSize="10" fontFamily="monospace">{label}</text>
-      <text x={x + w / 2} y={y + 43} textAnchor="middle" fill={svcColor} fontSize="8" fontFamily="monospace">{service}</text>
+    <div className="flex h-full flex-col gap-2">
+      <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+        <Badge className="border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">GPU nodes: {gpuNodeCount}</Badge>
+        <Badge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Serving: {servingCount}</Badge>
+        <Badge className="border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300">Mesh VRAM: {meshVramGb.toFixed(1)} GB</Badge>
+        <Badge className="border-zinc-500/30 bg-zinc-500/10 text-zinc-700 dark:text-zinc-300">Clients: {clients.length}</Badge>
+        {focusModel ? (
+          <Badge className="border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300">
+            Focus: {shortName(focusModel)}
+          </Badge>
+        ) : null}
+        <Badge className="ml-auto border-border/70 bg-background/70 text-muted-foreground">Pan: drag · Zoom: controls</Badge>
+      </div>
 
-      <rect x={barX} y={barY} width={barW} height={5} rx={2} fill="#111827" />
-      <rect x={barX} y={barY} width={(barW * pct) / 100} height={5} rx={2} fill={servingSel ? '#15803d' : '#1d4ed8'} />
-      <rect x={barX} y={bar2Y} width={barW} height={5} rx={2} fill="#111827" />
-      {usagePct > 0 ? <rect x={barX} y={bar2Y} width={(barW * usagePct) / 100} height={5} rx={2} fill={usagePct > 80 ? '#ea580c' : '#a16207'} /> : null}
-
-      <text x={barX} y={y + h - 8} fill="#64748b" fontSize="7.5" fontFamily="monospace">
-        {[vramLabel, usageLabel].filter(Boolean).join(' · ')}
-      </text>
-      <text x={barX + barW} y={y + h - 8} textAnchor="end" fill="#64748b" fontSize="7.5" fontFamily="monospace">
-        {usagePct > 0 ? `${usagePct}% used` : pct > 0 && !node.client ? `${pct}%` : ''}
-      </text>
-
-      {node.host && ok ? (
-        <g>
-          <rect x={x + w - 54} y={y + 6} width={40} height={13} rx={4} fill="#072012" stroke="#166534" strokeWidth={0.8} />
-          <text x={x + w - 34} y={y + 15} textAnchor="middle" fill="#86efac" fontSize="7.5" fontFamily="monospace">
-            :{status.api_port || 9337}
-          </text>
-        </g>
-      ) : null}
-    </g>
+      <div className="h-[220px] md:h-[240px] lg:h-[250px] xl:h-[280px] overflow-hidden rounded-lg border border-border/70 bg-muted/10">
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={topologyNodeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.22, maxZoom: 1.05 }}
+          minZoom={0.2}
+          maxZoom={1.6}
+          zoomOnScroll={false}
+          zoomOnPinch={false}
+          panOnScroll={false}
+          panOnDrag
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="hsl(var(--border))" />
+          <Controls showInteractive={false} position="bottom-right" />
+        </ReactFlow>
+      </div>
+      <div className="grid gap-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-foreground">{selectedNodeId}</span>
+          {selectedInfo ? <Badge className="h-5 border-border/70 bg-background/70 px-1.5 text-[10px]">{selectedInfo.role}</Badge> : null}
+          {selectedInfo ? <span>{selectedInfo.fullServing ? shortName(selectedInfo.fullServing) : selectedInfo.servingLabel}</span> : null}
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <span>VRAM share: {selectedInfo?.vramSharePct ?? 0}%</span>
+          <span>Model usage: {selectedInfo?.modelUsagePct ?? 0}%</span>
+          <span>Drag to pan, use control buttons to zoom.</span>
+        </div>
+      </div>
+    </div>
   );
+}
+
+function layoutTopologyNodes(
+  center: TopologyNode,
+  serving: TopologyNode[],
+  workers: TopologyNode[],
+  clients: TopologyNode[],
+  nodeRadius: number,
+): PositionedTopologyNode[] {
+  const ringSpacing = nodeRadius * 8.4 + 62;
+  const minChord = nodeRadius * 6.8 + 118;
+  const positioned: PositionedTopologyNode[] = [{ ...center, x: 0, y: 0, bucket: 'center' }];
+  const all = [
+    ...serving.map((n) => ({ ...n, bucket: 'serving' as const })),
+    ...workers.map((n) => ({ ...n, bucket: 'worker' as const })),
+    ...clients.map((n) => ({ ...n, bucket: 'client' as const })),
+  ];
+
+  if (all.length > 0 && all.length <= 12) {
+    const radius = 150 + ringSpacing + (all.length > 6 ? 20 : 0);
+    for (let i = 0; i < all.length; i += 1) {
+      const angle = -Math.PI / 2 + ((2 * Math.PI * i) / all.length);
+      const node = all[i];
+      positioned.push({
+        ...node,
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+      });
+    }
+    return positioned;
+  }
+
+  let ring = 1;
+  const groups: Array<{ key: 'serving' | 'worker' | 'client'; nodes: TopologyNode[]; phase: number }> = [
+    { key: 'serving', nodes: [...serving], phase: 0 },
+    { key: 'worker', nodes: [...workers], phase: Math.PI / 9 },
+    { key: 'client', nodes: [...clients], phase: Math.PI / 4 },
+  ];
+
+  for (const group of groups) {
+    let phase = group.phase;
+    let offset = 0;
+    while (offset < group.nodes.length) {
+      const radius = 110 + ring * ringSpacing;
+      const capacity = Math.max(8, Math.floor((2 * Math.PI * radius) / minChord));
+      const take = Math.min(capacity, group.nodes.length - offset);
+      for (let i = 0; i < take; i += 1) {
+        const angle = -Math.PI / 2 + phase + ((2 * Math.PI * i) / take);
+        const node = group.nodes[offset + i];
+        positioned.push({
+          ...node,
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
+          bucket: group.key,
+        });
+      }
+      offset += take;
+      phase += 0.21;
+      ring += 1;
+    }
+  }
+
+  return positioned;
 }
 
 function MetricChartCard<T>({

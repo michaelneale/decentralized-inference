@@ -10,7 +10,7 @@
 //! The console is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
-use crate::{download, election, mesh, nostr, telemetry};
+use crate::{download, election, mesh, nostr};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
@@ -30,7 +30,6 @@ pub struct MeshApi {
 
 struct ApiInner {
     node: mesh::Node,
-    telemetry: telemetry::Telemetry,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -84,29 +83,9 @@ struct MeshModelPayload {
     size_gb: f64,
 }
 
-#[derive(Serialize)]
-struct TelemetryEventsPayload {
-    live: telemetry::LiveSnapshot,
-    nodes: Vec<telemetry::NodeMetricRow>,
-    rollup: Vec<telemetry::RollupMetricRow>,
-    node_history: Vec<telemetry::NodeMetricRow>,
-    benchmarks: Vec<telemetry::BenchmarkRunRow>,
-}
-
-#[derive(serde::Deserialize)]
-struct ChatSampleIngest {
-    #[serde(default)]
-    ttft_ms: Option<u32>,
-    #[serde(default)]
-    completion_tokens: Option<u32>,
-    #[serde(default)]
-    tokens_per_sec: Option<f64>,
-}
-
 impl MeshApi {
     pub fn new(
         node: mesh::Node,
-        telemetry: telemetry::Telemetry,
         model_name: String,
         api_port: u16,
         model_size_bytes: u64,
@@ -114,7 +93,6 @@ impl MeshApi {
         MeshApi {
             inner: Arc::new(Mutex::new(ApiInner {
                 node,
-                telemetry,
                 is_host: false,
                 is_client: false,
                 llama_ready: false,
@@ -173,7 +151,7 @@ impl MeshApi {
             id: p.id.fmt_short().to_string(),
             role: match p.role {
                 mesh::NodeRole::Worker => "Worker".into(),
-                mesh::NodeRole::Host { http_port } => format!("Host (:{http_port})"),
+                mesh::NodeRole::Host { .. } => "Host".into(),
                 mesh::NodeRole::Client => "Client".into(),
             },
             models: p.models.clone(),
@@ -406,154 +384,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             stream.write_all(resp.as_bytes()).await?;
         }
 
-        // ── Telemetry: local live snapshot ──
-        "/api/metrics/live" => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let json = serde_json::to_string(&telemetry.snapshot())?;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                json.len(), json
-            );
-            stream.write_all(resp.as_bytes()).await?;
-        }
-
-        // ── Telemetry: ingest chat generation sample (console client) ──
-        "/api/metrics/chat-sample" => {
-            if !req.starts_with("POST ") {
-                respond_error(&mut stream, 405, "Method not allowed").await?;
-            } else if let Some(body) = http_body(&req) {
-                let telemetry = state.inner.lock().await.telemetry.clone();
-                match serde_json::from_str::<ChatSampleIngest>(body) {
-                    Ok(sample) => {
-                        telemetry.record_generation_metrics(sample.ttft_ms, sample.completion_tokens, sample.tokens_per_sec);
-                        let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
-                        stream.write_all(resp.as_bytes()).await?;
-                    }
-                    Err(_) => respond_error(&mut stream, 400, "Invalid JSON").await?,
-                }
-            } else {
-                respond_error(&mut stream, 400, "Missing body").await?;
-            }
-        }
-
-        // ── Telemetry SSE stream (full package for UI) ──
-        p if p.starts_with("/api/metrics/events") => {
-            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-            stream.write_all(header.as_bytes()).await?;
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let minutes = query_param_u32(path, "minutes").unwrap_or(180).clamp(1, 7 * 24 * 60);
-            let node_id = query_param(path, "id").map(|s| s.to_string());
-            let limit = query_param_u32(path, "limit").unwrap_or(300).clamp(1, 2000);
-            loop {
-                let node_history = if let Some(id) = node_id.clone() {
-                    telemetry.node_history_for(id, minutes).await
-                } else {
-                    telemetry.node_history(minutes).await
-                };
-                let payload = match (
-                    telemetry.all_nodes_latest(minutes).await,
-                    telemetry.rollup_history(minutes).await,
-                    node_history,
-                    telemetry.benchmark_history(minutes, limit).await,
-                ) {
-                    (Ok(nodes), Ok(rollup), Ok(node_history), Ok(benchmarks)) => TelemetryEventsPayload {
-                        live: telemetry.snapshot(),
-                        nodes,
-                        rollup,
-                        node_history,
-                        benchmarks,
-                    },
-                    _ => {
-                        if stream.write_all(b"event: error\ndata: {\"error\":\"telemetry query failed\"}\n\n").await.is_err() {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
-                let json = serde_json::to_string(&payload)?;
-                if stream.write_all(format!("data: {json}\n\n").as_bytes()).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
-
-        // ── Telemetry: local node history (SQLite) ──
-        p if p.starts_with("/api/metrics/node") => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 24 * 60);
-            let node_id = query_param(path, "id").map(|s| s.to_string());
-            let result = if let Some(id) = node_id {
-                telemetry.node_history_for(id, minutes).await
-            } else {
-                telemetry.node_history(minutes).await
-            };
-            match result {
-                Ok(rows) => {
-                    let json = serde_json::to_string(&rows)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(), json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
-                }
-                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
-            }
-        }
-
-        // ── Telemetry: latest row per known node (SQLite, local DB) ──
-        p if p.starts_with("/api/metrics/nodes") => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let minutes = query_param_u32(path, "minutes").unwrap_or(180).clamp(1, 7 * 24 * 60);
-            match telemetry.all_nodes_latest(minutes).await {
-                Ok(rows) => {
-                    let json = serde_json::to_string(&rows)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(), json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
-                }
-                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
-            }
-        }
-
-        // ── Telemetry: rollup history across rows in local DB ──
-        p if p.starts_with("/api/metrics/rollup") => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 7 * 24 * 60);
-            match telemetry.rollup_history(minutes).await {
-                Ok(rows) => {
-                    let json = serde_json::to_string(&rows)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(), json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
-                }
-                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
-            }
-        }
-
-        // ── Telemetry: benchmark run history (raw local rows, recent only) ──
-        p if p.starts_with("/api/metrics/benchmarks") => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let minutes = query_param_u32(path, "minutes").unwrap_or(60).clamp(1, 7 * 24 * 60);
-            let limit = query_param_u32(path, "limit").unwrap_or(200).clamp(1, 2000);
-            match telemetry.benchmark_history(minutes, limit).await {
-                Ok(rows) => {
-                    let json = serde_json::to_string(&rows)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(), json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
-                }
-                Err(e) => respond_error(&mut stream, 500, &format!("Telemetry query failed: {e}")).await?,
-            }
-        }
-
         // ── SSE event stream ──
         "/api/events" => {
             let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
@@ -576,14 +406,10 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
         // ── Chat proxy (routes through inference API port) ──
         p if p.starts_with("/api/chat") => {
-            let telemetry = state.inner.lock().await.telemetry.clone();
-            let span = telemetry.start_request(telemetry::RouteKind::Local);
             let inner = state.inner.lock().await;
             if !inner.llama_ready && !inner.is_client {
                 drop(inner);
-                let res = respond_error(&mut stream, 503, "LLM not ready").await;
-                span.finish(false);
-                return res;
+                return respond_error(&mut stream, 503, "LLM not ready").await;
             }
             let port = inner.api_port;
             drop(inner);
@@ -591,13 +417,9 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             if let Ok(mut upstream) = TcpStream::connect(&target).await {
                 let rewritten = req.replacen("/api/chat", "/v1/chat/completions", 1);
                 upstream.write_all(rewritten.as_bytes()).await?;
-                let result = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
-                span.finish(result.is_ok());
-                result?;
+                tokio::io::copy_bidirectional(&mut stream, &mut upstream).await?;
             } else {
-                let res = respond_error(&mut stream, 502, "Cannot reach LLM server").await;
-                span.finish(false);
-                res?;
+                respond_error(&mut stream, 502, "Cannot reach LLM server").await?;
             }
         }
 
@@ -606,25 +428,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         }
     }
     Ok(())
-}
-
-fn query_param_u32(path: &str, key: &str) -> Option<u32> {
-    query_param(path, key)?.parse::<u32>().ok()
-}
-
-fn query_param<'a>(path: &'a str, key: &str) -> Option<&'a str> {
-    let (_, query) = path.split_once('?')?;
-    for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
-        if k == key {
-            return Some(v);
-        }
-    }
-    None
-}
-
-fn http_body(req: &str) -> Option<&str> {
-    req.split_once("\r\n\r\n").map(|(_, b)| b)
 }
 
 async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::Result<()> {
