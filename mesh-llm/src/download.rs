@@ -247,6 +247,111 @@ pub const MODEL_CATALOG: &[CatalogModel] = &[
     },
 ];
 
+/// An image model bundle in the catalog — multiple files to download into a directory.
+pub struct CatalogImageModel {
+    pub name: &'static str,
+    pub dir_name: &'static str,
+    pub description: &'static str,
+    pub gpu_vram: &'static str,
+    pub files: &'static [CatalogImageFile],
+}
+
+pub struct CatalogImageFile {
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub size: &'static str,
+}
+
+pub const IMAGE_MODEL_CATALOG: &[CatalogImageModel] = &[
+    CatalogImageModel {
+        name: "flux1-dev",
+        dir_name: "flux1-dev",
+        description: "FLUX.1-dev — high quality image generation (q4_k, ~6.4GB VRAM)",
+        gpu_vram: "6.4GB",
+        files: &[
+            CatalogImageFile {
+                filename: "flux1-dev-q4_k.gguf",
+                url: "https://huggingface.co/leejet/FLUX.1-dev-gguf/resolve/main/flux1-dev-q4_k.gguf",
+                size: "6.4GB",
+            },
+            CatalogImageFile {
+                filename: "ae.safetensors",
+                url: "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
+                size: "167MB",
+            },
+            CatalogImageFile {
+                filename: "clip_l.safetensors",
+                url: "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+                size: "235MB",
+            },
+            CatalogImageFile {
+                filename: "t5xxl_fp16.safetensors",
+                url: "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors",
+                size: "9.5GB",
+            },
+        ],
+    },
+    CatalogImageModel {
+        name: "flux1-schnell",
+        dir_name: "flux1-schnell",
+        description: "FLUX.1-schnell — fast image generation, 4 steps (q4_k, ~6.4GB VRAM)",
+        gpu_vram: "6.4GB",
+        files: &[
+            CatalogImageFile {
+                filename: "flux1-schnell-q4_k.gguf",
+                url: "https://huggingface.co/leejet/FLUX.1-schnell-gguf/resolve/main/flux1-schnell-q4_k.gguf",
+                size: "6.4GB",
+            },
+            CatalogImageFile {
+                filename: "ae.safetensors",
+                url: "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors",
+                size: "167MB",
+            },
+            CatalogImageFile {
+                filename: "clip_l.safetensors",
+                url: "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors",
+                size: "235MB",
+            },
+            CatalogImageFile {
+                filename: "t5xxl_fp16.safetensors",
+                url: "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp16.safetensors",
+                size: "9.5GB",
+            },
+        ],
+    },
+];
+
+/// Find an image model in the catalog by name (case-insensitive partial match).
+pub fn find_image_model(query: &str) -> Option<&'static CatalogImageModel> {
+    let q = query.to_lowercase();
+    IMAGE_MODEL_CATALOG.iter().find(|m| m.name.to_lowercase() == q)
+        .or_else(|| IMAGE_MODEL_CATALOG.iter().find(|m| m.name.to_lowercase().contains(&q)))
+}
+
+/// Download an image model bundle to ~/.models/<dir_name>/.
+/// Downloads all component files with resume support.
+pub async fn download_image_model(model: &CatalogImageModel) -> Result<PathBuf> {
+    let dir = models_dir().join(model.dir_name);
+    tokio::fs::create_dir_all(&dir).await?;
+
+    eprintln!("📥 Downloading image model: {} ({})", model.name, model.description);
+    for file in model.files {
+        let dest = dir.join(file.filename);
+        if dest.exists() {
+            let size = tokio::fs::metadata(&dest).await?.len();
+            if size > 1_000_000 {
+                eprintln!("  ✅ {} already exists ({:.1}GB)", file.filename, size as f64 / 1e9);
+                continue;
+            }
+        }
+        eprintln!("  📥 {} ({})...", file.filename, file.size);
+        download_with_resume(&dest, file.url).await?;
+        eprintln!("  ✅ {}", file.filename);
+    }
+    eprintln!("✅ Image model ready: {}", dir.display());
+    Ok(dir)
+}
+
 /// Get the models directory (~/.models/)
 pub fn models_dir() -> PathBuf {
     dirs::home_dir()
@@ -438,5 +543,11 @@ pub fn list_models() {
             String::new()
         };
         eprintln!("  {:40} {:>6}  {}{}", m.name, m.size, m.description, draft_info);
+    }
+    eprintln!();
+    eprintln!("Image models (stable-diffusion.cpp):");
+    eprintln!();
+    for m in IMAGE_MODEL_CATALOG {
+        eprintln!("  {:40} {:>6}  {}", m.name, m.gpu_vram, m.description);
     }
 }

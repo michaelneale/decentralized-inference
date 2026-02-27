@@ -46,6 +46,12 @@ pub fn is_drop_request(buf: &[u8]) -> bool {
     s.starts_with("POST ") && s.contains("/mesh/drop")
 }
 
+/// Check if this is an image generation request (POST /v1/images/generations or /v1/images/edits)
+pub fn is_image_request(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.starts_with("POST ") && s.contains("/v1/images/")
+}
+
 // ── Model-aware tunnel routing ──
 
 /// The common request-handling path used by idle proxy, passive proxy, and bootstrap proxy.

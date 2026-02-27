@@ -36,6 +36,22 @@ download-model:
             "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF/resolve/main/GLM-4.7-Flash-Q4_K_M.gguf"
     fi
 
+# Build stable-diffusion.cpp (sd-server for image generation)
+build-sd:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d "{{sd_dir}}" ]; then
+        echo "Cloning stable-diffusion.cpp..."
+        git clone --recursive https://github.com/leejet/stable-diffusion.cpp.git "{{sd_dir}}"
+    fi
+    if [ ! -d "{{sd_dir}}/ggml/src" ]; then
+        echo "Initializing ggml submodule..."
+        cd "{{sd_dir}}" && git submodule update --init --recursive
+    fi
+    cmake -B "{{sd_build_dir}}" -S "{{sd_dir}}" -DSD_METAL=ON -DSD_BUILD_SHARED_LIBS=OFF
+    cmake --build "{{sd_build_dir}}" --config Release -j$(sysctl -n hw.ncpu)
+    echo "sd-server built: {{sd_build_dir}}/bin/sd-server"
+
 # ── Raw TCP (no mesh) ──────────────────────────────────────────
 
 # Start rpc-server (worker) with local GGUF loading
@@ -77,6 +93,9 @@ local: build download-model
 
 # ── QUIC Mesh ──────────────────────────────────────────────────
 
+sd_dir := "stable-diffusion.cpp"
+sd_build_dir := sd_dir / "build"
+
 mesh_bin := mesh_dir / "target/release/mesh-llm"
 
 # Start a mesh worker (no llama-server, just rpc-server + mesh)
@@ -107,6 +126,10 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     cp {{mesh_bin}} "$BUNDLE/"
     cp {{build_dir}}/bin/rpc-server "$BUNDLE/"
     cp {{build_dir}}/bin/llama-server "$BUNDLE/"
+    # Include sd-server if built
+    if [ -f "{{sd_build_dir}}/bin/sd-server" ]; then
+        cp {{sd_build_dir}}/bin/sd-server "$BUNDLE/"
+    fi
     for lib in {{build_dir}}/bin/*.dylib; do
         cp "$lib" "$BUNDLE/" 2>/dev/null || true
     done

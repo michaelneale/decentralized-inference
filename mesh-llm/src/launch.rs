@@ -337,6 +337,211 @@ pub async fn start_llama_server_router(
     anyhow::bail!("llama-server (router) failed to start within 60s");
 }
 
+/// An image model bundle: diffusion model + companion files (VAE, CLIP, T5).
+/// Stored as a directory in ~/.models/ (e.g. ~/.models/flux1-dev/).
+#[derive(Clone, Debug)]
+pub struct ImageModelBundle {
+    /// Human-readable name (directory name, e.g. "flux1-dev")
+    pub name: String,
+    /// Path to the diffusion model GGUF
+    pub diffusion_model: std::path::PathBuf,
+    /// Path to VAE (ae.safetensors or similar)
+    pub vae: Option<std::path::PathBuf>,
+    /// Path to CLIP-L text encoder
+    pub clip_l: Option<std::path::PathBuf>,
+    /// Path to T5XXL text encoder
+    pub t5xxl: Option<std::path::PathBuf>,
+    /// Total size of all files in the bundle
+    pub total_bytes: u64,
+    /// Size of just the diffusion model (approximates GPU VRAM needed)
+    pub diffusion_bytes: u64,
+}
+
+/// Scan ~/.models/ for image model bundles.
+/// A bundle is a directory containing a *.gguf diffusion model + companion files.
+pub fn scan_image_model_bundles() -> Vec<ImageModelBundle> {
+    let models_dir = crate::download::models_dir();
+    let mut bundles = Vec::new();
+
+    if !models_dir.exists() {
+        return bundles;
+    }
+
+    let Ok(entries) = std::fs::read_dir(&models_dir) else {
+        return bundles;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        // Look for a diffusion model GGUF inside the directory
+        let Ok(dir_entries) = std::fs::read_dir(&path) else { continue };
+
+        let mut diffusion_model: Option<std::path::PathBuf> = None;
+        let mut vae: Option<std::path::PathBuf> = None;
+        let mut clip_l: Option<std::path::PathBuf> = None;
+        let mut t5xxl: Option<std::path::PathBuf> = None;
+        let mut total_bytes: u64 = 0;
+
+        for de in dir_entries.flatten() {
+            let fp = de.path();
+            let fname = fp.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            let size = std::fs::metadata(&fp).map(|m| m.len()).unwrap_or(0);
+            total_bytes += size;
+
+            if fname.ends_with(".gguf") && size > 500_000_000 {
+                // Largest GGUF is the diffusion model
+                if diffusion_model.as_ref().map_or(true, |prev| {
+                    std::fs::metadata(prev).map(|m| m.len()).unwrap_or(0) < size
+                }) {
+                    diffusion_model = Some(fp.clone());
+                }
+            } else if fname.contains("ae") && fname.ends_with(".safetensors")
+                || fname.contains("vae") && fname.ends_with(".safetensors")
+            {
+                vae = Some(fp.clone());
+            } else if fname.contains("clip_l") && fname.ends_with(".safetensors") {
+                clip_l = Some(fp.clone());
+            } else if fname.contains("t5xxl") && fname.ends_with(".safetensors") {
+                t5xxl = Some(fp.clone());
+            }
+        }
+
+        // Must have at least a diffusion model to be a valid bundle
+        if let Some(ref dm) = diffusion_model {
+            let diffusion_bytes = std::fs::metadata(dm).map(|m| m.len()).unwrap_or(0);
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            bundles.push(ImageModelBundle {
+                name,
+                diffusion_model: dm.clone(),
+                vae,
+                clip_l,
+                t5xxl,
+                total_bytes,
+                diffusion_bytes,
+            });
+        }
+    }
+
+    bundles.sort_by(|a, b| a.name.cmp(&b.name));
+    bundles
+}
+
+/// Start sd-server for an image model bundle.
+/// Returns the port it's listening on.
+pub async fn start_sd_server(
+    bin_dir: &Path,
+    bundle: &ImageModelBundle,
+    http_port: u16,
+) -> Result<u16> {
+    // Look for sd-server in bin_dir, then fall back to sd_build_dir
+    let sd_server = find_sd_server(bin_dir)?;
+
+    tracing::info!(
+        "Starting sd-server on :{http_port} with model {}",
+        bundle.name
+    );
+
+    let log_file = std::fs::File::create(format!("/tmp/mesh-llm-sd-server-{http_port}.log"))
+        .context("Failed to create sd-server log file")?;
+    let log_file2 = log_file.try_clone()?;
+
+    let mut args = vec![
+        "--diffusion-model".to_string(),
+        bundle.diffusion_model.to_string_lossy().to_string(),
+        "--listen-port".to_string(),
+        http_port.to_string(),
+        "-l".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
+    if let Some(ref vae) = bundle.vae {
+        args.push("--vae".to_string());
+        args.push(vae.to_string_lossy().to_string());
+    }
+    if let Some(ref clip_l) = bundle.clip_l {
+        args.push("--clip_l".to_string());
+        args.push(clip_l.to_string_lossy().to_string());
+    }
+    if let Some(ref t5xxl) = bundle.t5xxl {
+        args.push("--t5xxl".to_string());
+        args.push(t5xxl.to_string_lossy().to_string());
+    }
+
+    // Keep text encoders on CPU to save VRAM for the diffusion model
+    args.push("--clip-on-cpu".to_string());
+    // Flash attention for speed
+    args.push("--diffusion-fa".to_string());
+
+    tracing::info!("sd-server args: {:?}", args);
+
+    let mut child = Command::new(&sd_server)
+        .args(&args)
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file2))
+        .spawn()
+        .with_context(|| format!("Failed to start sd-server at {}", sd_server.display()))?;
+
+    // sd-server health check: GET / returns "Stable Diffusion Server is running" with 200
+    let url = format!("http://localhost:{http_port}/");
+    for i in 0..120 {
+        if i > 0 && i % 10 == 0 {
+            tracing::info!("Waiting for sd-server to load model... ({i}s)");
+        }
+        if reqwest_health_check(&url).await {
+            // Detach
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            tracing::info!("sd-server ready on :{http_port}");
+            return Ok(http_port);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!("sd-server failed to start within 120s");
+}
+
+/// Kill all running sd-server processes.
+pub async fn kill_sd_server() {
+    let _ = std::process::Command::new("pkill").args(["-f", "sd-server"]).status();
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let output = std::process::Command::new("pgrep").args(["-f", "sd-server"]).output();
+        if let Ok(o) = output {
+            if o.stdout.is_empty() { return; }
+        } else {
+            return;
+        }
+    }
+    let _ = std::process::Command::new("pkill").args(["-9", "-f", "sd-server"]).status();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
+/// Find sd-server binary. Checks bin_dir first, then ../stable-diffusion.cpp/build/bin/
+pub fn find_sd_server(bin_dir: &Path) -> Result<std::path::PathBuf> {
+    // Check alongside llama-server
+    let candidate = bin_dir.join("sd-server");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    // Check stable-diffusion.cpp build dir relative to bin_dir
+    // bin_dir is typically llama.cpp/build/bin, so go up to project root
+    if let Some(project_root) = bin_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        let candidate = project_root.join("stable-diffusion.cpp/build/bin/sd-server");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "sd-server not found in {} or nearby. Build stable-diffusion.cpp with `just build-sd`.",
+        bin_dir.display()
+    );
+}
+
 /// Find an available TCP port
 pub async fn find_free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;

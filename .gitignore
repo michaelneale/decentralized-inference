@@ -1,5 +1,6 @@
 llama.cpp/
 llama.cpp-rpc-b2b/
+stable-diffusion.cpp/
 target/
 llama.cpp.bak/
 private-note.txt

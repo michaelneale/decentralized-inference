@@ -33,6 +33,13 @@
 - [ ] `mesh-llm recommend`: CLI subcommand to suggest models for your hardware
 - [ ] **Revisit `--publish` flag experience**: Bare `--publish` without `--mesh-name` is vestigial — publishes an unnamed mesh to Nostr that's hard to discover/filter. Consider: require `--mesh-name` with `--publish`, or auto-generate a name, or just document that `--mesh-name` is the intended way.
 
+## Image Generation (stable-diffusion.cpp)
+Design doc: [docs/SD_DESIGN.md](docs/SD_DESIGN.md)
+- [ ] **Phase 1 — Build & launch**: Add `build-sd` to Justfile (clone stable-diffusion.cpp, cmake with Metal), add `start_sd_server()` to `launch.rs`, detect image model bundles in `--offline` mode
+- [ ] **Phase 2 — Mesh integration**: Model type field in gossip (`llm` | `image`), API proxy path routing (`/v1/images/*` → sd-server), image models in election (always solo, no tensor split)
+- [ ] **Phase 3 — Download & catalog**: Bundle download support in `download.rs` (4 files per FLUX model), `mesh-llm download flux-dev` command
+- [ ] **Phase 4 — Bundle & deploy**: Include `sd-server` in `just bundle` tarball
+
 ## Future
 - [ ] **Public named meshes**: `--mesh-name "cool-mesh" --publish` currently gets -200 penalty for random `--auto` users (treated as private group). If someone explicitly passes both `--mesh-name` and `--publish`, add a `public: true` field to the Nostr listing so it scores like an unnamed mesh (no penalty). Lets people give their mesh a fun name without hiding it from discovery.
 - [ ] Demand-based Nostr listings: include request rates so `--auto` joiners can see what's hot

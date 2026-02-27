@@ -214,17 +214,22 @@ async fn main() -> Result<()> {
             Command::Download { name, draft } => {
                 match name {
                     Some(query) => {
-                        let model = download::find_model(query)
-                            .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
-                        download::download_model(model).await?;
-                        if *draft {
-                            if let Some(draft_name) = model.draft {
-                                let draft_model = download::find_model(draft_name)
-                                    .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
-                                download::download_model(draft_model).await?;
-                            } else {
-                                eprintln!("⚠ No draft model available for {}", model.name);
+                        // Try LLM catalog first, then image catalog
+                        if let Some(model) = download::find_model(query) {
+                            download::download_model(model).await?;
+                            if *draft {
+                                if let Some(draft_name) = model.draft {
+                                    let draft_model = download::find_model(draft_name)
+                                        .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in catalog", draft_name))?;
+                                    download::download_model(draft_model).await?;
+                                } else {
+                                    eprintln!("⚠ No draft model available for {}", model.name);
+                                }
                             }
+                        } else if let Some(img_model) = download::find_image_model(query) {
+                            download::download_image_model(img_model).await?;
+                        } else {
+                            anyhow::bail!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query);
                         }
                     }
                     None => download::list_models(),
@@ -1120,13 +1125,20 @@ async fn run_offline(cli: Cli, bin_dir: PathBuf) -> Result<()> {
         }
     }
 
-    if gguf_models.is_empty() && ollama_extras.is_empty() {
+    // Scan for image model bundles
+    let image_bundles = launch::scan_image_model_bundles();
+
+    if gguf_models.is_empty() && ollama_extras.is_empty() && image_bundles.is_empty() {
         eprintln!("   No models found on disk.");
         eprintln!("   Download a model first: mesh-llm download 3b");
+        eprintln!("   Download an image model: mesh-llm download flux1-dev");
         return Ok(());
     }
 
-    eprintln!("   Models available:");
+    eprintln!("   LLM models:");
+    if gguf_models.is_empty() && ollama_extras.is_empty() {
+        eprintln!("     (none)");
+    }
     for (name, _, size) in &gguf_models {
         eprintln!("     · {name} ({:.1}GB)", *size as f64 / 1e9);
     }
@@ -1137,85 +1149,100 @@ async fn run_offline(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     if !ollama_models.is_empty() && ollama_extras.is_empty() && !ollama_models.is_empty() {
         eprintln!("   (ollama models already covered by local GGUFs)");
     }
+
+    if !image_bundles.is_empty() {
+        eprintln!("   Image models:");
+        for bundle in &image_bundles {
+            eprintln!("     · {} ({:.1}GB GPU, {:.1}GB total)",
+                bundle.name,
+                bundle.diffusion_bytes as f64 / 1e9,
+                bundle.total_bytes as f64 / 1e9);
+        }
+    }
     eprintln!();
 
-    let total_models = gguf_models.len() + ollama_extras.len();
+    let total_llm_models = gguf_models.len() + ollama_extras.len();
 
-    // If --model was specified, use single-model mode instead of router
-    if !cli.model.is_empty() {
-        let model_path = resolve_model(&cli.model[0]).await?;
-        let model_name = model_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-        eprintln!("   Serving: {model_name} (single model mode)");
-        let llama_port = launch::find_free_port().await?;
-        let model_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
-        launch::start_llama_server(
-            &bin_dir, &model_path, llama_port, &[], None, None, 0, model_bytes,
-        ).await?;
-        eprintln!();
-        eprintln!("  ✅ Ready");
-        eprintln!("     API: http://localhost:{}", cli.port);
-        eprintln!();
-        eprintln!("  curl http://localhost:{}/v1/chat/completions \\", cli.port);
-        eprintln!("    -d '{{\"model\":\"{model_name}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}'");
-        eprintln!();
-        // Simple proxy from cli.port to llama_port
-        let addr = if cli.listen_all { "0.0.0.0" } else { "127.0.0.1" };
-        let listener = tokio::net::TcpListener::bind(format!("{addr}:{}", cli.port)).await?;
-        loop {
-            tokio::select! {
-                accept = listener.accept() => {
-                    let (tcp_stream, _) = accept?;
-                    let _ = tcp_stream.set_nodelay(true);
-                    let port = llama_port;
-                    tokio::spawn(async move {
-                        if let Ok(upstream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
-                            let _ = upstream.set_nodelay(true);
-                            let _ = tunnel::relay_tcp_streams(tcp_stream, upstream).await;
-                        }
-                    });
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\nShutting down...");
-                    break;
+    // Try to start sd-server for the first image bundle (if sd-server binary exists)
+    let sd_port: Option<u16> = if let Some(bundle) = image_bundles.first() {
+        match launch::find_sd_server(&bin_dir) {
+            Ok(_) => {
+                let port = launch::find_free_port().await?;
+                match launch::start_sd_server(&bin_dir, bundle, port).await {
+                    Ok(p) => {
+                        eprintln!("  🎨 Image gen ready: {} on :{}", bundle.name, p);
+                        Some(p)
+                    }
+                    Err(e) => {
+                        eprintln!("  ⚠️  sd-server failed to start: {e}");
+                        None
+                    }
                 }
             }
+            Err(_) => {
+                eprintln!("  ℹ️  sd-server not found — build with: just build-sd");
+                None
+            }
         }
-        launch::kill_llama_server().await;
+    } else {
+        None
+    };
+
+    // Start LLM backend: single model or router mode
+    let llama_port: Option<u16> = if !cli.model.is_empty() {
+        let model_path = resolve_model(&cli.model[0]).await?;
+        let port = launch::find_free_port().await?;
+        let model_bytes = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+        launch::start_llama_server(
+            &bin_dir, &model_path, port, &[], None, None, 0, model_bytes,
+        ).await?;
+        Some(port)
+    } else if total_llm_models > 0 {
+        let port = launch::find_free_port().await?;
+        launch::start_llama_server_router(
+            &bin_dir, &models_dir, port, 1, &ollama_extras,
+        ).await?;
+        Some(port)
+    } else {
+        None
+    };
+
+    if llama_port.is_none() && sd_port.is_none() {
+        eprintln!("  ❌ No backends started.");
         return Ok(());
     }
 
-    // Router mode: all models available, on-demand loading
-    eprintln!("   Starting llama-server (router mode, {} model(s), max loaded: 1)...", total_models);
-
-    let llama_port = launch::find_free_port().await?;
-    launch::start_llama_server_router(
-        &bin_dir, &models_dir, llama_port, 1, &ollama_extras,
-    ).await?;
-
-    // List the model names that are available via the router
+    // Print status
     let mut all_model_names: Vec<String> = gguf_models.iter().map(|(n, _, _)| n.clone()).collect();
     for (name, _) in &ollama_extras {
-        let safe = name.replace('/', "-").replace(':', "-");
-        all_model_names.push(safe);
+        all_model_names.push(name.replace('/', "-").replace(':', "-"));
     }
 
     eprintln!();
-    eprintln!("  ✅ Ready (offline, {} models available)", total_models);
+    eprintln!("  ✅ Ready (offline)");
     eprintln!("     API: http://localhost:{}", cli.port);
-    eprintln!("     Models load on first request, swap via LRU");
-    eprintln!();
-    eprintln!("  Available models:");
     for name in &all_model_names {
         eprintln!("     · {name}");
     }
-    eprintln!();
+    for bundle in &image_bundles {
+        if sd_port.is_some() {
+            eprintln!("     · {} 🎨", bundle.name);
+        }
+    }
+    if sd_port.is_some() {
+        eprintln!();
+        eprintln!("  curl http://localhost:{}/v1/images/generations \\", cli.port);
+        eprintln!("    -d '{{\"prompt\":\"a cat astronaut\",\"size\":\"1024x1024\"}}'");
+    }
     if let Some(name) = all_model_names.first() {
+        eprintln!();
         eprintln!("  curl http://localhost:{}/v1/chat/completions \\", cli.port);
         eprintln!("    -d '{{\"model\":\"{name}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}'");
-        eprintln!();
     }
+    eprintln!();
 
-    // Proxy from cli.port → llama_port (router handles model routing internally)
+    // Single proxy loop: route /v1/images/* → sd-server, everything else → llama-server
+    let default_port = llama_port.or(sd_port).unwrap_or(0);
     let addr = if cli.listen_all { "0.0.0.0" } else { "127.0.0.1" };
     let listener = tokio::net::TcpListener::bind(format!("{addr}:{}", cli.port)).await?;
 
@@ -1224,9 +1251,15 @@ async fn run_offline(cli: Cli, bin_dir: PathBuf) -> Result<()> {
             accept = listener.accept() => {
                 let (tcp_stream, _) = accept?;
                 let _ = tcp_stream.set_nodelay(true);
-                let port = llama_port;
+                let llama = default_port;
+                let sd = sd_port;
                 tokio::spawn(async move {
-                    if let Ok(upstream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+                    let target_port = pick_backend_port(&tcp_stream, llama, sd).await;
+                    if target_port == 0 {
+                        let _ = proxy::send_503(tcp_stream).await;
+                        return;
+                    }
+                    if let Ok(upstream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{target_port}")).await {
                         let _ = upstream.set_nodelay(true);
                         let _ = tunnel::relay_tcp_streams(tcp_stream, upstream).await;
                     }
@@ -1240,8 +1273,26 @@ async fn run_offline(cli: Cli, bin_dir: PathBuf) -> Result<()> {
     }
 
     launch::kill_llama_server().await;
+    launch::kill_sd_server().await;
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("mesh-llm-offline-models"));
     Ok(())
+}
+
+/// Peek at the HTTP request to decide which backend to route to.
+/// Returns sd_port for /v1/images/* requests, llama_port for everything else.
+async fn pick_backend_port(stream: &tokio::net::TcpStream, llama_port: u16, sd_port: Option<u16>) -> u16 {
+    let mut buf = vec![0u8; 4096];
+    match stream.peek(&mut buf).await {
+        Ok(n) if n > 0 => {
+            if proxy::is_image_request(&buf[..n]) {
+                if let Some(sd) = sd_port {
+                    return sd;
+                }
+            }
+            llama_port
+        }
+        _ => llama_port,
+    }
 }
 
 /// Idle mode: no args → show instructions and read-only console.
