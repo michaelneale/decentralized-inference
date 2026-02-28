@@ -111,42 +111,66 @@ Next step: verify this translates to actual generation quality (logprob comparis
 
 ---
 
-## Phase 2: Per-Node GGUF Packaging
+## Phase 2: Per-Node GGUF Packaging ✅
 
 **Goal**: Build offline tooling to produce one GGUF per node (trunk + expert group).
 
-### Steps
+### Implementation: `tools/moe-split/moe-split.cpp`
 
-1. **Inspect Mixtral safetensors from HF**
-   - `mistralai/Mixtral-8x7B-Instruct-v0.1` ships as sharded safetensors
-   - Expert tensors: `model.layers.{L}.block_sparse_moe.experts.{E}.w{1,2,3}.weight`
-   - Gate: `model.layers.{L}.block_sparse_moe.gate.weight`
-   - Everything else: trunk
+Native C++ tool that operates directly on GGUF files (no Python/safetensors dependency).
 
-2. **Write repacker** (Python or Rust)
-   - Read `model.safetensors.index.json` → classify trunk vs expert by name regex
-   - Partition experts into N groups (e.g., 2 groups: {0,1,2,3} and {4,5,6,7})
-   - Output: `trunk.safetensors`, `experts_group0.safetensors`, `experts_group1.safetensors`
-   - Optional: `experts_replicated.safetensors` (hot experts)
+**Capabilities**:
+- Reads MoE GGUF → classifies tensors as trunk vs expert
+- Slices packed expert tensors (`ffn_gate_exps`, `ffn_up_exps`, `ffn_down_exps`) along expert dim
+- Gathers router gate rows (`ffn_gate_inp`) to match selected experts
+- Updates `{arch}.expert_count` and clamps `expert_used_count` in metadata
+- Supports contiguous groups (`--groups N`) and custom expert lists (`--expert-list 64,65,72,...`)
+- Non-contiguous gather path for informed expert assignment from moe-analyze data
 
-3. **Convert to GGUF**
-   - For each node: merge trunk + experts_groupN → convert → quantize → `nodeN.gguf`
-   - Each node loads one self-contained GGUF (no llama.cpp loader changes needed)
+**Usage**:
+```bash
+# Split into 4 contiguous groups
+llama-moe-split -m model.gguf -g 4 --output-prefix node
+# → node-0.gguf, node-1.gguf, node-2.gguf, node-3.gguf
 
-4. **Distribution manifest**
-   ```json
-   {
-     "model": "Mixtral-8x7B-Instruct-v0.1",
-     "architecture": "moe",
-     "n_experts": 8, "top_k": 2,
-     "groups": {
-       "0": {"experts": [0,1,2,3], "file": "node0.gguf"},
-       "1": {"experts": [4,5,6,7], "file": "node1.gguf"}
-     },
-     "replicated_experts": [2, 5],
-     "routing": "masked-same-group-topk"
-   }
-   ```
+# Single group
+llama-moe-split -m model.gguf -g 4 --group-id 2 -o node2.gguf
+
+# Custom expert selection (informed grouping from moe-analyze)
+llama-moe-split -m model.gguf --expert-list 64,65,72,80,3,17 -o custom.gguf
+
+# Dry run
+llama-moe-split -m model.gguf -g 8 --dry-run
+```
+
+### Results (Qwen3-30B-A3B-Q4_K_M, 128 experts, top-8)
+
+| Metric | Value |
+|--------|-------|
+| Input size | 17 GB |
+| Output per node (4 groups) | 5.35 GB |
+| Expert tensors sliced | 144 (48 layers × 3 tensors) |
+| Router gates gathered | 48 (one per layer) |
+| Generation speed | 104-106 t/s (vs 101 t/s full model) |
+
+**Quality by contiguous group** (4 groups of 32 experts):
+
+| Group | Experts | Quality |
+|-------|---------|---------|
+| 0 | 0-31 | ❌ garbage |
+| 1 | 32-63 | ❌ garbage |
+| **2** | **64-95** | **✅ coherent** (106.4 t/s) |
+| 3 | 96-127 | ❌ garbage |
+
+**Key findings**:
+1. Split GGUFs load and run in unmodified llama.cpp — no loader changes needed
+2. Quality varies dramatically by group (matches Phase 1b logprob analysis)
+3. Contiguous slicing is a naive baseline — **informed grouping** (using moe-analyze
+   data to select balanced expert mixes) is essential for production
+4. Router gate rows are correctly gathered/reordered — expert renumbering works
+5. Generation speed is actually slightly faster (smaller expert tensors → less memory pressure)
+
+**Next**: Use moe-analyze output to build informed expert groups where every group is viable
 
 ---
 
