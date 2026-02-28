@@ -35,6 +35,26 @@ pub fn extract_model_from_http(buf: &[u8]) -> Option<String> {
     Some(after_quote[..end].to_string())
 }
 
+/// Extract a session hint from an HTTP request for MoE sticky routing.
+/// Looks for "user" or "session_id" in the JSON body. Falls back to None.
+pub fn extract_session_hint(buf: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let body_start = s.find("\r\n\r\n")? + 4;
+    let body = &s[body_start..];
+    // Try "user" field first (standard OpenAI parameter)
+    for key in &["\"user\"", "\"session_id\""] {
+        if let Some(pos) = body.find(key) {
+            let after_key = &body[pos + key.len()..];
+            let after_colon = after_key.trim_start().strip_prefix(':')?;
+            let after_ws = after_colon.trim_start();
+            let after_quote = after_ws.strip_prefix('"')?;
+            let end = after_quote.find('"')?;
+            return Some(after_quote[..end].to_string());
+        }
+    }
+    None
+}
+
 pub fn is_models_list_request(buf: &[u8]) -> bool {
     let s = String::from_utf8_lossy(buf);
     s.starts_with("GET ") && (s.contains("/v1/models") || s.contains("/models"))
@@ -130,8 +150,8 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
 /// Used by the API proxy after election has determined the target.
 pub async fn route_to_target(node: mesh::Node, tcp_stream: TcpStream, target: election::InferenceTarget) {
     match target {
-        election::InferenceTarget::Local(llama_port) => {
-            match TcpStream::connect(format!("127.0.0.1:{llama_port}")).await {
+        election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
+            match TcpStream::connect(format!("127.0.0.1:{port}")).await {
                 Ok(upstream) => {
                     let _ = upstream.set_nodelay(true);
                     if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
@@ -139,12 +159,12 @@ pub async fn route_to_target(node: mesh::Node, tcp_stream: TcpStream, target: el
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("API proxy: can't reach llama-server on {llama_port}: {e}");
+                    tracing::warn!("API proxy: can't reach llama-server on {port}: {e}");
                     let _ = send_503(tcp_stream).await;
                 }
             }
         }
-        election::InferenceTarget::Remote(host_id) => {
+        election::InferenceTarget::Remote(host_id) | election::InferenceTarget::MoeRemote(host_id) => {
             match node.open_http_tunnel(host_id).await {
                 Ok((quic_send, quic_recv)) => {
                     if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {

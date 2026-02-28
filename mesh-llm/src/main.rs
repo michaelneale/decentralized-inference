@@ -1286,7 +1286,15 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         node.record_request(name);
                     }
 
-                    let target = if let Some(ref name) = model_name {
+                    // MoE routing: use session hint for sticky routing across shards
+                    let target = if targets.moe.is_some() {
+                        // Extract a session hint from the request for sticky routing.
+                        // Use the source address + any user/session field as the hint.
+                        let session_hint = proxy::extract_session_hint(&buf[..n])
+                            .unwrap_or_else(|| format!("{_addr}"));
+                        targets.get_moe_target(&session_hint)
+                            .unwrap_or(first_available_target(&targets))
+                    } else if let Some(ref name) = model_name {
                         let t = targets.get(name);
                         if matches!(t, election::InferenceTarget::None) {
                             tracing::debug!("Model '{}' not found, trying first available", name);

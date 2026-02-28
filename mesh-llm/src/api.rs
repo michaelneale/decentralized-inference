@@ -299,10 +299,10 @@ pub async fn start(
             if target_rx.changed().await.is_err() { break; }
             let target = target_rx.borrow().clone();
             match target {
-                election::InferenceTarget::Local(port) => {
+                election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
                     state2.set_llama_port(Some(port)).await;
                 }
-                election::InferenceTarget::Remote(_) => {
+                election::InferenceTarget::Remote(_) | election::InferenceTarget::MoeRemote(_) => {
                     let mut inner = state2.inner.lock().await;
                     inner.llama_ready = true;
                     inner.llama_port = None;
