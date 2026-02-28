@@ -3,6 +3,7 @@ mod download;
 mod election;
 mod launch;
 mod mesh;
+mod moe;
 mod nostr;
 mod proxy;
 mod rewrite;
