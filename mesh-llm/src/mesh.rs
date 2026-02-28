@@ -13,6 +13,38 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, watch};
 
+/// Demand signal for a model — tracks interest via API requests and --model declarations.
+/// Gossiped across the mesh and merged via max(). Decays naturally when last_active gets old.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ModelDemand {
+    /// Unix timestamp of the most recent request or declaration.
+    pub last_active: u64,
+    /// Total requests seen (merged across peers via max).
+    pub request_count: u64,
+}
+
+/// How long a demand entry stays relevant without being refreshed.
+pub const DEMAND_TTL_SECS: u64 = 7200; // 2 hours
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Merge two demand maps. For each model, take max of last_active and request_count.
+pub fn merge_demand(
+    ours: &mut HashMap<String, ModelDemand>,
+    theirs: &HashMap<String, ModelDemand>,
+) {
+    for (model, their_demand) in theirs {
+        let entry = ours.entry(model.clone()).or_default();
+        entry.last_active = entry.last_active.max(their_demand.last_active);
+        entry.request_count = entry.request_count.max(their_demand.request_count);
+    }
+}
+
 pub const ALPN: &[u8] = b"mesh-llm/0";
 const STREAM_GOSSIP: u8 = 0x01;
 const STREAM_TUNNEL: u8 = 0x02;
@@ -66,8 +98,13 @@ struct PeerAnnouncement {
     #[serde(default)]
     requested_models: Vec<String>,
     /// Requests per minute by model (from API proxy routing)
+    /// Kept for backward compat — new nodes use model_demand instead.
     #[serde(default)]
     request_rates: std::collections::HashMap<String, u64>,
+    /// Demand signals for models — replaces request_rates and mesh_wanted.
+    /// Merged across peers via max(last_active, request_count).
+    #[serde(default)]
+    model_demand: HashMap<String, ModelDemand>,
     /// Stable mesh identity — shared by all nodes in the same mesh.
     /// Generated once by the originator, propagated via gossip.
     #[serde(default)]
@@ -94,7 +131,10 @@ pub struct PeerInfo {
     /// Models this node has requested the mesh to serve
     pub requested_models: Vec<String>,
     /// Requests per minute by model (gossipped from API proxy)
+    /// Kept for backward compat — new nodes use model_demand.
     pub request_rates: std::collections::HashMap<String, u64>,
+    /// Demand signals for models — the unified "what does this peer want?"
+    pub model_demand: HashMap<String, ModelDemand>,
     /// Last time we directly communicated with this peer (gossip, heartbeat, tunnel).
     /// Peers not seen in PEER_STALE_SECS are pruned from gossip and eventually removed.
     pub last_seen: std::time::Instant,
@@ -347,8 +387,9 @@ pub struct Node {
     llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
-    request_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
-    last_request_snapshot: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Mesh-wide demand map — merged from gossip + local API requests.
+    /// This is the single source of truth for "what does the mesh want?"
+    model_demand: Arc<std::sync::Mutex<HashMap<String, ModelDemand>>>,
     mesh_id: Arc<Mutex<Option<String>>>,
     accepting: Arc<(tokio::sync::Notify, std::sync::atomic::AtomicBool)>,
     vram_bytes: u64,
@@ -366,10 +407,6 @@ struct MeshState {
     /// Peers confirmed dead — don't reconnect from gossip discovery.
     /// Cleared when the peer successfully reconnects via rejoin/join.
     dead_peers: std::collections::HashSet<EndpointId>,
-    /// Mesh-level wanted models — accumulated from all peers' requested_models.
-    /// Survives peer removal so the mesh remembers what it needs even when
-    /// the node that declared the want goes offline.
-    mesh_wanted: std::collections::HashSet<String>,
 }
 
 /// Channels returned by Node::start for inbound tunnel streams.
@@ -470,7 +507,6 @@ impl Node {
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
                 dead_peers: std::collections::HashSet::new(),
-                mesh_wanted: std::collections::HashSet::new(),
             })),
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
@@ -479,8 +515,7 @@ impl Node {
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
-            request_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            last_request_snapshot: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             accepting: Arc::new((tokio::sync::Notify::new(), std::sync::atomic::AtomicBool::new(false))),
             vram_bytes: vram,
@@ -630,46 +665,85 @@ impl Node {
         self.available_models.lock().await.clone()
     }
 
-    /// Increment request count for a model (called from API proxy on every routed request).
+    /// Record a request for a model — updates the demand map.
+    /// Called from API proxy on every request (including misses for unserved models).
     /// Uses std::sync::Mutex (not tokio) so it can be called from sync context too.
     pub fn record_request(&self, model: &str) {
-        let mut counts = self.request_counts.lock().unwrap();
-        *counts.entry(model.to_string()).or_default() += 1;
+        let mut demand = self.model_demand.lock().unwrap();
+        let entry = demand.entry(model.to_string()).or_default();
+        entry.last_active = now_secs();
+        entry.request_count += 1;
     }
 
-    /// Snapshot request rates (requests per minute since last snapshot).
-    /// Called every gossip cycle (~60s). Returns rates and resets the counters.
-    pub fn snapshot_request_rates(&self) -> std::collections::HashMap<String, u64> {
-        let counts = self.request_counts.lock().unwrap();
-        let mut last = self.last_request_snapshot.lock().unwrap();
-        let mut rates = std::collections::HashMap::new();
-        for (model, &count) in counts.iter() {
-            let prev = last.get(model).copied().unwrap_or(0);
-            if count > prev {
-                rates.insert(model.clone(), count - prev);
+    /// Get the current demand map (for gossip and assignment decisions).
+    pub fn get_demand(&self) -> HashMap<String, ModelDemand> {
+        self.model_demand.lock().unwrap().clone()
+    }
+
+    /// Merge incoming demand from gossip into our local map.
+    pub fn merge_remote_demand(&self, remote: &HashMap<String, ModelDemand>) {
+        let mut demand = self.model_demand.lock().unwrap();
+        merge_demand(&mut demand, remote);
+    }
+
+    /// Get active demand entries (within TTL or pinned by a live node).
+    /// This replaces mesh_wanted_models().
+    pub async fn active_demand(&self) -> HashMap<String, ModelDemand> {
+        let now = now_secs();
+        let demand = self.model_demand.lock().unwrap().clone();
+
+        // Check which models are pinned (declared via --model by self or a live peer)
+        let my_requested = self.requested_models.lock().await;
+        let peers = self.state.lock().await;
+        let mut pinned: std::collections::HashSet<String> = my_requested.iter().cloned().collect();
+        for p in peers.peers.values() {
+            for m in &p.requested_models {
+                pinned.insert(m.clone());
             }
         }
-        *last = counts.clone();
-        rates
+        drop(peers);
+        drop(my_requested);
+
+        demand.into_iter()
+            .filter(|(model, d)| {
+                pinned.contains(model) || (now - d.last_active) < DEMAND_TTL_SECS
+            })
+            .collect()
+    }
+
+    /// Snapshot request rates for backward compat with old nodes.
+    /// Returns rates derived from the demand map.
+    pub fn snapshot_request_rates(&self) -> std::collections::HashMap<String, u64> {
+        let demand = self.model_demand.lock().unwrap();
+        demand.iter()
+            .filter(|(_, d)| d.request_count > 0)
+            .map(|(m, d)| (m.clone(), d.request_count))
+            .collect()
     }
 
     pub async fn set_requested_models(&self, models: Vec<String>) {
-        // Also accumulate into mesh-level wanted set
-        let mut state = self.state.lock().await;
-        for m in &models {
-            state.mesh_wanted.insert(m.clone());
+        // Seed demand entries for --model declarations
+        {
+            let mut demand = self.model_demand.lock().unwrap();
+            let now = now_secs();
+            for m in &models {
+                let entry = demand.entry(m.clone()).or_default();
+                entry.last_active = entry.last_active.max(now);
+            }
         }
-        drop(state);
         *self.requested_models.lock().await = models;
     }
 
+    #[allow(dead_code)]
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
     }
 
-    /// Get all models the mesh has ever wanted — survives peer removal.
+    /// Get all models the mesh wants — based on demand signals.
+    /// Replaces the old mesh_wanted_models() which was local-only.
+    #[allow(dead_code)]
     pub async fn mesh_wanted_models(&self) -> std::collections::HashSet<String> {
-        self.state.lock().await.mesh_wanted.clone()
+        self.active_demand().await.keys().cloned().collect()
     }
 
     /// Start a background task that periodically checks peer health.
@@ -1650,9 +1724,24 @@ impl Node {
             tracing::debug!("Ignoring add_peer for dead peer {}", id.fmt_short());
             return;
         }
-        // Accumulate peer's requested_models into mesh-level wanted set
-        for m in &ann.requested_models {
-            state.mesh_wanted.insert(m.clone());
+        // Merge demand from this peer into our mesh-wide demand map.
+        // If the peer sends model_demand (new node), use that directly.
+        // If model_demand is empty but requested_models has entries (old node),
+        // synthesize demand entries for backward compat.
+        {
+            let mut incoming_demand = ann.model_demand.clone();
+            if incoming_demand.is_empty() && !ann.requested_models.is_empty() {
+                // Old node — synthesize from requested_models + request_rates
+                let now = now_secs();
+                for m in &ann.requested_models {
+                    let entry = incoming_demand.entry(m.clone()).or_default();
+                    entry.last_active = entry.last_active.max(now);
+                    if let Some(&rate) = ann.request_rates.get(m) {
+                        entry.request_count = entry.request_count.max(rate);
+                    }
+                }
+            }
+            self.merge_remote_demand(&incoming_demand);
         }
         if let Some(existing) = state.peers.get_mut(&id) {
             let role_changed = existing.role != ann.role;
@@ -1674,6 +1763,7 @@ impl Node {
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
             existing.request_rates = ann.request_rates.clone();
+            existing.model_demand = ann.model_demand.clone();
             existing.last_seen = std::time::Instant::now();
             if ann.version.is_some() { existing.version = ann.version.clone(); }
             if role_changed || serving_changed {
@@ -1696,6 +1786,7 @@ impl Node {
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
             request_rates: ann.request_rates.clone(),
+            model_demand: ann.model_demand.clone(),
             last_seen: std::time::Instant::now(),
             version: ann.version.clone(),
         });
@@ -1713,6 +1804,8 @@ impl Node {
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
         let my_mesh_id = self.mesh_id.lock().await.clone();
+        // Every node sends the full mesh-wide demand map so it propagates infectiously.
+        let my_demand = self.get_demand();
         let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS);
         let mut announcements: Vec<PeerAnnouncement> = state.peers.values()
             .filter(|p| p.last_seen >= stale_cutoff) // skip stale peers
@@ -1726,6 +1819,7 @@ impl Node {
                 available_models: p.available_models.clone(),
                 requested_models: p.requested_models.clone(),
                 request_rates: p.request_rates.clone(),
+                model_demand: my_demand.clone(),
                 mesh_id: my_mesh_id.clone(),
                 version: p.version.clone(),
             })
@@ -1741,6 +1835,7 @@ impl Node {
             available_models: my_available,
             requested_models: my_requested,
             request_rates: my_rates,
+            model_demand: my_demand,
             mesh_id: my_mesh_id,
             version: Some(crate::VERSION.to_string()),
         });

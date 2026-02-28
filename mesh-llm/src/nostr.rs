@@ -327,19 +327,12 @@ pub async fn publish_loop(
 
         let served_set: std::collections::HashSet<&str> = actually_serving.iter().map(|s| s.as_str()).collect();
 
-        // Wanted = requested but not actually being served by a host
+        // Wanted = models with active demand but not currently served by a host
+        let active_demand = node.active_demand().await;
         let mut wanted: Vec<String> = Vec::new();
-        let my_requested = node.requested_models().await;
-        for m in &my_requested {
+        for m in active_demand.keys() {
             if !served_set.contains(m.as_str()) && !wanted.contains(m) {
                 wanted.push(m.clone());
-            }
-        }
-        for p in &peers {
-            for m in &p.requested_models {
-                if !served_set.contains(m.as_str()) && !wanted.contains(m) {
-                    wanted.push(m.clone());
-                }
             }
         }
 
