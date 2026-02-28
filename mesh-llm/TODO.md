@@ -26,6 +26,13 @@
 - [ ] **SOTA split: Qwen3.5-122B-A10B**: Smaller MoE, 4-bit should fit on 128GB solo. Good baseline before attempting 397B.
 - [ ] **SOTA dense: try largest dense models that need 2+ machines**: Llama-3.3-70B, Qwen2.5-72B — already have 72B on disk. Benchmark split performance at scale.
 
+## MoE Expert Sharding
+See [MoE_PLAN.md](../MoE_PLAN.md) for full plan. Distribute MoE experts across mesh nodes with masked expert groups — non-all-to-all routing for interactive chat.
+- [x] **Phase 1a: routing analysis tool** (`llama-moe-analyze`): observe MoE router decisions, measure group capture ratios. Initial results on Qwen3-30B-A3B (128 experts, top-8): best-group captures **99.3%** of unrestricted top-8 mass even with 8 groups (16 experts/group). Very promising.
+- [x] **Phase 1b: expert masking in llama.cpp**: `llama_model_set_expert_mask()` API + logprob comparison. Best group (of 4) loses only -0.1 logprob; worst loses -2.3. Confirms probe-based placement is critical — some groups are nearly lossless while others degrade heavily.
+- [ ] **Phase 2: per-node GGUF packaging**: tooling to split safetensors checkpoint into trunk + expert group bundles, convert to GGUF per node
+- [ ] **Phase 3: mesh integration**: session placement with probe-and-pin, masked routing per node
+
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`
 - [x] Request rates in `/api/status` JSON for external tooling (demand map: `request_count`, `last_active_secs_ago` per model)
