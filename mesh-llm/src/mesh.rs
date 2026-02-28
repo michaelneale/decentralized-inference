@@ -1843,6 +1843,151 @@ impl Node {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_demand_takes_max() {
+        let mut ours = HashMap::new();
+        ours.insert("GLM".into(), ModelDemand { last_active: 100, request_count: 50 });
+        ours.insert("Hermes".into(), ModelDemand { last_active: 200, request_count: 10 });
+
+        let mut theirs = HashMap::new();
+        theirs.insert("GLM".into(), ModelDemand { last_active: 150, request_count: 30 });
+        theirs.insert("Qwen".into(), ModelDemand { last_active: 300, request_count: 5 });
+
+        merge_demand(&mut ours, &theirs);
+
+        // GLM: max(100,150)=150 for last_active, max(50,30)=50 for count
+        assert_eq!(ours["GLM"].last_active, 150);
+        assert_eq!(ours["GLM"].request_count, 50);
+        // Hermes: unchanged (not in theirs)
+        assert_eq!(ours["Hermes"].last_active, 200);
+        assert_eq!(ours["Hermes"].request_count, 10);
+        // Qwen: new entry from theirs
+        assert_eq!(ours["Qwen"].last_active, 300);
+        assert_eq!(ours["Qwen"].request_count, 5);
+    }
+
+    #[test]
+    fn test_merge_demand_empty_maps() {
+        let mut ours = HashMap::new();
+        let theirs = HashMap::new();
+        merge_demand(&mut ours, &theirs);
+        assert!(ours.is_empty());
+
+        let mut theirs2 = HashMap::new();
+        theirs2.insert("GLM".into(), ModelDemand { last_active: 100, request_count: 1 });
+        merge_demand(&mut ours, &theirs2);
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours["GLM"].request_count, 1);
+    }
+
+    #[test]
+    fn test_merge_demand_idempotent() {
+        let mut ours = HashMap::new();
+        ours.insert("GLM".into(), ModelDemand { last_active: 100, request_count: 50 });
+
+        let theirs = ours.clone();
+        merge_demand(&mut ours, &theirs);
+
+        assert_eq!(ours["GLM"].last_active, 100);
+        assert_eq!(ours["GLM"].request_count, 50);
+    }
+
+    #[test]
+    fn test_demand_ttl_filtering() {
+        let now = now_secs();
+        let mut demand = HashMap::new();
+
+        // Recent — should survive
+        demand.insert("Recent".into(), ModelDemand {
+            last_active: now - 60, // 1 min ago
+            request_count: 10,
+        });
+        // Stale — should be filtered
+        demand.insert("Stale".into(), ModelDemand {
+            last_active: now - DEMAND_TTL_SECS - 100, // past TTL
+            request_count: 100,
+        });
+
+        let filtered: HashMap<String, ModelDemand> = demand.into_iter()
+            .filter(|(_, d)| (now - d.last_active) < DEMAND_TTL_SECS)
+            .collect();
+
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key("Recent"));
+        assert!(!filtered.contains_key("Stale"));
+    }
+
+    #[test]
+    fn test_backward_compat_synthesis() {
+        // Simulate receiving from an old node: model_demand is empty,
+        // but requested_models and request_rates have data
+        let ann_requested = vec!["GLM".to_string(), "Hermes".to_string()];
+        let mut ann_rates = std::collections::HashMap::new();
+        ann_rates.insert("GLM".to_string(), 42u64);
+        let ann_demand: HashMap<String, ModelDemand> = HashMap::new(); // empty — old node
+
+        // Synthesize
+        let mut incoming_demand = ann_demand.clone();
+        if incoming_demand.is_empty() && !ann_requested.is_empty() {
+            let now = now_secs();
+            for m in &ann_requested {
+                let entry = incoming_demand.entry(m.clone()).or_default();
+                entry.last_active = entry.last_active.max(now);
+                if let Some(&rate) = ann_rates.get(m) {
+                    entry.request_count = entry.request_count.max(rate);
+                }
+            }
+        }
+
+        assert_eq!(incoming_demand.len(), 2);
+        assert!(incoming_demand["GLM"].last_active > 0);
+        assert_eq!(incoming_demand["GLM"].request_count, 42);
+        assert!(incoming_demand["Hermes"].last_active > 0);
+        assert_eq!(incoming_demand["Hermes"].request_count, 0); // no rate for Hermes
+    }
+
+    #[test]
+    fn test_demand_serialization_roundtrip() {
+        let mut demand: HashMap<String, ModelDemand> = HashMap::new();
+        demand.insert("GLM".into(), ModelDemand { last_active: 1772309000, request_count: 42 });
+
+        let json = serde_json::to_string(&demand).unwrap();
+        let decoded: HashMap<String, ModelDemand> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded["GLM"].last_active, 1772309000);
+        assert_eq!(decoded["GLM"].request_count, 42);
+    }
+
+    #[test]
+    fn test_demand_deserialization_missing_field() {
+        // Simulate old gossip message without model_demand field
+        // Just verify ModelDemand defaults work
+        let d = ModelDemand::default();
+        assert_eq!(d.last_active, 0);
+        assert_eq!(d.request_count, 0);
+
+        // Verify HashMap<String, ModelDemand> defaults to empty
+        let empty: HashMap<String, ModelDemand> = Default::default();
+        assert!(empty.is_empty());
+
+        // The real test: serde default on a struct with model_demand
+        #[derive(Deserialize, Default)]
+        struct TestStruct {
+            #[serde(default)]
+            model_demand: HashMap<String, ModelDemand>,
+            #[serde(default)]
+            requested_models: Vec<String>,
+        }
+        let parsed: TestStruct = serde_json::from_str("{}").unwrap();
+        assert!(parsed.model_demand.is_empty());
+        assert!(parsed.requested_models.is_empty());
+    }
+}
+
 /// Generate a mesh ID for a new mesh.
 /// Named meshes: `sha256("mesh-llm:" + name + ":" + nostr_pubkey)` — deterministic, unique per creator.
 /// Unnamed meshes: random UUID, persisted to `~/.mesh-llm/mesh-id`.
