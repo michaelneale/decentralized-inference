@@ -9,7 +9,7 @@ Pool spare GPU capacity to run LLMs at larger scale. Split inference across mach
 ## Quick start (macOS Apple Silicon)
 
 ```bash
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 ```
 
 ```bash
