@@ -169,13 +169,21 @@ pub async fn election_loop(
     }
 
     // MoE mode: each node runs its own llama-server with its expert shard.
-    // Completely different from tensor-split mode.
+    // Only enter MoE split mode if the model doesn't fit locally or --split is forced.
+    // Otherwise, just run the full model — every node is independent.
     if let Some(ref moe_cfg) = moe_config {
-        moe_election_loop(
-            node, bin_dir, model, model_name, moe_cfg.clone(),
-            target_tx, &mut on_change,
-        ).await;
-        return;
+        let need_moe_split = force_split || !model_fits_locally;
+        if need_moe_split {
+            moe_election_loop(
+                node, bin_dir, model, model_name, moe_cfg.clone(),
+                target_tx, &mut on_change,
+            ).await;
+            return;
+        } else {
+            eprintln!("🧩 [{}] MoE model fits locally ({:.1}GB VRAM for {:.1}GB model) — no split needed",
+                model_name, my_vram as f64 / 1e9, model_bytes as f64 / 1e9);
+            // Fall through to normal election loop — each node runs full model independently
+        }
     }
 
     loop {
