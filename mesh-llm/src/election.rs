@@ -115,12 +115,52 @@ impl ModelTargets {
     }
 }
 
-/// Look up MoE config for a model from the catalog.
-fn lookup_moe_config(model_name: &str) -> Option<download::MoeConfig> {
+/// Look up MoE config for a model. Two tiers:
+/// 1. Catalog (has pre-computed ranking) — instant, optimal
+/// 2. GGUF header detection (no ranking) — uses conservative defaults
+fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::MoeConfig> {
+    // Tier 1: catalog lookup (has ranking)
     let q = model_name.to_lowercase();
-    download::MODEL_CATALOG.iter()
+    if let Some(cfg) = download::MODEL_CATALOG.iter()
         .find(|m| m.name.to_lowercase() == q || m.file.to_lowercase().contains(&q))
         .and_then(|m| m.moe.clone())
+    {
+        return Some(cfg);
+    }
+
+    // Tier 2: auto-detect from GGUF header
+    let info = moe::detect_moe(model_path)?;
+    eprintln!("🔍 Auto-detected MoE from GGUF: {} experts, top-{}",
+        info.expert_count, info.expert_used_count);
+
+    // Conservative default: 50% shared core (safe floor for quality).
+    // Without a ranking, we use sequential expert IDs (0..N).
+    let min_experts = (info.expert_count as f64 * 0.5).ceil() as u32;
+
+    // Check for cached ranking on disk
+    let ranking_path = moe::ranking_cache_path(model_path);
+    if let Some(ranking) = moe::load_cached_ranking(&ranking_path) {
+        eprintln!("  Using cached ranking from {}", ranking_path.display());
+        // Leak the ranking into a static slice so it matches MoeConfig's &'static [u32]
+        let ranking: &'static [u32] = Vec::leak(ranking);
+        return Some(download::MoeConfig {
+            n_expert: info.expert_count,
+            n_expert_used: info.expert_used_count,
+            min_experts_per_node: min_experts,
+            ranking,
+        });
+    }
+
+    // No ranking available — use sequential (0, 1, 2, ...) as fallback.
+    // The election loop can run moe-analyze to compute a proper ranking.
+    let sequential: Vec<u32> = (0..info.expert_count).collect();
+    let ranking: &'static [u32] = Vec::leak(sequential);
+    Some(download::MoeConfig {
+        n_expert: info.expert_count,
+        n_expert_used: info.expert_used_count,
+        min_experts_per_node: min_experts,
+        ranking,
+    })
 }
 
 /// Background election loop for a single model.
@@ -160,7 +200,7 @@ pub async fn election_loop(
     let model_fits_locally = my_vram >= (model_bytes as f64 * 1.1) as u64;
 
     // Check if this is a MoE model with pre-computed expert routing
-    let moe_config = lookup_moe_config(&model_name);
+    let moe_config = lookup_moe_config(&model_name, &model);
     if moe_config.is_some() {
         eprintln!("🧩 [{}] MoE model detected ({} experts, top-{})",
             model_name,
