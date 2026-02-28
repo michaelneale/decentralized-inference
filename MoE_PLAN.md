@@ -170,45 +170,92 @@ llama-moe-split -m model.gguf -g 8 --dry-run
 4. Router gate rows are correctly gathered/reordered — expert renumbering works
 5. Generation speed is actually slightly faster (smaller expert tensors → less memory pressure)
 
-**Next**: Use moe-analyze output to build informed expert groups where every group is viable
+### Phase 2b: Overlap Strategy (validated on Qwen3-30B-A3B)
+
+The key finding from Phase 2: **disjoint expert partitioning doesn't work**. You need a
+shared core of hot experts replicated to every node, with unique long-tail experts split across nodes.
+
+**Expert routing is dominated by a small core:**
+- Expert 0: 25% of all gate mass, selected on 97.8% of tokens
+- Top 46 experts (36%): minimum viable set for coherent output
+- Remaining 82 experts: 44.4% of gate mass, individually ~0.5% each
+
+**Validated overlap deployment (2 nodes):**
+
+| Config | Per-node | Quality | Coverage |
+|--------|----------|---------|----------|
+| 87 experts (46 shared + 41 unique) | 12.9 GB | ✅ both excellent | 128/128 |
+| Top-64 by mass | 9.8 GB | ✅ excellent | 64/128 |
+| Bottom-64 by mass | 9.8 GB | ❌ garbage | 64/128 |
+| Top-48 | 7.5 GB | ✅ coherent | 48/128 |
+| Top-44 | ~7 GB | ❌ loops | 44/128 |
+
+**The overlap strategy:**
+1. `moe-analyze --export-ranking --all-layers` → get per-expert gate mass ranking
+2. Shared core = top N experts (N ≈ minimum viable, ~36% for this model)
+3. Each node = shared core + unique shard of remaining experts
+4. No prompt probing needed — both nodes handle everything, hash-route sessions
+5. Full expert coverage across the fleet
+
+**Probing is NOT required** for the 2-node case with 68% overlap. Both nodes produce
+equivalent quality on all tested prompts (general chat, code, math, translation, reasoning).
+Probing becomes relevant only with more nodes / less overlap / sharper expert specialization.
+
+**Tools updated:**
+- `moe-analyze --export-ranking --all-layers` — exports gate mass CSV
+- `moe-split --ranking-file FILE --replicate N` — ranking-based snake draft with hot replication
+- `moe-split --expert-list` — arbitrary expert selection for custom splits
 
 ---
 
-## Phase 3: Mesh Integration (2+ nodes)
+## Phase 3: Mesh Integration (2+ nodes) ← **NEXT**
 
-**Goal**: Run Mixtral across mesh nodes with session pinning and probe-based placement.
+**Goal**: Wire the split GGUFs into mesh-llm so two real nodes serve sessions.
 
-### Steps
+### What's needed
 
-1. **Session placement in mesh-llm**
-   - New concept: `expert_group` per session
-   - Probe: on first request, send first 16–32 tokens to candidate nodes
-   - Each node scores: `S = sum(top_k(softmax(gate_logits) * mask))`
-   - Pin session to best-scoring node
+1. **moe-split automation in mesh-llm**
+   - Model catalog knows the full GGUF + ranking CSV
+   - On `mesh deploy`, split GGUFs for each node based on node count
+   - Push per-node GGUF to each node (or have nodes pull their shard)
 
-2. **Expert masking enforced by GGUF contents**
-   - Each node's GGUF only contains its group's experts
-   - Still need `--expert-mask` or equivalent so router logits are properly masked
+2. **Session routing**
+   - For N=2 with overlap: simple hash routing (both nodes are equivalent)
+   - No probing infrastructure needed for v1
+   - Session sticks to the assigned node for its lifetime (KV cache is local)
 
-3. **Online gate logging for hot-expert discovery**
-   - Each node logs unmasked gate top-k for early MoE layers during normal serving
-   - Periodically aggregate → update replicated expert set → rebuild overlay
+3. **llama-server per node**
+   - Each node runs stock llama-server with its split GGUF
+   - No code changes to llama-server — the split GGUF handles expert restriction
+   - mesh-llm proxy routes incoming requests to the assigned node
+
+4. **End-to-end test**
+   - Two machines, each loading a split Qwen3-30B-A3B GGUF
+   - Chat sessions routed via mesh-llm proxy
+   - Verify: both nodes respond coherently, sessions are sticky, no cross-node traffic
+
+### What's NOT needed for v1
+- Probe-based placement (both nodes equivalent with overlap)
+- Online gate logging / hot expert discovery
+- Dynamic expert rebalancing
 
 ---
 
-## Phase 4: Scale to Larger MoE
+## Phase 4: Scale to Real Targets
 
-Move to models where expert sharding actually matters:
+Models where expert sharding provides actual value (model doesn't fit on one machine):
 
-| Model | Total | Active | Experts | Groups needed |
-|-------|-------|--------|---------|---------------|
-| Mixtral 8×7B | 47B | ~13B | 8 | 2 |
-| Qwen3-30B-A3B | 30B | 3B | many | 4–8 |
-| Mixtral 8×22B | 141B | ~44B | 8 | 2–4 |
-| Qwen3-235B-A22B | 235B | ~22B | 128 | 8–16 |
-| Kimi-K2.5 | 1T | ~32B | 384 | 12–16 |
+| Model | Experts | Top-K | Size (Q4) | Est. min core | Nodes | Per-node |
+|-------|---------|-------|-----------|---------------|-------|----------|
+| Mixtral 8×22B | 8 | 2 | ~80 GB | ~4 experts | 2 | ~45 GB |
+| Qwen3-235B-A22B | 128 | 8 | ~130 GB | ~46? | 2-4 | ~35-70 GB |
+| DeepSeek-V3 | 256 | 8 | ~350 GB | TBD | 4-8 | ~50-90 GB |
+| Kimi-K2.5 | 384 | 8 | ~500 GB | TBD | 4-8 | ~65-130 GB |
 
-Same pipeline: inspect safetensors → classify → partition → per-node GGUF → masked routing + session pinning.
+**Same pipeline**: `moe-analyze` → ranking → `moe-split` with overlap → deploy to nodes.
+
+Key question for larger models: does the "shared core" percentage shrink as expert count grows?
+If so, overlap cost decreases and more nodes become viable. Need to test.
 
 ---
 
@@ -225,11 +272,11 @@ If trunk doesn't fit on one node (possible for Kimi-K2.5 at 1T total):
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Expert distribution | Non-all-to-all, always | RTT over mesh/WiFi/WAN kills interactive chat |
-| Routing constraint | Group-masked top-k, same group | Bounded fanout by construction |
-| Session binding | Sticky to one node/group | No per-token cross-host traffic |
+| Expert distribution | Overlapping shared core + unique shards | Disjoint fails; overlap makes every node viable |
+| Routing constraint | Router naturally adapts to available experts | Split GGUF only contains node's experts |
+| Session binding | Hash-route, sticky to one node | Both nodes equivalent with overlap; no probing needed |
 | Trunk placement | Replicated on every node | Keeps attention+KV local |
-| Placement method | Probe: score router mass per group | Content-aware, cheap |
-| Hot expert discovery | Offline calibration + online gate logging | Identify generalists for replication |
-| Packaging | Per-node GGUF (trunk + group + replicas) | Works with existing llama-server |
+| Placement method | Hash (v1), probe later if needed | Overlap makes nodes equivalent for general use |
+| Hot expert discovery | Offline: `moe-analyze --export-ranking` | Determines shared core + unique assignment |
+| Packaging | Per-node GGUF (trunk + shared core + unique shard) | Works with existing llama-server |
 | Starter model | Qwen3-30B-A3B | 128 experts (realistic group sizes), well-supported, 17GB Q4 |
