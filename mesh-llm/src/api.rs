@@ -82,6 +82,12 @@ struct MeshModelPayload {
     status: String,
     node_count: usize,
     size_gb: f64,
+    /// Total requests seen across the mesh (from demand map)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_count: Option<u64>,
+    /// Seconds since last request or declaration (None if no demand data)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_active_secs_ago: Option<u64>,
 }
 
 impl MeshApi {
@@ -158,6 +164,11 @@ impl MeshApi {
 
         let catalog = node.mesh_catalog().await;
         let served = node.models_being_served().await;
+        let active_demand = node.active_demand().await;
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let my_serving = inner.model_name.clone();
         let mesh_models: Vec<MeshModelPayload> = catalog.iter().map(|name| {
             let is_warm = served.contains(name);
@@ -182,11 +193,21 @@ impl MeshApi {
                         .unwrap_or("0")
                 )
             };
+            // Demand info from the unified demand map
+            let (request_count, last_active_secs_ago) = match active_demand.get(name) {
+                Some(d) => (
+                    Some(d.request_count),
+                    Some(now_ts.saturating_sub(d.last_active)),
+                ),
+                None => (None, None),
+            };
             MeshModelPayload {
                 name: name.clone(),
                 status: if is_warm { "warm".into() } else { "cold".into() },
                 node_count,
                 size_gb,
+                request_count,
+                last_active_secs_ago,
             }
         }).collect();
 
@@ -278,10 +299,10 @@ pub async fn start(
             if target_rx.changed().await.is_err() { break; }
             let target = target_rx.borrow().clone();
             match target {
-                election::InferenceTarget::Local(port) => {
+                election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
                     state2.set_llama_port(Some(port)).await;
                 }
-                election::InferenceTarget::Remote(_) => {
+                election::InferenceTarget::Remote(_) | election::InferenceTarget::MoeRemote(_) => {
                     let mut inner = state2.inner.lock().await;
                     inner.llama_ready = true;
                     inner.llama_port = None;

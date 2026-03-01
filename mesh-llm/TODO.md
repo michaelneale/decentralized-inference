@@ -26,14 +26,22 @@
 - [ ] **SOTA split: Qwen3.5-122B-A10B**: Smaller MoE, 4-bit should fit on 128GB solo. Good baseline before attempting 397B.
 - [ ] **SOTA dense: try largest dense models that need 2+ machines**: Llama-3.3-70B, Qwen2.5-72B — already have 72B on disk. Benchmark split performance at scale.
 
+## MoE Expert Sharding
+See [MoE_PLAN.md](../MoE_PLAN.md) for full plan. Distribute MoE experts across mesh nodes with overlapping expert shards — zero cross-node traffic during inference.
+- [x] **Phase 1a: routing analysis tool** (`llama-moe-analyze`): observe MoE router decisions, measure group capture ratios. Initial results on Qwen3-30B-A3B (128 experts, top-8): best-group captures **99.3%** of unrestricted top-8 mass even with 8 groups (16 experts/group).
+- [x] **Phase 1b: expert masking in llama.cpp**: `llama_model_set_expert_mask()` API + logprob comparison. Best group (of 4) loses only -0.1 logprob; worst loses -2.3.
+- [x] **Phase 2: per-node GGUF packaging** (`llama-moe-split`): splits MoE GGUF into per-node shards with trunk replicated + expert subset sliced. Validated: 87/128 experts per node = excellent quality, 12.9GB shard (vs 17GB full).
+- [x] **Phase 3: mesh integration**: auto-detect MoE from GGUF header, compute overlapping expert assignments, split locally, each node runs own llama-server. Session-sticky routing via hash. Integration tested: OLMoE-1B-7B across 2 machines over WAN (225ms RTT).
+- [ ] **Phase 4: optimized rankings**: run `moe-analyze` lazily for unknown MoE models, cache rankings. Current fallback uses conservative 50% shared core with sequential experts.
+- [ ] **Phase 5: scale testing**: Mixtral 8×22B (~80GB), Qwen3-235B-A22B (~130GB) — models that actually need distribution.
+
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`
-- [ ] Demand tracking in console: show req/min per model in TUI
-- [ ] Request rates in `/api/status` JSON for external tooling
+- [x] Request rates in `/api/status` JSON for external tooling (demand map: `request_count`, `last_active_secs_ago` per model)
 - [ ] `mesh-llm recommend`: CLI subcommand to suggest models for your hardware
 - [ ] **Revisit `--publish` flag experience**: Bare `--publish` without `--mesh-name` is vestigial — publishes an unnamed mesh to Nostr that's hard to discover/filter. Consider: require `--mesh-name` with `--publish`, or auto-generate a name, or just document that `--mesh-name` is the intended way.
 
 ## Future
 - [ ] **Public named meshes**: `--mesh-name "cool-mesh" --publish` currently gets -200 penalty for random `--auto` users (treated as private group). If someone explicitly passes both `--mesh-name` and `--publish`, add a `public: true` field to the Nostr listing so it scores like an unnamed mesh (no penalty). Lets people give their mesh a fun name without hiding it from discovery.
-- [ ] Demand-based Nostr listings: include request rates so `--auto` joiners can see what's hot
+- [x] Demand-based Nostr listings: `wanted` list now derived from unified demand map (active demand, not served)
 - [ ] Multi-node tensor split recovery: if one split peer dies, re-split across remaining

@@ -2,19 +2,28 @@
 
 ![Mesh LLM](mesh.png)
 
-Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights).
+Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights). MoE models split by experts instead of layers — each node runs independently with zero cross-node traffic.
 
 **[Try it now](https://mesh-llm-console.fly.dev/)** — live console connected to a public mesh. Chat with models running on real hardware.
 
-## Quick start (macOS Apple Silicon)
+## Install (macOS Apple Silicon)
 
 ```bash
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 ```
 
+Then run:
+
 ```bash
-mesh-llm --model Qwen2.5-32B    # downloads model (~20GB), starts API + web console
-mesh-llm --model Qwen2.5-3B     # or a small model first (~2GB)
+mesh-llm --auto                            # join the best public mesh, start serving
+```
+
+That's it. Downloads a model for your hardware, connects to other nodes, and gives you an OpenAI-compatible API at `http://localhost:9337`.
+
+Or start your own:
+```bash
+mesh-llm --model Qwen2.5-32B              # downloads model (~20GB), starts API + web console
+mesh-llm --model Qwen2.5-3B               # or a small model first (~2GB)
 ```
 
 Add another machine:
@@ -36,9 +45,11 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 
 **Tensor split** — if a model doesn't fit, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
 
+**MoE expert split** — Mixture-of-Experts models (Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek) split by experts, not layers. Each node gets a standalone GGUF with the full trunk + its expert subset — runs its own llama-server with zero cross-node traffic during inference. Auto-detected from GGUF metadata. Only splits when needed (model doesn't fit) or `--split` is forced.
+
 **Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
 
-**Demand-aware rebalancing** — request rates are tracked per model and shared via gossip. Standby nodes auto-promote to serve hot models (≥10 req/min, ≥3x imbalance). Nodes also auto-promote when a model loses its last server (within ~60s).
+**Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate infectiously across all nodes and decay naturally via TTL. Standby nodes auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others. When a model loses its last server, standby nodes detect it within ~60s.
 
 **Latency design** — the key insight is that HTTP streaming is latency-tolerant while RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for tensor splits where the model physically doesn't fit on one machine.
 
@@ -221,7 +232,7 @@ mesh-llm [OPTIONS]
   --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
   --listen-all         Bind to 0.0.0.0 (for containers)
   --max-vram GB        Cap VRAM advertised to mesh
-  --split              Force tensor split
+  --split              Force tensor split (dense) or MoE expert split
   --device DEV         GPU device (default: MTL0)
   --draft PATH         Draft model for speculative decoding
   --no-draft           Disable auto draft detection

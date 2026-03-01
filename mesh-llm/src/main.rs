@@ -3,6 +3,7 @@ mod download;
 mod election;
 mod launch;
 mod mesh;
+mod moe;
 mod nostr;
 mod proxy;
 mod rewrite;
@@ -477,18 +478,25 @@ fn parse_size_str(s: &str) -> u64 {
     }
 }
 
-/// 3. The most underserved model (fewest nodes serving it relative to its size)
-/// 4. Fall back to the first requested model in the mesh
+/// Pick which model this node should serve, based on demand signals.
+///
+/// Priority:
+/// 1. Unserved models with active demand that we have on disk (hottest first)
+/// 2. Underserved models with demand that we have on disk
+/// 3. Unserved models with demand that we can download from catalog
+/// 4. Standby if everything is covered
 async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
 
-    // Use mesh-level wanted set — survives peer removal
-    let mesh_requested = node.mesh_wanted_models().await;
+    // Get active demand — the unified "what does the mesh want?"
+    let demand = node.active_demand().await;
 
-    if mesh_requested.is_empty() {
-        // Nobody has requested anything — shouldn't happen if seeder ran
+    if demand.is_empty() {
+        eprintln!("📋 No demand signals — no models requested");
         return None;
     }
+
+    eprintln!("📋 Active demand: {:?}", demand.keys().collect::<Vec<_>>());
 
     // Count how many nodes are serving each model
     let mut serving_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -500,71 +508,78 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 
     let my_vram = node.vram_bytes();
 
-    // Find all unserved models we could solo
+    /// Check if a model fits in our VRAM. Returns false and logs if it doesn't.
+    fn model_fits(model: &str, my_vram: u64) -> bool {
+        let model_path = mesh::find_model_path(model);
+        let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
+        let needed = (model_bytes as f64 * 1.1) as u64;
+        if model_bytes > 0 && needed > my_vram {
+            eprintln!("📋 Skipping {} — needs {:.1}GB, we have {:.1}GB",
+                model, needed as f64 / 1e9, my_vram as f64 / 1e9);
+            return false;
+        }
+        true
+    }
+
+    // Sort demand entries by request_count descending (hottest first)
+    let mut demand_sorted: Vec<(String, mesh::ModelDemand)> = demand.into_iter().collect();
+    demand_sorted.sort_by(|a, b| b.1.request_count.cmp(&a.1.request_count));
+
+    // Priority 1: Unserved models on disk, ordered by demand
     let mut candidates: Vec<String> = Vec::new();
-    for m in &mesh_requested {
-        if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
-            let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
-            let needed = (model_bytes as f64 * 1.1) as u64;
-            if model_bytes > 0 && needed > my_vram {
-                eprintln!("📋 Skipping {} — needs {:.1}GB, we have {:.1}GB",
-                    m, needed as f64 / 1e9, my_vram as f64 / 1e9);
-                continue;
-            }
+    for (m, _d) in &demand_sorted {
+        if serving_count.get(m).copied().unwrap_or(0) == 0
+            && local_models.contains(m)
+            && model_fits(m, my_vram)
+        {
             candidates.push(m.clone());
         }
     }
 
     if !candidates.is_empty() {
-        // Pick deterministically based on node ID so concurrent joiners spread out.
-        // Sort candidates, then hash our node ID to pick an index.
-        candidates.sort();
-        let my_id = node.id();
-        let id_bytes = my_id.as_bytes();
-        let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let idx = (hash as usize) % candidates.len();
-        let pick = &candidates[idx];
-        eprintln!("📋 Assigned to serve {} (needed by mesh, already on disk, {} candidates)", pick, candidates.len());
+        // If multiple, pick deterministically so concurrent joiners spread out
+        if candidates.len() > 1 {
+            let my_id = node.id();
+            let id_bytes = my_id.as_bytes();
+            let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let idx = (hash as usize) % candidates.len();
+            let pick = &candidates[idx];
+            eprintln!("📋 Assigned to serve {} (unserved, on disk, {} candidates, by demand)", pick, candidates.len());
+            return Some(pick.clone());
+        }
+        let pick = &candidates[0];
+        eprintln!("📋 Assigned to serve {} (unserved, on disk, by demand)", pick);
         return Some(pick.clone());
     }
 
-    // Also check: are there models with fewer servers than others?
-    // If model A has 3 servers and model B has 1, we should add to B not go standby.
-    let mut underserved: Vec<(String, usize)> = Vec::new();
+    // Priority 2: Underserved models on disk (fewer servers than others)
     let max_count = serving_count.values().copied().max().unwrap_or(0);
-    for m in &mesh_requested {
+    let mut underserved: Vec<(String, usize, u64)> = Vec::new(); // (model, servers, demand)
+    for (m, d) in &demand_sorted {
         let count = serving_count.get(m).copied().unwrap_or(0);
-        if count < max_count && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
-            let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
-            let needed = (model_bytes as f64 * 1.1) as u64;
-            if model_bytes > 0 && needed > my_vram {
-                continue;
-            }
-            underserved.push((m.clone(), count));
+        if count < max_count && local_models.contains(m) && model_fits(m, my_vram) {
+            underserved.push((m.clone(), count, d.request_count));
         }
     }
     if !underserved.is_empty() {
-        // Pick the least-served model
-        underserved.sort_by_key(|(_, count)| *count);
-        let (pick, count) = &underserved[0];
+        // Pick the least-served, breaking ties by highest demand
+        underserved.sort_by_key(|(_, count, demand)| (*count, std::cmp::Reverse(*demand)));
+        let (pick, count, _) = &underserved[0];
         let max_model = serving_count.iter().max_by_key(|(_, &v)| v).map(|(k, _)| k.as_str()).unwrap_or("?");
         eprintln!("📋 Assigned to serve {} ({} servers vs {} has {}) — rebalancing",
             pick, count, max_model, max_count);
         return Some(pick.clone());
     }
 
-    // Nothing on disk matches — check if we can download an unserved model from catalog
-    let mut downloadable: Vec<String> = Vec::new();
-    for m in &mesh_requested {
+    // Priority 3: Unserved models we can download from catalog
+    let mut downloadable: Vec<(String, u64)> = Vec::new(); // (model, demand)
+    for (m, d) in &demand_sorted {
         if serving_count.get(m).copied().unwrap_or(0) > 0 { continue; }
-        // Check catalog for size
         if let Some(cat) = download::find_model(m) {
             let size_bytes = parse_size_str(cat.size);
             let needed = (size_bytes as f64 * 1.1) as u64;
             if needed <= my_vram {
-                downloadable.push(m.clone());
+                downloadable.push((m.clone(), d.request_count));
             } else {
                 eprintln!("📋 Skipping {} — needs {:.1}GB, we have {:.1}GB",
                     m, needed as f64 / 1e9, my_vram as f64 / 1e9);
@@ -572,37 +587,48 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         }
     }
     if !downloadable.is_empty() {
-        downloadable.sort();
-        let my_id = node.id();
-        let id_bytes = my_id.as_bytes();
-        let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let idx = (hash as usize) % downloadable.len();
-        let pick = &downloadable[idx];
-        eprintln!("📋 Assigned to serve {} (needed by mesh, will download)", pick);
+        // Pick hottest downloadable, with node-ID hash for tie-breaking
+        if downloadable.len() > 1 {
+            let my_id = node.id();
+            let id_bytes = my_id.as_bytes();
+            let hash = id_bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let idx = (hash as usize) % downloadable.len();
+            let (pick, _) = &downloadable[idx];
+            eprintln!("📋 Assigned to serve {} (unserved, will download, by demand)", pick);
+            return Some(pick.clone());
+        }
+        let (pick, _) = &downloadable[0];
+        eprintln!("📋 Assigned to serve {} (unserved, will download, by demand)", pick);
         return Some(pick.clone());
     }
 
-    // Everything is balanced — stay standby
-    let all_covered = mesh_requested.iter()
-        .all(|m| serving_count.get(m).copied().unwrap_or(0) > 0);
+    // Everything with demand is covered
+    let all_covered = demand_sorted.iter()
+        .all(|(m, _)| serving_count.get(m).copied().unwrap_or(0) > 0);
     if all_covered {
-        eprintln!("📋 All mesh models are balanced — staying on standby");
-        return None;
+        eprintln!("📋 All demanded models are covered — staying on standby");
     }
 
     None
 }
 
-/// Check if any mesh-requested model has zero servers and we have it on disk.
-/// Unlike pick_model_assignment(), this only returns a model when one is truly
-/// unserved — it won't promote just to add redundancy.
+/// Check if a standby node should promote to serve a model.
+/// Uses demand signals — promotes for unserved models with active demand,
+/// or for demand-based rebalancing when one model is much hotter than others.
+///
+/// Rebalancing uses `last_active` to gate on recency (only models active within
+/// the last 60 minutes are considered), then `request_count / servers` for
+/// relative hotness among those recent models.
 async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
+    let demand = node.active_demand().await;
 
-    // Use mesh-level wanted set — survives peer removal
-    let mesh_requested = node.mesh_wanted_models().await;
+    if demand.is_empty() { return None; }
 
-    if mesh_requested.is_empty() { return None; }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let mut serving_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for p in &peers {
@@ -613,8 +639,15 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
 
     let my_vram = node.vram_bytes();
 
-    // Priority 1: promote for models with ZERO servers
-    for m in &mesh_requested {
+    // Only consider models with recent activity (last 60 minutes).
+    // This prevents stale cumulative request_count from triggering promotions
+    // for models that were popular hours ago but idle now.
+    const RECENT_SECS: u64 = 3600;
+
+    // Priority 1: promote for models with active demand and ZERO servers
+    // Sort by demand (hottest first)
+    let mut unserved: Vec<(String, u64)> = Vec::new();
+    for (m, d) in &demand {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
             let model_path = mesh::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
@@ -622,65 +655,46 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
             if model_bytes > 0 && needed > my_vram {
                 continue;
             }
-            return Some(m.clone());
+            unserved.push((m.clone(), d.request_count));
         }
     }
-
-    // Priority 2: demand-based rebalancing
-    // Aggregate request rates across all peers for each model
-    let mut total_demand: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for p in &peers {
-        for (model, &rate) in &p.request_rates {
-            *total_demand.entry(model.clone()).or_default() += rate;
-        }
-    }
-    // Add our own rates
-    let my_rates = node.snapshot_request_rates();
-    for (model, rate) in &my_rates {
-        *total_demand.entry(model.clone()).or_default() += rate;
+    if !unserved.is_empty() {
+        unserved.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        return Some(unserved[0].0.clone());
     }
 
-    // Find the model with the worst demand/server ratio.
-    // Promote if: a model we can serve has significantly higher demand per server
-    // than others, OR is hot enough on its own (≥10 req/min per server).
-    if !total_demand.is_empty() {
-        let mut ratios: Vec<(String, f64)> = Vec::new();
-        for m in &mesh_requested {
-            let demand = *total_demand.get(m).unwrap_or(&0) as f64;
-            let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
-            if servers > 0.0 && local_models.contains(m) {
-                let model_path = mesh::find_model_path(m);
-                let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
-                let needed = (model_bytes as f64 * 1.1) as u64;
-                if model_bytes > 0 && needed > my_vram {
-                    continue;
-                }
-                ratios.push((m.clone(), demand / servers));
+    // Priority 2: demand-based rebalancing.
+    // Only consider models with recent activity, then use request_count / servers
+    // for relative hotness. Promote if one model is significantly hotter than others.
+    let mut ratios: Vec<(String, f64)> = Vec::new();
+    for (m, d) in &demand {
+        if now.saturating_sub(d.last_active) > RECENT_SECS { continue; }
+        let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
+        if servers > 0.0 && d.request_count > 0 && local_models.contains(m) {
+            let model_path = mesh::find_model_path(m);
+            let model_bytes = std::fs::metadata(&model_path).map(|md| md.len()).unwrap_or(0);
+            let needed = (model_bytes as f64 * 1.1) as u64;
+            if model_bytes > 0 && needed > my_vram {
+                continue;
             }
+            ratios.push((m.clone(), d.request_count as f64 / servers));
         }
+    }
 
-        if !ratios.is_empty() {
-            ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let (hottest_model, hottest_ratio) = &ratios[0];
+    if !ratios.is_empty() {
+        ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let (hottest_model, hottest_ratio) = &ratios[0];
+        let coldest_ratio = if ratios.len() >= 2 { ratios[ratios.len() - 1].1 } else { 0.0 };
+        let should_promote = if ratios.len() >= 2 {
+            *hottest_ratio >= coldest_ratio * 3.0 && *hottest_ratio >= 10.0
+        } else {
+            *hottest_ratio >= 10.0
+        };
 
-            // Two cases for promotion:
-            // 1. Multiple models with demand: hottest is ≥3x coldest (and ≥10 req/min)
-            // 2. Single hot model: ≥10 req/min per server with no other models getting traffic
-            let coldest_ratio = if ratios.len() >= 2 { ratios[ratios.len() - 1].1 } else { 0.0 };
-            let should_promote = if ratios.len() >= 2 {
-                *hottest_ratio >= coldest_ratio * 3.0 && *hottest_ratio >= 10.0
-            } else {
-                // Only one model has demand — promote if it's clearly hot
-                // and there's at least one model with 0 demand we could serve instead
-                // (otherwise adding capacity to the only active model is always right)
-                *hottest_ratio >= 10.0
-            };
-
-            if should_promote {
-                eprintln!("📋 Promoting to serve {} — demand {:.0} req/min/server (coldest: {:.0})",
-                    hottest_model, hottest_ratio, coldest_ratio);
-                return Some(hottest_model.clone());
-            }
+        if should_promote {
+            eprintln!("📋 Promoting to serve {} — demand {:.0} req/server (coldest: {:.0})",
+                hottest_model, hottest_ratio, coldest_ratio);
+            return Some(hottest_model.clone());
         }
     }
 
@@ -1272,7 +1286,15 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         node.record_request(name);
                     }
 
-                    let target = if let Some(ref name) = model_name {
+                    // MoE routing: use session hint for sticky routing across shards
+                    let target = if targets.moe.is_some() {
+                        // Extract a session hint from the request for sticky routing.
+                        // Use the source address + any user/session field as the hint.
+                        let session_hint = proxy::extract_session_hint(&buf[..n])
+                            .unwrap_or_else(|| format!("{_addr}"));
+                        targets.get_moe_target(&session_hint)
+                            .unwrap_or(first_available_target(&targets))
+                    } else if let Some(ref name) = model_name {
                         let t = targets.get(name);
                         if matches!(t, election::InferenceTarget::None) {
                             tracing::debug!("Model '{}' not found, trying first available", name);
