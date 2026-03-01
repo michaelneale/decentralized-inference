@@ -38,7 +38,7 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 
 **Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
 
-**Demand-aware rebalancing** — request rates are tracked per model and shared via gossip. Standby nodes auto-promote to serve hot models (≥10 req/min, ≥3x imbalance). Nodes also auto-promote when a model loses its last server (within ~60s).
+**Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate infectiously across all nodes and decay naturally via TTL. Standby nodes auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others. When a model loses its last server, standby nodes detect it within ~60s.
 
 **Latency design** — the key insight is that HTTP streaming is latency-tolerant while RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for tensor splits where the model physically doesn't fit on one machine.
 
