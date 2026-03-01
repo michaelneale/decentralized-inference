@@ -9,11 +9,6 @@ pub struct ModelDemand {
     pub last_active: u64,
     /// Total requests seen across the mesh (merged via max)
     pub request_count: u64,
-    /// Is this model explicitly declared via --model by a live node?
-    /// (Not gossiped — each node computes locally by checking if any
-    /// peer or self has it in requested_models)
-    #[serde(skip)]
-    pub pinned: bool,
 }
 ```
 

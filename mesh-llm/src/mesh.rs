@@ -686,6 +686,27 @@ impl Node {
         merge_demand(&mut demand, remote);
     }
 
+    /// Remove demand entries that have expired (past TTL and not pinned).
+    /// Call periodically to prevent unbounded map growth.
+    pub async fn gc_demand(&self) {
+        let now = now_secs();
+        let my_requested = self.requested_models.lock().await;
+        let peers = self.state.lock().await;
+        let mut pinned: std::collections::HashSet<String> = my_requested.iter().cloned().collect();
+        for p in peers.peers.values() {
+            for m in &p.requested_models {
+                pinned.insert(m.clone());
+            }
+        }
+        drop(peers);
+        drop(my_requested);
+
+        let mut demand = self.model_demand.lock().unwrap();
+        demand.retain(|model, d| {
+            pinned.contains(model) || (now - d.last_active) < DEMAND_TTL_SECS
+        });
+    }
+
     /// Get active demand entries (within TTL or pinned by a live node).
     /// This replaces mesh_wanted_models().
     pub async fn active_demand(&self) -> HashMap<String, ModelDemand> {
@@ -737,13 +758,6 @@ impl Node {
     #[allow(dead_code)]
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
-    }
-
-    /// Get all models the mesh wants — based on demand signals.
-    /// Replaces the old mesh_wanted_models() which was local-only.
-    #[allow(dead_code)]
-    pub async fn mesh_wanted_models(&self) -> std::collections::HashSet<String> {
-        self.active_demand().await.keys().cloned().collect()
     }
 
     /// Start a background task that periodically checks peer health.
@@ -850,6 +864,9 @@ impl Node {
                     // Also close any lingering connection
                     node.state.lock().await.connections.remove(&stale_id);
                 }
+
+                // GC expired demand entries to prevent unbounded map growth
+                node.gc_demand().await;
 
             }
         });

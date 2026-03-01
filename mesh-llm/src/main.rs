@@ -614,11 +614,20 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 /// Check if a standby node should promote to serve a model.
 /// Uses demand signals — promotes for unserved models with active demand,
 /// or for demand-based rebalancing when one model is much hotter than others.
+///
+/// Rebalancing uses `last_active` to gate on recency (only models active within
+/// the last 60 minutes are considered), then `request_count / servers` for
+/// relative hotness among those recent models.
 async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
     let demand = node.active_demand().await;
 
     if demand.is_empty() { return None; }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let mut serving_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for p in &peers {
@@ -628,6 +637,11 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
     }
 
     let my_vram = node.vram_bytes();
+
+    // Only consider models with recent activity (last 60 minutes).
+    // This prevents stale cumulative request_count from triggering promotions
+    // for models that were popular hours ago but idle now.
+    const RECENT_SECS: u64 = 3600;
 
     // Priority 1: promote for models with active demand and ZERO servers
     // Sort by demand (hottest first)
@@ -648,11 +662,12 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
         return Some(unserved[0].0.clone());
     }
 
-    // Priority 2: demand-based rebalancing
-    // Find the model with the worst demand/server ratio.
-    // Promote if a model has significantly higher demand per server than others.
+    // Priority 2: demand-based rebalancing.
+    // Only consider models with recent activity, then use request_count / servers
+    // for relative hotness. Promote if one model is significantly hotter than others.
     let mut ratios: Vec<(String, f64)> = Vec::new();
     for (m, d) in &demand {
+        if now.saturating_sub(d.last_active) > RECENT_SECS { continue; }
         let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
         if servers > 0.0 && d.request_count > 0 && local_models.contains(m) {
             let model_path = mesh::find_model_path(m);
