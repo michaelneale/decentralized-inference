@@ -2,7 +2,7 @@
 
 ![Mesh LLM](mesh.png)
 
-Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights). MoE models split by experts instead of layers — each node runs independently with zero cross-node traffic.
+Pool spare GPU capacity to run LLMs at larger scale. Models that don't fit on one machine are automatically distributed — dense models via pipeline parallelism, MoE models via expert sharding with zero cross-node inference traffic.
 
 **[Try it now](https://mesh-llm-console.fly.dev/)** — live console connected to a public mesh. Chat with models running on real hardware.
 
@@ -39,19 +39,23 @@ mesh-llm --client --auto                   # join as API-only client (no GPU)
 
 ## How it works
 
-Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
+Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`. Distribution is automatic — you just say `mesh-llm --model X` and the mesh figures out the best strategy:
 
-**Solo mode** — if a model fits on one machine, it runs there. Full speed, no network overhead.
+- **Model fits on one machine?** → runs solo, full speed, no network overhead
+- **Dense model too big?** → pipeline parallelism — layers split across nodes
+- **MoE model too big?** → expert parallelism — experts split across nodes, zero cross-node traffic
 
-**Tensor split** — if a model doesn't fit, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
+If a node has enough VRAM, it always runs the full model. Splitting only happens when it has to.
 
-**MoE expert split** — Mixture-of-Experts models (Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek) split by experts, not layers. Each node gets a standalone GGUF with the full trunk + its expert subset — runs its own llama-server with zero cross-node traffic during inference. Auto-detected from GGUF metadata. Only splits when needed (model doesn't fit) or `--split` is forced.
+**Pipeline parallelism** — for dense models that don't fit on one machine, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
+
+**MoE expert parallelism** — Mixture-of-Experts models (Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek — increasingly the best-performing architectures) are auto-detected from the GGUF header. The mesh reads expert routing statistics to identify which experts matter most, then assigns each node an overlapping shard: a shared core of critical experts replicated everywhere, plus unique experts distributed across nodes. Each node gets a standalone GGUF with the full trunk + its expert subset and runs its own independent llama-server — zero cross-node traffic during inference. Sessions are hash-routed to nodes for KV cache locality.
 
 **Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
 
 **Demand-aware rebalancing** — a unified demand map tracks which models the mesh wants (from `--model` flags, API requests, and gossip). Demand signals propagate infectiously across all nodes and decay naturally via TTL. Standby nodes auto-promote to serve unserved models with active demand, or rebalance when one model is significantly hotter than others. When a model loses its last server, standby nodes detect it within ~60s.
 
-**Latency design** — the key insight is that HTTP streaming is latency-tolerant while RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for tensor splits where the model physically doesn't fit on one machine.
+**Latency design** — the key insight is that HTTP streaming is latency-tolerant while RPC is latency-multiplied. llama-server always runs on the same box as the GPU. The mesh tunnels HTTP, so cross-network latency only affects time-to-first-token, not per-token throughput. RPC only crosses the network for pipeline splits where the model physically doesn't fit on one machine.
 
 ### Network optimizations
 
@@ -232,7 +236,7 @@ mesh-llm [OPTIONS]
   --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
   --listen-all         Bind to 0.0.0.0 (for containers)
   --max-vram GB        Cap VRAM advertised to mesh
-  --split              Force tensor split (dense) or MoE expert split
+  --split              Force pipeline split (dense) or MoE expert split
   --device DEV         GPU device (default: MTL0)
   --draft PATH         Draft model for speculative decoding
   --no-draft           Disable auto draft detection
