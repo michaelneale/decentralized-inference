@@ -494,6 +494,29 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_moe_olmoe() {
+        let path = std::path::Path::new("/Users/micn/.models/olmoe-1b-7b-0924-instruct-q4_k_m.gguf");
+        if !path.exists() {
+            eprintln!("Skipping: OLMoE model file not found");
+            return;
+        }
+        let info = detect_moe(path).expect("Should detect MoE");
+        assert_eq!(info.expert_count, 64);
+        assert_eq!(info.expert_used_count, 8);
+    }
+
+    #[test]
+    fn test_detect_moe_dense_model() {
+        // Qwen2.5-3B is dense (no experts) — should return None
+        let path = std::path::Path::new("/Users/micn/.models/Qwen2.5-3B-Instruct-Q4_K_M.gguf");
+        if !path.exists() {
+            eprintln!("Skipping: dense model file not found");
+            return;
+        }
+        assert!(detect_moe(path).is_none(), "Dense model should not be detected as MoE");
+    }
+
+    #[test]
     fn test_single_node() {
         let ranking: Vec<u32> = (0..8).collect();
         let assignments = compute_assignments(&ranking, 1, 4);
