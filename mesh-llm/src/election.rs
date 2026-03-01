@@ -250,7 +250,7 @@ pub async fn election_loop(
         let need_moe_split = force_split || !model_fits_locally;
         if need_moe_split {
             moe_election_loop(
-                node, bin_dir, model, model_name, moe_cfg.clone(),
+                node, tunnel_mgr, bin_dir, model, model_name, moe_cfg.clone(),
                 target_tx, &mut on_change,
             ).await;
             return;
@@ -413,6 +413,7 @@ pub async fn election_loop(
 /// - The proxy routes sessions to nodes via hash-based affinity
 async fn moe_election_loop(
     node: mesh::Node,
+    tunnel_mgr: tunnel::Manager,
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
     model_name: String,
@@ -449,6 +450,7 @@ async fn moe_election_loop(
         // Something changed — kill existing llama-server
         if currently_running {
             launch::kill_llama_server().await;
+            tunnel_mgr.set_http_port(0);
             currently_running = false;
             on_change(false, false);
         }
@@ -476,6 +478,7 @@ async fn moe_election_loop(
             ).await {
                 Ok(()) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
+                    tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
                     update_targets(&node, &model_name, InferenceTarget::Local(llama_port), &target_tx).await;
                     on_change(true, true);
@@ -539,6 +542,7 @@ async fn moe_election_loop(
             ).await {
                 Ok(()) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
+                    tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
                     node.regossip().await;
 
