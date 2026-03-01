@@ -1,17 +1,21 @@
-app = "mesh-llm-console"
+app = "mesh-llm-api"
 primary_region = "syd"
 
 [build]
-  dockerfile = "Dockerfile"
-
-[build.args]
+  dockerfile = "../Dockerfile"
+  [build.args]
+    CMD = "api"
 
 [http_service]
-  internal_port = 3131
+  internal_port = 9337
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 1
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 3
+    hard_limit = 5
 
 [[vm]]
   size = "shared-cpu-1x"
