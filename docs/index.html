@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>mesh-llm — Decentralised LLM Inference</title>
-    <meta name="description" content="Pool GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC. Open source.">
+    <meta name="description" content="Pool GPU capacity to run LLMs at larger scale. Automatic pipeline parallelism for dense models, expert sharding for MoE. Open source.">
     <style>
         :root { --bg:#0a0a0a; --bg2:#0d0d0d; --border:#1a1a1a; --text:#d0d0d0; --text2:#888; --text3:#555; --green:#4c4; --green-dim:#2a5a2a; --green-bg:#0a1a0a; --blue:#6cf; --blue-dim:#1a3a5c; --orange:#c84; --orange-dim:#5a4a2a; }
         * { box-sizing:border-box; margin:0; padding:0; }
@@ -64,7 +64,7 @@
     <section class="hero">
         <div class="hero-badge"><span class="dot"></span> Open source · Decentralized</div>
         <h1>Pool GPUs to run larger models</h1>
-        <p>Turn spare GPU capacity into a shared inference mesh. Serve many models across machines, run models larger than any single device, and scale capacity to meet demand. OpenAI-compatible API on every node.</p>
+        <p>Turn spare GPU capacity into a shared inference mesh. Dense models split by layers, MoE models split by experts — automatically detected. Serve many models across machines with an OpenAI-compatible API on every node.</p>
         <div class="hero-ctas">
             <a href="https://mesh-llm-console.fly.dev/" class="btn btn-primary">Try it now</a>
             <a href="https://github.com/michaelneale/decentralized-inference" class="btn btn-secondary">View on GitHub</a>
@@ -111,7 +111,7 @@
 
         <div class="tags">
             <span class="tag">OpenAI-compatible API</span>
-            <span class="tag">Layer split across GPUs</span>
+            <span class="tag">Pipeline + expert parallelism</span>
             <span class="tag">Multi-model routing</span>
             <span class="tag">Demand-aware rebalancing</span>
             <span class="tag">Nostr discovery</span>
@@ -128,12 +128,12 @@
             <div class="step">
                 <div class="step-num">1</div>
                 <h3>Start a mesh</h3>
-                <p>Pick a model. mesh-llm downloads it, starts serving, prints an invite token.</p>
+                <p>Pick a model. mesh-llm downloads it, detects the best distribution strategy, starts serving, prints an invite token.</p>
             </div>
             <div class="step">
                 <div class="step-num">2</div>
                 <h3>Others join</h3>
-                <p>Paste the token or use <code>--auto</code> to discover via Nostr. The mesh auto-assigns models and splits layers by VRAM.</p>
+                <p>Paste the token or use <code>--auto</code> to discover via Nostr. The mesh auto-assigns models — pipeline split for dense, expert shard for MoE.</p>
             </div>
             <div class="step">
                 <div class="step-num">3</div>
@@ -163,8 +163,13 @@
         <div class="features">
             <div class="feature">
                 <div class="feature-icon">⚡</div>
-                <h3>Smart layer splitting</h3>
-                <p>Model doesn't fit? Layers split across nodes by VRAM. Peers selected by lowest RTT first — 80ms hard cap keeps splits fast. Solo mode when a model fits on one machine.</p>
+                <h3>Automatic distribution</h3>
+                <p>Model fits on one machine? Solo mode, full speed. Too big? Dense models pipeline-split by layers across nodes. MoE models (Qwen3, GLM, Mixtral, DeepSeek) split by experts — auto-detected from GGUF metadata, zero config.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🧩</div>
+                <h3>MoE expert sharding</h3>
+                <p>Each node gets the full trunk plus an overlapping expert shard. Critical experts replicated everywhere, remaining distributed uniquely. Each node runs its own llama-server — zero cross-node traffic during inference.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">🔀</div>
