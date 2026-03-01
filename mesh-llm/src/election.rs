@@ -115,6 +115,41 @@ impl ModelTargets {
     }
 }
 
+/// Compute shard index for a node given all node IDs in the MoE group.
+/// Nodes are sorted by ID to ensure all nodes agree on the ordering.
+/// Returns (sorted_ids, my_index).
+pub fn moe_shard_index(my_id: iroh::EndpointId, peer_ids: &[iroh::EndpointId]) -> (Vec<iroh::EndpointId>, usize) {
+    let mut all_ids: Vec<iroh::EndpointId> = peer_ids.to_vec();
+    if !all_ids.contains(&my_id) {
+        all_ids.push(my_id);
+    }
+    all_ids.sort();
+    let idx = all_ids.iter().position(|id| *id == my_id).unwrap_or(0);
+    (all_ids, idx)
+}
+
+/// Build the MoE target map from sorted node IDs.
+/// The caller's own node gets MoeLocal(port), others get MoeRemote(id).
+pub fn build_moe_targets(
+    sorted_ids: &[iroh::EndpointId],
+    my_id: iroh::EndpointId,
+    my_port: u16,
+    model_name: &str,
+) -> ModelTargets {
+    let mut moe_state = MoeState::default();
+    for &id in sorted_ids {
+        if id == my_id {
+            moe_state.nodes.push(InferenceTarget::MoeLocal(my_port));
+        } else {
+            moe_state.nodes.push(InferenceTarget::MoeRemote(id));
+        }
+    }
+    let mut targets = ModelTargets::default();
+    targets.targets.insert(model_name.to_string(), InferenceTarget::MoeLocal(my_port));
+    targets.moe = Some(moe_state);
+    targets
+}
+
 /// Look up MoE config for a model. Two tiers:
 /// 1. Catalog (has pre-computed ranking) — instant, optimal
 /// 2. GGUF header detection (no ranking) — uses conservative defaults
@@ -401,10 +436,8 @@ async fn moe_election_loop(
 
         // Determine our shard index: sort all node IDs, find our position
         let my_id = node.id();
-        let mut all_ids: Vec<iroh::EndpointId> = model_peers.iter().map(|p| p.id).collect();
-        all_ids.push(my_id);
-        all_ids.sort();
-        let my_shard_index = all_ids.iter().position(|id| *id == my_id).unwrap_or(0);
+        let peer_ids: Vec<iroh::EndpointId> = model_peers.iter().map(|p| p.id).collect();
+        let (all_ids, my_shard_index) = moe_shard_index(my_id, &peer_ids);
 
         // If nothing changed, skip
         if currently_running && n_nodes == last_n_nodes {
@@ -509,20 +542,8 @@ async fn moe_election_loop(
                     currently_running = true;
                     node.regossip().await;
 
-                    // Build MoE target map: our local port + remote peers
-                    let mut moe_state = MoeState::default();
-                    for &id in &all_ids {
-                        if id == my_id {
-                            moe_state.nodes.push(InferenceTarget::MoeLocal(llama_port));
-                        } else {
-                            moe_state.nodes.push(InferenceTarget::MoeRemote(id));
-                        }
-                    }
-
-                    // Publish as MoeLocal so proxy knows this is MoE mode
-                    let mut targets = ModelTargets::default();
-                    targets.targets.insert(model_name.clone(), InferenceTarget::MoeLocal(llama_port));
-                    targets.moe = Some(moe_state);
+                    // Build and publish MoE target map
+                    let targets = build_moe_targets(&all_ids, my_id, llama_port, &model_name);
                     target_tx.send_replace(targets);
 
                     on_change(true, true);
@@ -734,4 +755,214 @@ async fn find_free_port() -> anyhow::Result<u16> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    /// Create a deterministic EndpointId from a byte seed.
+    fn make_id(seed: u8) -> iroh::EndpointId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        SecretKey::from_bytes(&bytes).public()
+    }
+
+    // ── Shard index computation ──
+
+    #[test]
+    fn test_shard_index_2_nodes() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let (all_a, idx_a) = moe_shard_index(id_a, &[id_b]);
+        let (all_b, idx_b) = moe_shard_index(id_b, &[id_a]);
+
+        // Both should see the same sorted order
+        assert_eq!(all_a, all_b);
+        // They should have different indices
+        assert_ne!(idx_a, idx_b);
+        // Indices should cover 0..2
+        let mut indices = vec![idx_a, idx_b];
+        indices.sort();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_shard_index_3_nodes() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let id_c = make_id(3);
+
+        let (_, idx_a) = moe_shard_index(id_a, &[id_b, id_c]);
+        let (_, idx_b) = moe_shard_index(id_b, &[id_a, id_c]);
+        let (_, idx_c) = moe_shard_index(id_c, &[id_a, id_b]);
+
+        let mut indices = vec![idx_a, idx_b, idx_c];
+        indices.sort();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_shard_index_solo() {
+        let id = make_id(42);
+        let (all, idx) = moe_shard_index(id, &[]);
+        assert_eq!(all.len(), 1);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn test_shard_index_stable_across_calls() {
+        // Same inputs should always give same outputs
+        let id_a = make_id(10);
+        let id_b = make_id(20);
+        let id_c = make_id(30);
+
+        let (order1, idx1) = moe_shard_index(id_a, &[id_b, id_c]);
+        let (order2, idx2) = moe_shard_index(id_a, &[id_c, id_b]); // different peer order
+        assert_eq!(order1, order2); // sorted, so same
+        assert_eq!(idx1, idx2);
+    }
+
+    #[test]
+    fn test_shard_index_my_id_already_in_peers() {
+        // Edge case: what if peers list already contains my ID?
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let (all, idx) = moe_shard_index(id_a, &[id_a, id_b]);
+        // Should not duplicate
+        assert_eq!(all.len(), 2);
+        assert!(idx < 2);
+    }
+
+    // ── MoE target map construction ──
+
+    #[test]
+    fn test_build_moe_targets_2_nodes() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let (sorted, _) = moe_shard_index(id_a, &[id_b]);
+
+        let targets = build_moe_targets(&sorted, id_a, 8080, "test-model");
+
+        // Should have MoE state
+        let moe = targets.moe.as_ref().unwrap();
+        assert_eq!(moe.nodes.len(), 2);
+
+        // Model should be in targets
+        assert!(matches!(targets.get("test-model"), InferenceTarget::MoeLocal(8080)));
+
+        // One should be local, one remote
+        let local_count = moe.nodes.iter()
+            .filter(|t| matches!(t, InferenceTarget::MoeLocal(_)))
+            .count();
+        let remote_count = moe.nodes.iter()
+            .filter(|t| matches!(t, InferenceTarget::MoeRemote(_)))
+            .count();
+        assert_eq!(local_count, 1);
+        assert_eq!(remote_count, 1);
+    }
+
+    #[test]
+    fn test_build_moe_targets_local_port_correct() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let (sorted, idx_a) = moe_shard_index(id_a, &[id_b]);
+
+        let targets = build_moe_targets(&sorted, id_a, 9999, "m");
+        let moe = targets.moe.as_ref().unwrap();
+
+        // Our index in the MoE state should have our port
+        match &moe.nodes[idx_a] {
+            InferenceTarget::MoeLocal(port) => assert_eq!(*port, 9999),
+            other => panic!("Expected MoeLocal(9999), got {:?}", other),
+        }
+    }
+
+    // ── Session hash routing ──
+
+    #[test]
+    fn test_session_routing_sticky() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let (sorted, _) = moe_shard_index(id_a, &[id_b]);
+        let targets = build_moe_targets(&sorted, id_a, 8080, "m");
+
+        // Same session hint should always route to same node
+        let t1 = targets.get_moe_target("user-123");
+        let t2 = targets.get_moe_target("user-123");
+        assert_eq!(format!("{:?}", t1), format!("{:?}", t2));
+    }
+
+    #[test]
+    fn test_session_routing_distributes() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let (sorted, _) = moe_shard_index(id_a, &[id_b]);
+        let targets = build_moe_targets(&sorted, id_a, 8080, "m");
+
+        // With enough different sessions, both nodes should get traffic
+        let mut hit_local = false;
+        let mut hit_remote = false;
+        for i in 0..100 {
+            let hint = format!("session-{i}");
+            match targets.get_moe_target(&hint) {
+                Some(InferenceTarget::MoeLocal(_)) => hit_local = true,
+                Some(InferenceTarget::MoeRemote(_)) => hit_remote = true,
+                _ => {}
+            }
+        }
+        assert!(hit_local, "Should route some sessions locally");
+        assert!(hit_remote, "Should route some sessions to remote");
+    }
+
+    #[test]
+    fn test_session_routing_empty_moe() {
+        let targets = ModelTargets::default();
+        assert!(targets.get_moe_target("anything").is_none());
+    }
+
+    #[test]
+    fn test_session_routing_single_node() {
+        let id_a = make_id(1);
+        let targets = build_moe_targets(&[id_a], id_a, 8080, "m");
+
+        // All sessions should go to the single node
+        for i in 0..20 {
+            match targets.get_moe_target(&format!("s{i}")) {
+                Some(InferenceTarget::MoeLocal(8080)) => {}
+                other => panic!("Expected MoeLocal(8080), got {:?}", other),
+            }
+        }
+    }
+
+    // ── Both nodes agree on the same assignments ──
+
+    #[test]
+    fn test_both_nodes_get_consistent_view() {
+        // If node A and B both compute assignments for 2 nodes,
+        // they should get the same expert lists (just different shard indices)
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let (_, idx_a) = moe_shard_index(id_a, &[id_b]);
+        let (_, idx_b) = moe_shard_index(id_b, &[id_a]);
+
+        let ranking: Vec<u32> = (0..128).collect();
+        let assignments = crate::moe::compute_assignments(&ranking, 2, 46);
+
+        // Node A picks assignment[idx_a], Node B picks assignment[idx_b]
+        // They should be different shards
+        assert_ne!(idx_a, idx_b);
+        // Their unique experts should not overlap
+        let a_experts: std::collections::HashSet<u32> = assignments[idx_a].experts.iter().cloned().collect();
+        let b_experts: std::collections::HashSet<u32> = assignments[idx_b].experts.iter().cloned().collect();
+        let shared: Vec<u32> = a_experts.intersection(&b_experts).cloned().collect();
+        // Shared should be exactly the core (first 46)
+        assert_eq!(shared.len(), 46);
+        // Union should cover all 128
+        let union: std::collections::HashSet<u32> = a_experts.union(&b_experts).cloned().collect();
+        assert_eq!(union.len(), 128);
+    }
 }

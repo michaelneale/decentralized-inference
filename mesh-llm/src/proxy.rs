@@ -238,3 +238,64 @@ pub async fn send_503(mut stream: TcpStream) -> std::io::Result<()> {
     stream.shutdown().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_session_hint_user_field() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"qwen\",\"user\":\"alice\",\"messages\":[]}";
+        assert_eq!(extract_session_hint(req), Some("alice".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_hint_session_id() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"session_id\":\"sess-42\"}";
+        assert_eq!(extract_session_hint(req), Some("sess-42".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_hint_user_preferred_over_session_id() {
+        // "user" appears before "session_id" in our search order
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"user\":\"bob\",\"session_id\":\"sess-1\"}";
+        assert_eq!(extract_session_hint(req), Some("bob".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_hint_none() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"messages\":[]}";
+        assert_eq!(extract_session_hint(req), None);
+    }
+
+    #[test]
+    fn test_extract_session_hint_no_body() {
+        let req = b"GET /v1/models HTTP/1.1\r\n\r\n";
+        assert_eq!(extract_session_hint(req), None);
+    }
+
+    #[test]
+    fn test_extract_session_hint_no_headers_end() {
+        let req = b"POST /v1/chat body without proper headers";
+        assert_eq!(extract_session_hint(req), None);
+    }
+
+    #[test]
+    fn test_extract_session_hint_whitespace_variants() {
+        // Extra whitespace around colon and value
+        let req = b"POST / HTTP/1.1\r\n\r\n{\"user\" : \"charlie\" }";
+        assert_eq!(extract_session_hint(req), Some("charlie".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_hint_empty_value() {
+        let req = b"POST / HTTP/1.1\r\n\r\n{\"user\":\"\"}";
+        assert_eq!(extract_session_hint(req), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_from_http_basic() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"Qwen3-30B\"}";
+        assert_eq!(extract_model_from_http(req), Some("Qwen3-30B".to_string()));
+    }
+}
