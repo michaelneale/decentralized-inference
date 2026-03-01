@@ -260,6 +260,42 @@ just build            # clones llama.cpp fork, builds everything
 just bundle           # portable tarball
 ```
 
+For `--client` mode only the `mesh-llm` binary is needed.
+
+## Developer releases
+
+Cross-platform `mesh-llm` release binaries are published by GitHub Actions from tags.
+
+### Local checks (before tagging)
+
+```bash
+just build            # full local build (llama.cpp + mesh-llm)
+just build-mesh aarch64-apple-darwin
+```
+
+Optional: follow the detailed packaging/smoke-test checklist in `RELEASE.md`.
+
+### Create a release
+
+```bash
+git add -A
+git commit -m "v0.X.0: <summary>"
+git tag v0.X.0
+git push origin main --tags
+```
+
+This triggers the GitHub Actions release workflow, which builds `mesh-llm` with `just` for:
+
+- macOS (`aarch64-apple-darwin`)
+- Linux (`x86_64-unknown-linux-gnu`)
+- Windows (`x86_64-pc-windows-msvc`)
+
+The workflow then creates/updates the GitHub release for that tag and uploads the binaries as release assets.
+
+### CI workflows
+
+- `.github/workflows/build-cross-platform.yml` builds PRs/pushes and uploads CI artifacts
+- `.github/workflows/release-mesh-llm.yml` builds tag releases and publishes GitHub Release assets
 ## Project Structure
 
 | Path | Purpose |
