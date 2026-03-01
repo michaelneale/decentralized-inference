@@ -27,11 +27,13 @@
 - [ ] **SOTA dense: try largest dense models that need 2+ machines**: Llama-3.3-70B, Qwen2.5-72B — already have 72B on disk. Benchmark split performance at scale.
 
 ## MoE Expert Sharding
-See [MoE_PLAN.md](../MoE_PLAN.md) for full plan. Distribute MoE experts across mesh nodes with masked expert groups — non-all-to-all routing for interactive chat.
-- [x] **Phase 1a: routing analysis tool** (`llama-moe-analyze`): observe MoE router decisions, measure group capture ratios. Initial results on Qwen3-30B-A3B (128 experts, top-8): best-group captures **99.3%** of unrestricted top-8 mass even with 8 groups (16 experts/group). Very promising.
-- [x] **Phase 1b: expert masking in llama.cpp**: `llama_model_set_expert_mask()` API + logprob comparison. Best group (of 4) loses only -0.1 logprob; worst loses -2.3. Confirms probe-based placement is critical — some groups are nearly lossless while others degrade heavily.
-- [ ] **Phase 2: per-node GGUF packaging**: tooling to split safetensors checkpoint into trunk + expert group bundles, convert to GGUF per node
-- [ ] **Phase 3: mesh integration**: session placement with probe-and-pin, masked routing per node
+See [MoE_PLAN.md](../MoE_PLAN.md) for full plan. Distribute MoE experts across mesh nodes with overlapping expert shards — zero cross-node traffic during inference.
+- [x] **Phase 1a: routing analysis tool** (`llama-moe-analyze`): observe MoE router decisions, measure group capture ratios. Initial results on Qwen3-30B-A3B (128 experts, top-8): best-group captures **99.3%** of unrestricted top-8 mass even with 8 groups (16 experts/group).
+- [x] **Phase 1b: expert masking in llama.cpp**: `llama_model_set_expert_mask()` API + logprob comparison. Best group (of 4) loses only -0.1 logprob; worst loses -2.3.
+- [x] **Phase 2: per-node GGUF packaging** (`llama-moe-split`): splits MoE GGUF into per-node shards with trunk replicated + expert subset sliced. Validated: 87/128 experts per node = excellent quality, 12.9GB shard (vs 17GB full).
+- [x] **Phase 3: mesh integration**: auto-detect MoE from GGUF header, compute overlapping expert assignments, split locally, each node runs own llama-server. Session-sticky routing via hash. Integration tested: OLMoE-1B-7B across 2 machines over WAN (225ms RTT).
+- [ ] **Phase 4: optimized rankings**: run `moe-analyze` lazily for unknown MoE models, cache rankings. Current fallback uses conservative 50% shared core with sequential experts.
+- [ ] **Phase 5: scale testing**: Mixtral 8×22B (~80GB), Qwen3-235B-A22B (~130GB) — models that actually need distribution.
 
 ## Nice to Have
 - [ ] Don't download what won't fit: check VRAM before downloading via `--model`

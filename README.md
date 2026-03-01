@@ -2,19 +2,28 @@
 
 ![Mesh LLM](mesh.png)
 
-Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights).
+Pool spare GPU capacity to run LLMs at larger scale. Split inference across machines over QUIC — models can be larger than any single machine's VRAM. Each node loads only its assigned layers from a local GGUF copy (zero network transfer for weights). MoE models split by experts instead of layers — each node runs independently with zero cross-node traffic.
 
 **[Try it now](https://mesh-llm-console.fly.dev/)** — live console connected to a public mesh. Chat with models running on real hardware.
 
-## Quick start (macOS Apple Silicon)
+## Install (macOS Apple Silicon)
 
 ```bash
 curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 ```
 
+Then run:
+
 ```bash
-mesh-llm --model Qwen2.5-32B    # downloads model (~20GB), starts API + web console
-mesh-llm --model Qwen2.5-3B     # or a small model first (~2GB)
+mesh-llm --auto                            # join the best public mesh, start serving
+```
+
+That's it. Downloads a model for your hardware, connects to other nodes, and gives you an OpenAI-compatible API at `http://localhost:9337`.
+
+Or start your own:
+```bash
+mesh-llm --model Qwen2.5-32B              # downloads model (~20GB), starts API + web console
+mesh-llm --model Qwen2.5-3B               # or a small model first (~2GB)
 ```
 
 Add another machine:
@@ -35,6 +44,8 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`.
 **Solo mode** — if a model fits on one machine, it runs there. Full speed, no network overhead.
 
 **Tensor split** — if a model doesn't fit, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
+
+**MoE expert split** — Mixture-of-Experts models (Qwen3-MoE, GLM, OLMoE, Mixtral, DeepSeek) split by experts, not layers. Each node gets a standalone GGUF with the full trunk + its expert subset — runs its own llama-server with zero cross-node traffic during inference. Auto-detected from GGUF metadata. Only splits when needed (model doesn't fit) or `--split` is forced.
 
 **Multi-model** — different nodes serve different models simultaneously. The API proxy peeks at the `model` field in each request and routes to the right node via QUIC tunnel. `/v1/models` lists everything available.
 
@@ -221,7 +232,7 @@ mesh-llm [OPTIONS]
   --bind-port PORT     Pin QUIC to fixed UDP port (for NAT)
   --listen-all         Bind to 0.0.0.0 (for containers)
   --max-vram GB        Cap VRAM advertised to mesh
-  --split              Force tensor split
+  --split              Force tensor split (dense) or MoE expert split
   --device DEV         GPU device (default: MTL0)
   --draft PATH         Draft model for speculative decoding
   --no-draft           Disable auto draft detection
