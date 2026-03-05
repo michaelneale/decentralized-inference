@@ -12,6 +12,8 @@ mod tunnel;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mesh::NodeRole;
+use std::collections::HashSet;
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 pub const VERSION: &str = "0.25.0";
@@ -38,16 +40,19 @@ struct Cli {
     auto: bool,
 
     /// Prefer InferenceHub-managed onboarding and disable local Nostr invite/discovery flows.
+    /// Also implied automatically when using --hub-mesh or --hub-invite.
     /// Example: mesh-llm --auto --inferencehub
     #[arg(long, global = true)]
     inferencehub: bool,
 
     /// Default InferenceHub mesh target when linking from the console.
     /// Accepts mesh ID, slug, or public mesh name.
+    /// Implies --inferencehub.
     #[arg(long, global = true)]
     hub_mesh: Option<String>,
 
     /// Default private InferenceHub invite token when linking from the console.
+    /// Implies --inferencehub.
     #[arg(long, global = true)]
     hub_invite: Option<String>,
 
@@ -220,17 +225,13 @@ async fn main() -> Result<()> {
     }
     let persisted_hub = read_persisted_hub_state();
     let hub_managed_mode = cli.inferencehub || persisted_hub.is_linked();
+    let first_time_hub_flow = cli.inferencehub && !persisted_hub.is_linked();
 
     // Clean up orphan processes from previous runs (skip for client — never runs llama-server)
     if !cli.client {
         launch::kill_llama_server().await;
         launch::kill_orphan_rpc_servers().await;
     }
-
-    // Background version check (non-blocking)
-    tokio::spawn(async {
-        check_for_update().await;
-    });
 
     // Subcommand dispatch
     if let Some(cmd) = &cli.command {
@@ -290,6 +291,16 @@ Use the dashboard InferenceHub controls instead."
             }
         }
     }
+
+    if first_time_hub_flow {
+        run_inferencehub_interactive(&mut cli, &persisted_hub).await?;
+    }
+
+    // Background version check (non-blocking).
+    // Spawn after any interactive prompts to avoid writing over input lines.
+    tokio::spawn(async {
+        check_for_update().await;
+    });
 
     if hub_managed_mode {
         if !cli.join.is_empty() {
@@ -429,6 +440,17 @@ Use the dashboard InferenceHub controls instead."
         }
     }
 
+    if hub_managed_mode && !cli.client {
+        if let Some(model) = cli.model.first() {
+            let startup_model = model.to_string_lossy().trim().to_string();
+            if !startup_model.is_empty() {
+                if let Err(err) = persist_hub_startup_model(&startup_model) {
+                    eprintln!("Warning: failed to save startup model preference: {err}");
+                }
+            }
+        }
+    }
+
     // --- Validation ---
     if cli.client && !cli.model.is_empty() {
         anyhow::bail!("--client and --model are mutually exclusive");
@@ -440,7 +462,7 @@ Use the dashboard InferenceHub controls instead."
                 Some(d) => d.clone(),
                 None => detect_bin_dir()?,
             };
-            return run_idle(cli, bin_dir, hub_managed_mode).await;
+            return run_idle(cli, bin_dir, hub_managed_mode, first_time_hub_flow).await;
         }
     }
 
@@ -479,6 +501,7 @@ Use the dashboard InferenceHub controls instead."
         requested_model_names,
         bin_dir,
         hub_managed_mode,
+        first_time_hub_flow,
     )
     .await
 }
@@ -907,6 +930,7 @@ async fn run_auto(
     requested_model_names: Vec<String>,
     bin_dir: PathBuf,
     hub_managed_mode: bool,
+    first_time_hub_flow: bool,
 ) -> Result<()> {
     let api_port = cli.port;
     let console_port = Some(cli.console);
@@ -1000,10 +1024,7 @@ async fn run_auto(
         node.set_mesh_id_force(mesh_id.clone()).await;
         mesh::save_last_mesh_id(&mesh_id);
         tracing::info!("Mesh ID: {mesh_id}");
-        if hub_managed_mode {
-            eprintln!("InferenceHub mode active: local invite token sharing is disabled.");
-            eprintln!("Use InferenceHub to manage mesh membership.");
-        } else {
+        if !hub_managed_mode {
             eprintln!("Invite: {token}");
             eprintln!("Waiting for peers...");
         }
@@ -1073,7 +1094,15 @@ async fn run_auto(
                 );
                 eprintln!("   Proxying requests to other nodes. Will activate when needed.");
             }
-            match run_passive(&cli, node.clone(), is_client, hub_managed_mode).await? {
+            match run_passive(
+                &cli,
+                node.clone(),
+                is_client,
+                hub_managed_mode,
+                first_time_hub_flow,
+            )
+            .await?
+            {
                 Some(model_name) => {
                     // Promoted! Resolve the model path and continue to serving
                     let model_path = mesh::find_model_path(&model_name);
@@ -1170,6 +1199,7 @@ async fn run_auto(
             api_port,
             model_size_bytes,
         );
+        cs.set_hub_first_time_onboarding(first_time_hub_flow).await;
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if let Some(draft) = &cli.draft {
             let dn = draft
@@ -1332,7 +1362,12 @@ async fn run_auto(
 
 /// Idle mode: no args → show instructions and read-only console.
 /// Use --auto or --join to actually connect to a mesh.
-async fn run_idle(cli: Cli, _bin_dir: PathBuf, hub_managed_mode: bool) -> Result<()> {
+async fn run_idle(
+    cli: Cli,
+    _bin_dir: PathBuf,
+    hub_managed_mode: bool,
+    first_time_hub_flow: bool,
+) -> Result<()> {
     let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
     let local_models = mesh::scan_local_models();
     eprintln!(
@@ -1343,19 +1378,7 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf, hub_managed_mode: bool) -> Result
     eprintln!();
     eprintln!("  Console: http://localhost:{}", cli.console);
     eprintln!();
-    if hub_managed_mode {
-        eprintln!("  InferenceHub onboarding:");
-        eprintln!(
-            "    mesh-llm --inferencehub                  start with hub-managed console flow"
-        );
-        eprintln!("    mesh-llm --auto --inferencehub           same, with automatic startup path");
-        eprintln!("    mesh-llm --inferencehub --hub-mesh \"<name|slug|mesh-id>\"");
-        eprintln!("    mesh-llm --inferencehub --hub-invite \"<invite-token>\"");
-        eprintln!(
-            "    Login with InferenceHub in the console header, then link or join/create a mesh."
-        );
-        eprintln!();
-    } else {
+    if !hub_managed_mode {
         eprintln!("  Start a mesh:");
         eprintln!("    mesh-llm --model Qwen2.5-32B                 serve a model");
         eprintln!("    mesh-llm --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name \"my-mesh\"");
@@ -1373,6 +1396,7 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf, hub_managed_mode: bool) -> Result
     node.set_available_models(local_models).await;
 
     let cs = api::MeshApi::new(node.clone(), "(idle)".into(), cli.port, 0);
+    cs.set_hub_first_time_onboarding(first_time_hub_flow).await;
     cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
     cs.update(false, false).await;
     let cs2 = cs.clone();
@@ -1396,6 +1420,7 @@ async fn run_passive(
     node: mesh::Node,
     is_client: bool,
     hub_managed_mode: bool,
+    first_time_hub_flow: bool,
 ) -> Result<Option<String>> {
     let local_port = cli.port;
 
@@ -1460,6 +1485,7 @@ async fn run_passive(
             "(standby)".to_string()
         };
         let cs = api::MeshApi::new(node.clone(), label, local_port, 0);
+        cs.set_hub_first_time_onboarding(first_time_hub_flow).await;
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         if is_client {
             cs.set_client(true).await;
@@ -1599,7 +1625,7 @@ async fn api_proxy(
                     }
 
                     if let Some(ref name) = model_name {
-                        node.record_request(name);
+                        node.record_inference_request(name);
                     }
 
                     // MoE routing: use session hint for sticky routing across shards
@@ -1817,6 +1843,723 @@ fn start_new_mesh(cli: &mut Cli, models: &[String], my_vram_gb: f64) {
     }
 }
 
+fn recommended_hub_models(max_vram_gb: f64) -> Vec<&'static download::CatalogModel> {
+    let draft_model_names: HashSet<&str> = download::MODEL_CATALOG
+        .iter()
+        .filter_map(|m| m.draft)
+        .collect();
+    let all_models: Vec<&download::CatalogModel> = download::MODEL_CATALOG
+        .iter()
+        .filter(|m| !draft_model_names.contains(m.name))
+        .collect();
+    if all_models.is_empty() {
+        return Vec::new();
+    }
+
+    let fit_limit_gb = if max_vram_gb > 0.0 {
+        Some(max_vram_gb * 1.1)
+    } else {
+        None
+    };
+
+    let fitting_models: Vec<&download::CatalogModel> = all_models
+        .iter()
+        .copied()
+        .filter(|m| {
+            fit_limit_gb
+                .map(|limit| download::parse_size_gb(m.size) <= limit)
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let source_models = if fitting_models.is_empty() {
+        all_models
+    } else {
+        fitting_models
+    };
+
+    // Build a balanced list of small/medium/large options based on local VRAM.
+    // This avoids always showing the first N catalog entries.
+    let (small_cutoff_gb, medium_cutoff_gb) = if max_vram_gb > 0.0 {
+        let small = (max_vram_gb * 0.45).max(3.0);
+        let medium = (max_vram_gb * 0.80).max(small + 1.0);
+        (small, medium)
+    } else {
+        (5.0, 12.0)
+    };
+
+    let mut small = Vec::new();
+    let mut medium = Vec::new();
+    let mut large = Vec::new();
+    for model in &source_models {
+        let size_gb = download::parse_size_gb(model.size);
+        if size_gb <= small_cutoff_gb {
+            small.push(*model);
+        } else if size_gb <= medium_cutoff_gb {
+            medium.push(*model);
+        } else {
+            large.push(*model);
+        }
+    }
+
+    let mut models: Vec<&download::CatalogModel> = Vec::new();
+    let mut push_unique = |model: &'static download::CatalogModel| {
+        if !models.iter().any(|m| m.name == model.name) {
+            models.push(model);
+        }
+    };
+
+    for bucket in [&small, &medium, &large] {
+        if let Some(model) = bucket.first() {
+            push_unique(*model);
+        }
+    }
+
+    for model in small.iter().take(3) {
+        push_unique(*model);
+    }
+    for model in medium.iter().take(3) {
+        push_unique(*model);
+    }
+    for model in large.iter().take(2) {
+        push_unique(*model);
+    }
+
+    for model in source_models {
+        if models.len() >= 8 {
+            break;
+        }
+        if !models.iter().any(|m| m.name == model.name) {
+            models.push(model);
+        }
+    }
+
+    models.truncate(8);
+    models
+}
+
+fn normalize_model_hint_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let filename = std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(trimmed);
+    let lower = filename.to_lowercase();
+    let key = lower
+        .strip_suffix(".gguf")
+        .map(ToOwned::to_owned)
+        .unwrap_or(lower);
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
+fn prioritize_hub_model_options(
+    options: Vec<&'static download::CatalogModel>,
+    mesh_model_hints: &[String],
+) -> (Vec<&'static download::CatalogModel>, HashSet<String>) {
+    if mesh_model_hints.is_empty() {
+        return (options, HashSet::new());
+    }
+
+    let mut prioritized: Vec<&'static download::CatalogModel> = Vec::new();
+    let mut preferred_model_names: HashSet<String> = HashSet::new();
+    for hint in mesh_model_hints {
+        let Some(hint_key) = normalize_model_hint_key(hint) else {
+            continue;
+        };
+        if let Some(model) = options.iter().copied().find(|candidate| {
+            normalize_model_hint_key(candidate.name)
+                .map(|key| key == hint_key)
+                .unwrap_or(false)
+        }) {
+            if preferred_model_names.insert(model.name.to_string()) {
+                prioritized.push(model);
+            }
+        }
+    }
+
+    for model in options {
+        if preferred_model_names.contains(model.name) {
+            continue;
+        }
+        prioritized.push(model);
+    }
+
+    (prioritized, preferred_model_names)
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn prompt_custom_model_input(prompt: &str) -> Result<String> {
+    loop {
+        let custom = prompt_line(prompt)?;
+        if !custom.trim().is_empty() {
+            return Ok(custom.trim().to_string());
+        }
+        eprintln!("Please enter a model name, path, or URL.");
+    }
+}
+
+fn wait_for_any_keypress() {
+    let _ = io::stdout().flush();
+    let mut buf = [0_u8; 1];
+    let _ = io::stdin().read(&mut buf);
+}
+
+#[cfg(target_os = "macos")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = std::process::Command::new("open").arg(url).status()?;
+    if !status.success() {
+        anyhow::bail!("open command failed with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = std::process::Command::new("xdg-open").arg(url).status()?;
+    if !status.success() {
+        anyhow::bail!("xdg-open command failed with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("start command failed with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_url_in_browser(_url: &str) -> Result<()> {
+    anyhow::bail!("automatic browser open is not supported on this platform");
+}
+
+fn hub_base_url() -> String {
+    std::env::var("MESH_LLM_HUB_BASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://www.inferencehub.cc".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+async fn resolve_hub_mesh_id_by_selector(
+    base_url: &str,
+    access_token: &str,
+    selector: &str,
+) -> Result<String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        anyhow::bail!("empty mesh selector");
+    }
+    let client = reqwest::Client::new();
+
+    let by_id_resp = client
+        .get(format!("{base_url}/api/v0/meshes/{selector}"))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    if by_id_resp.status().is_success() {
+        let payload = by_id_resp.json::<serde_json::Value>().await?;
+        let id = payload
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default()
+            .to_string();
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+
+    let list_resp = client
+        .get(format!("{base_url}/api/v0/meshes"))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    if !list_resp.status().is_success() {
+        anyhow::bail!("mesh list request failed with {}", list_resp.status());
+    }
+    let payload = list_resp.json::<serde_json::Value>().await?;
+    let Some(items) = payload.as_array() else {
+        anyhow::bail!("mesh list response format was invalid");
+    };
+
+    let selector_lower = selector.to_lowercase();
+    let mut matches: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())?;
+            let slug = item
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            if id == selector
+                || slug
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case(selector))
+                    .unwrap_or(false)
+                || name
+                    .as_deref()
+                    .map(|s| s.to_lowercase() == selector_lower)
+                    .unwrap_or(false)
+            {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    matches.sort();
+    matches.dedup();
+
+    match matches.as_slice() {
+        [single] => Ok(single.clone()),
+        [] => anyhow::bail!("no InferenceHub mesh matched '{selector}'"),
+        _ => anyhow::bail!("multiple meshes matched '{selector}'. Use an exact mesh ID."),
+    }
+}
+
+async fn fetch_hub_mesh_model_hints(
+    cli: &Cli,
+    persisted_hub: &PersistedHubState,
+) -> Result<Vec<String>> {
+    let Some(access_token) = persisted_hub.access_token.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let base_url = hub_base_url();
+
+    let selector = cli
+        .hub_mesh
+        .clone()
+        .or_else(|| persisted_hub.default_mesh_selector.clone())
+        .or_else(|| persisted_hub.linked_mesh_id.clone());
+    let mesh_id = if let Some(selector) = selector {
+        resolve_hub_mesh_id_by_selector(&base_url, access_token, &selector).await?
+    } else {
+        // Do not redeem invite tokens here because redeeming consumes invite uses.
+        return Ok(Vec::new());
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base_url}/api/v0/meshes/{mesh_id}"))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("mesh details fetch failed with {}", response.status());
+    }
+    let payload = response.json::<serde_json::Value>().await?;
+
+    let mut ordered_hints = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_hint = |value: &serde_json::Value| {
+        let Some(name) = value.as_str().map(str::trim).filter(|v| !v.is_empty()) else {
+            return;
+        };
+        if seen.insert(name.to_string()) {
+            ordered_hints.push(name.to_string());
+        }
+    };
+
+    if let Some(runtime) = payload
+        .get("runtime_warm_models")
+        .and_then(|v| v.as_array())
+    {
+        for model in runtime {
+            push_hint(model);
+        }
+    }
+    if let Some(configured) = payload.get("models").and_then(|v| v.as_array()) {
+        for model in configured {
+            push_hint(model);
+        }
+    }
+
+    Ok(ordered_hints)
+}
+
+async fn run_hub_device_sign_in(base_url: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+    let start_response = client
+        .post(format!("{base_url}/api/v0/device-auth/start"))
+        .json(&serde_json::json!({ "client_name": "mesh-llm" }))
+        .send()
+        .await?;
+    if !start_response.status().is_success() {
+        let status = start_response.status();
+        let body = start_response.text().await.unwrap_or_default();
+        anyhow::bail!("sign-in start failed ({status}): {body}");
+    }
+    let start_payload = start_response.json::<serde_json::Value>().await?;
+    let device_code = start_payload
+        .get("device_code")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("device auth response missing device_code"))?
+        .to_string();
+    let user_code = start_payload
+        .get("user_code")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("device auth response missing user_code"))?
+        .to_string();
+    let verification_uri = start_payload
+        .get("verification_uri_complete")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            start_payload
+                .get("verification_uri")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| anyhow::anyhow!("device auth response missing verification URI"))?
+        .to_string();
+    let mut poll_interval_secs = start_payload
+        .get("interval")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .max(1);
+
+    eprintln!();
+    eprintln!("🔐 InferenceHub sign-in");
+    eprintln!("  1) Press any key (then Enter) to open your browser");
+    eprintln!("  2) Approve this device code: {user_code}");
+    eprintln!("  3) Return here after approval");
+    eprintln!("  URL: {verification_uri}");
+    eprintln!();
+    eprintln!("Press any key (then Enter) to continue...");
+    wait_for_any_keypress();
+    if let Err(err) = open_url_in_browser(&verification_uri) {
+        eprintln!("Could not open browser automatically: {err}");
+        eprintln!("Open the URL manually to continue.");
+    }
+    let mut waiting_progress = false;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(poll_interval_secs)).await;
+        let poll_response = client
+            .post(format!("{base_url}/api/v0/device-auth/poll"))
+            .json(&serde_json::json!({ "device_code": device_code }))
+            .send()
+            .await?;
+        let poll_status_code = poll_response.status();
+        let poll_payload = poll_response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let status = poll_payload
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let error = poll_payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if status == "authorized" {
+            if waiting_progress {
+                eprintln!();
+            }
+            let access_token = poll_payload
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("authorization succeeded but access_token missing"))?
+                .to_string();
+            return Ok(access_token);
+        }
+
+        if status == "pending" || error == "authorization_pending" {
+            if !waiting_progress {
+                eprint!("Waiting for approval");
+                waiting_progress = true;
+            }
+            eprint!(".");
+            let _ = io::stderr().flush();
+            if let Some(next) = poll_payload.get("interval").and_then(|v| v.as_u64()) {
+                poll_interval_secs = next.max(1);
+            }
+            continue;
+        }
+
+        if error == "slow_down" {
+            if !waiting_progress {
+                eprint!("Waiting for approval");
+                waiting_progress = true;
+            }
+            eprint!(".");
+            let _ = io::stderr().flush();
+            poll_interval_secs = poll_interval_secs.saturating_add(2).max(1);
+            continue;
+        }
+
+        if status == "expired" || error == "expired_token" {
+            if waiting_progress {
+                eprintln!();
+            }
+            anyhow::bail!("sign-in timed out: device code expired");
+        }
+        if status == "denied" || error == "access_denied" {
+            if waiting_progress {
+                eprintln!();
+            }
+            anyhow::bail!("sign-in denied");
+        }
+        if status == "consumed" || error == "invalid_grant" {
+            if waiting_progress {
+                eprintln!();
+            }
+            anyhow::bail!("device code already used");
+        }
+
+        if !poll_status_code.is_success() {
+            if waiting_progress {
+                eprintln!();
+            }
+            anyhow::bail!("sign-in poll failed ({poll_status_code}): {poll_payload}");
+        }
+    }
+}
+
+async fn run_inferencehub_interactive(
+    cli: &mut Cli,
+    persisted_hub: &PersistedHubState,
+) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(());
+    }
+    if cli.command.is_some() {
+        return Ok(());
+    }
+
+    eprintln!("🌐 InferenceHub onboarding");
+    eprintln!("--------------------------");
+
+    let mut effective_hub = persisted_hub.clone();
+    let mut changed_target = false;
+    let has_target = cli.hub_mesh.is_some()
+        || cli.hub_invite.is_some()
+        || persisted_hub.default_mesh_selector.is_some()
+        || persisted_hub.default_invite_token.is_some()
+        || persisted_hub.linked_mesh_id.is_some();
+    if !has_target {
+        eprintln!("No default mesh target is configured.");
+        eprintln!("  1) Join a public mesh (slug or mesh id)");
+        eprintln!("  2) Join a private mesh (invite token)");
+        eprintln!("  3) Choose later in the console");
+        let choice = prompt_line("Select [1-3] (default 3): ")?;
+        match choice.as_str() {
+            "1" => {
+                let selector = prompt_line("Public mesh slug/id: ")?;
+                if !selector.is_empty() {
+                    cli.hub_mesh = Some(selector);
+                    cli.hub_invite = None;
+                    changed_target = true;
+                }
+            }
+            "2" => {
+                let invite = prompt_line("Private invite token: ")?;
+                if !invite.is_empty() {
+                    cli.hub_invite = Some(invite);
+                    cli.hub_mesh = None;
+                    changed_target = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if changed_target {
+        persist_hub_default_target(cli.hub_mesh.clone(), cli.hub_invite.clone())?;
+        effective_hub.default_mesh_selector = cli.hub_mesh.clone();
+        effective_hub.default_invite_token = cli.hub_invite.clone();
+    }
+
+    let has_effective_target = cli.hub_mesh.is_some()
+        || cli.hub_invite.is_some()
+        || effective_hub.default_mesh_selector.is_some()
+        || effective_hub.default_invite_token.is_some()
+        || effective_hub.linked_mesh_id.is_some();
+    if has_effective_target && effective_hub.access_token.is_none() {
+        let base_url = hub_base_url();
+        let access_token = run_hub_device_sign_in(&base_url).await?;
+        persist_hub_access_token(&access_token)?;
+        effective_hub.access_token = Some(access_token);
+        eprintln!("✅ Signed in to InferenceHub.");
+    }
+
+    if !cli.client && cli.model.is_empty() {
+        if let Some(saved) = effective_hub.default_startup_model.clone() {
+            if saved_startup_model_is_resolvable(&saved) {
+                cli.model.push(PathBuf::from(&saved));
+                eprintln!("🧠 Using saved startup model: {saved}");
+            } else {
+                eprintln!("⚠ Saved startup model is missing/unresolvable: {saved}");
+                eprintln!("🧠 Please choose a startup model again.");
+            }
+        }
+    }
+
+    if !cli.client && cli.model.is_empty() {
+        let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
+        let mesh_model_hints = fetch_hub_mesh_model_hints(cli, &effective_hub)
+            .await
+            .unwrap_or_default();
+        let mut options = recommended_hub_models(my_vram_gb);
+        let mut preferred = HashSet::new();
+        if !mesh_model_hints.is_empty() {
+            let (prioritized, preferred_names) =
+                prioritize_hub_model_options(options, &mesh_model_hints);
+            options = prioritized;
+            preferred = preferred_names;
+        }
+        if !options.is_empty() {
+            eprintln!();
+            eprintln!("🧠 Choose a startup model (required):");
+            for (idx, model) in options.iter().enumerate() {
+                let preferred_label = if preferred.contains(model.name) {
+                    " [used in this mesh]"
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "  {}) {} ({}) - {}{}",
+                    idx + 1,
+                    model.name,
+                    model.size,
+                    model.description,
+                    preferred_label
+                );
+            }
+            let custom_option = options.len() + 1;
+            eprintln!("  {}) Enter custom model name/path/URL", custom_option);
+            let selected = prompt_line(&format!(
+                "Choose [1-{}] or enter custom model (default 1): ",
+                custom_option
+            ))?;
+
+            let custom_model = match selected.parse::<usize>().ok() {
+                Some(value) if value == custom_option => {
+                    Some(prompt_custom_model_input("Custom model name/path/URL: ")?)
+                }
+                Some(value) if value >= 1 && value <= options.len() => {
+                    let picked = options[value - 1];
+                    cli.model.push(PathBuf::from(picked.name));
+                    eprintln!("✅ Startup model: {}", picked.name);
+                    None
+                }
+                _ => {
+                    if selected.trim().is_empty() {
+                        let picked = options[0];
+                        cli.model.push(PathBuf::from(picked.name));
+                        eprintln!("✅ Startup model: {}", picked.name);
+                        None
+                    } else {
+                        Some(selected.trim().to_string())
+                    }
+                }
+            };
+
+            if let Some(custom) = custom_model {
+                cli.model.push(PathBuf::from(&custom));
+                eprintln!("✅ Startup model: {}", custom);
+            }
+        } else {
+            eprintln!();
+            let custom = prompt_custom_model_input("Enter startup model name/path/URL: ")?;
+            cli.model.push(PathBuf::from(&custom));
+            eprintln!("✅ Startup model: {}", custom);
+        }
+    }
+
+    if !cli.client {
+        if let Some(model) = cli.model.first() {
+            let startup_model = model.to_string_lossy().trim().to_string();
+            if !startup_model.is_empty() {
+                persist_hub_startup_model(&startup_model)?;
+            }
+        }
+    }
+
+    if !cli.auto {
+        cli.auto = true;
+        eprintln!("⚙️  Auto-start enabled for onboarding.");
+    }
+    eprintln!();
+    Ok(())
+}
+
+fn saved_startup_model_is_resolvable(saved: &str) -> bool {
+    let candidate = saved.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+
+    let path = std::path::Path::new(candidate);
+    if path.exists() {
+        return true;
+    }
+
+    // Support direct HF URLs and shorthand accepted by resolve_model().
+    if candidate.starts_with("https://huggingface.co/")
+        || candidate.starts_with("http://huggingface.co/")
+    {
+        return true;
+    }
+    if candidate.contains('/') && candidate.ends_with(".gguf") {
+        return true;
+    }
+
+    // Bare names are valid when discoverable on disk or in the catalog.
+    if !candidate.contains('/') {
+        for dir in mesh::model_dirs() {
+            if dir.join(candidate).exists() {
+                return true;
+            }
+        }
+        return download::find_model(candidate).is_some();
+    }
+
+    false
+}
+
 fn nostr_relays(cli_relays: &[String]) -> Vec<String> {
     if cli_relays.is_empty() {
         nostr::DEFAULT_RELAYS
@@ -1833,6 +2576,10 @@ struct PersistedHubState {
     link_state: String,
     membership_enforcement: String,
     linked_mesh_id: Option<String>,
+    default_mesh_selector: Option<String>,
+    default_invite_token: Option<String>,
+    default_startup_model: Option<String>,
+    access_token: Option<String>,
 }
 
 impl PersistedHubState {
@@ -1874,16 +2621,36 @@ fn read_persisted_hub_state() -> PersistedHubState {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned),
+        default_mesh_selector: json
+            .get("default_mesh_selector")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        default_invite_token: json
+            .get("default_invite_token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        default_startup_model: json
+            .get("default_startup_model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        access_token: json
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
     }
 }
 
-fn persist_hub_default_target(
-    mesh_selector: Option<String>,
-    invite_token: Option<String>,
+fn update_hub_session_json(
+    mut update: impl FnMut(&mut serde_json::Map<String, serde_json::Value>),
 ) -> anyhow::Result<()> {
-    if mesh_selector.is_none() && invite_token.is_none() {
-        return Ok(());
-    }
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
@@ -1898,23 +2665,61 @@ fn persist_hub_default_target(
     let Some(obj) = json.as_object_mut() else {
         anyhow::bail!("failed to parse hub-session.json object");
     };
-    if let Some(selector) = mesh_selector {
-        obj.insert(
-            "default_mesh_selector".to_string(),
-            serde_json::Value::String(selector),
-        );
-        obj.remove("default_invite_token");
-    }
-    if let Some(invite) = invite_token {
-        obj.insert(
-            "default_invite_token".to_string(),
-            serde_json::Value::String(invite),
-        );
-        obj.remove("default_mesh_selector");
-    }
+    update(obj);
     let payload = serde_json::to_string_pretty(&json)?;
     std::fs::write(path, payload)?;
     Ok(())
+}
+
+fn persist_hub_default_target(
+    mesh_selector: Option<String>,
+    invite_token: Option<String>,
+) -> anyhow::Result<()> {
+    if mesh_selector.is_none() && invite_token.is_none() {
+        return Ok(());
+    }
+    update_hub_session_json(|obj| {
+        if let Some(selector) = mesh_selector.clone() {
+            obj.insert(
+                "default_mesh_selector".to_string(),
+                serde_json::Value::String(selector),
+            );
+            obj.remove("default_invite_token");
+        }
+        if let Some(invite) = invite_token.clone() {
+            obj.insert(
+                "default_invite_token".to_string(),
+                serde_json::Value::String(invite),
+            );
+            obj.remove("default_mesh_selector");
+        }
+    })
+}
+
+fn persist_hub_access_token(access_token: &str) -> anyhow::Result<()> {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return Ok(());
+    }
+    update_hub_session_json(|obj| {
+        obj.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(token.to_string()),
+        );
+    })
+}
+
+fn persist_hub_startup_model(startup_model: &str) -> anyhow::Result<()> {
+    let model = startup_model.trim();
+    if model.is_empty() {
+        return Ok(());
+    }
+    update_hub_session_json(|obj| {
+        obj.insert(
+            "default_startup_model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    })
 }
 
 /// Discover meshes on Nostr and optionally join one.

@@ -29,6 +29,109 @@ pub fn bytes_transferred() -> u64 {
     BYTES_TRANSFERRED.load(Ordering::Relaxed)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpRelayUsage {
+    pub status_code: Option<u16>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+const MAX_USAGE_CAPTURE_BYTES: usize = 512 * 1024;
+
+#[derive(Default)]
+struct UsageCapture {
+    tail: Vec<u8>,
+    status_code: Option<u16>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+}
+
+impl UsageCapture {
+    fn ingest(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.tail.extend_from_slice(chunk);
+        if self.tail.len() > MAX_USAGE_CAPTURE_BYTES {
+            let drop = self.tail.len() - MAX_USAGE_CAPTURE_BYTES;
+            self.tail.drain(0..drop);
+        }
+        if self.status_code.is_none() {
+            self.status_code = parse_http_status_code(&self.tail);
+        }
+        self.prompt_tokens = extract_last_usage_value(&self.tail, &[b"\"prompt_tokens\"", b"\"input_tokens\""])
+            .or(self.prompt_tokens);
+        self.completion_tokens =
+            extract_last_usage_value(&self.tail, &[b"\"completion_tokens\"", b"\"output_tokens\""])
+                .or(self.completion_tokens);
+    }
+
+    fn snapshot(&self) -> HttpRelayUsage {
+        HttpRelayUsage {
+            status_code: self.status_code,
+            prompt_tokens: self.prompt_tokens.unwrap_or(0),
+            completion_tokens: self.completion_tokens.unwrap_or(0),
+        }
+    }
+}
+
+fn find_last_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    for i in (0..=haystack.len() - needle.len()).rev() {
+        if &haystack[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn parse_http_status_code(bytes: &[u8]) -> Option<u16> {
+    let line_end = bytes.windows(2).position(|w| w == b"\r\n")?;
+    let line = std::str::from_utf8(&bytes[..line_end]).ok()?;
+    let mut parts = line.split_whitespace();
+    let _ = parts.next()?;
+    let code = parts.next()?.parse::<u16>().ok()?;
+    Some(code)
+}
+
+fn extract_json_u64_after_key(bytes: &[u8], key: &[u8]) -> Option<u64> {
+    let idx = find_last_subslice(bytes, key)?;
+    let mut i = idx + key.len();
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b':' {
+            i += 1;
+            break;
+        }
+        if !b.is_ascii_whitespace() {
+            return None;
+        }
+        i += 1;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    std::str::from_utf8(&bytes[start..i]).ok()?.parse::<u64>().ok()
+}
+
+fn extract_last_usage_value(bytes: &[u8], keys: &[&[u8]]) -> Option<u64> {
+    for key in keys {
+        if let Some(value) = extract_json_u64_after_key(bytes, key) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 /// Manages all tunnels for a node
 #[derive(Clone)]
 pub struct Manager {
@@ -299,32 +402,32 @@ async fn handle_inbound_http_stream(
     relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
 }
 
-/// Relay a TCP stream through a QUIC bi-stream. Used by the lite client
-/// to tunnel local HTTP requests to the remote host's llama-server.
-/// Relay between two TCP streams (for local proxying).
-pub async fn relay_tcp_streams(a: TcpStream, b: TcpStream) -> Result<()> {
+pub async fn relay_tcp_streams_with_usage(a: TcpStream, b: TcpStream) -> Result<HttpRelayUsage> {
+    let usage = Arc::new(std::sync::Mutex::new(UsageCapture::default()));
+    let usage2 = usage.clone();
     let (a_read, mut a_write) = tokio::io::split(a);
     let (b_read, mut b_write) = tokio::io::split(b);
     let mut t1 = tokio::spawn(async move {
         tokio::io::copy(&mut tokio::io::BufReader::new(a_read), &mut b_write).await
     });
     let mut t2 = tokio::spawn(async move {
-        tokio::io::copy(&mut tokio::io::BufReader::new(b_read), &mut a_write).await
+        relay_tcp_to_tcp_with_usage(b_read, &mut a_write, usage2).await
     });
     tokio::select! {
         _ = &mut t1 => { t2.abort(); }
         _ = &mut t2 => { t1.abort(); }
     }
-    Ok(())
+    let snapshot = usage.lock().unwrap().snapshot();
+    Ok(snapshot)
 }
 
-pub async fn relay_tcp_via_quic(
+pub async fn relay_tcp_via_quic_with_usage(
     tcp_stream: TcpStream,
     quic_send: iroh::endpoint::SendStream,
     quic_recv: iroh::endpoint::RecvStream,
-) -> Result<()> {
+) -> Result<HttpRelayUsage> {
     let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
-    relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+    relay_bidirectional_with_usage(tcp_read, tcp_write, quic_send, quic_recv).await
 }
 
 /// Bidirectional relay. When either direction finishes, abort the other.
@@ -334,15 +437,29 @@ pub async fn relay_bidirectional(
     quic_send: iroh::endpoint::SendStream,
     quic_recv: iroh::endpoint::RecvStream,
 ) -> Result<()> {
+    let _ = relay_bidirectional_with_usage(tcp_read, tcp_write, quic_send, quic_recv).await?;
+    Ok(())
+}
+
+async fn relay_bidirectional_with_usage(
+    tcp_read: tokio::io::ReadHalf<TcpStream>,
+    tcp_write: tokio::io::WriteHalf<TcpStream>,
+    quic_send: iroh::endpoint::SendStream,
+    quic_recv: iroh::endpoint::RecvStream,
+) -> Result<HttpRelayUsage> {
+    let usage = Arc::new(std::sync::Mutex::new(UsageCapture::default()));
+    let usage2 = usage.clone();
     let mut t1 = tokio::spawn(async move { relay_tcp_to_quic(tcp_read, quic_send).await });
-    let mut t2 = tokio::spawn(async move { relay_quic_to_tcp(quic_recv, tcp_write).await });
+    let mut t2 =
+        tokio::spawn(async move { relay_quic_to_tcp_with_usage(quic_recv, tcp_write, usage2).await });
     // When either direction finishes, abort the other so we don't leak
     // tasks waiting on a half-open connection (rpc-server keeps TCP open).
     tokio::select! {
         _ = &mut t1 => { t2.abort(); }
         _ = &mut t2 => { t1.abort(); }
     }
-    Ok(())
+    let snapshot = usage.lock().unwrap().snapshot();
+    Ok(snapshot)
 }
 
 async fn relay_tcp_to_quic(
@@ -366,9 +483,10 @@ async fn relay_tcp_to_quic(
     Ok(())
 }
 
-async fn relay_quic_to_tcp(
+async fn relay_quic_to_tcp_with_usage(
     mut quic_recv: iroh::endpoint::RecvStream,
     mut tcp_write: tokio::io::WriteHalf<TcpStream>,
+    usage: Arc<std::sync::Mutex<UsageCapture>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
@@ -384,6 +502,7 @@ async fn relay_quic_to_tcp(
         }
         Ok(Ok(Some(n))) => {
             tcp_write.write_all(&buf[..n]).await?;
+            usage.lock().unwrap().ingest(&buf[..n]);
             total += n as u64;
             BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
             tracing::debug!("QUIC→TCP: first read {n} bytes");
@@ -403,6 +522,7 @@ async fn relay_quic_to_tcp(
         match quic_recv.read(&mut buf).await {
             Ok(Some(n)) => {
                 tcp_write.write_all(&buf[..n]).await?;
+                usage.lock().unwrap().ingest(&buf[..n]);
                 total += n as u64;
                 BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
                 tracing::debug!("QUIC→TCP: wrote {n} bytes (total: {total})");
@@ -418,4 +538,53 @@ async fn relay_quic_to_tcp(
         }
     }
     Ok(())
+}
+
+async fn relay_tcp_to_tcp_with_usage(
+    mut src: tokio::io::ReadHalf<TcpStream>,
+    dst: &mut tokio::io::WriteHalf<TcpStream>,
+    usage: Arc<std::sync::Mutex<UsageCapture>>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = src.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        dst.write_all(&buf[..n]).await?;
+        usage.lock().unwrap().ingest(&buf[..n]);
+        BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_http_status_code() {
+        let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{}";
+        assert_eq!(parse_http_status_code(response), Some(200));
+    }
+
+    #[test]
+    fn parses_usage_fields() {
+        let body =
+            br#"{"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":128,"total_tokens":170}}"#;
+        let mut usage = UsageCapture::default();
+        usage.ingest(body);
+        let snapshot = usage.snapshot();
+        assert_eq!(snapshot.prompt_tokens, 42);
+        assert_eq!(snapshot.completion_tokens, 128);
+    }
+
+    #[test]
+    fn parses_stream_usage_alias_fields() {
+        let body = br#"data: {"usage":{"input_tokens":11,"output_tokens":19}}"#;
+        let mut usage = UsageCapture::default();
+        usage.ingest(body);
+        let snapshot = usage.snapshot();
+        assert_eq!(snapshot.prompt_tokens, 11);
+        assert_eq!(snapshot.completion_tokens, 19);
+    }
 }

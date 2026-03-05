@@ -5,6 +5,7 @@
 
 use crate::{election, mesh, tunnel};
 use anyhow::Result;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -92,7 +93,7 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
     // Demand tracking for rebalancing
     if track_demand {
         if let Some(ref name) = model_name {
-            node.record_request(name);
+            node.record_inference_request(name);
         }
     }
 
@@ -106,6 +107,7 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
         match node.any_host().await {
             Some(p) => vec![p.id],
             None => {
+                node.record_inference_failure();
                 let _ = send_503(tcp_stream).await;
                 return;
             }
@@ -120,10 +122,22 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
     let mut last_err = None;
     let mut refreshed = false;
     for target_host in &target_hosts {
+        let started = Instant::now();
         match node.open_http_tunnel(*target_host).await {
             Ok((quic_send, quic_recv)) => {
-                if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
-                    tracing::debug!("HTTP tunnel relay ended: {e}");
+                match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv).await {
+                    Ok(usage) => {
+                        node.record_token_usage(usage.prompt_tokens, usage.completion_tokens);
+                        if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
+                            node.record_inference_failure();
+                        } else {
+                            node.record_inference_completion(started.elapsed().as_millis() as u64);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("HTTP tunnel relay ended: {e}");
+                        node.record_inference_failure();
+                    }
                 }
                 return;
             }
@@ -148,6 +162,7 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
     if let Some(e) = last_err {
         tracing::warn!("All hosts failed for model {:?}: {e}", model_name);
     }
+    node.record_inference_failure();
     let _ = send_503(tcp_stream).await;
 }
 
@@ -163,14 +178,27 @@ pub async fn route_to_target(
         election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
             match TcpStream::connect(format!("127.0.0.1:{port}")).await {
                 Ok(upstream) => {
+                    let started = Instant::now();
                     let _inflight = node.begin_inflight_request();
                     let _ = upstream.set_nodelay(true);
-                    if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
-                        tracing::debug!("API proxy (local) ended: {e}");
+                    match tunnel::relay_tcp_streams_with_usage(tcp_stream, upstream).await {
+                        Ok(usage) => {
+                            node.record_token_usage(usage.prompt_tokens, usage.completion_tokens);
+                            if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
+                                node.record_inference_failure();
+                            } else {
+                                node.record_inference_completion(started.elapsed().as_millis() as u64);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("API proxy (local) ended: {e}");
+                            node.record_inference_failure();
+                        }
                     }
                 }
                 Err(e) => {
                     tracing::warn!("API proxy: can't reach llama-server on {port}: {e}");
+                    node.record_inference_failure();
                     let _ = send_503(tcp_stream).await;
                 }
             }
@@ -179,10 +207,20 @@ pub async fn route_to_target(
         | election::InferenceTarget::MoeRemote(host_id) => {
             match node.open_http_tunnel(host_id).await {
                 Ok((quic_send, quic_recv)) => {
-                    if let Err(e) =
-                        tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await
-                    {
-                        tracing::debug!("API proxy (remote) ended: {e}");
+                    let started = Instant::now();
+                    match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv).await {
+                        Ok(usage) => {
+                            node.record_token_usage(usage.prompt_tokens, usage.completion_tokens);
+                            if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
+                                node.record_inference_failure();
+                            } else {
+                                node.record_inference_completion(started.elapsed().as_millis() as u64);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("API proxy (remote) ended: {e}");
+                            node.record_inference_failure();
+                        }
                     }
                 }
                 Err(e) => {
@@ -190,11 +228,13 @@ pub async fn route_to_target(
                         "API proxy: can't tunnel to host {}: {e}",
                         host_id.fmt_short()
                     );
+                    node.record_inference_failure();
                     let _ = send_503(tcp_stream).await;
                 }
             }
         }
         election::InferenceTarget::None => {
+            node.record_inference_failure();
             let _ = send_503(tcp_stream).await;
         }
     }

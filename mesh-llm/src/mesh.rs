@@ -421,6 +421,12 @@ pub struct Node {
     peer_change_tx: watch::Sender<usize>,
     pub peer_change_rx: watch::Receiver<usize>,
     inflight_requests: Arc<std::sync::atomic::AtomicUsize>,
+    total_inference_requests: Arc<std::sync::atomic::AtomicU64>,
+    failed_inference_requests: Arc<std::sync::atomic::AtomicU64>,
+    completed_inference_requests: Arc<std::sync::atomic::AtomicU64>,
+    total_inference_latency_ms: Arc<std::sync::atomic::AtomicU64>,
+    total_input_tokens: Arc<std::sync::atomic::AtomicU64>,
+    total_output_tokens: Arc<std::sync::atomic::AtomicU64>,
     inflight_change_tx: watch::Sender<u64>,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     tunnel_http_tx:
@@ -483,6 +489,64 @@ impl Node {
 
     pub fn inflight_change_rx(&self) -> watch::Receiver<u64> {
         self.inflight_change_tx.subscribe()
+    }
+
+    pub fn total_inference_requests(&self) -> u64 {
+        self.total_inference_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn failed_inference_requests(&self) -> u64 {
+        self.failed_inference_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn completed_inference_requests(&self) -> u64 {
+        self.completed_inference_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn average_inference_latency_ms(&self) -> u64 {
+        let completed = self.completed_inference_requests();
+        if completed == 0 {
+            return 0;
+        }
+        self.total_inference_latency_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / completed
+    }
+
+    pub fn record_inference_failure(&self) {
+        self.failed_inference_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_inference_completion(&self, latency_ms: u64) {
+        self.completed_inference_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_inference_latency_ms
+            .fetch_add(latency_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn total_input_tokens(&self) -> u64 {
+        self.total_input_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn total_output_tokens(&self) -> u64 {
+        self.total_output_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn record_token_usage(&self, input_tokens: u64, output_tokens: u64) {
+        if input_tokens > 0 {
+            self.total_input_tokens
+                .fetch_add(input_tokens, std::sync::atomic::Ordering::Relaxed);
+        }
+        if output_tokens > 0 {
+            self.total_output_tokens
+                .fetch_add(output_tokens, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub async fn start(
@@ -613,6 +677,12 @@ impl Node {
             peer_change_tx,
             peer_change_rx,
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            total_inference_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            failed_inference_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            completed_inference_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_inference_latency_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_input_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_output_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             inflight_change_tx,
             tunnel_tx,
             tunnel_http_tx,
@@ -799,6 +869,13 @@ impl Node {
         let entry = demand.entry(model.to_string()).or_default();
         entry.last_active = now_secs();
         entry.request_count += 1;
+    }
+
+    /// Record an inference request for telemetry and demand balancing.
+    pub fn record_inference_request(&self, model: &str) {
+        self.record_request(model);
+        self.total_inference_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the current demand map (for gossip and assignment decisions).

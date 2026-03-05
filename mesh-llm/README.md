@@ -79,7 +79,7 @@ mesh-llm --inferencehub --hub-mesh "my-public-mesh"
 mesh-llm --inferencehub --hub-invite "ih_inv_..."
 ```
 
-Then use `Login with InferenceHub` in the console header to link the current mesh or leave and join/create a mesh on InferenceHub.
+`mesh-llm --inferencehub` is interactive on first run: choose a startup model, then use `Login with InferenceHub` in the console header to complete auth for the target mesh.
 
 ## Live demo
 
