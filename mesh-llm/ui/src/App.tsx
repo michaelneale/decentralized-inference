@@ -186,8 +186,10 @@ type TopologyNode = {
 };
 
 type ThemeMode = 'auto' | 'light' | 'dark';
+type ReasoningMode = 'auto' | 'on' | 'off';
 
 const THEME_STORAGE_KEY = 'mesh-llm-theme';
+const REASONING_MODE_STORAGE_KEY = 'mesh-llm-reasoning-mode';
 const DEFAULT_CHAT_TITLE = 'New chat';
 const CHAT_DB_NAME = 'mesh-llm-chat-db';
 const CHAT_DB_STORE = 'state';
@@ -237,6 +239,12 @@ function readThemeMode(): ThemeMode {
   if (typeof window === 'undefined') return 'auto';
   const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
   return stored === 'light' || stored === 'dark' || stored === 'auto' ? stored : 'auto';
+}
+
+function readReasoningMode(): ReasoningMode {
+  if (typeof window === 'undefined') return 'auto';
+  const stored = window.localStorage.getItem(REASONING_MODE_STORAGE_KEY);
+  return stored === 'on' || stored === 'off' || stored === 'auto' ? stored : 'auto';
 }
 
 function applyThemeMode(mode: ThemeMode) {
@@ -431,6 +439,7 @@ export function App() {
   const [chatStateHydrated, setChatStateHydrated] = useState(false);
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>(() => readReasoningMode());
   const [isSending, setIsSending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
@@ -506,6 +515,10 @@ export function App() {
     applyThemeMode(themeMode);
     window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(REASONING_MODE_STORAGE_KEY, reasoningMode);
+  }, [reasoningMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -691,24 +704,33 @@ export function App() {
     conversationId: string;
     assistantId: string;
     model: string;
+    reasoningMode: ReasoningMode;
     historyForRequest: ChatMessage[];
   }) {
-    const { conversationId, assistantId, model, historyForRequest } = params;
+    const { conversationId, assistantId, model, reasoningMode, historyForRequest } = params;
     const reqStart = performance.now();
     const controller = new AbortController();
     currentAbortRef.current = controller;
 
     try {
+      const requestBody: Record<string, unknown> = {
+        model,
+        messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      if (reasoningMode !== 'auto') {
+        // Best-effort switch for chat templates that expose a thinking toggle (e.g. Qwen3).
+        requestBody.chat_template_kwargs = {
+          enable_thinking: reasoningMode === 'on',
+        };
+      }
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
-        body: JSON.stringify({
-          model,
-          messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -850,7 +872,7 @@ export function App() {
     pushRoute({ section: 'chat', chatId: conversationId });
     setInput('');
     setIsSending(true);
-    await streamAssistantReply({ conversationId, assistantId, model, historyForRequest });
+    await streamAssistantReply({ conversationId, assistantId, model, reasoningMode, historyForRequest });
   }
 
   async function regenerateLastResponse() {
@@ -872,7 +894,7 @@ export function App() {
       })),
     }));
     setIsSending(true);
-    await streamAssistantReply({ conversationId, assistantId, model, historyForRequest });
+    await streamAssistantReply({ conversationId, assistantId, model, reasoningMode, historyForRequest });
   }
 
   function stopStreaming() {
@@ -1038,6 +1060,8 @@ export function App() {
                 modelStatsByName={modelStatsByName}
                 selectedModel={selectedModel}
                 setSelectedModel={setSelectedModel}
+                reasoningMode={reasoningMode}
+                setReasoningMode={setReasoningMode}
                 selectedModelNodeCount={selectedModelNodeCount}
                 selectedModelVramGb={selectedModelVramGb}
                 isHubLinked={isHubLinked}
@@ -2114,6 +2138,8 @@ function ChatPage(props: {
   modelStatsByName: Record<string, ModelServingStat>;
   selectedModel: string;
   setSelectedModel: (v: string) => void;
+  reasoningMode: ReasoningMode;
+  setReasoningMode: (v: ReasoningMode) => void;
   selectedModelNodeCount: number | null;
   selectedModelVramGb: number | null;
   isHubLinked: boolean;
@@ -2145,6 +2171,8 @@ function ChatPage(props: {
     modelStatsByName,
     selectedModel,
     setSelectedModel,
+    reasoningMode,
+    setReasoningMode,
     selectedModelNodeCount,
     selectedModelVramGb,
     isHubLinked,
@@ -2268,6 +2296,17 @@ function ChatPage(props: {
                     </SelectItem>
                   );
                 })}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">Reasoning</span>
+            <Select value={reasoningMode} onValueChange={(v) => setReasoningMode(v as ReasoningMode)}>
+              <SelectTrigger className="h-8 w-[132px]">
+                <SelectValue placeholder="Auto" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto</SelectItem>
+                <SelectItem value="on">Think</SelectItem>
+                <SelectItem value="off">No-think</SelectItem>
               </SelectContent>
             </Select>
           </div>

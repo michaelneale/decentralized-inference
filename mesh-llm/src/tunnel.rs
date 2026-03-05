@@ -14,6 +14,7 @@ use crate::mesh::Node;
 use crate::rewrite::{self, PortRewriteMap};
 use anyhow::Result;
 use iroh::EndpointId;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,6 +38,7 @@ pub struct HttpRelayUsage {
 }
 
 const MAX_USAGE_CAPTURE_BYTES: usize = 512 * 1024;
+const MAX_HTTP_REQUEST_REWRITE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 struct UsageCapture {
@@ -130,6 +132,233 @@ fn extract_last_usage_value(bytes: &[u8], keys: &[&[u8]]) -> Option<u64> {
         }
     }
     None
+}
+
+fn header_end_offset(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|idx| idx + 4)
+}
+
+fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.lines() {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                return value.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    None
+}
+
+fn has_chunked_encoding(headers: &str) -> bool {
+    headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+        })
+}
+
+fn rewrite_chat_completions_request(request: &[u8]) -> Option<Vec<u8>> {
+    let header_end = header_end_offset(request)?;
+    let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+    let mut lines = headers.split("\r\n");
+    let request_line = lines.next()?.trim();
+    if !(request_line.starts_with("POST /v1/chat/completions")
+        || request_line.starts_with("POST /api/chat"))
+    {
+        return None;
+    }
+    let original_body = &request[header_end..];
+    let mut json = serde_json::from_slice::<Value>(original_body).ok()?;
+    let root = json.as_object_mut()?;
+    let stream_options = root
+        .entry("stream_options".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !stream_options.is_object() {
+        *stream_options = Value::Object(serde_json::Map::new());
+    }
+    stream_options
+        .as_object_mut()
+        .expect("stream_options should be object")
+        .insert("include_usage".to_string(), Value::Bool(true));
+    let rewritten_body = serde_json::to_vec(&json).ok()?;
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str(request_line);
+    rebuilt.push_str("\r\n");
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((name, _)) = trimmed.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                continue;
+            }
+            if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+                continue;
+            }
+        }
+        rebuilt.push_str(trimmed);
+        rebuilt.push_str("\r\n");
+    }
+    rebuilt.push_str(&format!("Content-Length: {}\r\n", rewritten_body.len()));
+    rebuilt.push_str("\r\n");
+
+    let mut out = rebuilt.into_bytes();
+    out.extend_from_slice(&rewritten_body);
+    Some(out)
+}
+
+async fn relay_http_request_to_quic_with_optional_rewrite(
+    mut tcp_read: tokio::io::ReadHalf<TcpStream>,
+    mut quic_send: iroh::endpoint::SendStream,
+) -> Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut pending = Vec::<u8>::new();
+    let mut first_request_handled = false;
+
+    loop {
+        let n = tcp_read.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        if !first_request_handled {
+            pending.extend_from_slice(&buf[..n]);
+            if pending.len() > MAX_HTTP_REQUEST_REWRITE_BYTES {
+                quic_send.write_all(&pending).await?;
+                BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                pending.clear();
+                first_request_handled = true;
+                continue;
+            }
+            let Some(header_end) = header_end_offset(&pending) else {
+                continue;
+            };
+            let headers = match std::str::from_utf8(&pending[..header_end]) {
+                Ok(h) => h,
+                Err(_) => {
+                    quic_send.write_all(&pending).await?;
+                    BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                    pending.clear();
+                    first_request_handled = true;
+                    continue;
+                }
+            };
+            if has_chunked_encoding(headers) {
+                quic_send.write_all(&pending).await?;
+                BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                pending.clear();
+                first_request_handled = true;
+                continue;
+            }
+            let content_length = parse_content_length(headers).unwrap_or(0);
+            let total_len = header_end + content_length;
+            if pending.len() < total_len {
+                continue;
+            }
+            let request_bytes = &pending[..total_len];
+            let rewritten =
+                rewrite_chat_completions_request(request_bytes).unwrap_or_else(|| request_bytes.to_vec());
+            quic_send.write_all(&rewritten).await?;
+            BYTES_TRANSFERRED.fetch_add(rewritten.len() as u64, Ordering::Relaxed);
+            if pending.len() > total_len {
+                let tail = &pending[total_len..];
+                quic_send.write_all(tail).await?;
+                BYTES_TRANSFERRED.fetch_add(tail.len() as u64, Ordering::Relaxed);
+            }
+            pending.clear();
+            first_request_handled = true;
+            continue;
+        }
+
+        quic_send.write_all(&buf[..n]).await?;
+        BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    if !pending.is_empty() {
+        quic_send.write_all(&pending).await?;
+        BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+    }
+
+    quic_send.finish()?;
+    Ok(())
+}
+
+async fn relay_http_request_to_tcp_with_optional_rewrite(
+    mut src: tokio::io::ReadHalf<TcpStream>,
+    dst: &mut tokio::io::WriteHalf<TcpStream>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut pending = Vec::<u8>::new();
+    let mut first_request_handled = false;
+
+    loop {
+        let n = src.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        if !first_request_handled {
+            pending.extend_from_slice(&buf[..n]);
+            if pending.len() > MAX_HTTP_REQUEST_REWRITE_BYTES {
+                dst.write_all(&pending).await?;
+                BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                pending.clear();
+                first_request_handled = true;
+                continue;
+            }
+            let Some(header_end) = header_end_offset(&pending) else {
+                continue;
+            };
+            let headers = match std::str::from_utf8(&pending[..header_end]) {
+                Ok(h) => h,
+                Err(_) => {
+                    dst.write_all(&pending).await?;
+                    BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                    pending.clear();
+                    first_request_handled = true;
+                    continue;
+                }
+            };
+            if has_chunked_encoding(headers) {
+                dst.write_all(&pending).await?;
+                BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+                pending.clear();
+                first_request_handled = true;
+                continue;
+            }
+            let content_length = parse_content_length(headers).unwrap_or(0);
+            let total_len = header_end + content_length;
+            if pending.len() < total_len {
+                continue;
+            }
+            let request_bytes = &pending[..total_len];
+            let rewritten =
+                rewrite_chat_completions_request(request_bytes).unwrap_or_else(|| request_bytes.to_vec());
+            dst.write_all(&rewritten).await?;
+            BYTES_TRANSFERRED.fetch_add(rewritten.len() as u64, Ordering::Relaxed);
+            if pending.len() > total_len {
+                let tail = &pending[total_len..];
+                dst.write_all(tail).await?;
+                BYTES_TRANSFERRED.fetch_add(tail.len() as u64, Ordering::Relaxed);
+            }
+            pending.clear();
+            first_request_handled = true;
+            continue;
+        }
+
+        dst.write_all(&buf[..n]).await?;
+        BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    if !pending.is_empty() {
+        dst.write_all(&pending).await?;
+        BYTES_TRANSFERRED.fetch_add(pending.len() as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// Manages all tunnels for a node
@@ -407,9 +636,8 @@ pub async fn relay_tcp_streams_with_usage(a: TcpStream, b: TcpStream) -> Result<
     let usage2 = usage.clone();
     let (a_read, mut a_write) = tokio::io::split(a);
     let (b_read, mut b_write) = tokio::io::split(b);
-    let mut t1 = tokio::spawn(async move {
-        tokio::io::copy(&mut tokio::io::BufReader::new(a_read), &mut b_write).await
-    });
+    let mut t1 =
+        tokio::spawn(async move { relay_http_request_to_tcp_with_optional_rewrite(a_read, &mut b_write).await });
     let mut t2 = tokio::spawn(async move {
         relay_tcp_to_tcp_with_usage(b_read, &mut a_write, usage2).await
     });
@@ -449,7 +677,8 @@ async fn relay_bidirectional_with_usage(
 ) -> Result<HttpRelayUsage> {
     let usage = Arc::new(std::sync::Mutex::new(UsageCapture::default()));
     let usage2 = usage.clone();
-    let mut t1 = tokio::spawn(async move { relay_tcp_to_quic(tcp_read, quic_send).await });
+    let mut t1 =
+        tokio::spawn(async move { relay_http_request_to_quic_with_optional_rewrite(tcp_read, quic_send).await });
     let mut t2 =
         tokio::spawn(async move { relay_quic_to_tcp_with_usage(quic_recv, tcp_write, usage2).await });
     // When either direction finishes, abort the other so we don't leak
@@ -586,5 +815,13 @@ mod tests {
         let snapshot = usage.snapshot();
         assert_eq!(snapshot.prompt_tokens, 11);
         assert_eq!(snapshot.completion_tokens, 19);
+    }
+
+    #[test]
+    fn rewrites_chat_completion_request_to_include_usage() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 33\r\n\r\n{\"stream\":true,\"model\":\"qwen3\"}";
+        let rewritten = rewrite_chat_completions_request(req).expect("request should rewrite");
+        let as_text = String::from_utf8(rewritten).expect("valid utf8");
+        assert!(as_text.contains("\"stream_options\":{\"include_usage\":true}"));
     }
 }
