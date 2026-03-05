@@ -68,6 +68,19 @@ mesh-llm    # no args
 
 Shows getting-started instructions and opens a read-only console on `:3131`. The node stays dormant — no inbound QUIC connections or heartbeat — until you start or join a mesh via CLI flags.
 
+## InferenceHub onboarding
+
+Use hub-managed onboarding (no local Nostr invite/discovery flow):
+
+```bash
+mesh-llm --inferencehub
+mesh-llm --auto --inferencehub
+mesh-llm --inferencehub --hub-mesh "my-public-mesh"
+mesh-llm --inferencehub --hub-invite "ih_inv_..."
+```
+
+`mesh-llm --inferencehub` is interactive on first run: choose a startup model, then use `Login with InferenceHub` in the console header to complete auth for the target mesh.
+
 ## Live demo
 
 **[Try it now](https://mesh-llm-console.fly.dev/)** — web console connected to the default public mesh. Runs as a client on Fly.io, no GPU.

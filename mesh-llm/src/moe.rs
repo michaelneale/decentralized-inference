@@ -94,7 +94,10 @@ fn read_i64(f: &mut std::fs::File) -> std::io::Result<i64> {
 fn read_gguf_string(f: &mut std::fs::File) -> std::io::Result<String> {
     let len = read_u64(f)? as usize;
     if len > 1_000_000 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "string too long"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "string too long",
+        ));
     }
     let mut buf = vec![0u8; len];
     f.read_exact(&mut buf)?;
@@ -108,8 +111,9 @@ fn skip_gguf_value(f: &mut std::fs::File, typ: GgufType) -> std::io::Result<()> 
             let _ = read_gguf_string(f)?;
         }
         GgufType::Array => {
-            let elem_type = GgufType::from_u32(read_u32(f)?)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad array type"))?;
+            let elem_type = GgufType::from_u32(read_u32(f)?).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "bad array type")
+            })?;
             let count = read_u64(f)? as usize;
             for _ in 0..count {
                 skip_gguf_value(f, elem_type)?;
@@ -212,14 +216,34 @@ pub fn ranking_cache_path(model_path: &Path) -> PathBuf {
 /// Also supports the full CSV format from moe-analyze: expert_id,total_mass,mass_fraction,selection_count
 pub fn load_cached_ranking(path: &Path) -> Option<Vec<u32>> {
     let content = std::fs::read_to_string(path).ok()?;
-    let ranking: Vec<u32> = content.lines()
+    let ranking: Vec<u32> = content
+        .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("expert"))
         .filter_map(|l| {
             // Support both plain "42" and CSV "42,1234.5,0.03,500"
             l.split(',').next()?.trim().parse().ok()
         })
         .collect();
-    if ranking.is_empty() { None } else { Some(ranking) }
+    if ranking.is_empty() {
+        None
+    } else {
+        Some(ranking)
+    }
+}
+
+/// Save ranking cache as one expert id per line.
+#[cfg(test)]
+fn save_ranking(path: &Path, ranking: &[u32]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = ranking
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{content}\n"))?;
+    Ok(())
 }
 
 // ── Expert assignment ──
@@ -252,11 +276,14 @@ pub fn compute_assignments(
 
     if n_nodes <= 1 || min_exp >= n_expert {
         // Single node or core covers everything — just give everyone all experts
-        return vec![NodeAssignment {
-            experts: ranking.to_vec(),
-            n_shared: n_expert,
-            n_unique: 0,
-        }; n_nodes.max(1)];
+        return vec![
+            NodeAssignment {
+                experts: ranking.to_vec(),
+                n_shared: n_expert,
+                n_unique: 0,
+            };
+            n_nodes.max(1)
+        ];
     }
 
     // Shared core = top min_experts by gate mass
@@ -292,7 +319,9 @@ pub fn compute_assignments(
 
 /// Format expert list as comma-separated string for moe-split --expert-list.
 pub fn expert_list_arg(assignment: &NodeAssignment) -> String {
-    assignment.experts.iter()
+    assignment
+        .experts
+        .iter()
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join(",")
@@ -322,9 +351,12 @@ pub fn run_split(
     let expert_list = expert_list_arg(assignment);
     let status = std::process::Command::new(bin_dir.join("llama-moe-split"))
         .args([
-            "-m", &model_path.to_string_lossy(),
-            "--expert-list", &expert_list,
-            "-o", &output_path.to_string_lossy(),
+            "-m",
+            &model_path.to_string_lossy(),
+            "--expert-list",
+            &expert_list,
+            "-o",
+            &output_path.to_string_lossy(),
         ])
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run llama-moe-split: {e}"))?;
@@ -409,10 +441,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ranking.csv");
-        std::fs::write(&path, "expert_id,total_mass,mass_fraction,selection_count\n\
+        std::fs::write(
+            &path,
+            "expert_id,total_mass,mass_fraction,selection_count\n\
             0,8365.69,0.250,15680\n\
             26,267.43,0.008,4800\n\
-            41,250.11,0.007,4600\n").unwrap();
+            41,250.11,0.007,4600\n",
+        )
+        .unwrap();
 
         let loaded = load_cached_ranking(&path).unwrap();
         assert_eq!(loaded, vec![0, 26, 41]);
@@ -434,7 +470,8 @@ mod tests {
 
     #[test]
     fn test_detect_moe_olmoe() {
-        let path = std::path::Path::new("/Users/micn/.models/olmoe-1b-7b-0924-instruct-q4_k_m.gguf");
+        let path =
+            std::path::Path::new("/Users/micn/.models/olmoe-1b-7b-0924-instruct-q4_k_m.gguf");
         if !path.exists() {
             eprintln!("Skipping: OLMoE model file not found");
             return;
@@ -452,7 +489,10 @@ mod tests {
             eprintln!("Skipping: dense model file not found");
             return;
         }
-        assert!(detect_moe(path).is_none(), "Dense model should not be detected as MoE");
+        assert!(
+            detect_moe(path).is_none(),
+            "Dense model should not be detected as MoE"
+        );
     }
 
     #[test]

@@ -22,15 +22,18 @@ import {
   Gauge,
   Hash,
   Laptop,
+  Link2,
   Loader2,
   MessageSquarePlus,
   Maximize2,
   Minimize2,
   Moon,
   Network,
+  ExternalLink,
   Pencil,
   RotateCcw,
   Send,
+  ShieldCheck,
   Square,
   Sparkles,
   Sun,
@@ -49,6 +52,14 @@ import { Alert, AlertDescription, AlertTitle } from './components/ui/alert';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './components/ui/dropdown-menu';
 import {
   NavigationMenu,
   NavigationMenuItem,
@@ -76,10 +87,15 @@ type MeshModel = {
   size_gb: number;
 };
 
+type CatalogTopModel = {
+  name: string;
+  size_gb: number;
+  description: string;
+};
+
 type Peer = {
   id: string;
   role: string;
-  models: string[];
   vram_gb: number;
   serving?: string | null;
   rtt_ms?: number | null;
@@ -101,9 +117,27 @@ type StatusPayload = {
   mesh_name?: string | null;
   peers: Peer[];
   mesh_models: MeshModel[];
+  top_catalog_models?: CatalogTopModel[];
   inflight_requests: number;
   launch_pi?: string | null;
   launch_goose?: string | null;
+  mesh_id?: string | null;
+  mesh_link_state?: 'unlinked' | 'linking' | 'linked' | 'degraded' | string;
+  membership_enforcement?: 'local' | 'hub_enforced' | string;
+  hub_mesh_url?: string | null;
+  hub_mesh_name?: string | null;
+  hub_mesh_slug?: string | null;
+  hub_mesh_visibility?: 'public' | 'private' | string;
+  hub_base_url?: string | null;
+  hub_auth_state?: 'logged_out' | 'logged_in' | 'auth_pending' | string;
+  hub_user_name?: string | null;
+  hub_user_handle?: string | null;
+  hub_user_avatar_url?: string | null;
+  hub_profile_url?: string | null;
+  hub_meshes_url?: string | null;
+  hub_default_mesh_selector?: string | null;
+  hub_default_invite_configured?: boolean | null;
+  hub_first_time_onboarding?: boolean | null;
 };
 
 type ChatMessage = {
@@ -152,8 +186,10 @@ type TopologyNode = {
 };
 
 type ThemeMode = 'auto' | 'light' | 'dark';
+type ReasoningMode = 'auto' | 'on' | 'off';
 
 const THEME_STORAGE_KEY = 'mesh-llm-theme';
+const REASONING_MODE_STORAGE_KEY = 'mesh-llm-reasoning-mode';
 const DEFAULT_CHAT_TITLE = 'New chat';
 const CHAT_DB_NAME = 'mesh-llm-chat-db';
 const CHAT_DB_STORE = 'state';
@@ -205,6 +241,12 @@ function readThemeMode(): ThemeMode {
   return stored === 'light' || stored === 'dark' || stored === 'auto' ? stored : 'auto';
 }
 
+function readReasoningMode(): ReasoningMode {
+  if (typeof window === 'undefined') return 'auto';
+  const stored = window.localStorage.getItem(REASONING_MODE_STORAGE_KEY);
+  return stored === 'on' || stored === 'off' || stored === 'auto' ? stored : 'auto';
+}
+
 function applyThemeMode(mode: ThemeMode) {
   if (typeof window === 'undefined') return;
   const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -216,6 +258,10 @@ function applyThemeMode(mode: ThemeMode) {
 function randomId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function shellQuoteArg(value: string): string {
+  return /^[A-Za-z0-9._:/-]+$/.test(value) ? value : `"${value.replace(/(["\\$`])/g, '\\$1')}"`;
 }
 
 function deriveConversationTitle(input: string): string {
@@ -393,6 +439,7 @@ export function App() {
   const [chatStateHydrated, setChatStateHydrated] = useState(false);
   const [input, setInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>(() => readReasoningMode());
   const [isSending, setIsSending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<Record<string, boolean>>({});
@@ -454,6 +501,10 @@ export function App() {
     const port = status?.api_port ?? 9337;
     return `http://127.0.0.1:${port}/v1`;
   }, [status?.api_port]);
+  const meshLinkState = status?.mesh_link_state ?? 'unlinked';
+  const isHubLinked = meshLinkState === 'linked' || status?.membership_enforcement === 'hub_enforced';
+  const hubBaseUrl = status?.hub_base_url ?? 'https://inferencehub.cc';
+  const hubMeshUrl = status?.hub_mesh_url ?? `${hubBaseUrl}/my-meshes`;
 
   useEffect(() => {
     if (!warmModels.length) return;
@@ -464,6 +515,10 @@ export function App() {
     applyThemeMode(themeMode);
     window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(REASONING_MODE_STORAGE_KEY, reasoningMode);
+  }, [reasoningMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -649,24 +704,33 @@ export function App() {
     conversationId: string;
     assistantId: string;
     model: string;
+    reasoningMode: ReasoningMode;
     historyForRequest: ChatMessage[];
   }) {
-    const { conversationId, assistantId, model, historyForRequest } = params;
+    const { conversationId, assistantId, model, reasoningMode, historyForRequest } = params;
     const reqStart = performance.now();
     const controller = new AbortController();
     currentAbortRef.current = controller;
 
     try {
+      const requestBody: Record<string, unknown> = {
+        model,
+        messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      if (reasoningMode !== 'auto') {
+        // Best-effort switch for chat templates that expose a thinking toggle (e.g. Qwen3).
+        requestBody.chat_template_kwargs = {
+          enable_thinking: reasoningMode === 'on',
+        };
+      }
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
-        body: JSON.stringify({
-          model,
-          messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -808,7 +872,7 @@ export function App() {
     pushRoute({ section: 'chat', chatId: conversationId });
     setInput('');
     setIsSending(true);
-    await streamAssistantReply({ conversationId, assistantId, model, historyForRequest });
+    await streamAssistantReply({ conversationId, assistantId, model, reasoningMode, historyForRequest });
   }
 
   async function regenerateLastResponse() {
@@ -830,7 +894,7 @@ export function App() {
       })),
     }));
     setIsSending(true);
-    await streamAssistantReply({ conversationId, assistantId, model, historyForRequest });
+    await streamAssistantReply({ conversationId, assistantId, model, reasoningMode, historyForRequest });
   }
 
   function stopStreaming() {
@@ -969,6 +1033,19 @@ export function App() {
           inviteWithModelName={inviteWithModelName}
           inviteClientCommand={inviteClientCommand}
           inviteToken={inviteToken}
+          isHubLinked={isHubLinked}
+          hubBaseUrl={hubBaseUrl}
+          hubMeshUrl={hubMeshUrl}
+          hubMeshName={status?.hub_mesh_name ?? null}
+          hubMeshSlug={status?.hub_mesh_slug ?? null}
+          hubMeshVisibility={status?.hub_mesh_visibility ?? null}
+          hubDefaultMeshSelector={status?.hub_default_mesh_selector ?? null}
+          hubAuthState={status?.hub_auth_state ?? 'logged_out'}
+          hubUserName={status?.hub_user_name ?? null}
+          hubUserHandle={status?.hub_user_handle ?? null}
+          hubUserAvatarUrl={status?.hub_user_avatar_url ?? null}
+          hubProfileUrl={status?.hub_profile_url ?? null}
+          hubMeshesUrl={status?.hub_meshes_url ?? null}
           apiDirectUrl={apiDirectUrl}
           launchPi={status?.launch_pi ?? null}
           launchGoose={status?.launch_goose ?? null}
@@ -983,8 +1060,13 @@ export function App() {
                 modelStatsByName={modelStatsByName}
                 selectedModel={selectedModel}
                 setSelectedModel={setSelectedModel}
+                reasoningMode={reasoningMode}
+                setReasoningMode={setReasoningMode}
                 selectedModelNodeCount={selectedModelNodeCount}
                 selectedModelVramGb={selectedModelVramGb}
+                isHubLinked={isHubLinked}
+                hubMeshUrl={hubMeshUrl}
+                hubBaseUrl={hubBaseUrl}
                 conversations={conversations}
                 activeConversationId={activeConversationId}
                 onConversationCreate={createNewConversation}
@@ -1026,17 +1108,16 @@ export function App() {
             Mesh LLM {status?.version ? `v${status.version}` : 'version loading...'}
             {status?.latest_version ? (
               <>
-                <span>·</span>
                 <a
                   href="https://github.com/michaelneale/decentralized-inference/releases"
                   target="_blank"
                   rel="noreferrer"
-                  className="underline-offset-2 hover:text-foreground hover:underline"
+                  className="inline-flex"
                   title="A newer mesh-llm version is available"
                 >
-                  {status?.version
-                    ? `Update available: v${status.version} -> v${status.latest_version}`
-                    : `Update available: v${status.latest_version}`}
+                  <Badge className="h-5 border-amber-500/40 bg-amber-500/10 px-2 text-[10px] text-amber-700 dark:text-amber-300">
+                    Update available
+                  </Badge>
                 </a>
               </>
             ) : null}
@@ -1072,6 +1153,19 @@ function AppHeader({
   inviteWithModelName,
   inviteClientCommand,
   inviteToken,
+  isHubLinked,
+  hubBaseUrl,
+  hubMeshUrl,
+  hubMeshName,
+  hubMeshSlug,
+  hubMeshVisibility,
+  hubDefaultMeshSelector,
+  hubAuthState,
+  hubUserName,
+  hubUserHandle,
+  hubUserAvatarUrl,
+  hubProfileUrl,
+  hubMeshesUrl,
   apiDirectUrl,
   launchPi,
   launchGoose,
@@ -1086,6 +1180,19 @@ function AppHeader({
   inviteWithModelName: string;
   inviteClientCommand: string;
   inviteToken: string;
+  isHubLinked: boolean;
+  hubBaseUrl: string;
+  hubMeshUrl: string;
+  hubMeshName: string | null;
+  hubMeshSlug: string | null;
+  hubMeshVisibility: string | null;
+  hubDefaultMeshSelector: string | null;
+  hubAuthState: string;
+  hubUserName: string | null;
+  hubUserHandle: string | null;
+  hubUserAvatarUrl: string | null;
+  hubProfileUrl: string | null;
+  hubMeshesUrl: string | null;
   apiDirectUrl: string;
   launchPi: string | null;
   launchGoose: string | null;
@@ -1096,7 +1203,65 @@ function AppHeader({
   const [apiDirectCopied, setApiDirectCopied] = useState(false);
   const [launchPiCopied, setLaunchPiCopied] = useState(false);
   const [launchGooseCopied, setLaunchGooseCopied] = useState(false);
+  const [hubPublicJoinWithModelCopied, setHubPublicJoinWithModelCopied] = useState(false);
+  const [hubPublicJoinClientCopied, setHubPublicJoinClientCopied] = useState(false);
+  const [hubPrivateInviteBusy, setHubPrivateInviteBusy] = useState(false);
+  const [hubPrivateInviteToken, setHubPrivateInviteToken] = useState<string | null>(null);
+  const [hubPrivateInviteError, setHubPrivateInviteError] = useState<string | null>(null);
+  const [hubPrivateInviteWithModelCopied, setHubPrivateInviteWithModelCopied] = useState(false);
+  const [hubPrivateInviteClientCopied, setHubPrivateInviteClientCopied] = useState(false);
+  const [hubPrivateInviteTokenCopied, setHubPrivateInviteTokenCopied] = useState(false);
   const [isThemePopoverOpen, setIsThemePopoverOpen] = useState(false);
+  const [hubSignedOutLocal, setHubSignedOutLocal] = useState(false);
+  const [hubAuthBusy, setHubAuthBusy] = useState(false);
+  const [hubPendingCode, setHubPendingCode] = useState<string | null>(null);
+  const hubPollTimerRef = useRef<number | null>(null);
+  const isHubLoggedIn = hubAuthState === 'logged_in' && !hubSignedOutLocal;
+  const effectiveHubProfileUrl = hubProfileUrl || `${hubBaseUrl}/profile`;
+  const effectiveHubMeshesUrl = `${hubBaseUrl}/my-meshes`;
+  const hubDisplayName = hubUserName || hubUserHandle || 'InferenceHub User';
+  const hubHandleText = hubUserHandle ? `@${hubUserHandle.replace(/^@/, '')}` : null;
+  const hubAvatarFallback = (hubUserName || hubUserHandle || 'I').trim().charAt(0).toUpperCase();
+  const piWebsiteUrl = 'https://pi.dev';
+  const gooseWebsiteUrl = 'https://block.github.io/goose/';
+  const isHubPublicMesh = isHubLinked && (hubMeshVisibility || '').toLowerCase() === 'public';
+  const isHubPrivateMesh = isHubLinked && (hubMeshVisibility || '').toLowerCase() === 'private';
+  const hubPublicMeshSelector = useMemo(() => {
+    const explicitSlug = hubMeshSlug?.trim();
+    if (explicitSlug) return explicitSlug;
+    const selector = hubDefaultMeshSelector?.trim();
+    if (selector) return selector;
+    try {
+      const path = new URL(hubMeshUrl).pathname;
+      const match = path.match(/^\/meshes\/([^/]+)$/);
+      if (!match?.[1]) return null;
+      return decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+  }, [hubDefaultMeshSelector, hubMeshSlug, hubMeshUrl]);
+  const hubPublicJoinWithModelCommand = useMemo(() => {
+    if (!hubPublicMeshSelector) return '';
+    const modelName = inviteWithModelName && inviteWithModelName !== '(idle)' ? inviteWithModelName : '';
+    return modelName
+      ? `mesh-llm --hub-mesh ${shellQuoteArg(hubPublicMeshSelector)} --model ${shellQuoteArg(modelName)}`
+      : '';
+  }, [hubPublicMeshSelector, inviteWithModelName]);
+  const hubPublicJoinClientCommand = useMemo(() => {
+    if (!hubPublicMeshSelector) return '';
+    return `mesh-llm --client --hub-mesh ${shellQuoteArg(hubPublicMeshSelector)}`;
+  }, [hubPublicMeshSelector]);
+  const hubPrivateInviteWithModelCommand = useMemo(() => {
+    if (!hubPrivateInviteToken) return '';
+    const modelName = inviteWithModelName && inviteWithModelName !== '(idle)' ? inviteWithModelName : '';
+    return modelName
+      ? `mesh-llm --join ${shellQuoteArg(hubPrivateInviteToken)} --model ${shellQuoteArg(modelName)}`
+      : '';
+  }, [hubPrivateInviteToken, inviteWithModelName]);
+  const hubPrivateInviteClientCommand = useMemo(() => {
+    if (!hubPrivateInviteToken) return '';
+    return `mesh-llm --client --join ${shellQuoteArg(hubPrivateInviteToken)}`;
+  }, [hubPrivateInviteToken]);
 
   async function copyInviteWithModelCommand() {
     if (!inviteWithModelCommand) return;
@@ -1164,10 +1329,203 @@ function AppHeader({
     }
   }
 
+  async function copyHubPublicJoinWithModelCommand() {
+    if (!hubPublicJoinWithModelCommand) return;
+    try {
+      await navigator.clipboard.writeText(hubPublicJoinWithModelCommand);
+      setHubPublicJoinWithModelCopied(true);
+      window.setTimeout(() => setHubPublicJoinWithModelCopied(false), 1500);
+    } catch {
+      setHubPublicJoinWithModelCopied(false);
+    }
+  }
+
+  async function copyHubPublicJoinClientCommand() {
+    if (!hubPublicJoinClientCommand) return;
+    try {
+      await navigator.clipboard.writeText(hubPublicJoinClientCommand);
+      setHubPublicJoinClientCopied(true);
+      window.setTimeout(() => setHubPublicJoinClientCopied(false), 1500);
+    } catch {
+      setHubPublicJoinClientCopied(false);
+    }
+  }
+
+  async function createHubPrivateInviteToken() {
+    if (hubPrivateInviteBusy) return;
+    setHubPrivateInviteBusy(true);
+    setHubPrivateInviteError(null);
+    try {
+      const response = await fetch('/api/hub/invites/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => null) as { invite_token?: string; error?: string } | null;
+      if (!response.ok) {
+        setHubPrivateInviteToken(null);
+        setHubPrivateInviteError(payload?.error || `Invite generation failed (HTTP ${response.status})`);
+        return;
+      }
+      const token = payload?.invite_token?.trim() || '';
+      if (!token) {
+        setHubPrivateInviteToken(null);
+        setHubPrivateInviteError('Invite generation failed: missing invite token.');
+        return;
+      }
+      setHubPrivateInviteToken(token);
+      setHubPrivateInviteWithModelCopied(false);
+      setHubPrivateInviteClientCopied(false);
+      setHubPrivateInviteTokenCopied(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setHubPrivateInviteToken(null);
+      setHubPrivateInviteError(`Invite generation failed: ${message}`);
+    } finally {
+      setHubPrivateInviteBusy(false);
+    }
+  }
+
+  async function copyHubPrivateInviteWithModelCommand() {
+    if (!hubPrivateInviteWithModelCommand) return;
+    try {
+      await navigator.clipboard.writeText(hubPrivateInviteWithModelCommand);
+      setHubPrivateInviteWithModelCopied(true);
+      window.setTimeout(() => setHubPrivateInviteWithModelCopied(false), 1500);
+    } catch {
+      setHubPrivateInviteWithModelCopied(false);
+    }
+  }
+
+  async function copyHubPrivateInviteClientCommand() {
+    if (!hubPrivateInviteClientCommand) return;
+    try {
+      await navigator.clipboard.writeText(hubPrivateInviteClientCommand);
+      setHubPrivateInviteClientCopied(true);
+      window.setTimeout(() => setHubPrivateInviteClientCopied(false), 1500);
+    } catch {
+      setHubPrivateInviteClientCopied(false);
+    }
+  }
+
+  async function copyHubPrivateInviteToken() {
+    if (!hubPrivateInviteToken) return;
+    try {
+      await navigator.clipboard.writeText(hubPrivateInviteToken);
+      setHubPrivateInviteTokenCopied(true);
+      window.setTimeout(() => setHubPrivateInviteTokenCopied(false), 1500);
+    } catch {
+      setHubPrivateInviteTokenCopied(false);
+    }
+  }
+
   function selectThemeMode(mode: ThemeMode) {
     setThemeMode(mode);
     setIsThemePopoverOpen(false);
   }
+
+  function openHub(url: string) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  function clearHubPollTimer() {
+    if (hubPollTimerRef.current !== null) {
+      window.clearTimeout(hubPollTimerRef.current);
+      hubPollTimerRef.current = null;
+    }
+  }
+
+  function scheduleHubAuthPoll(deviceCode: string, intervalSeconds: number) {
+    clearHubPollTimer();
+    hubPollTimerRef.current = window.setTimeout(() => {
+      void pollHubAuth(deviceCode, intervalSeconds);
+    }, Math.max(1, intervalSeconds) * 1000);
+  }
+
+  async function pollHubAuth(deviceCode: string, fallbackIntervalSeconds: number) {
+    try {
+      const response = await fetch('/api/hub/login-device/poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_code: deviceCode }),
+      });
+      const payload = await response.json().catch(() => null) as {
+        status?: string;
+        interval?: number;
+        error?: string;
+      } | null;
+      const status = payload?.status ?? '';
+      if (status === 'pending') {
+        scheduleHubAuthPoll(deviceCode, payload?.interval ?? fallbackIntervalSeconds);
+        return;
+      }
+      clearHubPollTimer();
+      setHubAuthBusy(false);
+      setHubPendingCode(null);
+      if (status && status !== 'authorized' && status !== 'consumed') {
+        window.alert(`InferenceHub login ${status}. Please try again.`);
+      }
+    } catch {
+      scheduleHubAuthPoll(deviceCode, fallbackIntervalSeconds);
+    }
+  }
+
+  async function openHubLogin() {
+    if (hubAuthBusy) return;
+    setHubSignedOutLocal(false);
+    setHubAuthBusy(true);
+    setHubPendingCode(null);
+    clearHubPollTimer();
+    try {
+      const response = await fetch('/api/hub/login-device/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_name: 'mesh-llm' }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json() as {
+        device_code?: string;
+        user_code?: string;
+        verification_uri_complete?: string;
+        verification_uri?: string;
+        interval?: number;
+      };
+      const deviceCode = payload.device_code?.trim() || '';
+      if (!deviceCode) throw new Error('Missing device_code');
+      const verificationUrl = payload.verification_uri_complete || payload.verification_uri || `${hubBaseUrl}/link/device`;
+      openHub(verificationUrl);
+      if (payload.user_code) setHubPendingCode(payload.user_code);
+      scheduleHubAuthPoll(deviceCode, payload.interval ?? 3);
+    } catch (err) {
+      setHubAuthBusy(false);
+      setHubPendingCode(null);
+      const message = err instanceof Error ? err.message : 'Failed to start device login';
+      window.alert(`InferenceHub login failed: ${message}`);
+    }
+  }
+
+  async function signOutHub() {
+    try {
+      await fetch('/api/hub/logout', { method: 'POST' });
+    } catch {
+      // best-effort until backend logout route is available
+    }
+    clearHubPollTimer();
+    setHubAuthBusy(false);
+    setHubPendingCode(null);
+    setHubSignedOutLocal(true);
+  }
+
+  useEffect(() => () => clearHubPollTimer(), []);
+  useEffect(() => {
+    if (!isHubLoggedIn) return;
+    clearHubPollTimer();
+    setHubAuthBusy(false);
+    setHubPendingCode(null);
+  }, [isHubLoggedIn]);
+  useEffect(() => {
+    if (hubAuthState === 'logged_in') setHubSignedOutLocal(false);
+  }, [hubAuthState]);
 
   return (
     <header className="shrink-0 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
@@ -1256,7 +1614,17 @@ function AppHeader({
                 <div className="text-xs font-medium text-muted-foreground">Agent Commands</div>
                 {launchPi && (
                   <div className="space-y-1">
-                    <div className="text-xs text-muted-foreground">pi</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs text-muted-foreground">pi</div>
+                      <a
+                        href={piWebsiteUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      >
+                        Learn more
+                      </a>
+                    </div>
                     <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
                       <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
                         {launchPi}
@@ -1276,7 +1644,17 @@ function AppHeader({
                 )}
                 {launchGoose && (
                   <div className="space-y-1">
-                    <div className="text-xs text-muted-foreground">Goose</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs text-muted-foreground">Goose</div>
+                      <a
+                        href={gooseWebsiteUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      >
+                        Learn more
+                      </a>
+                    </div>
                     <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
                       <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
                         {launchGoose}
@@ -1308,100 +1686,303 @@ function AppHeader({
                       variant="outline"
                       size="icon"
                       aria-label="Invite"
-                      disabled={!inviteToken}
+                      disabled={!inviteToken && !isHubLinked}
                     >
                       <UserPlus className="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
                 </TooltipTrigger>
-                <TooltipContent>Invite</TooltipContent>
+                <TooltipContent>{isHubLinked ? 'Join' : 'Invite'}</TooltipContent>
               </Tooltip>
               <PopoverContent className="w-[420px] space-y-3" align="end">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <UserPlus className="h-4 w-4 text-muted-foreground" />
-                  <span>Invite to this mesh</span>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  Invite with a model loaded to add compute, or invite as a client for API-only access.
-                </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-xs font-medium">
-                  <span>Contribute compute</span>
-                  <Badge className="h-5 gap-1 border-emerald-500/40 bg-emerald-500/10 px-2 text-[10px] text-emerald-700 dark:text-emerald-300">
-                    <Sparkles className="h-3 w-3" />
-                    Recommended
-                  </Badge>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  Joins and serves the model {inviteWithModelName || 'selected model'}
-                </div>
-              </div>
-              {inviteWithModelCommand ? (
-                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
-                  <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
-                    {inviteWithModelCommand}
-                  </code>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 shrink-0"
-                    aria-label="Copy model command"
-                    onClick={() => void copyInviteWithModelCommand()}
-                  >
-                    {inviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">No warm model selected yet.</div>
-              )}
-              <div className="space-y-1 pt-1">
-                <div className="text-xs font-medium">Join as client</div>
-                <div className="text-xs text-muted-foreground">Connects for API access without loading a model.</div>
-              </div>
-              {inviteClientCommand ? (
-                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
-                  <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
-                    {inviteClientCommand}
-                  </code>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 shrink-0"
-                    aria-label="Copy client command"
-                    onClick={() => void copyInviteClientCommand()}
-                  >
-                    {inviteClientCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">No invite token available yet.</div>
-              )}
-              <div className="space-y-1 pt-1">
-                <div className="text-xs font-medium">Invite token</div>
-                {inviteToken ? (
-                  <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
-                    <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
-                      {inviteToken}
-                    </code>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      className="h-7 w-7 shrink-0"
-                      aria-label="Copy invite token"
-                      onClick={() => void copyInviteToken()}
-                    >
-                      {tokenCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                    </Button>
-                  </div>
+              {isHubLinked ? (
+                isHubPublicMesh ? (
+                  <>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                        <span>Join this public InferenceHub mesh</span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Run these commands on another node to join this mesh.
+                      </div>
+                      {hubMeshName ? (
+                        <div className="text-xs text-muted-foreground">Mesh name: {hubMeshName}</div>
+                      ) : null}
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-xs font-medium">
+                        <span>Contribute compute</span>
+                        <Badge className="h-5 gap-1 border-emerald-500/40 bg-emerald-500/10 px-2 text-[10px] text-emerald-700 dark:text-emerald-300">
+                          <Sparkles className="h-3 w-3" />
+                          Recommended
+                        </Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Joins and serves the model {inviteWithModelName || 'No model loaded'}
+                      </div>
+                    </div>
+                    {hubPublicJoinWithModelCommand ? (
+                      <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                          {hubPublicJoinWithModelCommand}
+                        </code>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 shrink-0"
+                          aria-label="Copy public mesh model command"
+                          onClick={() => void copyHubPublicJoinWithModelCommand()}
+                        >
+                          {hubPublicJoinWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">No warm model selected yet.</div>
+                    )}
+                    <div className="space-y-1 pt-1">
+                      <div className="text-xs font-medium">Join as client</div>
+                      <div className="text-xs text-muted-foreground">Connects for API access without loading a model.</div>
+                    </div>
+                    {hubPublicJoinClientCommand ? (
+                      <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                          {hubPublicJoinClientCommand}
+                        </code>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 shrink-0"
+                          aria-label="Copy public mesh client command"
+                          onClick={() => void copyHubPublicJoinClientCommand()}
+                        >
+                          {hubPublicJoinClientCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">Public mesh join command unavailable.</div>
+                    )}
+                  </>
+                ) : isHubPrivateMesh ? (
+                  <>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                        <span>Join this private InferenceHub mesh</span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Generate an invite token, then run these commands on another node.
+                      </div>
+                      {hubMeshName ? (
+                        <div className="text-xs text-muted-foreground">Mesh name: {hubMeshName}</div>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => void createHubPrivateInviteToken()}
+                        disabled={hubPrivateInviteBusy}
+                      >
+                        {hubPrivateInviteBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserPlus className="h-3.5 w-3.5" />}
+                        {hubPrivateInviteToken ? 'Generate new invite token' : 'Generate invite token'}
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => openHub(hubMeshUrl)} className="gap-1.5">
+                        Manage mesh
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    {hubPrivateInviteError ? (
+                      <div className="text-xs text-destructive">{hubPrivateInviteError}</div>
+                    ) : null}
+                    {hubPrivateInviteToken ? (
+                      <>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 text-xs font-medium">
+                            <span>Contribute compute</span>
+                            <Badge className="h-5 gap-1 border-emerald-500/40 bg-emerald-500/10 px-2 text-[10px] text-emerald-700 dark:text-emerald-300">
+                              <Sparkles className="h-3 w-3" />
+                              Recommended
+                            </Badge>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            Joins and serves the model {inviteWithModelName || 'No model loaded'}
+                          </div>
+                        </div>
+                        {hubPrivateInviteWithModelCommand ? (
+                          <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                              {hubPrivateInviteWithModelCommand}
+                            </code>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7 shrink-0"
+                              aria-label="Copy private mesh model command"
+                              onClick={() => void copyHubPrivateInviteWithModelCommand()}
+                            >
+                              {hubPrivateInviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">No warm model selected yet.</div>
+                        )}
+                        <div className="space-y-1 pt-1">
+                          <div className="text-xs font-medium">Join as client</div>
+                          <div className="text-xs text-muted-foreground">Connects for API access without loading a model.</div>
+                        </div>
+                        {hubPrivateInviteClientCommand ? (
+                          <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                              {hubPrivateInviteClientCommand}
+                            </code>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7 shrink-0"
+                              aria-label="Copy private mesh client command"
+                              onClick={() => void copyHubPrivateInviteClientCommand()}
+                            >
+                              {hubPrivateInviteClientCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">Private mesh client command unavailable.</div>
+                        )}
+                        <div className="space-y-1 pt-1">
+                          <div className="text-xs font-medium">Invite token</div>
+                          <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                              {hubPrivateInviteToken}
+                            </code>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7 shrink-0"
+                              aria-label="Copy private mesh invite token"
+                              onClick={() => void copyHubPrivateInviteToken()}
+                            >
+                              {hubPrivateInviteTokenCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            </Button>
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+                  </>
                 ) : (
-                  <div className="text-xs text-muted-foreground">No invite token available yet.</div>
-                )}
-              </div>
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                        <span>This mesh is managed by InferenceHub</span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Manage membership and invites in InferenceHub.
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" size="sm" onClick={() => openHub(hubMeshUrl)} className="gap-1.5">
+                        Manage mesh
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                )
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <UserPlus className="h-4 w-4 text-muted-foreground" />
+                      <span>Invite to this mesh</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Invite with a model loaded to add compute, or invite as a client for API-only access.
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-xs font-medium">
+                      <span>Contribute compute</span>
+                      <Badge className="h-5 gap-1 border-emerald-500/40 bg-emerald-500/10 px-2 text-[10px] text-emerald-700 dark:text-emerald-300">
+                        <Sparkles className="h-3 w-3" />
+                        Recommended
+                      </Badge>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Joins and serves the model {inviteWithModelName || 'No model loaded'}
+                    </div>
+                  </div>
+                  {inviteWithModelCommand ? (
+                    <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                        {inviteWithModelCommand}
+                      </code>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 shrink-0"
+                        aria-label="Copy model command"
+                        onClick={() => void copyInviteWithModelCommand()}
+                      >
+                        {inviteWithModelCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground">No warm model selected yet.</div>
+                  )}
+                  <div className="space-y-1 pt-1">
+                    <div className="text-xs font-medium">Join as client</div>
+                    <div className="text-xs text-muted-foreground">Connects for API access without loading a model.</div>
+                  </div>
+                  {inviteClientCommand ? (
+                    <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                        {inviteClientCommand}
+                      </code>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 shrink-0"
+                        aria-label="Copy client command"
+                        onClick={() => void copyInviteClientCommand()}
+                      >
+                        {inviteClientCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground">No invite token available yet.</div>
+                  )}
+                  <div className="space-y-1 pt-1">
+                    <div className="text-xs font-medium">Invite token</div>
+                    {inviteToken ? (
+                      <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
+                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-xs">
+                          {inviteToken}
+                        </code>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 shrink-0"
+                          aria-label="Copy invite token"
+                          onClick={() => void copyInviteToken()}
+                        >
+                          {tokenCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">No invite token available yet.</div>
+                    )}
+                  </div>
+                </>
+              )}
               </PopoverContent>
             </Popover>
             <Popover open={isThemePopoverOpen} onOpenChange={setIsThemePopoverOpen}>
@@ -1469,6 +2050,72 @@ function AppHeader({
                 </button>
               </PopoverContent>
             </Popover>
+            {isHubLoggedIn ? (
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <Button type="button" variant="outline" size="icon" className="h-9 w-9 overflow-hidden rounded-full p-0" aria-label="InferenceHub profile">
+                        {hubUserAvatarUrl ? (
+                          <img src={hubUserAvatarUrl} alt={hubDisplayName} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="flex h-full w-full items-center justify-center bg-muted text-xs font-semibold">
+                            {hubAvatarFallback}
+                          </span>
+                        )}
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>InferenceHub</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent className="w-64" align="end">
+                  <DropdownMenuLabel className="p-0 font-normal">
+                    <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-background">
+                        {hubUserAvatarUrl ? (
+                          <img src={hubUserAvatarUrl} alt={hubDisplayName} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="text-xs font-semibold">{hubAvatarFallback}</span>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{hubDisplayName}</div>
+                        {hubHandleText ? <div className="truncate text-xs text-muted-foreground">{hubHandleText}</div> : null}
+                      </div>
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="justify-between" onSelect={() => openHub(hubMeshUrl)}>
+                    This mesh
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="justify-between" onSelect={() => openHub(effectiveHubMeshesUrl)}>
+                    My meshes
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="justify-between" onSelect={() => openHub(effectiveHubProfileUrl)}>
+                    Profile
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void signOutHub()}>
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Button type="button" size="sm" className="gap-1.5" onClick={() => void openHubLogin()} disabled={hubAuthBusy}>
+                  {hubAuthBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                  {hubAuthBusy ? 'Waiting for approval...' : 'Login with InferenceHub'}
+                </Button>
+                {hubPendingCode ? (
+                  <Badge variant="outline" className="h-8 px-2 font-mono text-[10px] tracking-wide">
+                    {hubPendingCode}
+                  </Badge>
+                ) : null}
+              </div>
+            )}
           </div>
         </TooltipProvider>
       </div>
@@ -1491,8 +2138,13 @@ function ChatPage(props: {
   modelStatsByName: Record<string, ModelServingStat>;
   selectedModel: string;
   setSelectedModel: (v: string) => void;
+  reasoningMode: ReasoningMode;
+  setReasoningMode: (v: ReasoningMode) => void;
   selectedModelNodeCount: number | null;
   selectedModelVramGb: number | null;
+  isHubLinked: boolean;
+  hubMeshUrl: string;
+  hubBaseUrl: string;
   conversations: ChatConversation[];
   activeConversationId: string;
   onConversationCreate: () => void;
@@ -1519,8 +2171,13 @@ function ChatPage(props: {
     modelStatsByName,
     selectedModel,
     setSelectedModel,
+    reasoningMode,
+    setReasoningMode,
     selectedModelNodeCount,
     selectedModelVramGb,
+    isHubLinked,
+    hubMeshUrl,
+    hubBaseUrl,
     conversations,
     activeConversationId,
     onConversationCreate,
@@ -1639,6 +2296,17 @@ function ChatPage(props: {
                     </SelectItem>
                   );
                 })}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">Reasoning</span>
+            <Select value={reasoningMode} onValueChange={(v) => setReasoningMode(v as ReasoningMode)}>
+              <SelectTrigger className="h-8 w-[132px]">
+                <SelectValue placeholder="Auto" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto</SelectItem>
+                <SelectItem value="on">Think</SelectItem>
+                <SelectItem value="off">No-think</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -1766,7 +2434,11 @@ function ChatPage(props: {
             >
               {messages.length === 0 ? (
                 <div className="flex min-h-full items-center justify-center">
-                  <InviteFriendEmptyState inviteToken={inviteToken} selectedModel={selectedModel || warmModels[0] || ''} />
+                  {isHubLinked ? (
+                    <InferenceHubEmptyState hubMeshUrl={hubMeshUrl} hubBaseUrl={hubBaseUrl} />
+                  ) : (
+                    <InviteFriendEmptyState inviteToken={inviteToken} selectedModel={selectedModel || warmModels[0] || ''} />
+                  )}
                 </div>
               ) : (
                 <>
@@ -1841,6 +2513,51 @@ function ChatPage(props: {
   );
 }
 
+function InferenceHubEmptyState({ hubMeshUrl, hubBaseUrl }: { hubMeshUrl: string; hubBaseUrl: string }) {
+  function openUrl(url: string) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  return (
+    <Card className="mx-auto max-w-3xl border-dashed">
+      <CardContent className="space-y-4 p-6">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border">
+            <ShieldCheck className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold">This mesh is managed by InferenceHub</h2>
+            <p className="text-sm text-muted-foreground">
+              Membership and invites are verified through InferenceHub.
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-3 text-sm leading-6 text-muted-foreground">
+          <p>
+            Add peers by inviting members from InferenceHub. Connected nodes are validated as mesh members before
+            they can participate.
+          </p>
+          <p>
+            Use the mesh page to manage access, view members, and keep this mesh identity consistent across nodes.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" onClick={() => openUrl(hubMeshUrl)} className="gap-1.5">
+            This mesh
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+          <Button type="button" variant="outline" onClick={() => openUrl(`${hubBaseUrl}/my-meshes`)} className="gap-1.5">
+            My meshes
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function InviteFriendEmptyState({ inviteToken, selectedModel }: { inviteToken: string; selectedModel: string }) {
   const [inviteWithModelCopied, setInviteWithModelCopied] = useState(false);
   const [inviteClientCopied, setInviteClientCopied] = useState(false);
@@ -1904,7 +2621,7 @@ function InviteFriendEmptyState({ inviteToken, selectedModel }: { inviteToken: s
                 Recommended
               </Badge>
             </div>
-            <div className="text-xs text-muted-foreground">Joins and serves the model {selectedModel || 'selected model'}</div>
+            <div className="text-xs text-muted-foreground">Joins and serves the model {selectedModel || 'No model loaded'}</div>
           </div>
           {inviteWithModelCommand ? (
             <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1.5">
@@ -1969,6 +2686,30 @@ function DashboardPage({
 }) {
   const [modelFilter, setModelFilter] = useState<'all' | 'warm' | 'cold'>('all');
   const [isMeshOverviewFullscreen, setIsMeshOverviewFullscreen] = useState(false);
+  const meshLinkState = status?.mesh_link_state ?? 'unlinked';
+  const isHubLinked = meshLinkState === 'linked' || status?.membership_enforcement === 'hub_enforced';
+  const hubMeshUrl = status?.hub_mesh_url?.trim() || null;
+  const showHubMeshIdentity = isHubLinked || meshLinkState === 'linking' || meshLinkState === 'degraded' || Boolean(hubMeshUrl);
+  const meshNameFromUrl = useMemo(() => {
+    if (!hubMeshUrl) return null;
+    try {
+      const path = new URL(hubMeshUrl).pathname;
+      const match = path.match(/^\/meshes\/([^/]+)$/);
+      if (!match?.[1]) return null;
+      return decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+  }, [hubMeshUrl]);
+  const hubLinkedMeshName = status?.hub_mesh_name?.trim()
+    || status?.mesh_name?.trim()
+    || status?.hub_default_mesh_selector?.trim()
+    || meshNameFromUrl
+    || status?.mesh_id?.trim()
+    || 'Mesh linked';
+  const servingModelLabel = status?.model_name && status.model_name !== '(idle)'
+    ? shortName(status.model_name)
+    : 'No model loaded';
   const filteredModels = useMemo(() => {
     const models = status?.mesh_models ?? [];
     return [...models]
@@ -1988,7 +2729,7 @@ function DashboardPage({
           : peer.role === 'Host'
             ? 'Host'
             : 'Idle';
-      const modelLabel = peer.serving && peer.serving !== '(idle)' ? shortName(peer.serving) : 'idle';
+      const modelLabel = peer.serving && peer.serving !== '(idle)' ? shortName(peer.serving) : 'No model loaded';
       const latencyLabel = formatLatency(peer.rtt_ms);
       const sharePct = peer.role !== 'Client' && totalMeshVramGb > 0
         ? Math.round((Math.max(0, peer.vram_gb) / totalMeshVramGb) * 100)
@@ -2029,7 +2770,17 @@ function DashboardPage({
   return (
     <div className="space-y-4">
       <TooltipProvider>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <div className={cn('grid gap-4 md:grid-cols-2', showHubMeshIdentity ? 'xl:grid-cols-6' : 'xl:grid-cols-5')}>
+        {showHubMeshIdentity ? (
+          <StatCard
+            title="Inferencehub Mesh"
+            value={hubLinkedMeshName}
+            icon={<BrandIcon className="h-4 w-4 text-blue-500" />}
+            tooltip={isHubLinked
+              ? 'InferenceHub-linked mesh identity for this node.'
+              : 'Hub mesh target detected for this node.'}
+          />
+        ) : null}
         <StatCard
           title="Node ID"
           value={status?.node_id ?? 'n/a'}
@@ -2043,7 +2794,7 @@ function DashboardPage({
         />
         <StatCard
           title="Serving Model"
-          value={status?.model_name ? shortName(status.model_name) : 'n/a'}
+          value={servingModelLabel}
           icon={<Sparkles className="h-4 w-4" />}
           tooltip="Model currently served by this node."
         />
@@ -2206,7 +2957,9 @@ function DashboardPage({
             <DashboardPanelEmpty
               icon={<Network className="h-4 w-4" />}
               title="No peers connected"
-              description="Invite another node to join this mesh to see connected peers."
+              description={isHubLinked
+                ? 'Invite members from InferenceHub to connect additional verified peers.'
+                : 'Invite another node to join this mesh to see connected peers.'}
             />
           )}
         </CardContent>
@@ -2445,7 +3198,7 @@ function MeshTopologyFlow({
         role,
         statusLabel: node.statusLabel,
         latencyMs: node.latencyMs ?? null,
-        loadedModel: node.client ? 'n/a' : servingModel ? shortName(servingModel) : 'idle',
+        loadedModel: node.client ? 'n/a' : servingModel ? shortName(servingModel) : 'No model loaded',
         vramGb: Math.max(0, node.vram),
         vramSharePct,
       });
@@ -2509,7 +3262,7 @@ function MeshTopologyFlow({
           role: 'Node',
           statusLabel: 'n/a',
           latencyMs: null,
-          loadedModel: 'idle',
+          loadedModel: 'No model loaded',
           vramGb: 0,
           vramSharePct: 0,
         },
@@ -2746,12 +3499,14 @@ function ChatBubble({
 
 function StatCard({
   title,
+  titleSuffix,
   value,
   valueSuffix,
   icon,
   tooltip,
 }: {
   title: string;
+  titleSuffix?: ReactNode;
   value: string;
   valueSuffix?: ReactNode;
   icon: ReactNode;
@@ -2760,7 +3515,13 @@ function StatCard({
   const card = (
     <Card>
       <CardContent className="p-3">
-        <div className="mb-2 flex items-center gap-2 text-muted-foreground">{icon}<span className="text-xs">{title}</span></div>
+        <div className="mb-2 flex items-center justify-between gap-2 text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-2">
+            {icon}
+            <span className="text-xs">{title}</span>
+          </div>
+          {titleSuffix ? <div className="shrink-0">{titleSuffix}</div> : null}
+        </div>
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-foreground">
           <span className="truncate">{value}</span>
           {valueSuffix}

@@ -4,6 +4,10 @@
 
 For changes in `ui/`, use components and compose interfaces consistently with shadcn/ui patterns where possible.
 Prefer extending existing shadcn-style primitives in `ui/src/components/ui/` over ad-hoc custom markup/styling.
+Use idiomatic shadcn component choices:
+- `DropdownMenu` for profile/action/context menus with discrete items.
+- `Popover` for rich custom content (forms, multi-step content, explanatory blocks).
+- If a needed primitive is missing, add it to `ui/src/components/ui/` in shadcn style before building custom one-off UI.
 Reference shadcn LLM instructions: https://ui.shadcn.com/llms.txt
 
 ## Project Structure

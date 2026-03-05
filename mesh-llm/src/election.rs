@@ -105,9 +105,13 @@ impl ModelTargets {
     /// Returns None if not in MoE mode.
     pub fn get_moe_target(&self, session_hint: &str) -> Option<InferenceTarget> {
         let moe = self.moe.as_ref()?;
-        if moe.nodes.is_empty() { return None; }
+        if moe.nodes.is_empty() {
+            return None;
+        }
         // Simple hash routing: hash the session hint, pick a node
-        let hash = session_hint.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let hash = session_hint
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         let idx = (hash as usize) % moe.nodes.len();
         Some(moe.nodes[idx].clone())
     }
@@ -126,7 +130,10 @@ impl ModelTargets {
 /// Compute shard index for a node given all node IDs in the MoE group.
 /// Nodes are sorted by ID to ensure all nodes agree on the ordering.
 /// Returns (sorted_ids, my_index).
-pub fn moe_shard_index(my_id: iroh::EndpointId, peer_ids: &[iroh::EndpointId]) -> (Vec<iroh::EndpointId>, usize) {
+pub fn moe_shard_index(
+    my_id: iroh::EndpointId,
+    peer_ids: &[iroh::EndpointId],
+) -> (Vec<iroh::EndpointId>, usize) {
     let mut all_ids: Vec<iroh::EndpointId> = peer_ids.to_vec();
     if !all_ids.contains(&my_id) {
         all_ids.push(my_id);
@@ -153,7 +160,9 @@ pub fn build_moe_targets(
         }
     }
     let mut targets = ModelTargets::default();
-    targets.targets.insert(model_name.to_string(), InferenceTarget::MoeLocal(my_port));
+    targets
+        .targets
+        .insert(model_name.to_string(), InferenceTarget::MoeLocal(my_port));
     targets.moe = Some(moe_state);
     targets
 }
@@ -164,7 +173,8 @@ pub fn build_moe_targets(
 fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::MoeConfig> {
     // Tier 1: catalog lookup (has ranking)
     let q = model_name.to_lowercase();
-    if let Some(cfg) = download::MODEL_CATALOG.iter()
+    if let Some(cfg) = download::MODEL_CATALOG
+        .iter()
         .find(|m| m.name.to_lowercase() == q || m.file.to_lowercase().contains(&q))
         .and_then(|m| m.moe.clone())
     {
@@ -173,8 +183,10 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
 
     // Tier 2: auto-detect from GGUF header
     let info = moe::detect_moe(model_path)?;
-    eprintln!("🔍 Auto-detected MoE from GGUF: {} experts, top-{}",
-        info.expert_count, info.expert_used_count);
+    eprintln!(
+        "🔍 Auto-detected MoE from GGUF: {} experts, top-{}",
+        info.expert_count, info.expert_used_count
+    );
 
     // Conservative default: 50% shared core (safe floor for quality).
     // Without a ranking, we use sequential expert IDs (0..N).
@@ -245,10 +257,12 @@ pub async fn election_loop(
     // Check if this is a MoE model with pre-computed expert routing
     let moe_config = lookup_moe_config(&model_name, &model);
     if moe_config.is_some() {
-        eprintln!("🧩 [{}] MoE model detected ({} experts, top-{})",
+        eprintln!(
+            "🧩 [{}] MoE model detected ({} experts, top-{})",
             model_name,
             moe_config.as_ref().unwrap().n_expert,
-            moe_config.as_ref().unwrap().n_expert_used);
+            moe_config.as_ref().unwrap().n_expert_used
+        );
     }
 
     // MoE mode: each node runs its own llama-server with its expert shard.
@@ -258,13 +272,24 @@ pub async fn election_loop(
         let need_moe_split = force_split || !model_fits_locally;
         if need_moe_split {
             moe_election_loop(
-                node, tunnel_mgr, bin_dir, model, model_name, moe_cfg.clone(),
-                target_tx, &mut on_change,
-            ).await;
+                node,
+                tunnel_mgr,
+                bin_dir,
+                model,
+                model_name,
+                moe_cfg.clone(),
+                target_tx,
+                &mut on_change,
+            )
+            .await;
             return;
         } else {
-            eprintln!("🧩 [{}] MoE model fits locally ({:.1}GB VRAM for {:.1}GB model) — no split needed",
-                model_name, my_vram as f64 / 1e9, model_bytes as f64 / 1e9);
+            eprintln!(
+                "🧩 [{}] MoE model fits locally ({:.1}GB VRAM for {:.1}GB model) — no split needed",
+                model_name,
+                my_vram as f64 / 1e9,
+                model_bytes as f64 / 1e9
+            );
             // Fall through to normal election loop — each node runs full model independently
         }
     }
@@ -495,7 +520,8 @@ async fn moe_election_loop(
     loop {
         // Count how many nodes (including us) are serving this model
         let peers = node.peers().await;
-        let model_peers: Vec<mesh::PeerInfo> = peers.iter()
+        let model_peers: Vec<mesh::PeerInfo> = peers
+            .iter()
             .filter(|p| p.serving.as_deref() == Some(&model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
             .cloned()
@@ -509,7 +535,9 @@ async fn moe_election_loop(
 
         // If nothing changed, skip
         if currently_running && n_nodes == last_n_nodes {
-            if peer_rx.changed().await.is_err() { break; }
+            if peer_rx.changed().await.is_err() {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             continue;
         }
@@ -533,7 +561,9 @@ async fn moe_election_loop(
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("  Failed to find free port: {e}");
-                    if peer_rx.changed().await.is_err() { break; }
+                    if peer_rx.changed().await.is_err() {
+                        break;
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
@@ -541,15 +571,36 @@ async fn moe_election_loop(
 
             let model_bytes = total_model_bytes(&model);
             match launch::start_llama_server(
-                &bin_dir, &model, llama_port, &[], None, None, 0, model_bytes,
-            ).await {
+                &bin_dir,
+                &model,
+                llama_port,
+                &[],
+                None,
+                None,
+                0,
+                model_bytes,
+            )
+            .await
+            {
                 Ok(()) => {
-                    node.set_role(NodeRole::Host { http_port: llama_port }).await;
+                    node.set_role(NodeRole::Host {
+                        http_port: llama_port,
+                    })
+                    .await;
                     tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
-                    update_targets(&node, &model_name, InferenceTarget::Local(llama_port), &target_tx).await;
+                    update_targets(
+                        &node,
+                        &model_name,
+                        InferenceTarget::Local(llama_port),
+                        &target_tx,
+                    )
+                    .await;
                     on_change(true, true);
-                    eprintln!("✅ [{}] MoE solo — llama-server ready on port {llama_port}", model_name);
+                    eprintln!(
+                        "✅ [{}] MoE solo — llama-server ready on port {llama_port}",
+                        model_name
+                    );
                 }
                 Err(e) => {
                     eprintln!("  Failed to start llama-server: {e}");
@@ -557,19 +608,22 @@ async fn moe_election_loop(
             }
         } else {
             // Multi-node MoE: split and load our shard
-            eprintln!("🧩 [{}] MoE split mode — {} nodes, I am shard {}/{}",
-                model_name, n_nodes, my_shard_index, n_nodes);
+            eprintln!(
+                "🧩 [{}] MoE split mode — {} nodes, I am shard {}/{}",
+                model_name, n_nodes, my_shard_index, n_nodes
+            );
             on_change(true, false);
 
             // Compute assignments and get our shard
-            let assignments = moe::compute_assignments(
-                moe_cfg.ranking,
-                n_nodes,
-                moe_cfg.min_experts_per_node,
-            );
+            let assignments =
+                moe::compute_assignments(moe_cfg.ranking, n_nodes, moe_cfg.min_experts_per_node);
             let my_assignment = &assignments[my_shard_index];
-            eprintln!("  My experts: {} ({} shared + {} unique)",
-                my_assignment.experts.len(), my_assignment.n_shared, my_assignment.n_unique);
+            eprintln!(
+                "  My experts: {} ({} shared + {} unique)",
+                my_assignment.experts.len(),
+                my_assignment.n_shared,
+                my_assignment.n_unique
+            );
 
             // Ensure our split GGUF exists (cached)
             let shard_path = moe::split_path(&model, n_nodes, my_shard_index);
@@ -582,14 +636,20 @@ async fn moe_election_loop(
                     }
                     Err(e) => {
                         eprintln!("  ❌ moe-split failed: {e}");
-                        if peer_rx.changed().await.is_err() { break; }
+                        if peer_rx.changed().await.is_err() {
+                            break;
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         continue;
                     }
                 }
             } else {
                 let size = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
-                eprintln!("  Using cached shard: {} ({:.1} GB)", shard_path.display(), size as f64 / 1e9);
+                eprintln!(
+                    "  Using cached shard: {} ({:.1} GB)",
+                    shard_path.display(),
+                    size as f64 / 1e9
+                );
             }
 
             // Start llama-server with our shard
@@ -597,7 +657,9 @@ async fn moe_election_loop(
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("  Failed to find free port: {e}");
-                    if peer_rx.changed().await.is_err() { break; }
+                    if peer_rx.changed().await.is_err() {
+                        break;
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
@@ -605,10 +667,22 @@ async fn moe_election_loop(
 
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
             match launch::start_llama_server(
-                &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes,
-            ).await {
+                &bin_dir,
+                &shard_path,
+                llama_port,
+                &[],
+                None,
+                None,
+                0,
+                shard_bytes,
+            )
+            .await
+            {
                 Ok(()) => {
-                    node.set_role(NodeRole::Host { http_port: llama_port }).await;
+                    node.set_role(NodeRole::Host {
+                        http_port: llama_port,
+                    })
+                    .await;
                     tunnel_mgr.set_http_port(llama_port);
                     currently_running = true;
                     node.regossip().await;
@@ -618,8 +692,12 @@ async fn moe_election_loop(
                     target_tx.send_replace(targets);
 
                     on_change(true, true);
-                    eprintln!("✅ [{}] MoE shard {} ready on port {llama_port} ({} experts)",
-                        model_name, my_shard_index, my_assignment.experts.len());
+                    eprintln!(
+                        "✅ [{}] MoE shard {} ready on port {llama_port} ({} experts)",
+                        model_name,
+                        my_shard_index,
+                        my_assignment.experts.len()
+                    );
                 }
                 Err(e) => {
                     eprintln!("  ❌ Failed to start llama-server: {e}");
@@ -628,8 +706,13 @@ async fn moe_election_loop(
         }
 
         // Wait for next peer change
-        if peer_rx.changed().await.is_err() { break; }
-        eprintln!("⚡ [{}] Mesh changed — re-checking MoE deployment...", model_name);
+        if peer_rx.changed().await.is_err() {
+            break;
+        }
+        eprintln!(
+            "⚡ [{}] Mesh changed — re-checking MoE deployment...",
+            model_name
+        );
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
@@ -968,13 +1051,20 @@ mod tests {
         assert_eq!(moe.nodes.len(), 2);
 
         // Model should be in targets
-        assert!(matches!(targets.get("test-model"), InferenceTarget::MoeLocal(8080)));
+        assert!(matches!(
+            targets.get("test-model"),
+            InferenceTarget::MoeLocal(8080)
+        ));
 
         // One should be local, one remote
-        let local_count = moe.nodes.iter()
+        let local_count = moe
+            .nodes
+            .iter()
             .filter(|t| matches!(t, InferenceTarget::MoeLocal(_)))
             .count();
-        let remote_count = moe.nodes.iter()
+        let remote_count = moe
+            .nodes
+            .iter()
             .filter(|t| matches!(t, InferenceTarget::MoeRemote(_)))
             .count();
         assert_eq!(local_count, 1);
@@ -1073,8 +1163,10 @@ mod tests {
         // They should be different shards
         assert_ne!(idx_a, idx_b);
         // Their unique experts should not overlap
-        let a_experts: std::collections::HashSet<u32> = assignments[idx_a].experts.iter().cloned().collect();
-        let b_experts: std::collections::HashSet<u32> = assignments[idx_b].experts.iter().cloned().collect();
+        let a_experts: std::collections::HashSet<u32> =
+            assignments[idx_a].experts.iter().cloned().collect();
+        let b_experts: std::collections::HashSet<u32> =
+            assignments[idx_b].experts.iter().cloned().collect();
         let shared: Vec<u32> = a_experts.intersection(&b_experts).cloned().collect();
         // Shared should be exactly the core (first 46)
         assert_eq!(shared.len(), 46);

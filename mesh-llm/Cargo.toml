@@ -21,3 +21,4 @@ nostr-sdk = { version = "0.44.1", default-features = false }
 rustls = "0.23.36"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 tokio-stream = "0.1"
+ed25519-dalek = "2.1.1"

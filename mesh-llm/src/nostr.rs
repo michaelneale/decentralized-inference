@@ -288,7 +288,8 @@ pub async fn publish_loop(
         // This handles the case where a node temporarily loses connectivity,
         // goes solo, and starts publishing independently. When the bigger mesh
         // is still out there, we should rejoin it instead of fragmenting.
-        let gpu_peers = peers.iter()
+        let gpu_peers = peers
+            .iter()
             .filter(|p| !matches!(p.role, crate::mesh::NodeRole::Client))
             .count();
         if gpu_peers == 0 {
@@ -725,7 +726,9 @@ pub fn score_mesh(mesh: &DiscoveredMesh, _now_secs: u64, last_mesh_id: Option<&s
 #[derive(Debug)]
 pub enum AutoDecision {
     /// Ranked list of meshes to try joining (best first)
-    Join { candidates: Vec<(String, DiscoveredMesh)> },
+    Join {
+        candidates: Vec<(String, DiscoveredMesh)>,
+    },
     /// No suitable mesh found — start a new one with these models
     StartNew { models: Vec<String> },
 }
@@ -772,7 +775,8 @@ pub fn smart_auto(
     scored.sort_by(|a, b| b.1.cmp(&a.1));
 
     // Collect all candidates with positive score (not stale, not full)
-    let viable: Vec<(String, DiscoveredMesh)> = scored.iter()
+    let viable: Vec<(String, DiscoveredMesh)> = scored
+        .iter()
         .filter(|(_, score)| *score > 0)
         .map(|(m, _)| (m.listing.invite_token.clone(), (*m).clone()))
         .collect();
