@@ -15,6 +15,21 @@ Reference shadcn LLM instructions: https://ui.shadcn.com/llms.txt
 
 **Read `docs/TESTING.md` and `docs/DESIGN.md` before making changes.**
 
+## Building
+
+Always use `just`:
+
+```bash
+just build    # builds llama.cpp fork, mesh-llm binary, and UI
+just bundle   # creates portable /tmp/mesh-bundle.tar.gz (~18MB)
+just stop     # kill mesh/rpc/llama processes
+just test     # quick inference test against :9337
+just auto     # build + stop + start with --auto
+just ui-dev   # vite dev server with HMR
+```
+
+See `CONTRIBUTING.md` for full dev workflow.
+
 ## Testing
 
 **Read `docs/TESTING.md` before running any tests.** It has:
@@ -23,44 +38,19 @@ Reference shadcn LLM instructions: https://ui.shadcn.com/llms.txt
 - Single-machine testing with ephemeral keys
 - Cleanup commands
 
-### Test Machines
-
-| Machine | SSH | VRAM | Notes |
-|---|---|---|---|
-| **Local** (Sydney) | n/a (this machine) | 51.5GB (M4 Max 64GB) | Binary: `mesh-llm/target/release/mesh-llm` |
-| **Mini** (Sydney) | `sshpass -p "spankychat2000" ssh michaelneale@192.168.86.60` | 12.9GB (M4 16GB) | Bundle at `/tmp/mesh-bundle/` |
-| **Brad** (QLD) | `ssh mic@home.dwyer.au -p 23632` | 103GB (M4 Max 128GB) | Must use `--bind-port 7842`, broken SSL/NAT |
+Test machine details (IPs, credentials, SSH commands) are in `~/Documents/private-note.txt` (outside the repo) — **never commit credentials to any tracked file.**
 
 ### Deploy to Remote
 
 ```bash
-just bundle                  # builds /tmp/mesh-bundle.tar.gz (~17MB)
-scp /tmp/mesh-bundle.tar.gz michaelneale@192.168.86.60:/tmp/
-ssh michaelneale@192.168.86.60 "cd /tmp && tar xzf mesh-bundle.tar.gz && codesign -s - mesh-bundle/mesh-llm mesh-bundle/rpc-server mesh-bundle/llama-server"
-```
-
-### Common Test Pattern
-
-```bash
-# Local: start originator
-nohup ./target/release/mesh-llm --model Qwen2.5-3B-Instruct-Q4_K_M --port 8090 > /tmp/local-node.log 2>&1 &
-
-# Extract token
-TOKEN=$(grep "Invite token:" /tmp/local-node.log | awk '{print $NF}')
-
-# Mini: join
-ssh mini "cd /tmp/mesh-bundle && MESH_LLM_EPHEMERAL_KEY=1 nohup ./mesh-llm --model Qwen2.5-3B-Instruct-Q4_K_M --port 8091 --join $TOKEN > /tmp/mini-node.log 2>&1 &"
-
-# Verify
-curl http://localhost:8090/v1/models
-ssh mini "curl http://localhost:8091/v1/models"
+just bundle
+# scp bundle to remote, tar xzf, codesign -s - the three binaries
 ```
 
 ### Cleanup (always do this)
 
 ```bash
 pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server
-ssh mini "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server"
 ```
 
 ## Deploy Checklist — MANDATORY
@@ -70,32 +60,28 @@ ssh mini "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server"
 ### Before starting nodes
 1. **Bump VERSION** — Change `VERSION` in `main.rs` to a new tentative version so you can verify the running binary is actually the new code.
 2. **Build and bundle** — `just build && just bundle`
-3. **Kill ALL processes on ALL nodes** — `pkill -9 -f mesh-llm; pkill -9 -f llama-server; pkill -9 -f rpc-server` on Local, Mini, AND Brad.
-4. **Verify clean** — Run `ps -eo pid,args | grep -E 'mesh-llm|llama-server|rpc-server' | grep -v grep` on EVERY node. Must return empty.
-5. **Deploy bundle** — scp + tar + codesign on Mini and Brad.
-6. **Verify version on disk** — Run `mesh-llm --version` on EVERY node. Must show the new version.
+3. **Kill ALL processes on ALL nodes** — `pkill -9 -f mesh-llm; pkill -9 -f llama-server; pkill -9 -f rpc-server` on every node.
+4. **Verify clean** — `ps -eo pid,args | grep -E 'mesh-llm|llama-server|rpc-server' | grep -v grep` on every node. Must return empty.
+5. **Deploy bundle** — scp + tar + codesign on remote nodes.
+6. **Verify version on disk** — `mesh-llm --version` on every node. Must show the new version.
 
 ### After starting nodes
-7. **Verify exactly 1 mesh-llm process per node** — `ps -eo pid,ppid,args | grep mesh-llm | grep -v grep` on EVERY node. Must show exactly 1 process, properly parented.
-8. **Verify child processes** — Each mesh-llm should have at most 1 rpc-server and 1 llama-server as children (check ppid matches mesh-llm pid). No orphans.
-9. **Verify API responds on every node** — `curl -s http://localhost:3131/api/status` must return valid JSON on EVERY node. Don't assume — check.
-10. **Verify version in gossip** — Check `/api/status` peers list. New-code nodes must show the new version string. Old-code nodes show null/missing (that's expected).
-11. **Verify peer count** — Every node should see the expected number of peers. If a node is missing, investigate immediately — don't assume "it'll show up".
-12. **Test inference through every model** — Send a request to EVERY model listed in `/v1/models`. Verify non-empty, valid response. Empty responses must be investigated (check `reasoning_content` for reasoning models like GLM).
+7. **Verify exactly 1 mesh-llm process per node**.
+8. **Verify child processes** — Each mesh-llm should have at most 1 rpc-server and 1 llama-server as children.
+9. **Verify API responds on every node** — `curl -s http://localhost:3131/api/status` must return valid JSON.
+10. **Verify version in gossip** — Check `/api/status` peers list for the new version string.
+11. **Verify peer count** — Every node should see the expected number of peers.
+12. **Test inference through every model** — Send a request to every model in `/v1/models`.
 13. **Test `/v1/` passthrough on 3131** — Verify `/v1/models` and `/v1/chat/completions` both work on port 3131, not just 9337.
 
 ### Common failures to watch for
-- **nohup over SSH doesn't stick** — Use `bash -c "nohup ... & disown"` pattern. Always verify the process is still running 5+ seconds after SSH disconnects.
-- **Stale binary on Brad** — Brad copies from `/tmp/mesh-bundle/` to `~/bin/`. If you forget `cp`, Brad runs the old binary.
+- **nohup over SSH doesn't stick** — Use `bash -c "nohup ... & disown"` pattern. Always verify the process is still running after SSH disconnects.
 - **Duplicate processes** — If a previous run wasn't killed cleanly, you get 2 mesh-llm processes fighting for ports. Always kill-verify-start.
-- **codesign changes the hash** — Don't compare MD5 of Local build vs codesigned remote binary. Compare Mini vs Brad (both codesigned from same bundle).
+- **codesign changes the hash** — Don't compare MD5 of local build vs codesigned remote binary.
 
-### Brad Constraints
+## Releasing
 
-- **Must be originator** (NAT prevents inbound connections when joining)
-- **Must use `--bind-port 7842`** (port forwarding configured for this port)
-- **Broken SSL trust store** — can't verify iroh relay HTTPS certs
-- Only works as publisher/initiator, not as joiner
+See `RELEASE.md` for the full release process (build, verify, bundle, tag, `gh release create`).
 
 ## Key Files to Read
 
@@ -106,3 +92,5 @@ ssh mini "pkill -f mesh-llm; pkill -f rpc-server; pkill -f llama-server"
 - `src/api.rs` — Management API (:3131): `/api/status`, `/api/events`, `/api/discover`, `/api/join`
 - `src/nostr.rs` — Nostr discovery, `score_mesh()`, `smart_auto()`
 - `src/download.rs` — Model catalog (`MODEL_CATALOG`), HuggingFace downloads
+- `src/moe.rs` — MoE detection, expert rankings, split orchestration
+- `src/launch.rs` — llama-server/rpc-server process management
