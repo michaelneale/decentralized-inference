@@ -61,11 +61,14 @@ impl UsageCapture {
         if self.status_code.is_none() {
             self.status_code = parse_http_status_code(&self.tail);
         }
-        self.prompt_tokens = extract_last_usage_value(&self.tail, &[b"\"prompt_tokens\"", b"\"input_tokens\""])
-            .or(self.prompt_tokens);
-        self.completion_tokens =
-            extract_last_usage_value(&self.tail, &[b"\"completion_tokens\"", b"\"output_tokens\""])
-                .or(self.completion_tokens);
+        self.prompt_tokens =
+            extract_last_usage_value(&self.tail, &[b"\"prompt_tokens\"", b"\"input_tokens\""])
+                .or(self.prompt_tokens);
+        self.completion_tokens = extract_last_usage_value(
+            &self.tail,
+            &[b"\"completion_tokens\"", b"\"output_tokens\""],
+        )
+        .or(self.completion_tokens);
     }
 
     fn snapshot(&self) -> HttpRelayUsage {
@@ -122,7 +125,10 @@ fn extract_json_u64_after_key(bytes: &[u8], key: &[u8]) -> Option<u64> {
     if i == start {
         return None;
     }
-    std::str::from_utf8(&bytes[start..i]).ok()?.parse::<u64>().ok()
+    std::str::from_utf8(&bytes[start..i])
+        .ok()?
+        .parse::<u64>()
+        .ok()
 }
 
 fn extract_last_usage_value(bytes: &[u8], keys: &[&[u8]]) -> Option<u64> {
@@ -135,7 +141,8 @@ fn extract_last_usage_value(bytes: &[u8], keys: &[&[u8]]) -> Option<u64> {
 }
 
 fn header_end_offset(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4)
+    bytes
+        .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|idx| idx + 4)
 }
@@ -261,8 +268,8 @@ async fn relay_http_request_to_quic_with_optional_rewrite(
                 continue;
             }
             let request_bytes = &pending[..total_len];
-            let rewritten =
-                rewrite_chat_completions_request(request_bytes).unwrap_or_else(|| request_bytes.to_vec());
+            let rewritten = rewrite_chat_completions_request(request_bytes)
+                .unwrap_or_else(|| request_bytes.to_vec());
             quic_send.write_all(&rewritten).await?;
             BYTES_TRANSFERRED.fetch_add(rewritten.len() as u64, Ordering::Relaxed);
             if pending.len() > total_len {
@@ -336,8 +343,8 @@ async fn relay_http_request_to_tcp_with_optional_rewrite(
                 continue;
             }
             let request_bytes = &pending[..total_len];
-            let rewritten =
-                rewrite_chat_completions_request(request_bytes).unwrap_or_else(|| request_bytes.to_vec());
+            let rewritten = rewrite_chat_completions_request(request_bytes)
+                .unwrap_or_else(|| request_bytes.to_vec());
             dst.write_all(&rewritten).await?;
             BYTES_TRANSFERRED.fetch_add(rewritten.len() as u64, Ordering::Relaxed);
             if pending.len() > total_len {
@@ -636,11 +643,13 @@ pub async fn relay_tcp_streams_with_usage(a: TcpStream, b: TcpStream) -> Result<
     let usage2 = usage.clone();
     let (a_read, mut a_write) = tokio::io::split(a);
     let (b_read, mut b_write) = tokio::io::split(b);
-    let mut t1 =
-        tokio::spawn(async move { relay_http_request_to_tcp_with_optional_rewrite(a_read, &mut b_write).await });
-    let mut t2 = tokio::spawn(async move {
-        relay_tcp_to_tcp_with_usage(b_read, &mut a_write, usage2).await
+    let mut t1 = tokio::spawn(async move {
+        relay_http_request_to_tcp_with_optional_rewrite(a_read, &mut b_write).await
     });
+    let mut t2 =
+        tokio::spawn(
+            async move { relay_tcp_to_tcp_with_usage(b_read, &mut a_write, usage2).await },
+        );
     tokio::select! {
         _ = &mut t1 => { t2.abort(); }
         _ = &mut t2 => { t1.abort(); }
@@ -677,10 +686,13 @@ async fn relay_bidirectional_with_usage(
 ) -> Result<HttpRelayUsage> {
     let usage = Arc::new(std::sync::Mutex::new(UsageCapture::default()));
     let usage2 = usage.clone();
-    let mut t1 =
-        tokio::spawn(async move { relay_http_request_to_quic_with_optional_rewrite(tcp_read, quic_send).await });
+    let mut t1 = tokio::spawn(async move {
+        relay_http_request_to_quic_with_optional_rewrite(tcp_read, quic_send).await
+    });
     let mut t2 =
-        tokio::spawn(async move { relay_quic_to_tcp_with_usage(quic_recv, tcp_write, usage2).await });
+        tokio::spawn(
+            async move { relay_quic_to_tcp_with_usage(quic_recv, tcp_write, usage2).await },
+        );
     // When either direction finishes, abort the other so we don't leak
     // tasks waiting on a half-open connection (rpc-server keeps TCP open).
     tokio::select! {

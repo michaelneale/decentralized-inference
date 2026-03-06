@@ -125,7 +125,8 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
         let started = Instant::now();
         match node.open_http_tunnel(*target_host).await {
             Ok((quic_send, quic_recv)) => {
-                match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv).await {
+                match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv).await
+                {
                     Ok(usage) => {
                         node.record_token_usage(usage.prompt_tokens, usage.completion_tokens);
                         if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
@@ -187,7 +188,9 @@ pub async fn route_to_target(
                             if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
                                 node.record_inference_failure();
                             } else {
-                                node.record_inference_completion(started.elapsed().as_millis() as u64);
+                                node.record_inference_completion(
+                                    started.elapsed().as_millis() as u64
+                                );
                             }
                         }
                         Err(e) => {
@@ -208,13 +211,17 @@ pub async fn route_to_target(
             match node.open_http_tunnel(host_id).await {
                 Ok((quic_send, quic_recv)) => {
                     let started = Instant::now();
-                    match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv).await {
+                    match tunnel::relay_tcp_via_quic_with_usage(tcp_stream, quic_send, quic_recv)
+                        .await
+                    {
                         Ok(usage) => {
                             node.record_token_usage(usage.prompt_tokens, usage.completion_tokens);
                             if usage.status_code.map(|s| s >= 400).unwrap_or(false) {
                                 node.record_inference_failure();
                             } else {
-                                node.record_inference_completion(started.elapsed().as_millis() as u64);
+                                node.record_inference_completion(
+                                    started.elapsed().as_millis() as u64
+                                );
                             }
                         }
                         Err(e) => {
