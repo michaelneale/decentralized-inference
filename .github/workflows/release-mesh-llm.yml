@@ -1,0 +1,88 @@
+name: Release mesh-llm
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_path: mesh-llm/target/x86_64-unknown-linux-gnu/release/mesh-llm
+            binary_name: mesh-llm
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary_path: mesh-llm/target/aarch64-apple-darwin/release/mesh-llm
+            binary_name: mesh-llm
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_path: mesh-llm/target/x86_64-pc-windows-msvc/release/mesh-llm.exe
+            binary_name: mesh-llm.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mesh-llm
+
+      - name: Build release binary with just
+        run: just build-mesh ${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          archive="mesh-llm-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "dist/${archive}" -C "$(dirname "${{ matrix.binary_path }}")" "${{ matrix.binary_name }}"
+          echo "ARCHIVE_PATH=dist/${archive}" >> "$GITHUB_ENV"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ env.ARCHIVE_PATH }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
