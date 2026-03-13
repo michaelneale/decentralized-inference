@@ -60,9 +60,9 @@ fi
 
 start_time=$(date +%s)
 
-# Launch pi in tmux
+# Launch pi in tmux — cd to result dir first so file paths resolve
 tmux new-session -d -s "$SESSION" -x 200 -y 50
-tmux send-keys -t "$SESSION" "$PI_CMD" Enter
+tmux send-keys -t "$SESSION" "cd $result_dir && $PI_CMD" Enter
 sleep 5  # let pi start up
 
 # Send each turn
