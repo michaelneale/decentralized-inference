@@ -253,15 +253,37 @@ fn strip_split_suffix(name: &str) -> &str {
 /// Tools presence is an attribute, not a category override — a code request
 /// with tools is still Code (with needs_tools=true), not ToolCall.
 pub fn classify(body: &Value) -> Classification {
-    // Check tools presence (attribute, not category)
-    let needs_tools = body.get("tools")
-        .and_then(|t| t.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false);
-
     // Collect all text from messages for keyword analysis
     let text = collect_message_text(body);
     let lower = text.to_lowercase();
+
+    // Check if the request actually needs tool execution.
+    // Tools in the schema just means "client supports tools" — most agent clients
+    // always send tools. Only set needs_tools when the message content implies
+    // the model needs to call a tool (read files, run commands, edit, etc).
+    let has_tools_schema = body.get("tools")
+        .and_then(|t| t.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let content_needs_tools = has_tools_schema && (
+        lower.contains("read ") || lower.contains("read the ") ||
+        lower.contains("edit ") || lower.contains("edit the ") ||
+        lower.contains("write ") || lower.contains("write the ") || lower.contains("write a ") ||
+        lower.contains("run ") || lower.contains("execute") ||
+        lower.contains("find ") || lower.contains("search ") || lower.contains("grep") ||
+        lower.contains("fix ") || lower.contains("fix the ") ||
+        lower.contains("create ") || lower.contains("create the ") || lower.contains("create a ") ||
+        lower.contains("delete ") || lower.contains("remove ") ||
+        lower.contains("list ") || lower.contains("show ") ||
+        lower.contains("check ") || lower.contains("verify ") ||
+        lower.contains("install ") || lower.contains("build ") ||
+        lower.contains("the file") || lower.contains("this file") ||
+        lower.contains("this directory") || lower.contains("this repo") ||
+        lower.contains(".py") || lower.contains(".js") || lower.contains(".rs") ||
+        lower.contains(".ts") || lower.contains(".txt") || lower.contains(".md") ||
+        lower.contains(".json") || lower.contains(".yaml") || lower.contains(".toml")
+    );
+    let needs_tools = content_needs_tools;
 
     // Count last user message tokens (rough proxy for complexity)
     let last_user_len = last_user_message_len(body);
@@ -496,8 +518,9 @@ mod tests {
 
     #[test]
     fn test_classify_tool_call() {
+        // Content that implies tool use + tools schema = ToolCall
         let body = json!({
-            "messages": [{"role": "user", "content": "hello"}],
+            "messages": [{"role": "user", "content": "Run the tests and check the output"}],
             "tools": [{"type": "function", "function": {"name": "bash"}}]
         });
         assert_eq!(classify(&body).category, Category::ToolCall);
@@ -570,14 +593,25 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_tools_only() {
-        // Tools present but no strong content signal — ToolCall category
+    fn test_classify_tools_schema_but_chat_content() {
+        // Tools in schema but content is just chat — should NOT need tools
         let body = json!({
             "messages": [{"role": "user", "content": "hello"}],
             "tools": [{"type": "function", "function": {"name": "bash"}}]
         });
         let cl = classify(&body);
-        assert_eq!(cl.category, Category::ToolCall);
+        assert_eq!(cl.category, Category::Chat);
+        assert!(!cl.needs_tools);
+    }
+
+    #[test]
+    fn test_classify_tools_schema_with_tool_content() {
+        // Tools in schema AND content implies tool use — needs tools
+        let body = json!({
+            "messages": [{"role": "user", "content": "Read the file and fix the bug"}],
+            "tools": [{"type": "function", "function": {"name": "read"}}]
+        });
+        let cl = classify(&body);
         assert!(cl.needs_tools);
     }
 
