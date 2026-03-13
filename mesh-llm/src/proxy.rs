@@ -274,6 +274,147 @@ pub async fn send_503(mut stream: TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Pipeline-aware HTTP proxy for local targets.
+///
+/// Instead of TCP tunneling, this:
+/// 1. Parses the HTTP request body
+/// 2. Calls the planner model for a pre-plan
+/// 3. Injects the plan into the request
+/// 4. Forwards to the strong model via HTTP
+/// 5. Streams the response back to the client
+pub async fn pipeline_proxy_local(
+    mut client_stream: TcpStream,
+    buf: &[u8],
+    n: usize,
+    planner_port: u16,
+    planner_model: &str,
+    strong_port: u16,
+    node: &mesh::Node,
+) {
+    // Parse request body
+    let mut body = match extract_body_json(&buf[..n]) {
+        Some(b) => b,
+        None => {
+            let _ = send_400(client_stream, "invalid JSON body").await;
+            return;
+        }
+    };
+
+    // Extract whether this is a streaming request
+    let is_streaming = body.get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    // Pre-plan: ask the small model
+    let http_client = reqwest::Client::new();
+    let planner_url = format!("http://127.0.0.1:{planner_port}");
+    let messages = body.get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    match crate::pipeline::pre_plan(&http_client, &planner_url, planner_model, &messages).await {
+        Ok(plan) => {
+            tracing::info!(
+                "pipeline: pre-plan by {} in {}ms — {}",
+                plan.model_used, plan.elapsed_ms,
+                plan.plan_text.chars().take(200).collect::<String>()
+            );
+            crate::pipeline::inject_plan(&mut body, &plan);
+        }
+        Err(e) => {
+            tracing::warn!("pipeline: pre-plan failed ({e}), proceeding without plan");
+        }
+    }
+
+    // Forward to strong model — use reqwest for full HTTP handling
+    let strong_url = format!("http://127.0.0.1:{strong_port}/v1/chat/completions");
+
+    let _inflight = node.begin_inflight_request();
+
+    if is_streaming {
+        // Streaming: forward SSE chunks to client
+        match http_client.post(&strong_url)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let content_type = resp.headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("text/event-stream")
+                    .to_string();
+
+                // Send HTTP response headers
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\n\r\n",
+                );
+                if client_stream.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+
+                // Stream body chunks
+                use tokio_stream::StreamExt;
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            // HTTP chunked encoding
+                            let chunk_header = format!("{:x}\r\n", bytes.len());
+                            if client_stream.write_all(chunk_header.as_bytes()).await.is_err() { break; }
+                            if client_stream.write_all(&bytes).await.is_err() { break; }
+                            if client_stream.write_all(b"\r\n").await.is_err() { break; }
+                        }
+                        Err(e) => {
+                            tracing::debug!("pipeline: stream error: {e}");
+                            break;
+                        }
+                    }
+                }
+                // Terminal chunk
+                let _ = client_stream.write_all(b"0\r\n\r\n").await;
+                let _ = client_stream.shutdown().await;
+            }
+            Err(e) => {
+                tracing::warn!("pipeline: strong model request failed: {e}");
+                let _ = send_503(client_stream).await;
+            }
+        }
+    } else {
+        // Non-streaming: simple request/response
+        match http_client.post(&strong_url)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.bytes().await {
+                    Ok(resp_bytes) => {
+                        let header = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                            resp_bytes.len()
+                        );
+                        let _ = client_stream.write_all(header.as_bytes()).await;
+                        let _ = client_stream.write_all(&resp_bytes).await;
+                        let _ = client_stream.shutdown().await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("pipeline: response read failed: {e}");
+                        let _ = send_503(client_stream).await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("pipeline: strong model request failed: {e}");
+                let _ = send_503(client_stream).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

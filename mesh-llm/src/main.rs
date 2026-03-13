@@ -7,6 +7,7 @@ mod moe;
 mod nostr;
 mod proxy;
 mod rewrite;
+mod pipeline;
 mod router;
 mod tunnel;
 
@@ -1385,7 +1386,7 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                     }
 
                     // Smart routing: if no model specified (or model="auto"), classify and pick
-                    let effective_model = if model_name.is_none() || model_name.as_deref() == Some("auto") {
+                    let (effective_model, classification) = if model_name.is_none() || model_name.as_deref() == Some("auto") {
                         if let Some(body_json) = proxy::extract_body_json(&buf[..n]) {
                             let cl = router::classify(&body_json);
                             let available: Vec<(&str, f64)> = targets.targets.keys()
@@ -1394,25 +1395,62 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                             let picked = router::pick_model_classified(&cl, &available);
                             if let Some(name) = picked {
                                 tracing::info!("router: {:?}/{:?} tools={} → {name}", cl.category, cl.complexity, cl.needs_tools);
-                                Some(name.to_string())
+                                (Some(name.to_string()), Some(cl))
                             } else {
-                                None
+                                (None, Some(cl))
                             }
                         } else {
-                            None
+                            (None, None)
                         }
                     } else {
-                        model_name.clone()
+                        (model_name.clone(), None)
                     };
 
                     if let Some(ref name) = effective_model {
                         node.record_request(name);
                     }
 
+                    // Pipeline routing: for complex agentic tasks, pre-plan with a small model
+                    let use_pipeline = classification.as_ref()
+                        .map(|cl| pipeline::should_pipeline(cl))
+                        .unwrap_or(false);
+
+                    if use_pipeline {
+                        if let Some(ref strong_name) = effective_model {
+                            // Find a planner: any local model that isn't the strong model
+                            let planner = targets.targets.iter()
+                                .find(|(name, target_vec)| {
+                                    *name != strong_name
+                                        && target_vec.iter().any(|t| matches!(t, election::InferenceTarget::Local(_)))
+                                })
+                                .and_then(|(name, target_vec)| {
+                                    target_vec.iter().find_map(|t| match t {
+                                        election::InferenceTarget::Local(p) => Some((name.clone(), *p)),
+                                        _ => None,
+                                    })
+                                });
+
+                            let strong_local_port = targets.targets.get(strong_name.as_str())
+                                .and_then(|tv| tv.iter().find_map(|t| match t {
+                                    election::InferenceTarget::Local(p) => Some(*p),
+                                    _ => None,
+                                }));
+
+                            if let (Some((planner_name, planner_port)), Some(strong_port)) = (planner, strong_local_port) {
+                                tracing::info!("pipeline: {planner_name} (plan) → {strong_name} (execute)");
+                                proxy::pipeline_proxy_local(
+                                    tcp_stream, &buf, n,
+                                    planner_port, &planner_name,
+                                    strong_port, &node,
+                                ).await;
+                                return;
+                            }
+                        }
+                        // Fall through to normal routing if pipeline setup fails
+                    }
+
                     // MoE routing: use session hint for sticky routing across shards
                     let target = if targets.moe.is_some() {
-                        // Extract a session hint from the request for sticky routing.
-                        // Use the source address + any user/session field as the hint.
                         let session_hint = proxy::extract_session_hint(&buf[..n])
                             .unwrap_or_else(|| format!("{_addr}"));
                         targets.get_moe_target(&session_hint)
