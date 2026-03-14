@@ -168,7 +168,7 @@ pub async fn start_llama_server(
     } else if model_bytes < 50 * GB {
         8192   // large models (27B-32B): 8K — balance quality vs VRAM
     } else {
-        4096   // frontier (70B+): 4K — KV cache is huge, preserve VRAM
+        8192   // frontier (70B+): 8K — agents need context for tools/system prompts
     };
     tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB)", model_bytes as f64 / GB as f64);
 

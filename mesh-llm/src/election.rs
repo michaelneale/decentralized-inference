@@ -935,7 +935,7 @@ async fn start_llama(
         );
         Some(split_str)
     } else {
-        eprintln!("  Solo mode ({:.0}GB)", my_vram_f / 1e9);
+        eprintln!("  Serving entirely ({:.0}GB VRAM)", my_vram_f / 1e9);
         None
     };
 
