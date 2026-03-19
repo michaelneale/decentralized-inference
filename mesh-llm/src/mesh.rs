@@ -848,11 +848,18 @@ impl Node {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
+                let is_client = matches!(*node.role.lock().await, NodeRole::Client);
                 let mut peers_and_conns: Vec<(EndpointId, Option<Connection>)> = {
                     let state = node.state.lock().await;
-                    state.peers.keys().map(|id| {
+                    state.peers.iter().filter_map(|(id, p)| {
                         let conn = state.connections.get(id).cloned();
-                        (*id, conn)
+                        // Clients skip heartbeat to other clients with no connection —
+                        // no point establishing client-to-client QUIC connections.
+                        // If we already have a connection (e.g. they connected to us), keep it.
+                        if is_client && conn.is_none() && matches!(p.role, NodeRole::Client) {
+                            return None;
+                        }
+                        Some((*id, conn))
                     }).collect()
                 };
                 tracing::debug!("Heartbeat tick: {} peers to check", peers_and_conns.len());
@@ -1556,7 +1563,10 @@ impl Node {
 
         {
             let state = self.state.lock().await;
-            if state.peers.contains_key(&peer_id) { return Ok(()); }
+            // Skip if we already have a connection to this peer.
+            // Note: check connections, not just peers — transitive peers appear in
+            // the peer table without a connection and still need a direct connect.
+            if state.connections.contains_key(&peer_id) { return Ok(()); }
             if state.dead_peers.contains(&peer_id) {
                 tracing::debug!("Skipping connection to dead peer {}", peer_id.fmt_short());
                 return Ok(());
