@@ -1,29 +1,5 @@
 # mesh-llm TODO
 
-## Vision / Multimodal
-
-llama.cpp supports vision models via `--mmproj` (multimodal projector). The server handles OpenAI-compatible `image_url` content parts in `/v1/chat/completions`. Our proxy forwards request bodies as-is, so the vision message format works end-to-end. Tested locally with Qwen3.5-0.8B — reads screenshots, does OCR, describes images.
-
-Multimodal models are a superset of text models — they do normal text chat AND accept images. No tradeoff.
-
-**What's needed:**
-- **Catalog**: Add `vision: bool` to `CatalogModel`, add `mmproj` field (filename + URL). Tag Qwen3.5 family as vision.
-- **Launch**: Pass `--mmproj <file>` to llama-server when model has one
-- **Download**: Download mmproj alongside model GGUF
-- **`/v1/models`**: Surface `"capabilities": ["vision"]` so clients know
-- **`/api/status` → `mesh_models`**: Add `vision: bool` so UI can show badge
-- **UI model list**: Show 👁 or camera icon next to vision-capable models
-- **UI chat input**: Show image attach button when selected model supports vision. Encode as base64 `data:image/jpeg;base64,...` in OpenAI `image_url` content part format
-
-**Models (all Qwen3.5 are vision-native):**
-- Qwen3.5-0.8B (~0.5GB + 0.2GB mmproj) — tiny, runs anywhere, good for OCR/screenshots
-- Qwen3.5-4B (~2.5GB + mmproj) — good balance
-- Qwen3.5-9B (~5.5GB + mmproj) — drop-in replacement for Qwen3-8B, gains vision
-- Qwen3.5-27B (~16GB + mmproj) — already on Studio as text-only, just needs mmproj
-- Gemma-3-12b, Pixtral-12B — alternative architectures with vision
-
-No image generation — llama.cpp is transformers only. Vision = understanding (describe, OCR, visual QA).
-
 ## Mixture of Models (MoM)
 
 Route different requests to specialized models based on task type. Instead of one "best" model, the mesh becomes smarter about which model handles what.
@@ -80,6 +56,11 @@ Design: [MoE_PLAN.md](../MoE_PLAN.md) · Auto-deploy: [MoE_DEPLOY_DESIGN.md](../
 - [ ] **Static speed estimates**: `tok_s: f64` on ModelProfile. Quick tasks prefer fast models.
 - [ ] **Response quality checks**: Detect empty/repetitive/truncated responses, retry with different model.
 - [ ] **MoM-aware routing**: Route by task type to best-suited model (see Mixture of Models above).
+- [ ] **Vision-aware routing**: Auto-route image requests to vision-capable models.
 
 ## Resilience
 - [ ] **Multi-node tensor split recovery**: If one split peer dies, re-split across remaining.
+
+## Vision — Future
+- [ ] **More catalog entries**: Gemma-3-12B, Pixtral-12B, larger Qwen3.5 (35B-A3B MoE, 122B-A10B MoE)
+- [ ] **Image generation**: Not supported by llama.cpp (transformers only), but could add diffusion backend later.
