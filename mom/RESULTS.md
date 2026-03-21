@@ -68,9 +68,38 @@ Ensemble is 3-10x slower than the best solo model per task. Each round requires 
 
 4. **Model diversity matters more than model count**. MiniMax (MoE, strong tools) + Qwen3-30B (MoE, fast) complement each other. Adding a third weak model (Qwen3-8B) didn't help — it never won.
 
+## Claude vs Qwen3-8B Comparison
+
+Direct head-to-head on a code review task (find bugs in a statistics module, fix them, add error handling, suggest tests).
+
+| | Claude Sonnet 4 | Qwen3-8B (local) |
+|--|---|----|
+| Time | 34.0s | 28.7s |
+| Output | 8,987 chars | 7,460 chars |
+| Bugs found | 10 | 7 |
+| Quality | Excellent | Good |
+
+### Quality Analysis
+
+**Claude advantages:**
+- Found more edge cases (NaN, infinity, boolean-as-number, string input, iterator input)
+- Produced complete working fixed code with a shared `_validate_input()` helper
+- Test cases are specific pytest assertions with `pytest.raises`
+- Identified the subtle issue of booleans being treated as int (True=1, False=0)
+
+**Qwen3-8B:**
+- Found the main bugs (empty list, mode ties, percentile range, non-numeric)
+- Chose `return None` pattern instead of raising exceptions — debatable design choice but less Pythonic
+- Test cases are more repetitive (same `describe([])` test repeated)
+- Missed: NaN handling, infinity, boolean-as-number, string-as-iterable, iterator support
+
+**Verdict:** Claude is meaningfully better — finds more edge cases, produces more idiomatic Python, better test coverage. But Qwen3-8B catches the most important bugs. For a code review, Claude at ~$0.05 beats Qwen3-8B (free), but the gap isn't enormous.
+
+**MoM implication:** An ensemble of Qwen3-8B + Qwen3-30B + MiniMax might close the gap with Claude by combining diverse perspectives. The MoM tool-use result already showed the ensemble picking the best model's answer.
+
 ## Next Steps
 
 - [ ] Try single-round MoM (parallel generate → vote → best answer) — same quality gain, 1/3 the latency
-- [ ] Add pi/Claude as baseline comparison on the same prompts
+- [ ] Run same code review through MoM ensemble, compare with Claude
 - [ ] Test with harder problems where models genuinely disagree
 - [ ] Consider MoM as a mesh-llm router strategy for `model=auto`
