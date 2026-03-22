@@ -151,9 +151,44 @@ Same task (add display_name() to Rust struct), pi -p harness, working directory 
 
 All models get these right. MoA adds 3.5x latency for zero quality improvement. Confirms: when all models can solve the problem, ensembling is pure waste.
 
+## MoA with Strong Models Only (MiniMax + Qwen2.5-72B)
+
+After filtering to tier 3+ models only (dropping Qwen3.5-9B), MoA fan-out drops from 80s to 3s. Second agentic eval:
+
+| | Claude | MiniMax solo | MoA (2 strong) |
+|--|---|---|---|
+| Time | **13s** | 18s | 45s |
+| Score | **5/5** | **5/5** | 3/5 |
+| Issue | — | — | Aggregation prompt broke tool-use |
+
+MoA's aggregation prompt (`"synthesize these responses..."`) confused MiniMax into using its own XML tool-call format (`<minimax:tool_call>`) instead of pi's tools. The synthesis context injection is fundamentally incompatible with agentic tool-use flows.
+
+**MiniMax solo = Claude** confirmed again. Consistently 5/5 across two runs.
+
+## Conclusions
+
+### What works
+- **Solo strong model (MiniMax-253B)** for agentic tasks — matches Claude at 18-24s
+- **MoA for single-turn chat quality** — synthesizes diverse perspectives
+- **Best-of-N for correctness** — picks best response without amplifying hallucinations
+- **Tier filtering** — only fan out to strong models (tier 3+)
+
+### What doesn't work
+- **MoA for agentic/tool-use** — synthesis prompt breaks tool-use protocol
+- **Including weak models** — Qwen3.5-9B adds 80s latency, never contributes quality
+- **MoA synthesis for code review** — amplifies hallucinated bugs from weaker models
+- **Multi-round deliberation (NSED)** — 3-10x latency, marginal improvement
+
+### Recommendations for mesh-llm
+1. **Default `model=auto` should pick the strongest single model** — already implemented, working
+2. **`model=moa` is useful for chat** — non-agentic single-turn questions where quality matters
+3. **`model=best-of-n` for code review/analysis** — when you want the best answer, not a merged one
+4. **Filter MoA to tier 3+ models** — implemented, prevents weak model drag
+5. **Don't use MoA as an agent backend** — it breaks tool-use flows
+
 ## Next Steps
 
-- [ ] Try single-round MoM (parallel generate → vote → best answer) — same quality gain, 1/3 the latency
-- [ ] Run same code review through MoM ensemble, compare with Claude
-- [ ] Test with harder problems where models genuinely disagree
-- [ ] Consider MoM as a mesh-llm router strategy for `model=auto`
+- [ ] Test MoA on harder tasks where models genuinely disagree (edge cases, ambiguous requirements)
+- [ ] Try MoA-2 (two-layer) to see if quality justifies 3x latency for chat
+- [ ] Consider `model=auto` using MoA only for single-turn non-tool requests
+- [ ] Profile MoA latency breakdown: fan-out vs aggregation vs thinking overhead

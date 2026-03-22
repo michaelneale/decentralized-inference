@@ -1,0 +1,1 @@
+Added the `display_name()` method to the `User` struct in `/Users/micn/Documents/code/deez/mom/results/agent-eval-20260322_191753/minimax-solo/src/models/user.rs`. The method returns the full name formatted as "first_name last_name" using the `format!` macro.

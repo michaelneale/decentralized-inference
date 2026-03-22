@@ -49,6 +49,21 @@ pub fn is_moa_request(model: &str) -> bool {
     parse_strategy(model).is_some()
 }
 
+/// Filter models to only include tier 3+ (strong models).
+/// Weak models drag down MoA with slow responses and poor quality.
+pub fn filter_strong_models(models: &[String]) -> Vec<String> {
+    let strong: Vec<String> = models.iter()
+        .filter(|m| {
+            crate::router::profile_for(m)
+                .map(|p| p.tier >= 3)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    // Fall back to all models if filtering leaves <2
+    if strong.len() >= 2 { strong } else { models.to_vec() }
+}
+
 // ── Prompts ──
 
 const SYNTHESIZE_SYSTEM: &str = "You have been provided with a set of responses from various open-source models to the latest user query. Your task is to synthesize these responses into a single, high-quality response. It is crucial to critically evaluate the information provided in these responses, recognizing that some of it may be biased or incorrect. Your response should not simply replicate the given answers but should offer a refined, accurate, and comprehensive reply to the instruction. Ensure your response is well-structured, coherent, and adheres to the highest standards of accuracy and reliability.\n\nResponses from models:";
@@ -228,7 +243,7 @@ pub async fn handle_moa_request(
 ) {
     let proxy_url = format!("http://127.0.0.1:{proxy_port}");
     let http_client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300))
         .pool_max_idle_per_host(0)
         .build()
@@ -264,8 +279,11 @@ pub async fn handle_moa_request(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
+    // Filter to strong models only (tier 3+) — weak models drag down the ensemble
+    let models = filter_strong_models(&models);
+
     if models.len() < 2 {
-        let _ = crate::proxy::send_400(client_stream, "MoA requires 2+ models").await;
+        let _ = crate::proxy::send_400(client_stream, "MoA requires 2+ strong models").await;
         return;
     }
 
