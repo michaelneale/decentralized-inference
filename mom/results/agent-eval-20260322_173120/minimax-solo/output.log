@@ -1,0 +1,1 @@
+Done. Added the `display_name()` method to the `User` struct in `src/models/user.rs`. It returns the full name as a `String` formatted as "first_name last_name".

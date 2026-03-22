@@ -1,0 +1,9 @@
+{
+  "lastChangelogVersion": "0.57.1",
+  "packages": [
+    "npm:pi-mcp-adapter"
+  ],
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-4-6",
+  "defaultThinkingLevel": "off"
+}

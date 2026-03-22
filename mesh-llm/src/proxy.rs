@@ -82,7 +82,7 @@ pub fn is_drop_request(buf: &[u8]) -> bool {
 /// by model name (or falls back to any host), and tunnels the request via QUIC.
 ///
 /// Set `track_demand` to record requests for demand-based rebalancing.
-pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_demand: bool) {
+pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_demand: bool, proxy_port: u16) {
     let mut buf = vec![0u8; 32768];
     let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
         Ok(v) => v,
@@ -91,9 +91,25 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
 
     // Handle /v1/models
     if is_models_list_request(&buf[..n]) {
-        let served = node.models_being_served().await;
+        let mut served = node.models_being_served().await;
+        // Add MoA virtual models if 2+ real models available
+        if served.len() >= 2 {
+            served.push("moa".to_string());
+            served.push("best-of-n".to_string());
+            served.push("moa-2".to_string());
+        }
         let _ = send_models_list(tcp_stream, &served).await;
         return;
+    }
+
+    // MoA routing: fan out to all models, aggregate with strongest
+    if model_name.as_deref().map(|m| crate::moa::is_moa_request(m)).unwrap_or(false) {
+        let served = node.models_being_served().await;
+        if served.len() >= 2 {
+            crate::moa::handle_moa_request(tcp_stream, &buf, n, proxy_port, served, &node).await;
+            return;
+        }
+        // Fall through to normal routing if <2 models
     }
 
     // Demand tracking for rebalancing (done after routing so we track the actual model used)

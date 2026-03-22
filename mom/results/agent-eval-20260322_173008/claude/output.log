@@ -1,0 +1,7 @@
+I've successfully created the user.rs file with the User struct and added the `display_name()` method. The method:
+
+- Returns a `String` (owned value) formatted as "first_name last_name"
+- Uses the `format!` macro to concatenate the first and last names with a space
+- Accesses the private fields directly since it's within the same impl block
+
+The `display_name()` method will return the full name in the format you requested: "first_name last_name".

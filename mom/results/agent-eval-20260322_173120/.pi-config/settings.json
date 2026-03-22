@@ -1,0 +1,6 @@
+{
+  "packages": [],
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultThinkingLevel": "off"
+}

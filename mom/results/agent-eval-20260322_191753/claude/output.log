@@ -1,0 +1,11 @@
+Great! I've added the `display_name()` method to the User struct. The method:
+
+1. Returns a `String` (owned value) containing the formatted full name
+2. Uses the `format!` macro to concatenate the first name and last name with a space between them
+3. Follows the existing code style and naming conventions
+
+The method can now be used like this:
+```rust
+let user = User::new("John", "Doe", "john.doe@example.com");
+let full_name = user.display_name(); // Returns "John Doe"
+```

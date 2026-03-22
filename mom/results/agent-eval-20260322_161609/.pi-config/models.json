@@ -1,0 +1,22 @@
+{
+  "providers": {
+    "mesh-local": {
+      "baseUrl": "http://localhost:8081/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "compat": {
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false
+      },
+      "models": [{
+        "id": "Qwen3-8B-Q4_K_M.gguf",
+        "name": "Qwen3-8B",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 16384,
+        "maxTokens": 4096
+      }]
+    }
+  }
+}

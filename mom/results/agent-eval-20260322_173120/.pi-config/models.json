@@ -1,0 +1,50 @@
+{
+  "providers": {
+    "mesh-local": {
+      "baseUrl": "http://localhost:8081/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "compat": {
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false
+      },
+      "models": [{
+        "id": "Qwen3-8B-Q4_K_M.gguf",
+        "name": "Qwen3-8B",
+        "reasoning": false,
+        "input": ["text"],
+        "contextWindow": 16384,
+        "maxTokens": 4096
+      }]
+    },
+    "mesh": {
+      "baseUrl": "http://localhost:9337/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "compat": {
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        {
+          "id": "MiniMax-M2.5-Q4_K_M",
+          "name": "MiniMax-253B",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 32768,
+          "maxTokens": 4096
+        },
+        {
+          "id": "moa",
+          "name": "MoA (mixture)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 32768,
+          "maxTokens": 4096
+        }
+      ]
+    }
+  }
+}

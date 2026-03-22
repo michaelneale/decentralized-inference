@@ -7,6 +7,7 @@ mod moe;
 mod nostr;
 mod proxy;
 mod rewrite;
+mod moa;
 mod pipeline;
 mod router;
 mod tunnel;
@@ -1388,7 +1389,7 @@ async fn run_passive(cli: &Cli, node: mesh::Node, is_client: bool) -> Result<Opt
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Connection from {addr}");
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, local_port));
             }
             Some(model_name) = promote_rx.recv() => {
                 eprintln!("⬆️  Standby promoting to serve: {model_name}");
@@ -1438,7 +1439,13 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
             match proxy::peek_request(&tcp_stream, &mut buf).await {
                 Ok((n, model_name)) => {
                     if proxy::is_models_list_request(&buf[..n]) {
-                        let models: Vec<String> = targets.targets.keys().cloned().collect();
+                        let mut models: Vec<String> = targets.targets.keys().cloned().collect();
+                        // Add MoA virtual models if 2+ real models available
+                        if models.len() >= 2 {
+                            models.push("moa".to_string());
+                            models.push("best-of-n".to_string());
+                            models.push("moa-2".to_string());
+                        }
                         let _ = proxy::send_models_list(tcp_stream, &models).await;
                         return;
                     }
@@ -1450,6 +1457,13 @@ async fn api_proxy(node: mesh::Node, port: u16, target_rx: tokio::sync::watch::R
                         } else {
                             let _ = proxy::send_400(tcp_stream, "missing 'model' field").await;
                         }
+                        return;
+                    }
+
+                    // MoA routing: fan out to all models, aggregate with strongest
+                    if model_name.as_deref().map(|m| moa::is_moa_request(m)).unwrap_or(false) {
+                        let models: Vec<String> = targets.targets.keys().cloned().collect();
+                        moa::handle_moa_request(tcp_stream, &buf, n, port, models, &node).await;
                         return;
                     }
 
@@ -1571,7 +1585,7 @@ async fn bootstrap_proxy(
                 };
                 let _ = tcp_stream.set_nodelay(true);
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, port));
             }
             resp_tx = stop_rx.recv() => {
                 // Hand over listener to api_proxy

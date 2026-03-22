@@ -1,0 +1,5 @@
+I've successfully added the `display_name()` method to the User struct. The method returns a `String` containing the full name formatted as "first_name last_name" using the `format!` macro to concatenate the first and last name fields with a space in between.
+
+The updated User implementation now includes:
+- `display_name()` - returns the formatted full name as a String
+- All existing methods (new, email, first_name, last_name) remain unchanged

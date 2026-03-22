@@ -1,0 +1,7 @@
+I've successfully added the `display_name()` method to the User struct. The method:
+
+1. Returns a `String` containing the full name
+2. Formats it as "first_name last_name" using the `format!` macro
+3. Uses the existing `first_name` and `last_name` fields from the struct
+
+The method is now available for use and follows the same pattern as the other getter methods in the impl block.

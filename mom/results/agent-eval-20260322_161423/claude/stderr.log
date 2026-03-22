@@ -1,0 +1,19 @@
+npm error code ECONNRESET
+npm error errno ECONNRESET
+npm error network request to https://global.block-artifacts.com/artifactory/api/npm/square-npm/pi-mcp-adapter failed, reason: Client network socket disconnected before secure TLS connection was established
+npm error network This is a problem related to network connectivity.
+npm error network In most cases you are behind a proxy or have bad network settings.
+npm error network
+npm error network If you are behind a proxy, please make sure that the
+npm error network 'proxy' config is set properly.  See: 'npm help config'
+npm error A complete log of this run can be found in: /Users/micn/.npm/_logs/2026-03-22T05_14_25_491Z-debug-0.log
+file:///opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/dist/core/package-manager.js:1430
+                    reject(new Error(`${command} ${args.join(" ")} failed with code ${code}`));
+                           ^
+
+Error: npm install -g pi-mcp-adapter failed with code 1
+    at ChildProcess.<anonymous> (file:///opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/dist/core/package-manager.js:1430:28)
+    at ChildProcess.emit (node:events:508:20)
+    at ChildProcess._handle.onexit (node:internal/child_process:293:12)
+
+Node.js v25.5.0
