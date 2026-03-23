@@ -220,25 +220,47 @@ pub async fn route_to_target(node: mesh::Node, tcp_stream: TcpStream, target: el
 
 // ── Response helpers ──
 
-pub async fn send_models_list(mut stream: TcpStream, models: &[String]) -> std::io::Result<()> {
-    let data: Vec<serde_json::Value> = models
-        .iter()
-        .map(|m| {
-            let has_vision = crate::download::MODEL_CATALOG.iter()
-                .find(|c| c.name == m.as_str()
-                    || c.file.strip_suffix(".gguf").unwrap_or(c.file) == m.as_str())
-                .map(|c| c.mmproj.is_some())
-                .unwrap_or(false);
-            let mut caps = vec!["text"];
-            if has_vision { caps.push("vision"); }
-            serde_json::json!({
-                "id": m,
-                "object": "model",
-                "owned_by": "mesh-llm",
-                "capabilities": caps,
-            })
+fn model_has_vision_capability(model: &str) -> bool {
+    crate::download::MODEL_CATALOG.iter()
+        .find(|c| c.name == model || c.file.strip_suffix(".gguf").unwrap_or(c.file) == model)
+        .map(|c| c.mmproj.is_some())
+        .unwrap_or(false)
+}
+
+fn build_models_list_data(models: &[String]) -> Vec<serde_json::Value> {
+    let mut data = Vec::with_capacity(models.len() + usize::from(!models.is_empty()));
+
+    if !models.is_empty() {
+        let mut auto_caps = vec!["text"];
+        if models.iter().any(|m| model_has_vision_capability(m)) {
+            auto_caps.push("vision");
+        }
+        data.push(serde_json::json!({
+            "id": "auto",
+            "object": "model",
+            "owned_by": "mesh-llm",
+            "capabilities": auto_caps,
+        }));
+    }
+
+    data.extend(models.iter().map(|m| {
+        let mut caps = vec!["text"];
+        if model_has_vision_capability(m) {
+            caps.push("vision");
+        }
+        serde_json::json!({
+            "id": m,
+            "object": "model",
+            "owned_by": "mesh-llm",
+            "capabilities": caps,
         })
-        .collect();
+    }));
+
+    data
+}
+
+pub async fn send_models_list(mut stream: TcpStream, models: &[String]) -> std::io::Result<()> {
+    let data = build_models_list_data(models);
     let body = serde_json::json!({ "object": "list", "data": data }).to_string();
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
@@ -481,5 +503,26 @@ mod tests {
     fn test_extract_model_from_http_basic() {
         let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"Qwen3-30B\"}";
         assert_eq!(extract_model_from_http(req), Some("Qwen3-30B".to_string()));
+    }
+
+    #[test]
+    fn test_build_models_list_data_includes_auto_when_models_served() {
+        let models = vec![
+            "Qwen3-8B-Q4_K_M".to_string(),
+            "Qwen3.5-0.8B-Q4_K_M".to_string(),
+        ];
+        let data = build_models_list_data(&models);
+
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0]["id"], "auto");
+        assert_eq!(data[0]["capabilities"], serde_json::json!(["text", "vision"]));
+        assert_eq!(data[1]["id"], "Qwen3-8B-Q4_K_M");
+        assert_eq!(data[2]["id"], "Qwen3.5-0.8B-Q4_K_M");
+    }
+
+    #[test]
+    fn test_build_models_list_data_omits_auto_when_no_models_served() {
+        let data = build_models_list_data(&[]);
+        assert!(data.is_empty());
     }
 }

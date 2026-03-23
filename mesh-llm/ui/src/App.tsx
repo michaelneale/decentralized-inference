@@ -173,6 +173,7 @@ const CHAT_SAVE_DEBOUNCE_MS = 500;
 const CHAT_MAX_CONVERSATIONS = 80;
 const CHAT_MAX_MESSAGES_PER_CONVERSATION = 240;
 const CHAT_MAX_TEXT_CHARS = 12000;
+const AUTO_MODEL_ID = 'auto';
 
 function sectionFromPathname(pathname: string): TopSection | null {
   if (pathname === '/dashboard' || pathname === '/dashboard/') return 'dashboard';
@@ -423,11 +424,12 @@ export function App() {
   );
   const messages = activeConversation?.messages ?? [];
 
+  const displayMeshModels = useMemo(() => sanitizeMeshModels(status?.mesh_models ?? []), [status?.mesh_models]);
   const warmModels = useMemo(() => {
-    const list = (status?.mesh_models ?? []).filter((m) => m.status === 'warm').map((m) => m.name);
+    const list = displayMeshModels.filter((m) => m.status === 'warm').map((m) => m.name);
     if (!list.length && status?.model_name) list.push(status.model_name);
-    return list;
-  }, [status]);
+    return [...new Set(list.filter((name) => name && name !== AUTO_MODEL_ID))];
+  }, [displayMeshModels, status?.model_name]);
   const modelStatsByName = useMemo<Record<string, ModelServingStat>>(() => {
     const stats: Record<string, ModelServingStat> = {};
     for (const model of warmModels) stats[model] = { nodes: 0, vramGb: 0 };
@@ -445,25 +447,25 @@ export function App() {
       addServingNode(peer.serving, peer.vram_gb);
     }
 
-    for (const model of status.mesh_models ?? []) {
+    for (const model of displayMeshModels) {
       if (!stats[model.name]) continue;
       if (stats[model.name].nodes === 0) stats[model.name].nodes = Math.max(0, model.node_count || 0);
     }
 
     return stats;
-  }, [status, warmModels]);
+  }, [displayMeshModels, status, warmModels]);
   const selectedChatModel = selectedModel || warmModels[0] || status?.model_name || '';
   const visionModels = useMemo(() => {
     const set = new Set<string>();
-    for (const m of status?.mesh_models ?? []) {
+    for (const m of displayMeshModels) {
       if (m.vision) set.add(m.name);
     }
     return set;
-  }, [status?.mesh_models]);
+  }, [displayMeshModels]);
   const selectedModelVision = useMemo(() => {
     if (selectedModel) return visionModels.has(selectedModel);
-    return (status?.mesh_models ?? []).some((m) => m.status === 'warm' && m.vision);
-  }, [status?.mesh_models, selectedModel, visionModels]);
+    return displayMeshModels.some((m) => m.status === 'warm' && m.vision);
+  }, [displayMeshModels, selectedModel, visionModels]);
   const selectedModelStat = selectedChatModel ? modelStatsByName[selectedChatModel] : undefined;
   const selectedModelNodeCount = selectedModelStat ? selectedModelStat.nodes : null;
   const selectedModelVramGb = selectedModelStat ? selectedModelStat.vramGb : null;
@@ -2142,12 +2144,12 @@ function DashboardPage({
 }) {
   const [modelFilter, setModelFilter] = useState<'all' | 'warm' | 'cold'>('all');
   const [isMeshOverviewFullscreen, setIsMeshOverviewFullscreen] = useState(false);
+  const displayMeshModels = useMemo(() => sanitizeMeshModels(status?.mesh_models ?? []), [status?.mesh_models]);
   const filteredModels = useMemo(() => {
-    const models = status?.mesh_models ?? [];
-    return [...models]
+    return [...displayMeshModels]
       .filter((m) => (modelFilter === 'all' ? true : m.status === modelFilter))
       .sort((a, b) => (b.node_count - a.node_count) || a.name.localeCompare(b.name));
-  }, [status?.mesh_models, modelFilter]);
+  }, [displayMeshModels, modelFilter]);
   const totalMeshVramGb = useMemo(() => meshGpuVram(status), [status]);
   const sortedPeers = useMemo(() => {
     return [...(status?.peers ?? [])].sort((a, b) => (b.vram_gb - a.vram_gb) || a.id.localeCompare(b.id));
@@ -2235,7 +2237,7 @@ function DashboardPage({
         />
         <StatCard
           title="Active Models"
-          value={`${(status?.mesh_models ?? []).filter((m) => m.status === 'warm').length}`}
+          value={`${displayMeshModels.filter((m) => m.status === 'warm').length}`}
           icon={<Sparkles className="h-4 w-4" />}
           tooltip="Models currently loaded and serving across the mesh."
         />
@@ -2355,8 +2357,8 @@ function DashboardPage({
             ) : (
               <DashboardPanelEmpty
                 icon={<Sparkles className="h-4 w-4" />}
-                title={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
-                description={(status?.mesh_models.length ?? 0) > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
+                title={displayMeshModels.length > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
+                description={displayMeshModels.length > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
               />
             )}
           </CardContent>
@@ -3133,6 +3135,16 @@ function DashboardPanelEmpty({
 function meshGpuVram(status: StatusPayload | null) {
   if (!status) return 0;
   return (status.is_client ? 0 : status.my_vram_gb || 0) + (status.peers || []).filter((p) => p.role !== 'Client').reduce((s, p) => s + p.vram_gb, 0);
+}
+
+function sanitizeMeshModels(models: MeshModel[]) {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    const name = (model.name || '').trim();
+    if (!name || name === AUTO_MODEL_ID || seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
 }
 
 function shortName(name: string) {

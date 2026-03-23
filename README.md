@@ -127,7 +127,7 @@ Build-from-source and UI development instructions are in [CONTRIBUTING.md](CONTR
 
 ## Using with agents
 
-mesh-llm exposes an OpenAI-compatible API on `localhost:9337`. Any tool that supports custom OpenAI endpoints works. `/v1/models` lists available models; the `model` field in requests routes to the right node.
+mesh-llm exposes an OpenAI-compatible API on `localhost:9337`. Any tool that supports custom OpenAI endpoints works. `/v1/models` lists available models and includes `auto` whenever the mesh is serving at least one model; the `model` field in requests routes to the right node.
 
 For built-in launcher integrations (`goose`, `claude`):
 

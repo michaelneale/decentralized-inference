@@ -1974,6 +1974,11 @@ async fn check_mesh(client: &reqwest::Client, port: u16, model: &Option<String>)
         );
     }
 
+    let routable_models: Vec<String> = models.iter()
+        .filter(|name| name.as_str() != "auto")
+        .cloned()
+        .collect();
+
     let chosen = if let Some(ref m) = model {
         if !models.iter().any(|n| n == m) {
             if let Some(mut c) = child {
@@ -1985,7 +1990,7 @@ async fn check_mesh(client: &reqwest::Client, port: u16, model: &Option<String>)
         m.clone()
     } else {
         // Pick the strongest tool-capable model for agentic work.
-        let available: Vec<(&str, f64)> = models.iter().map(|n| (n.as_str(), 0.0)).collect();
+        let available: Vec<(&str, f64)> = routable_models.iter().map(|n| (n.as_str(), 0.0)).collect();
         let agentic = router::Classification {
             category: router::Category::Code,
             complexity: router::Complexity::Deep,
@@ -1993,10 +1998,9 @@ async fn check_mesh(client: &reqwest::Client, port: u16, model: &Option<String>)
         };
         router::pick_model_classified(&agentic, &available)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| models[0].clone())
+            .unwrap_or_else(|| routable_models.first().cloned().unwrap_or_else(|| models[0].clone()))
     };
     eprintln!("   Models: {}", models.join(", "));
-    eprintln!("   Using: {chosen}");
     Ok((models, chosen, child))
 }
 
@@ -2004,7 +2008,17 @@ async fn run_goose(model: Option<String>, port: u16) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
-    let (models, chosen, mut _mesh_child) = check_mesh(&client, port, &model).await?;
+    let (models, _chosen, mut _mesh_child) = check_mesh(&client, port, &model).await?;
+    let goose_model = model.unwrap_or_else(|| "auto".to_string());
+    let provider_model_names: Vec<String> = if models.iter().any(|name| name == "auto") {
+        models.clone()
+    } else {
+        let mut names = Vec::with_capacity(models.len() + 1);
+        names.push("auto".to_string());
+        names.extend(models.clone());
+        names
+    };
+    eprintln!("   Using: {goose_model}");
 
     // Write custom provider JSON
     let goose_config_dir = dirs::home_dir()
@@ -2014,7 +2028,7 @@ async fn run_goose(model: Option<String>, port: u16) -> Result<()> {
         .join("custom_providers");
     std::fs::create_dir_all(&goose_config_dir)?;
 
-    let provider_models: Vec<serde_json::Value> = models.iter().map(|name| {
+    let provider_models: Vec<serde_json::Value> = provider_model_names.iter().map(|name| {
         serde_json::json!({"name": name, "context_limit": 65536})
     }).collect();
 
@@ -2043,7 +2057,7 @@ async fn run_goose(model: Option<String>, port: u16) -> Result<()> {
             .arg("-a")
             .arg(goose_app)
             .env("GOOSE_PROVIDER", "mesh")
-            .env("GOOSE_MODEL", &chosen)
+            .env("GOOSE_MODEL", &goose_model)
             .spawn()?;
         // Goose.app is a GUI — can't wait for it. Mesh stays running.
         if _mesh_child.is_some() {
@@ -2054,7 +2068,7 @@ async fn run_goose(model: Option<String>, port: u16) -> Result<()> {
         let status = std::process::Command::new("goose")
             .arg("session")
             .env("GOOSE_PROVIDER", "mesh")
-            .env("GOOSE_MODEL", &chosen)
+            .env("GOOSE_MODEL", &goose_model)
             .status();
         match status {
             Ok(s) if s.success() => {}
@@ -2062,7 +2076,7 @@ async fn run_goose(model: Option<String>, port: u16) -> Result<()> {
             Err(_) => {
                 eprintln!("goose not found. Install: https://github.com/block/goose");
                 eprintln!("Or run manually:");
-                eprintln!("  GOOSE_PROVIDER=mesh GOOSE_MODEL={chosen} goose session");
+                eprintln!("  GOOSE_PROVIDER=mesh GOOSE_MODEL={goose_model} goose session");
             }
         }
         // CLI goose exited — clean up mesh if we started it
@@ -2079,7 +2093,8 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
-    let (_models, chosen, mut _mesh_child) = check_mesh(&client, port, &model).await?;
+    let (_models, _chosen, mut _mesh_child) = check_mesh(&client, port, &model).await?;
+    let claude_model = model.unwrap_or_else(|| "auto".to_string());
 
     // Configure and launch Claude Code
     // llama-server natively serves the Anthropic /v1/messages API, and
@@ -2094,11 +2109,11 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
         "env": {
             "ANTHROPIC_BASE_URL": &base_url,
             "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_MODEL": &chosen,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": &chosen,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": &chosen,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": &chosen,
-            "CLAUDE_CODE_SUBAGENT_MODEL": &chosen,
+            "ANTHROPIC_MODEL": &claude_model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": &claude_model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": &claude_model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": &claude_model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": &claude_model,
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
             "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
             "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
@@ -2118,9 +2133,9 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
     });
     let settings_json = serde_json::to_string(&settings)?;
 
-    eprintln!("🚀 Launching Claude Code with {chosen} → {base_url}\n");
+    eprintln!("🚀 Launching Claude Code with {claude_model} → {base_url}\n");
     let status = std::process::Command::new("claude")
-        .args(["--model", &chosen, "--settings", &settings_json])
+        .args(["--model", &claude_model, "--settings", &settings_json])
         .status();
     match status {
         Ok(s) if s.success() => {}
@@ -2128,7 +2143,7 @@ async fn run_claude(model: Option<String>, port: u16) -> Result<()> {
         Err(_) => {
             eprintln!("claude not found. Install: https://docs.anthropic.com/en/docs/claude-code");
             eprintln!("Or run manually:");
-            eprintln!("  ANTHROPIC_BASE_URL={base_url} ANTHROPIC_API_KEY= claude --model {chosen}");
+            eprintln!("  ANTHROPIC_BASE_URL={base_url} ANTHROPIC_API_KEY= claude --model {claude_model}");
         }
     }
     // Claude exited — clean up mesh if we started it
