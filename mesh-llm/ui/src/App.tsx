@@ -2297,7 +2297,7 @@ function DashboardPage({
           </Card>
         </div>
 
-        <Card className="lg:col-span-2">
+        <Card className="flex h-full min-h-0 flex-col lg:col-span-2">
           <CardHeader className="pb-2">
             <div className="flex flex-wrap items-center gap-2">
               <CardTitle className="text-sm">Model Catalog</CardTitle>
@@ -2316,9 +2316,9 @@ function DashboardPage({
               </div>
             </div>
           </CardHeader>
-          <CardContent className="min-h-0 pt-0">
+          <CardContent className="flex min-h-0 flex-1 flex-col pt-0">
             {filteredModels.length > 0 ? (
-              <ScrollArea className="h-[18rem] md:h-[20rem]">
+              <ScrollArea className="min-h-0 flex-1">
                 <div className="space-y-2">
                   {filteredModels.map((model) => (
                     <div key={model.name} className="rounded-md border p-3">
