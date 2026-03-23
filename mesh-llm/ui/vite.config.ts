@@ -19,5 +19,30 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (
+            id.includes('/src/components/mesh-topology-diagram.tsx')
+            || id.includes('/node_modules/@xyflow/')
+          ) {
+            return 'dashboard-topology';
+          }
+
+          if (
+            id.includes('/src/components/chat-markdown-message.tsx')
+            || id.includes('/node_modules/react-markdown/')
+            || id.includes('/node_modules/remark-gfm/')
+            || id.includes('/node_modules/remark-math/')
+            || id.includes('/node_modules/rehype-highlight/')
+            || id.includes('/node_modules/highlight.js/')
+          ) {
+            return 'chat-markdown';
+          }
+
+          return undefined;
+        },
+      },
+    },
   },
 });
