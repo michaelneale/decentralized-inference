@@ -2881,6 +2881,24 @@ function layoutTopologyNodes(
   clients: TopologyNode[],
   nodeRadius: number,
 ): PositionedTopologyNode[] {
+  const placeRow = (
+    row: TopologyNode[],
+    bucket: PositionedTopologyNode['bucket'],
+    y: number,
+    horizontalSpacing: number,
+    positioned: PositionedTopologyNode[],
+  ) => {
+    const startX = -((row.length - 1) * horizontalSpacing) / 2;
+    row.forEach((node, index) => {
+      positioned.push({
+        ...node,
+        bucket,
+        x: startX + (index * horizontalSpacing),
+        y,
+      });
+    });
+  };
+
   const all: Array<PositionedTopologyNode> = [
     ...serving.map((n) => ({ ...n, bucket: 'serving' as const, x: 0, y: 0 })),
     ...workers.map((n) => ({ ...n, bucket: 'worker' as const, x: 0, y: 0 })),
@@ -2890,6 +2908,42 @@ function layoutTopologyNodes(
   const positioned: PositionedTopologyNode[] = [{ ...center, x: 0, y: 0, bucket: 'center' }];
   const peerCount = all.length;
   if (peerCount === 0) return positioned;
+
+  if (peerCount <= 6) {
+    const horizontalSpacing = 270;
+    const bandOffset = 215;
+    const rowStep = 118;
+    const topRows: Array<{ nodes: TopologyNode[]; bucket: PositionedTopologyNode['bucket'] }> = [];
+    const bottomRows: Array<{ nodes: TopologyNode[]; bucket: PositionedTopologyNode['bucket'] }> = [];
+
+    if (serving.length) {
+      topRows.push({ nodes: serving, bucket: 'serving' });
+    }
+
+    if (workers.length) {
+      if (serving.length === 0) {
+        topRows.push({ nodes: workers, bucket: 'worker' });
+      } else {
+        bottomRows.push({ nodes: workers, bucket: 'worker' });
+      }
+    }
+
+    if (clients.length) {
+      bottomRows.push({ nodes: clients, bucket: 'client' });
+    }
+
+    topRows.forEach((row, index) => {
+      const distanceFromCenter = bandOffset + ((topRows.length - index - 1) * rowStep);
+      placeRow(row.nodes, row.bucket, -distanceFromCenter, horizontalSpacing, positioned);
+    });
+
+    bottomRows.forEach((row, index) => {
+      const distanceFromCenter = bandOffset + (index * rowStep);
+      placeRow(row.nodes, row.bucket, distanceFromCenter, horizontalSpacing, positioned);
+    });
+
+    return positioned;
+  }
 
   // Small meshes get a larger first ring so the graph uses the available canvas.
   const baseRadius = peerCount <= 3
