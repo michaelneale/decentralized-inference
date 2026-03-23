@@ -2260,7 +2260,7 @@ function DashboardPage({
         </div>
       </TooltipProvider>
 
-      <div className="grid gap-4 lg:grid-cols-7">
+      <div className="grid items-start gap-4 lg:grid-cols-7">
         <div className="lg:col-span-5">
           <Card>
             <CardHeader className="pb-2">
@@ -2297,7 +2297,7 @@ function DashboardPage({
           </Card>
         </div>
 
-        <Card className="flex h-full min-h-0 flex-col lg:col-span-2">
+        <Card className="lg:col-span-2">
           <CardHeader className="pb-2">
             <div className="flex flex-wrap items-center gap-2">
               <CardTitle className="text-sm">Model Catalog</CardTitle>
@@ -2316,9 +2316,9 @@ function DashboardPage({
               </div>
             </div>
           </CardHeader>
-          <CardContent className="flex h-[360px] min-h-0 flex-1 flex-col pt-0 md:h-[420px] lg:h-[460px] xl:h-[520px]">
+          <CardContent className="pt-0">
             {filteredModels.length > 0 ? (
-              <ScrollArea className="h-full min-h-0 flex-1">
+              <div className="h-[360px] overflow-y-auto pr-2 md:h-[420px] lg:h-[460px] xl:h-[520px]">
                 <div className="space-y-2">
                   {filteredModels.map((model) => (
                     <div key={model.name} className="rounded-md border p-3">
@@ -2351,13 +2351,15 @@ function DashboardPage({
                     </div>
                   ))}
                 </div>
-              </ScrollArea>
+              </div>
             ) : (
-              <DashboardPanelEmpty
-                icon={<Sparkles className="h-4 w-4" />}
-                title={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
-                description={(status?.mesh_models.length ?? 0) > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
-              />
+              <div className="h-[360px] md:h-[420px] lg:h-[460px] xl:h-[520px]">
+                <DashboardPanelEmpty
+                  icon={<Sparkles className="h-4 w-4" />}
+                  title={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
+                  description={(status?.mesh_models.length ?? 0) > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
+                />
+              </div>
             )}
           </CardContent>
         </Card>
