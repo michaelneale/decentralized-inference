@@ -2262,7 +2262,7 @@ function DashboardPage({
         </div>
       </TooltipProvider>
 
-      <div className="grid gap-4 lg:grid-cols-7">
+      <div className="grid items-start gap-4 lg:grid-cols-7">
         <div className="lg:col-span-5">
           <Card>
             <CardHeader className="pb-2">
@@ -2318,9 +2318,9 @@ function DashboardPage({
               </div>
             </div>
           </CardHeader>
-          <CardContent className="min-h-0 pt-0">
+          <CardContent className="pt-0">
             {filteredModels.length > 0 ? (
-              <ScrollArea className="h-[18rem] md:h-[20rem]">
+              <div className="h-[360px] overflow-y-auto pr-2 md:h-[420px] lg:h-[460px] xl:h-[520px]">
                 <div className="space-y-2">
                   {filteredModels.map((model) => (
                     <div key={model.name} className="rounded-md border p-3">
@@ -2353,13 +2353,15 @@ function DashboardPage({
                     </div>
                   ))}
                 </div>
-              </ScrollArea>
+              </div>
             ) : (
-              <DashboardPanelEmpty
-                icon={<Sparkles className="h-4 w-4" />}
-                title={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
-                description={(status?.mesh_models.length ?? 0) > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
-              />
+              <div className="h-[360px] md:h-[420px] lg:h-[460px] xl:h-[520px]">
+                <DashboardPanelEmpty
+                  icon={<Sparkles className="h-4 w-4" />}
+                  title={(status?.mesh_models.length ?? 0) > 0 ? `No ${modelFilter} models` : 'No model catalog data'}
+                  description={(status?.mesh_models.length ?? 0) > 0 ? 'Try changing the model filter.' : 'Model metadata will appear once the mesh reports available models.'}
+                />
+              </div>
             )}
           </CardContent>
         </Card>
@@ -3204,7 +3206,7 @@ function DashboardPanelEmpty({
   description: string;
 }) {
   return (
-    <div className="flex h-[18rem] flex-col items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center md:h-[20rem]">
+    <div className="flex h-full min-h-[18rem] flex-col items-center justify-center rounded-md border border-dashed bg-muted/20 px-4 text-center md:min-h-[20rem]">
       <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-full border bg-background text-muted-foreground">
         {icon}
       </div>
