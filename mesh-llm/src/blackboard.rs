@@ -36,12 +36,11 @@ pub struct BlackboardItem {
     pub timestamp: u64,
     /// The message.
     pub text: String,
-    /// Optional reply-to another item's ID.
-    pub reply_to: Option<u64>,
+
 }
 
 impl BlackboardItem {
-    pub fn new(from: String, peer_id: String, text: String, reply_to: Option<u64>) -> Self {
+    pub fn new(from: String, peer_id: String, text: String) -> Self {
         let ts = now_secs();
         // ID = timestamp nanos for uniqueness, with random low bits
         let nanos = std::time::SystemTime::now()
@@ -56,7 +55,6 @@ impl BlackboardItem {
             peer_id,
             timestamp: ts,
             text,
-            reply_to,
         }
     }
 }
@@ -191,33 +189,6 @@ impl BlackboardStore {
         scored.into_iter().map(|(_, item)| item).collect()
     }
 
-
-    /// Get a thread: the given item + all replies.
-    pub async fn thread(&self, id: u64) -> Vec<BlackboardItem> {
-        let items = self.items.lock().await;
-        // Find the root item
-        let root = items.iter().find(|i| i.id == id).cloned();
-        // Find all replies (direct and transitive)
-        let mut thread_ids = vec![id];
-        let mut result = Vec::new();
-        if let Some(r) = root {
-            result.push(r);
-        }
-        // Simple BFS for nested replies
-        let mut i = 0;
-        while i < thread_ids.len() {
-            let parent_id = thread_ids[i];
-            for item in items.iter() {
-                if item.reply_to == Some(parent_id) && !thread_ids.contains(&item.id) {
-                    thread_ids.push(item.id);
-                    result.push(item.clone());
-                }
-            }
-            i += 1;
-        }
-        result.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        result
-    }
 
     /// Feed: items newer than a timestamp, optionally filtered by peer.
     #[allow(dead_code)]
@@ -381,16 +352,16 @@ mod tests {
 
     #[test]
     fn test_blackboard_item_unique_ids() {
-        let a = BlackboardItem::new("alice".into(), "abc".into(), "hello".into(), None);
+        let a = BlackboardItem::new("alice".into(), "abc".into(), "hello".into());
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let b = BlackboardItem::new("bob".into(), "def".into(), "world".into(), None);
+        let b = BlackboardItem::new("bob".into(), "def".into(), "world".into());
         assert_ne!(a.id, b.id);
     }
 
     #[tokio::test]
     async fn test_store_insert_dedup() {
         let store = BlackboardStore::new(true);
-        let item = BlackboardItem::new("alice".into(), "abc".into(), "hello".into(), None);
+        let item = BlackboardItem::new("alice".into(), "abc".into(), "hello".into());
         assert!(store.insert(item.clone()).await);
         assert!(!store.insert(item).await); // duplicate
         assert_eq!(store.all().await.len(), 1);
@@ -399,8 +370,8 @@ mod tests {
     #[tokio::test]
     async fn test_store_search_single_term() {
         let store = BlackboardStore::new(true);
-        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM fix".into(), None)).await;
-        store.insert(BlackboardItem::new("bob".into(), "b".into(), "networking stuff".into(), None)).await;
+        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM fix".into())).await;
+        store.insert(BlackboardItem::new("bob".into(), "b".into(), "networking stuff".into())).await;
         let results = store.search("cuda", 0).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].text.contains("CUDA"));
@@ -409,9 +380,9 @@ mod tests {
     #[tokio::test]
     async fn test_store_search_multi_term_or() {
         let store = BlackboardStore::new(true);
-        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM fix".into(), None)).await;
-        store.insert(BlackboardItem::new("bob".into(), "b".into(), "networking refactor".into(), None)).await;
-        store.insert(BlackboardItem::new("carol".into(), "c".into(), "unrelated stuff".into(), None)).await;
+        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM fix".into())).await;
+        store.insert(BlackboardItem::new("bob".into(), "b".into(), "networking refactor".into())).await;
+        store.insert(BlackboardItem::new("carol".into(), "c".into(), "unrelated stuff".into())).await;
         // "CUDA networking" should match both alice and bob (OR)
         let results = store.search("CUDA networking", 0).await;
         assert_eq!(results.len(), 2);
@@ -420,9 +391,9 @@ mod tests {
     #[tokio::test]
     async fn test_store_search_ranking() {
         let store = BlackboardStore::new(true);
-        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM on GPU".into(), None)).await;
+        store.insert(BlackboardItem::new("alice".into(), "a".into(), "CUDA OOM on GPU".into())).await;
         std::thread::sleep(std::time::Duration::from_millis(1));
-        store.insert(BlackboardItem::new("bob".into(), "b".into(), "CUDA fix for GPU OOM issue".into(), None)).await;
+        store.insert(BlackboardItem::new("bob".into(), "b".into(), "CUDA fix for GPU OOM issue".into())).await;
         // "CUDA OOM GPU" — bob matches 3 terms, alice matches 3 terms, bob is newer
         let results = store.search("CUDA OOM GPU", 0).await;
         assert_eq!(results.len(), 2);
@@ -432,11 +403,11 @@ mod tests {
     async fn test_post_rate_limit() {
         let store = BlackboardStore::new(true);
         for i in 0..10 {
-            let item = BlackboardItem::new("alice".into(), "a".into(), format!("msg {i}"), None);
+            let item = BlackboardItem::new("alice".into(), "a".into(), format!("msg {i}"));
             assert!(store.post(item).await.is_ok());
         }
         // 11th should be rate limited
-        let item = BlackboardItem::new("alice".into(), "a".into(), "one too many".into(), None);
+        let item = BlackboardItem::new("alice".into(), "a".into(), "one too many".into());
         assert!(store.post(item).await.is_err());
     }
 
@@ -444,25 +415,10 @@ mod tests {
     async fn test_post_text_too_long() {
         let store = BlackboardStore::new(true);
         let long_text = "x".repeat(5000);
-        let item = BlackboardItem::new("alice".into(), "a".into(), long_text, None);
+        let item = BlackboardItem::new("alice".into(), "a".into(), long_text);
         let result = store.post(item).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("too long"));
-    }
-
-    #[tokio::test]
-    async fn test_store_thread() {
-        let store = BlackboardStore::new(true);
-        let q = BlackboardItem::new("alice".into(), "a".into(), "How to fix OOM?".into(), None);
-        let q_id = q.id;
-        store.insert(q).await;
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let a = BlackboardItem::new("bob".into(), "b".into(), "Set ctx-size 2048".into(), Some(q_id));
-        store.insert(a).await;
-        let thread = store.thread(q_id).await;
-        assert_eq!(thread.len(), 2);
-        assert_eq!(thread[0].text, "How to fix OOM?");
-        assert_eq!(thread[1].text, "Set ctx-size 2048");
     }
 
     #[test]

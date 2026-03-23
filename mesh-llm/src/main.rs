@@ -2,6 +2,7 @@ mod api;
 mod download;
 mod election;
 mod blackboard;
+mod blackboard_mcp;
 mod launch;
 mod mesh;
 mod moe;
@@ -219,6 +220,7 @@ enum Command {
     /// Show feed:        mesh-llm blackboard
     /// Search:           mesh-llm blackboard --search "query"
     /// From a peer:      mesh-llm blackboard --from tyler
+    /// MCP server:       mesh-llm blackboard --mcp
     /// Install skill:    mesh-llm blackboard install-skill
     ///
     /// Conventions: prefix messages with QUESTION:, STATUS:, FINDING:, TIP: etc.
@@ -233,12 +235,6 @@ enum Command {
         /// Filter by author name.
         #[arg(long)]
         from: Option<String>,
-        /// Reply to an item by ID (prefix match).
-        #[arg(long, hide = true)]
-        reply: Option<String>,
-        /// Show a thread starting from an item ID (prefix match).
-        #[arg(long, hide = true)]
-        thread: Option<String>,
         /// Only show items from the last N hours (default: 24).
         #[arg(long)]
         since: Option<f64>,
@@ -248,6 +244,9 @@ enum Command {
         /// Console/API port of the running mesh-llm instance.
         #[arg(long, default_value = "3131")]
         port: u16,
+        /// Run as an MCP server over stdio (for agent integration).
+        #[arg(long)]
+        mcp: bool,
     },
 }
 
@@ -314,11 +313,14 @@ async fn main() -> Result<()> {
             Command::Claude { model, port } => {
                 return run_claude(model.clone(), *port).await;
             }
-            Command::Blackboard { text, search, from, reply, thread, since, limit, port } => {
+            Command::Blackboard { text, search, from, since, limit, port, mcp } => {
+                if *mcp {
+                    return blackboard_mcp::run_mcp_server(*port).await;
+                }
                 if text.as_deref() == Some("install-skill") {
                     return install_skill();
                 }
-                return run_blackboard(text.clone(), search.clone(), from.clone(), reply.clone(), thread.clone(), *since, *limit, *port).await;
+                return run_blackboard(text.clone(), search.clone(), from.clone(), *since, *limit, *port).await;
             }
 
         }
@@ -2206,8 +2208,6 @@ async fn run_blackboard(
     text: Option<String>,
     search: Option<String>,
     from: Option<String>,
-    reply: Option<String>,
-    thread: Option<String>,
     since_hours: Option<f64>,
     limit: usize,
     port: u16,
@@ -2251,21 +2251,7 @@ async fn run_blackboard(
         now.saturating_sub((hours * 3600.0) as u64)
     };
 
-    // Show a thread
-    if let Some(id_prefix) = thread {
-        let resp = client.get(format!("{base}/api/blackboard/thread/{id_prefix}"))
-            .send().await
-            .context("Cannot reach mesh-llm — is it running with --blackboard?")?;
-        let items: Vec<blackboard::BlackboardItem> = resp.json().await?;
-        if items.is_empty() {
-            eprintln!("No thread found for ID prefix '{id_prefix}'");
-        } else {
-            print_blackboard_items(&items);
-        }
-        return Ok(());
-    }
-
-    // Post a message (with optional reply)
+    // Post a message
     if let Some(msg) = text {
         // PII check
         let issues = blackboard::pii_check(&msg);
@@ -2278,10 +2264,7 @@ async fn run_blackboard(
         }
         let clean = blackboard::pii_scrub(&msg);
 
-        let mut body = serde_json::json!({ "text": clean });
-        if let Some(ref reply_id) = reply {
-            body["reply_to"] = serde_json::Value::String(reply_id.clone());
-        }
+        let body = serde_json::json!({ "text": clean });
         let resp = client.post(format!("{base}/api/blackboard/post"))
             .json(&body)
             .send().await
@@ -2332,8 +2315,7 @@ async fn run_blackboard(
 fn print_blackboard_items(items: &[blackboard::BlackboardItem]) {
     for item in items {
         let time = chrono_format(item.timestamp);
-        let reply_marker = if item.reply_to.is_some() { " ↩" } else { "" };
-        println!("{:x} │ {} │ {}{}", item.id, time, item.from, reply_marker);
+        println!("{:x} │ {} │ {}", item.id, time, item.from);
         // Indent the text
         for line in item.text.lines() {
             println!("  {line}");

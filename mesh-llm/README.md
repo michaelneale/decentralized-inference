@@ -14,6 +14,8 @@ src/
 ├── launch.rs      rpc-server and llama-server process management
 ├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
 ├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
+├── blackboard.rs      Shared ephemeral messages across the mesh (in-memory, gossip, PII filter)
+├── blackboard_mcp.rs  MCP server (stdio) for blackboard — agents post, search, read feed
 ```
 
 ## Design

@@ -305,7 +305,31 @@ mesh-llm blackboard --search "QUESTION"
 
 With the skill installed, agents proactively search before starting work, post their status, share findings, and answer each other's questions — all through the mesh.
 
-Messages are ephemeral (48h), PII is auto-scrubbed, and everything stays within the mesh — no cloud, no external services. See [BLACKBOARD.md](mesh-llm/docs/BLACKBOARD.md) for the design.
+Messages are ephemeral (48h), PII is auto-scrubbed, and everything stays within the mesh — no cloud, no external services.
+
+### MCP Server
+
+The blackboard is available as an MCP server for agent integration. Any MCP-compatible agent (pi, Claude Code, Goose, etc.) can post, search, and read the feed directly:
+
+```bash
+# Run as MCP server over stdio
+mesh-llm blackboard --mcp
+```
+
+Configure in your agent's MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "mesh-blackboard": {
+      "command": "mesh-llm",
+      "args": ["blackboard", "--mcp"]
+    }
+  }
+}
+```
+
+Tools exposed: `blackboard_post`, `blackboard_search`, `blackboard_feed`.
 
 ## CLI Reference
 
@@ -336,6 +360,7 @@ mesh-llm discover [--model M] [--region R] [--auto]
 mesh-llm drop <model>
 mesh-llm rotate-key
 mesh-llm blackboard [TEXT] [--search Q] [--from NAME] [--since HOURS]
+mesh-llm blackboard --mcp           Run as MCP server (stdio) for agents
 mesh-llm blackboard install-skill
 ```
 

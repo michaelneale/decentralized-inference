@@ -618,29 +618,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             }
         }
 
-        ("GET", p) if p.starts_with("/api/blackboard/thread/") => {
-            let node = state.inner.lock().await.node.clone();
-            if !node.blackboard.is_enabled() {
-                respond_error(&mut stream, 404, "Blackboard not enabled (start with --blackboard)").await?;
-            } else {
-                let id_prefix = &p["/api/blackboard/thread/".len()..];
-                // Find item by hex ID prefix
-                let items = node.blackboard.all().await;
-                let target = items.iter().find(|i| format!("{:x}", i.id).starts_with(id_prefix));
-                let result = if let Some(t) = target {
-                    node.blackboard.thread(t.id).await
-                } else {
-                    vec![]
-                };
-                let json = serde_json::to_string(&result).unwrap_or_else(|_| "[]".into());
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    json.len(), json
-                );
-                stream.write_all(resp.as_bytes()).await?;
-            }
-        }
-
         ("POST", "/api/blackboard/post") => {
             let node = state.inner.lock().await.node.clone();
             if !node.blackboard.is_enabled() {
@@ -655,16 +632,10 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                         if text.is_empty() {
                             respond_error(&mut stream, 400, "Missing 'text' field").await?;
                         } else {
-                            let reply_to = if let Some(s) = val["reply_to"].as_str() {
-                                let all_items = node.blackboard.all().await;
-                                all_items.iter().find(|i| format!("{:x}", i.id).starts_with(s)).map(|i| i.id)
-                            } else {
-                                None
-                            };
                             let peer_name = node.peer_name().await;
                             let peer_id_hex = format!("{}", node.id().fmt_short());
                             let item = crate::blackboard::BlackboardItem::new(
-                                peer_name, peer_id_hex, text, reply_to,
+                                peer_name, peer_id_hex, text,
                             );
                             match node.blackboard.post(item).await {
                                 Ok(posted) => {
