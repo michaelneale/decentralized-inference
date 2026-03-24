@@ -11,7 +11,7 @@ Pool spare GPU capacity to run LLMs at larger scale. Models that don't fit on on
 ## Install (macOS Apple Silicon)
 
 ```bash
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 ```
 
 Then run:

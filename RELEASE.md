@@ -60,11 +60,11 @@ git push origin main --tags
 ```bash
 VERSION=v0.X.0
 cp /tmp/mesh-bundle.tar.gz /tmp/mesh-llm-${VERSION}-aarch64-apple-darwin.tar.gz
-cp /tmp/mesh-bundle.tar.gz /tmp/mesh-llm-aarch64-apple-darwin.tar.gz
+cp /tmp/mesh-bundle.tar.gz /tmp/mesh-bundle.tar.gz
 
 gh release create ${VERSION} \
   /tmp/mesh-llm-${VERSION}-aarch64-apple-darwin.tar.gz \
-  /tmp/mesh-llm-aarch64-apple-darwin.tar.gz \
+  /tmp/mesh-bundle.tar.gz \
   --title "mesh-llm ${VERSION}" \
   --notes "## What's new
 
@@ -73,7 +73,7 @@ gh release create ${VERSION} \
 ### Install (macOS Apple Silicon)
 
 \`\`\`bash
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 \`\`\`
 "
 ```
@@ -83,13 +83,13 @@ Two assets are uploaded: one with the version in the name (for pinning), one wit
 ### 7. Verify the install one-liner works
 
 ```bash
-curl -fsSL https://github.com/michaelneale/decentralized-inference/releases/latest/download/mesh-llm-aarch64-apple-darwin.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
+curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && sudo mv mesh-bundle/* /usr/local/bin/
 mesh-llm --model Qwen2.5-3B --console
 ```
 
 ## Notes
 
-- The unversioned asset name (`mesh-llm-aarch64-apple-darwin.tar.gz`) is what the README's install one-liner uses via the `/latest/download/` URL. It must be uploaded with every release.
+- The unversioned asset name (`mesh-bundle.tar.gz`) is what the README's install one-liner uses via the `/latest/download/` URL. It must be uploaded with every release.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
   ```bash
   codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server

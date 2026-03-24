@@ -1101,7 +1101,7 @@ export function App() {
               <>
                 <span>·</span>
                 <a
-                  href="https://github.com/michaelneale/decentralized-inference/releases"
+                  href="https://github.com/michaelneale/mesh-llm/releases"
                   target="_blank"
                   rel="noreferrer"
                   className="underline-offset-2 hover:text-foreground hover:underline"
@@ -1115,7 +1115,7 @@ export function App() {
             ) : null}
             <span>·</span>
             <a
-              href="https://github.com/michaelneale/decentralized-inference"
+              href="https://github.com/michaelneale/mesh-llm"
               target="_blank"
               rel="noreferrer"
               className="inline-flex h-5 w-5 items-center justify-center hover:text-foreground"
@@ -2280,7 +2280,7 @@ function DashboardPage({
             Learn more →
           </a>
           {' · '}
-          <a href="https://github.com/michaelneale/decentralized-inference" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 underline hover:text-foreground">
+          <a href="https://github.com/michaelneale/mesh-llm" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 underline hover:text-foreground">
             GitHub
           </a>
         </AlertDescription>
