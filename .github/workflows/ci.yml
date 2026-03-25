@@ -41,22 +41,6 @@ jobs:
           mesh-llm/target/release/mesh-llm --version
           mesh-llm/target/release/mesh-llm --help | head -5
 
-      - name: Clone llama.cpp fork
-        run: git clone -b rebase-upstream-master --depth 1 https://github.com/michaelneale/llama.cpp.git
-
-      - name: Build llama.cpp (CPU + RPC)
-        run: |
-          cmake -B llama.cpp/build -S llama.cpp \
-            -DGGML_RPC=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DLLAMA_OPENSSL=OFF
-          cmake --build llama.cpp/build --config Release -j$(nproc)
-
-      - name: Verify llama.cpp binaries
-        run: |
-          ls -lh llama.cpp/build/bin/llama-server llama.cpp/build/bin/rpc-server
-          llama.cpp/build/bin/llama-server --version
-
       - name: Check formatting
         working-directory: mesh-llm
         run: cargo fmt -- --check || true
