@@ -71,6 +71,53 @@ See `tests/test_reasoning_compat.sh` for the contract tests validating this beha
 ## Resilience
 - [ ] **Multi-node tensor split recovery**: If one split peer dies, re-split across remaining.
 
+## Distributed Agent Sandboxes (kodak integration)
+
+Route coding agent tasks across the mesh to sandboxed environments (Tart VMs, Docker containers). See [kodak](https://github.com/michaelneale/kodak) for the sandbox manager.
+
+**Core idea:** Agents pull work off the mesh and execute in isolated sandboxes. The mesh handles task routing, context transfer, and result streaming. Editors talk to a local ACP/stdio shim that posts tasks to the mesh — they don't know the work happened remotely.
+
+**Task lifecycle:**
+1. Task posted to blackboard (prompt + requirements + context manifest)
+2. Capable nodes evaluate and claim (platform, toolchains, agents, repo familiarity)
+3. First valid claim wins, poster acks
+4. Context transferred over QUIC (repo bundle, files, error logs)
+5. Agent runs in sandbox, streams results back over QUIC
+6. Output artifacts (diffs, test results) published to mesh
+
+**Key design constraint:** Agents need rich context to be useful — not just a prompt. A remote agent needs the repo (or relevant subset), build state, project conventions, error logs. This is the hard part.
+
+**Node affinity / warm state:**
+- Nodes track what repos they've cloned, what builds they've cached, what tasks they've completed
+- Claiming priority favors nodes that already have the repo checked out and warm
+- First task for a new repo is slow (clone), subsequent ones are fast
+- Affinity is soft — any capable node can claim, warm nodes just claim faster
+
+**What exists today:**
+- Blackboard (gossip-based message store) → task metadata
+- QUIC direct channels → context transfer + result streaming
+- kodak justfile → Tart VM lifecycle, agent installation, headless execution
+- Claim protocol design in kodak README
+
+**What's needed:**
+- [ ] Task schema on blackboard (structured JSON: task_id, prompt, requirements, context refs)
+- [ ] Node capability advertisement (OS, toolchains, agents, warm repos)
+- [ ] Context bundling: poster packages relevant files, transfers over QUIC
+- [ ] Agent launcher on claiming node: spin up sandbox, inject context, run agent, stream output
+- [ ] ACP stdio bridge: local shim speaks ACP to editor, translates to mesh tasks
+- [ ] Affinity tracking: per-node state of repos/builds/history for smart claiming
+- [ ] Artifact exchange: gossip the pointer (hash, size, location), QUIC the bytes
+
+**Sandbox options:**
+| Platform | Sandbox | Boot | Disk |
+|----------|---------|------|------|
+| macOS | Tart VM | ~12s | ~28GB |
+| Linux | Docker | ~1-2s | ~0.5-2GB |
+| Linux | Firecracker microVM | ~125ms | configurable |
+| Windows | WSL2 / Hyper-V | varies | varies |
+
+**Relates to:** Blackboard, QUIC tunnels, model routing (agents can use mesh-llm for inference)
+
 ## Vision — Future
 - [ ] **More catalog entries**: Gemma-3-12B, Pixtral-12B, larger Qwen3.5 (35B-A3B MoE, 122B-A10B MoE)
 - [ ] **Image generation**: Not supported by llama.cpp (transformers only), but could add diffusion backend later.
