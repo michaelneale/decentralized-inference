@@ -3,6 +3,7 @@ mod download;
 mod election;
 mod blackboard;
 mod blackboard_mcp;
+mod hardware;
 mod launch;
 mod mesh;
 mod moe;
@@ -101,6 +102,10 @@ struct Cli {
     /// Limit VRAM advertised to the mesh (GB).
     #[arg(long, hide = true)]
     max_vram: Option<f64>,
+
+    /// Enumerate host hardware (GPU name, hostname) at startup.
+    #[arg(long, hide = true)]
+    enumerate_host: bool,
 
     /// Path to rpc-server and llama-server binaries.
     #[arg(long, hide = true)]
@@ -866,7 +871,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     let role = if is_client { NodeRole::Client } else { NodeRole::Worker };
     // Clients report 0 VRAM so they're never assigned a model to serve
     let max_vram = if is_client { Some(0.0) } else { cli.max_vram };
-    let (node, channels) = mesh::Node::start(role, &cli.relay, cli.bind_port, max_vram).await?;
+    let (node, channels) = mesh::Node::start(role, &cli.relay, cli.bind_port, max_vram, cli.enumerate_host).await?;
     node.start_accepting();
     let token = node.invite_token();
 
@@ -1350,7 +1355,7 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     eprintln!();
 
     // Start a dormant node just for the console
-    let (node, _channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram).await?;
+    let (node, _channels) = mesh::Node::start(NodeRole::Worker, &cli.relay, cli.bind_port, cli.max_vram, cli.enumerate_host).await?;
     node.set_available_models(local_models).await;
 
     let cs = api::MeshApi::new(node.clone(), "(idle)".into(), cli.port, 0);

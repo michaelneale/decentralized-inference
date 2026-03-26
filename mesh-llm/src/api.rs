@@ -47,6 +47,36 @@ struct ApiInner {
 }
 
 #[derive(Serialize)]
+struct GpuEntry {
+    name: String,
+    vram_bytes: u64,
+}
+
+fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>) -> Vec<GpuEntry> {
+    let names: Vec<&str> = gpu_name
+        .map(|s| s.split(", ").collect())
+        .unwrap_or_default();
+    if names.is_empty() {
+        return vec![];
+    }
+    let vrams: Vec<u64> = gpu_vram
+        .map(|s| {
+            s.split(',')
+                .filter_map(|v| v.trim().parse::<u64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| GpuEntry {
+            name: name.to_string(),
+            vram_bytes: vrams.get(i).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
 struct StatusPayload {
     version: String,
     latest_version: Option<String>,
@@ -73,6 +103,9 @@ struct StatusPayload {
     mesh_name: Option<String>,
     /// true when this node found the mesh via Nostr discovery (community/public mesh)
     nostr_discovery: bool,
+    my_hostname: Option<String>,
+    my_is_soc: Option<bool>,
+    gpus: Vec<GpuEntry>,
 }
 
 #[derive(Serialize)]
@@ -84,6 +117,9 @@ struct PeerPayload {
     serving: Option<String>,
     serving_models: Vec<String>,
     rtt_ms: Option<u32>,
+    hostname: Option<String>,
+    is_soc: Option<bool>,
+    gpus: Vec<GpuEntry>,
 }
 
 #[derive(Serialize)]
@@ -202,6 +238,9 @@ impl MeshApi {
                 serving: p.serving.clone(),
                 serving_models: p.serving_models.clone(),
                 rtt_ms: p.rtt_ms,
+                hostname: p.hostname.clone(),
+                is_soc: p.is_soc,
+                gpus: build_gpus(p.gpu_name.as_deref(), p.gpu_vram.as_deref()),
             })
             .collect();
 
@@ -321,6 +360,9 @@ impl MeshApi {
             mesh_id,
             mesh_name,
             nostr_discovery,
+            my_hostname: node.hostname.clone(),
+            my_is_soc: node.is_soc,
+            gpus: build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref()),
         }
     }
 
@@ -777,4 +819,68 @@ async fn respond_bytes_cached(
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_gpus_both_none() {
+        let result = build_gpus(None, None);
+        assert!(result.is_empty(), "expected empty vec when no gpu_name");
+    }
+
+    #[test]
+    fn test_build_gpus_single_no_vram() {
+        let result = build_gpus(Some("NVIDIA RTX 5090"), None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "NVIDIA RTX 5090");
+        assert_eq!(result[0].vram_bytes, 0);
+    }
+
+    #[test]
+    fn test_build_gpus_single_with_vram() {
+        let result = build_gpus(Some("NVIDIA RTX 5090"), Some("34359738368")); // 32 GiB in bytes
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "NVIDIA RTX 5090");
+        assert_eq!(result[0].vram_bytes, 34_359_738_368);
+    }
+
+    #[test]
+    fn test_build_gpus_multi_full_vram() {
+        let result = build_gpus(
+            Some("NVIDIA RTX 5090, NVIDIA RTX 3080"),
+            Some("34359738368,10737418240"),
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "NVIDIA RTX 5090");
+        assert_eq!(result[0].vram_bytes, 34_359_738_368);
+        assert_eq!(result[1].name, "NVIDIA RTX 3080");
+        assert_eq!(result[1].vram_bytes, 10_737_418_240);
+    }
+
+    #[test]
+    fn test_build_gpus_multi_partial_vram() {
+        let result = build_gpus(
+            Some("NVIDIA RTX 5090, NVIDIA RTX 3080"),
+            Some("34359738368"),
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].vram_bytes, 34_359_738_368);
+        assert_eq!(result[1].vram_bytes, 0, "missing VRAM entry should default to 0");
+    }
+
+    #[test]
+    fn test_build_gpus_vram_no_gpu_name() {
+        let result = build_gpus(None, Some("34359738368"));
+        assert!(result.is_empty(), "no gpu_name means no entries even if vram present");
+    }
+
+    #[test]
+    fn test_build_gpus_vram_whitespace_trimmed() {
+        let result = build_gpus(Some("NVIDIA RTX 4090"), Some(" 25769803776 "));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].vram_bytes, 25_769_803_776);
+    }
 }

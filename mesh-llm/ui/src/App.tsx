@@ -20,18 +20,21 @@ import {
   Copy,
   Cpu,
   Gauge,
+  Gpu,
   Hash,
   ImagePlus,
   Laptop,
   Loader2,
   MessageSquarePlus,
   Maximize2,
+  MemoryStick,
   Minimize2,
   Moon,
   Network,
   Pencil,
   RotateCcw,
   Send,
+  Server,
   Square,
   Sparkles,
   Sun,
@@ -91,6 +94,9 @@ type Peer = {
   serving?: string | null;
   serving_models?: string[];
   rtt_ms?: number | null;
+  hostname?: string;
+  is_soc?: boolean;
+  gpus?: { name: string; vram_bytes: number }[];
 };
 
 type StatusPayload = {
@@ -114,6 +120,9 @@ type StatusPayload = {
   launch_pi?: string | null;
   launch_goose?: string | null;
   nostr_discovery?: boolean;
+  my_hostname?: string;
+  my_is_soc?: boolean;
+  gpus?: { name: string; vram_bytes: number }[];
 };
 
 type ChatMessage = {
@@ -162,6 +171,9 @@ type TopologyNode = {
   servingModels: string[];
   statusLabel: string;
   latencyMs?: number | null;
+  hostname?: string;
+  isSoc?: boolean;
+  gpus?: { name: string; vram_bytes: number }[];
 };
 
 type ThemeMode = 'auto' | 'light' | 'dark';
@@ -982,6 +994,9 @@ export function App() {
           : (status.model_name ? [status.model_name] : []),
         statusLabel: status.node_status || (status.is_client ? 'Client' : status.is_host ? 'Host' : 'Idle'),
         latencyMs: null,
+        hostname: status.my_hostname,
+        isSoc: status.my_is_soc,
+        gpus: status.gpus,
       });
     }
     for (const p of status.peers ?? []) {
@@ -996,6 +1011,9 @@ export function App() {
         servingModels: pModels,
         statusLabel: peerStatusLabel(p),
         latencyMs: p.rtt_ms ?? null,
+        hostname: p.hostname,
+        isSoc: p.is_soc,
+        gpus: p.gpus,
       });
     }
     return nodes;
@@ -2591,6 +2609,9 @@ type TopologyNodeInfo = {
   loadedModels: string[];
   vramGb: number;
   vramSharePct: number;
+  hostname?: string;
+  isSoc?: boolean;
+  gpus?: { name: string; vram_bytes: number }[];
 };
 
 type TopologyFlowNodeData = {
@@ -2665,6 +2686,13 @@ function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
         </div>
 
         <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] leading-3">
+          {data.info.hostname && (
+            <div className="inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2 py-1">
+              <Server className="h-3 w-3 text-muted-foreground" />
+              <span className="text-muted-foreground">Host</span>
+              <span className="font-medium">{data.info.hostname}</span>
+            </div>
+          )}
           <div className="inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2 py-1">
             <Network className="h-3 w-3 text-muted-foreground" />
             <span className="text-muted-foreground">Role</span>
@@ -2678,7 +2706,7 @@ function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
             </div>
           ) : null}
           <div className="inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2 py-1">
-            <Cpu className="h-3 w-3 text-muted-foreground" />
+            <MemoryStick className="h-3 w-3 text-muted-foreground" />
             <span className="text-muted-foreground">VRAM</span>
             <span className="font-medium">{data.info.vramGb.toFixed(1)} GB</span>
           </div>
@@ -2687,6 +2715,51 @@ function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
             <span className="text-muted-foreground">Share</span>
             <span className="whitespace-nowrap font-medium">{data.info.vramSharePct}%</span>
           </div>
+          {data.info.gpus?.map((gpu, i) => {
+              const lower = gpu.name.toLowerCase();
+              const isNvidia = lower.includes("nvidia") || lower.includes("jetson");
+              const isAmd = lower.includes("amd");
+              const isIntel = lower.includes("intel");
+              const iconColor = isNvidia
+                ? "#76b900"
+                : isAmd
+                  ? "#ED1C24"
+                  : isIntel
+                    ? "#0071C5"
+                    : undefined;
+              const model = gpu.name
+                .replace(/^NVIDIA GeForce\s+/i, "")
+                .replace(/^NVIDIA Quadro\s+/i, "")
+                .replace(/^NVIDIA\s+/i, "")
+                .replace(/^AMD Radeon\s+/i, "")
+                .replace(/^AMD\s+/i, "")
+                .replace(/^Intel Arc\s+/i, "")
+                .replace(/^Intel\s+/i, "")
+                .replace(/^Apple\s+/i, "")
+                .trim();
+              const vramGb = gpu.vram_bytes / (1024 * 1024 * 1024);
+              const GpuIcon = data.info.isSoc ? Cpu : Gpu;
+              return (
+                <div
+                  key={`${gpu.name}-${i}`}
+                  className="group/gpu inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2 py-1"
+                >
+                  <GpuIcon
+                    className="h-3 w-3"
+                    style={iconColor ? { color: iconColor } : undefined}
+                  />
+                  <span className="text-muted-foreground">{data.info.isSoc ? "SoC" : "GPU"}</span>
+                  <span className="relative inline-flex font-medium">
+                    <span className={`transition-opacity duration-200 group-hover/gpu:opacity-0`}>
+                      {model}
+                    </span>
+                    <span className="absolute left-0 top-0 whitespace-nowrap opacity-0 transition-opacity duration-200 group-hover/gpu:opacity-100">
+                      {Math.round(vramGb)} GB
+                    </span>
+                  </span>
+                </div>
+              );
+            })}
         </div>
       </div>
     </div>
@@ -2786,6 +2859,9 @@ function MeshTopologyFlow({
         loadedModels: node.client ? [] : servingModels.length > 0 ? servingModels : (servingModel ? [servingModel] : []),
         vramGb: Math.max(0, node.vram),
         vramSharePct,
+        hostname: node.hostname,
+        isSoc: node.isSoc,
+        gpus: node.gpus,
       });
     }
     return out;

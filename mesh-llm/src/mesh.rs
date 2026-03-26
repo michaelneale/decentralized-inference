@@ -112,6 +112,16 @@ struct PeerAnnouncement {
     /// Stable mesh identity — only populated on the self entry.
     #[serde(default)]
     mesh_id: Option<String>,
+    /// GPU name/model (e.g. "NVIDIA A100", "Apple M4 Max")
+    #[serde(default)]
+    gpu_name: Option<String>,
+    /// Hostname of the node
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    is_soc: Option<bool>,
+    #[serde(default)]
+    gpu_vram: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +147,12 @@ pub struct PeerInfo {
     pub last_seen: std::time::Instant,
     /// mesh-llm version (e.g. "0.23.0")
     pub version: Option<String>,
+    /// GPU name/model (e.g. "NVIDIA A100", "Apple M4 Max")
+    pub gpu_name: Option<String>,
+    /// Hostname of the node
+    pub hostname: Option<String>,
+    pub is_soc: Option<bool>,
+    pub gpu_vram: Option<String>,
 }
 
 /// Peers not directly verified within this window are considered stale
@@ -240,7 +256,7 @@ pub fn find_model_path(stem: &str) -> std::path::PathBuf {
 /// "VRAM" is a misnomer — on macOS unified memory and Linux CPU-only, this
 /// is system RAM. On Linux with a GPU, it's actual GPU VRAM.
 pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
-    let mut detected = detect_vram_bytes();
+    let mut detected = crate::hardware::survey().vram_bytes;
     if let Some(cap) = max_vram_gb {
         let cap_bytes = (cap * 1e9) as u64;
         if cap_bytes < detected { detected = cap_bytes; }
@@ -248,138 +264,6 @@ pub fn detect_vram_bytes_capped(max_vram_gb: Option<f64>) -> u64 {
     detected
 }
 
-pub fn detect_vram_bytes() -> u64 {
-    #[cfg(target_os = "macos")]
-    {
-        // sysctl hw.memsize returns total physical RAM
-        let output = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok();
-        if let Some(out) = output {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                if let Ok(bytes) = s.trim().parse::<u64>() {
-                    // ~75% usable for Metal on unified memory
-                    return (bytes as f64 * 0.75) as u64;
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Read system RAM from /proc/meminfo (always available on Linux)
-        let system_ram = (|| -> Option<u64> {
-            let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-            for line in meminfo.lines() {
-                if line.starts_with("MemTotal:") {
-                    let kb = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-                    return Some(kb * 1024);
-                }
-            }
-            None
-        })().unwrap_or(0);
-
-        // Try NVIDIA GPU (nvidia-smi)
-        let gpu_vram = (|| -> Option<u64> {
-            let out = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-                .output().ok()?;
-            if !out.status.success() { return None; }
-            let s = String::from_utf8(out.stdout).ok()?;
-            let total_mib: u64 = s.lines()
-                .filter_map(|line| line.trim().parse::<u64>().ok())
-                .sum();
-            if total_mib > 0 { Some(total_mib * 1024 * 1024) } else { None }
-        })().or_else(|| {
-            // Try AMD ROCm (rocm-smi)
-            let out = std::process::Command::new("rocm-smi")
-                .args(["--showmeminfo", "vram", "--csv"])
-                .output().ok()?;
-            if !out.status.success() { return None; }
-            let s = String::from_utf8(out.stdout).ok()?;
-            for line in s.lines().skip(1) {
-                if let Some(total) = line.split(',').nth(1) {
-                    if let Ok(bytes) = total.trim().parse::<u64>() {
-                        return Some(bytes);
-                    }
-                }
-            }
-            None
-        });
-
-        if let Some(vram) = gpu_vram {
-            // GPU + RAM offload: full VRAM + 75% of remaining system RAM.
-            // llama.cpp offloads layers that don't fit in VRAM to system RAM
-            // (-ngl 99 loads as many layers as fit on GPU, rest stay in RAM).
-            let ram_offload = system_ram.saturating_sub(vram);
-            return vram + (ram_offload as f64 * 0.75) as u64;
-        }
-
-        // No GPU — CPU-only inference uses system RAM.
-        if system_ram > 0 {
-            return (system_ram as f64 * 0.75) as u64;
-        }
-
-        // Fallback: try NVIDIA Tegra/Jetson (tegrastats — unified memory, no nvidia-smi)
-        if let Some(total_mb) = tegrastats_ram_total_mb() {
-            if total_mb > 0 {
-                // Jetson uses unified memory; return full total so the caller can cap via --max-vram
-                return total_mb * 1024 * 1024;
-            }
-        }
-    }
-
-    0
-}
-
-/// Spawn `tegrastats --interval 1`, read the first output line, then kill the process.
-/// Returns the total unified RAM in MB parsed from the line, or `None` on any failure.
-///
-/// tegrastats output example:
-///   `03-25-2026 18:27:55 RAM 10400/62838MB (lfb 729x4MB) CPU [...] GR3D_FREQ 0% ...`
-#[cfg(target_os = "linux")]
-fn tegrastats_ram_total_mb() -> Option<u64> {
-    use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new("tegrastats")
-        .args(["--interval", "1"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let stdout = child.stdout.take()?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let _ = reader.read_line(&mut line);
-    let _ = child.kill();
-    let _ = child.wait();
-
-    parse_tegrastats_ram_mb(&line)
-}
-
-/// Extract total RAM in MB from a tegrastats output line.
-///
-/// Looks for the `RAM used/totalMB` token, e.g. `RAM 10400/62838MB`.
-#[cfg(target_os = "linux")]
-fn parse_tegrastats_ram_mb(line: &str) -> Option<u64> {
-    // Locate the "RAM " token
-    let after_ram = line.split_once("RAM ")?.1;
-    // Expect "used/totalMB" — skip the used portion
-    let after_slash = after_ram.split_once('/')?.1;
-    // Strip the "MB" suffix
-    let total_str = after_slash.split_once("MB")?.0;
-    total_str.trim().parse::<u64>().ok()
-}
-
-/// Return `true` if this line was produced by tegrastats on a Tegra/Jetson device.
-/// Presence of `GR3D_FREQ` confirms an on-chip GPU.
-#[cfg(target_os = "linux")]
-fn tegrastats_line_has_gpu(line: &str) -> bool {
-    line.contains("GR3D_FREQ")
-}
 
 /// Lightweight routing table for passive nodes (clients + standby GPU).
 /// Contains just enough info to route requests to the right host.
@@ -506,6 +390,11 @@ pub struct Node {
     tunnel_http_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     pub blackboard: crate::blackboard::BlackboardStore,
     blackboard_name: Arc<Mutex<Option<String>>>,
+    pub enumerate_host: bool,
+    pub gpu_name: Option<String>,
+    pub hostname: Option<String>,
+    pub is_soc: Option<bool>,
+    pub gpu_vram: Option<String>,
 }
 
 struct MeshState {
@@ -566,7 +455,7 @@ impl Node {
         self.inflight_change_tx.subscribe()
     }
 
-    pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>, max_vram_gb: Option<f64>) -> Result<(Self, TunnelChannels)> {
+    pub async fn start(role: NodeRole, relay_urls: &[String], bind_port: Option<u16>, max_vram_gb: Option<f64>, enumerate_host: bool) -> Result<(Self, TunnelChannels)> {
         // Clients use an ephemeral key so they get a unique identity even
         // when running on the same machine as a GPU node.
         let secret_key = if matches!(role, NodeRole::Client) || std::env::var("MESH_LLM_EPHEMERAL_KEY").is_ok() {
@@ -633,7 +522,16 @@ impl Node {
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
 
-        let mut vram = detect_vram_bytes();
+        let hw = crate::hardware::survey();
+        let mut vram = hw.vram_bytes;
+        let gpu_name = if matches!(role, NodeRole::Client) { None } else { hw.gpu_name };
+        let hostname = hw.hostname;
+        let is_soc = Some(hw.is_soc);
+        let gpu_vram = if hw.gpu_vram.is_empty() {
+            None
+        } else {
+            Some(hw.gpu_vram.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(","))
+        };
         if let Some(max_gb) = max_vram_gb {
             let max_bytes = (max_gb * 1e9) as u64;
             if max_bytes < vram {
@@ -675,6 +573,11 @@ impl Node {
             tunnel_http_tx,
             blackboard: crate::blackboard::BlackboardStore::new(false),
             blackboard_name: Arc::new(Mutex::new(None)),
+            enumerate_host,
+            gpu_name,
+            hostname,
+            is_soc,
+            gpu_vram,
         };
 
         // Accept loop starts but waits for start_accepting() before processing connections.
@@ -2126,6 +2029,10 @@ impl Node {
             existing.requested_models = ann.requested_models.clone();
             existing.last_seen = std::time::Instant::now();
             if ann.version.is_some() { existing.version = ann.version.clone(); }
+            existing.gpu_name = ann.gpu_name.clone();
+            existing.hostname = ann.hostname.clone();
+            existing.is_soc = ann.is_soc;
+            existing.gpu_vram = ann.gpu_vram.clone();
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -2148,6 +2055,10 @@ impl Node {
             requested_models: ann.requested_models.clone(),
             last_seen: std::time::Instant::now(),
             version: ann.version.clone(),
+            gpu_name: ann.gpu_name.clone(),
+            hostname: ann.hostname.clone(),
+            is_soc: ann.is_soc,
+            gpu_vram: ann.gpu_vram.clone(),
         });
         let count = state.peers.len();
         drop(state);
@@ -2173,6 +2084,10 @@ impl Node {
             existing.vram_bytes = ann.vram_bytes;
             if !addr.addrs.is_empty() { existing.addr = addr.clone(); }
             if ann.version.is_some() { existing.version = ann.version.clone(); }
+            if ann.gpu_name.is_some() { existing.gpu_name = ann.gpu_name.clone(); }
+            if ann.hostname.is_some() { existing.hostname = ann.hostname.clone(); }
+            if ann.is_soc.is_some() { existing.is_soc = ann.is_soc; }
+            if ann.gpu_vram.is_some() { existing.gpu_vram = ann.gpu_vram.clone(); }
             if serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -2194,6 +2109,10 @@ impl Node {
                 requested_models: ann.requested_models.clone(),
                 last_seen: std::time::Instant::now(),
                 version: ann.version.clone(),
+                gpu_name: ann.gpu_name.clone(),
+                hostname: ann.hostname.clone(),
+                is_soc: ann.is_soc,
+                gpu_vram: ann.gpu_vram.clone(),
             });
         }
     }
@@ -2227,6 +2146,10 @@ impl Node {
                     version: p.version.clone(),
                     model_demand: HashMap::new(),
                     mesh_id: None,
+                    gpu_name: p.gpu_name.clone(),
+                    hostname: p.hostname.clone(),
+                    is_soc: p.is_soc,
+                    gpu_vram: p.gpu_vram.clone(),
                 })
                 .collect()
         };
@@ -2244,6 +2167,10 @@ impl Node {
             version: Some(crate::VERSION.to_string()),
             model_demand: my_demand,
             mesh_id: my_mesh_id,
+            gpu_name: if self.enumerate_host { self.gpu_name.clone() } else { None },
+            hostname: if self.enumerate_host { self.hostname.clone() } else { None },
+            is_soc: self.is_soc,
+            gpu_vram: if self.enumerate_host { self.gpu_vram.clone() } else { None },
         });
         announcements
     }
@@ -2371,6 +2298,176 @@ mod tests {
         assert_eq!(split_gguf_base_name("Qwen3-8B-Q4_K_M"), None);
         assert_eq!(split_gguf_base_name("model-001-of-003"), None); // wrong digit count
         assert_eq!(split_gguf_base_name("model-00001-of-00003"), Some("model"));
+    }
+
+    #[test]
+    fn test_peer_announcement_gpu_serde_roundtrip() {
+        // Test that gpu_name and hostname fields serialize and deserialize correctly
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_name: Option<String>,
+            #[serde(default)]
+            hostname: Option<String>,
+        }
+
+        let test = TestAnnouncement {
+            gpu_name: Some("NVIDIA A100".to_string()),
+            hostname: Some("worker-01".to_string()),
+        };
+
+        let json = serde_json::to_string(&test).unwrap();
+        let decoded: TestAnnouncement = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.gpu_name, Some("NVIDIA A100".to_string()));
+        assert_eq!(decoded.hostname, Some("worker-01".to_string()));
+    }
+
+    #[test]
+    fn test_peer_announcement_backward_compat_no_hw_fields() {
+        // Simulate old gossip message without gpu_name or hostname
+        #[derive(Deserialize, Debug)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_name: Option<String>,
+            #[serde(default)]
+            hostname: Option<String>,
+        }
+
+        let json = r#"{"other_field": "value"}"#;
+        let decoded: TestAnnouncement = serde_json::from_str(json).unwrap();
+
+        assert_eq!(decoded.gpu_name, None);
+        assert_eq!(decoded.hostname, None);
+    }
+
+    #[test]
+    fn test_peer_announcement_backward_compat_with_hw_fields() {
+        // Simulate new gossip message with gpu_name and hostname
+        #[derive(Deserialize, Debug)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_name: Option<String>,
+            #[serde(default)]
+            hostname: Option<String>,
+        }
+
+        let json = r#"{"gpu_name": "NVIDIA H100", "hostname": "gpu-server-02"}"#;
+        let decoded: TestAnnouncement = serde_json::from_str(json).unwrap();
+
+        assert_eq!(decoded.gpu_name, Some("NVIDIA H100".to_string()));
+        assert_eq!(decoded.hostname, Some("gpu-server-02".to_string()));
+    }
+
+    #[test]
+    fn test_peer_announcement_hostname_serde_roundtrip() {
+        // Test hostname-only roundtrip
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_name: Option<String>,
+            #[serde(default)]
+            hostname: Option<String>,
+        }
+
+        let test = TestAnnouncement {
+            gpu_name: None,
+            hostname: Some("compute-node-42".to_string()),
+        };
+
+        let json = serde_json::to_string(&test).unwrap();
+        let decoded: TestAnnouncement = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.hostname, Some("compute-node-42".to_string()));
+        assert_eq!(decoded.gpu_name, None);
+    }
+
+    #[test]
+    fn test_peer_payload_hw_fields() {
+        // Test that PeerPayload includes gpu_name and hostname fields
+        #[derive(Serialize, Debug)]
+        struct TestPeerPayload {
+            id: String,
+            gpu_name: Option<String>,
+            hostname: Option<String>,
+        }
+
+        let payload = TestPeerPayload {
+            id: "peer-123".to_string(),
+            gpu_name: Some("NVIDIA A100".to_string()),
+            hostname: Some("worker-01".to_string()),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["gpu_name"], "NVIDIA A100");
+        assert_eq!(value["hostname"], "worker-01");
+    }
+
+    #[test]
+    fn test_enumerate_host_false_omits_hw_fields_in_announcement() {
+        let enumerate_host = false;
+        let gpu_name: Option<String> = Some("NVIDIA RTX 5090".to_string());
+        let hostname: Option<String> = Some("carrack".to_string());
+        let gpu_vram: Option<String> = Some("34359738368".to_string());
+
+        let gossip_gpu_name = if enumerate_host { gpu_name.clone() } else { None };
+        let gossip_hostname = if enumerate_host { hostname.clone() } else { None };
+        let gossip_gpu_vram = if enumerate_host { gpu_vram.clone() } else { None };
+
+        assert_eq!(gossip_gpu_name, None);
+        assert_eq!(gossip_hostname, None);
+        assert_eq!(gossip_gpu_vram, None);
+    }
+
+    #[test]
+    fn test_enumerate_host_true_includes_hw_fields_in_announcement() {
+        let enumerate_host = true;
+        let gpu_name: Option<String> = Some("NVIDIA RTX 5090".to_string());
+        let hostname: Option<String> = Some("carrack".to_string());
+        let gpu_vram: Option<String> = Some("34359738368".to_string());
+
+        let gossip_gpu_name = if enumerate_host { gpu_name.clone() } else { None };
+        let gossip_hostname = if enumerate_host { hostname.clone() } else { None };
+        let gossip_gpu_vram = if enumerate_host { gpu_vram.clone() } else { None };
+
+        assert_eq!(gossip_gpu_name, Some("NVIDIA RTX 5090".to_string()));
+        assert_eq!(gossip_hostname, Some("carrack".to_string()));
+        assert_eq!(gossip_gpu_vram, Some("34359738368".to_string()));
+    }
+
+    #[test]
+    fn test_is_soc_always_included_regardless_of_enumerate_host() {
+        for enumerate_host in [false, true] {
+            let is_soc: Option<bool> = Some(true);
+            let gpu_name: Option<String> = Some("Tegra AGX Orin".to_string());
+
+            let gossip_gpu_name = if enumerate_host { gpu_name.clone() } else { None };
+
+            assert_eq!(is_soc, Some(true), "is_soc must always be sent");
+            if enumerate_host {
+                assert!(gossip_gpu_name.is_some());
+            } else {
+                assert!(gossip_gpu_name.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_peer_announcement_backward_compat_is_soc_gpu_vram() {
+        #[derive(Deserialize, Debug)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            is_soc: Option<bool>,
+            #[serde(default)]
+            gpu_vram: Option<String>,
+        }
+
+        let json = r#"{"other_field": "value"}"#;
+        let decoded: TestAnnouncement = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.is_soc, None, "old nodes without is_soc should default to None");
+        assert_eq!(decoded.gpu_vram, None, "old nodes without gpu_vram should default to None");
     }
 }
 

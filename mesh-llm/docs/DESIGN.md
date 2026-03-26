@@ -19,6 +19,7 @@ src/
 ├── launch.rs      rpc-server and llama-server process management
 ├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
 ├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
+├── hardware.rs    GPU/host hardware detection: Collector trait, DefaultCollector, TegraCollector
 ```
 
 ## Node Roles
@@ -150,6 +151,60 @@ preserved for sticky mesh preference, but the node is invisible until it joins.
 
 All join paths converge: `--auto`, `--join TOKEN`, and idle→console join end up
 in the same connect → assign → serve flow.
+
+## Hardware Detection
+
+`hardware.rs` collects GPU and host info at startup via the `Collector` trait:
+
+```rust
+trait Collector {
+    fn collect(&self) -> Vec<Metric>;
+}
+```
+
+| Implementation | Platform | Source |
+|---|---|---|
+| `DefaultCollector` | macOS (Metal/CPU) | `system_profiler`, `vm_stat` |
+| `DefaultCollector` | Linux NVIDIA | `/proc/driver/nvidia`, `nvidia-smi` |
+| `DefaultCollector` | Linux AMD | `/sys/class/drm`, `rocm-smi` |
+| `TegraCollector` | Jetson / Tegra | sysfs + `tegrastats` |
+
+`survey()` calls all applicable collectors and returns a `HardwareSurvey` with `gpu_name`, `gpu_vram` (per-GPU bytes), `vram_bytes` (total), `hostname`, and `is_soc`.
+
+### Gossip Fields
+
+Four new `PeerAnnouncement` fields (all `#[serde(default)]` for backward compat):
+
+| Field | Type | Description |
+|---|---|---|
+| `gpu_name` | `Option<String>` | Comma-separated GPU model names |
+| `hostname` | `Option<String>` | System hostname |
+| `is_soc` | `Option<bool>` | True for Tegra/Jetson (unified memory) |
+| `gpu_vram` | `Option<String>` | Comma-separated per-GPU VRAM in bytes |
+
+### `--enumerate-host` Flag
+
+Controls whether `gpu_name`, `hostname`, and `gpu_vram` appear in gossip. `is_soc` is always sent. Default: `false` (privacy-preserving; peers see VRAM totals but not GPU model or hostname).
+
+```
+--enumerate-host    # opt in: peers learn your GPU name and hostname
+```
+
+### API Shape
+
+`GET /api/status` — self node:
+```json
+{
+  "my_hostname": "carrack",
+  "my_is_soc": false,
+  "gpus": [{"name": "NVIDIA RTX 5090", "vram_bytes": 34359738368}]
+}
+```
+
+`peers[]` entries (only when peer has `--enumerate-host`):
+```json
+{"hostname": "lemony-28", "is_soc": true, "gpus": [{"name": "Tegra AGX Orin", "vram_bytes": 0}]}
+```
 
 ## Nostr Discovery
 
