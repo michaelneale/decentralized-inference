@@ -191,11 +191,13 @@
     <section id="install">
         <div class="section-tag">Quick start</div>
         <h2>Install &amp; run</h2>
-        <p class="section-lead">macOS Apple Silicon. One command to install, one to run.</p>
+        <p class="section-lead">macOS or Linux. One command to install, one to run.</p>
 
         <div class="code-block">
-            <span class="comment"># Install (downloads ~18MB bundle)</span><br>
-            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="val">https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz</span> | <span class="cmd">tar</span> xz &amp;&amp; mv mesh-bundle/* ~/.local/bin/<br><br>
+            <span class="comment"># Install on macOS (downloads ~18MB bundle)</span><br>
+            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="val">https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz</span> | <span class="cmd">tar</span> xz &amp;&amp; mkdir -p ~/.local/bin &amp;&amp; mv mesh-bundle/* ~/.local/bin/<br><br>
+            <span class="comment"># Install on Linux (build from source — needs just, cmake, nvcc, Rust, Node.js)</span><br>
+            <span class="cmd">git clone</span> <span class="val">https://github.com/michaelneale/mesh-llm</span> &amp;&amp; <span class="cmd">cd</span> mesh-llm &amp;&amp; <span class="cmd">just</span> build<br><br>
             <span class="comment"># Join the public mesh — instant chat, zero config</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--auto</span><br><br>
             <span class="comment"># Or start your own mesh with a model</span><br>
@@ -390,7 +392,7 @@
 
     <section class="cta-section">
         <h2>Try it</h2>
-        <p>One binary. macOS Apple Silicon and Linux. MIT licensed.</p>
+        <p>One binary. macOS Apple Silicon and Linux (CUDA). MIT licensed.</p>
         <div class="cta-buttons">
             <a href="https://www.anarchai.org/dashboard" class="btn btn-primary">Try it now</a>
             <a href="#install" class="btn btn-secondary">Install</a>
