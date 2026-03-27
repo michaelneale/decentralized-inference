@@ -96,7 +96,7 @@ type Peer = {
   rtt_ms?: number | null;
   hostname?: string;
   is_soc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type StatusPayload = {
@@ -122,7 +122,7 @@ type StatusPayload = {
   nostr_discovery?: boolean;
   my_hostname?: string;
   my_is_soc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type ChatMessage = {
@@ -173,7 +173,7 @@ type TopologyNode = {
   latencyMs?: number | null;
   hostname?: string;
   isSoc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type ThemeMode = 'auto' | 'light' | 'dark';
@@ -2753,8 +2753,8 @@ function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
                     <span className="group-hover/gpu:invisible">
                       {model}
                     </span>
-                    <span className="invisible absolute left-0 top-0 whitespace-nowrap group-hover/gpu:visible">
-                      {Math.round(vramGb)} GB
+                    <span className="absolute left-0 top-0 whitespace-nowrap opacity-0 transition-opacity duration-200 group-hover/gpu:opacity-100">
+                      {`${Math.round(vramGb)} GB`}
                     </span>
                   </span>
                 </div>

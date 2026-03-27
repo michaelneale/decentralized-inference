@@ -187,6 +187,14 @@ bundle output="/tmp/mesh-bundle.tar.gz":
         [ -f "$bin" ] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done
+    # Include Apple Silicon benchmark binary if built
+    BENCH="{{ mesh_dir }}/target/release/membench-fingerprint"
+    if [ -f "$BENCH" ]; then
+        cp "$BENCH" "$BUNDLE/"
+        echo "Included: membench-fingerprint"
+    else
+        echo "Note: membench-fingerprint not found — run 'just benchmark-build-apple' to include it"
+    fi
     tar czf {{ output }} -C "$DIR" mesh-bundle/
     rm -rf "$DIR"
     echo "Bundle: {{ output }} ($(du -sh {{ output }} | cut -f1))"
@@ -208,6 +216,30 @@ release-bundle-amd version output="dist":
 # Create Linux Vulkan release archive(s).
 release-bundle-vulkan version output="dist":
     MESH_RELEASE_FLAVOR=vulkan scripts/package-release.sh "{{ version }}" "{{ output }}"
+
+# ── Benchmark Binaries ────────────────────────────────────────────────────────
+
+# Build Apple Silicon memory bandwidth benchmark (macOS only)
+[macos]
+benchmark-build-apple:
+    swiftc -O benchmarks/membench-fingerprint.swift -o {{mesh_dir}}/target/release/membench-fingerprint
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint"
+
+# Build NVIDIA CUDA memory bandwidth benchmark (requires CUDA toolkit)
+benchmark-build-cuda:
+    nvcc -O3 -o {{mesh_dir}}/target/release/membench-fingerprint-cuda benchmarks/membench-fingerprint.cu
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda"
+
+# Build AMD ROCm/HIP memory bandwidth benchmark (requires ROCm)
+benchmark-build-hip:
+    hipcc -O3 -std=c++17 -o {{mesh_dir}}/target/release/membench-fingerprint-hip benchmarks/membench-fingerprint.hip
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-hip"
+
+# Build Intel Arc SYCL memory bandwidth benchmark (requires Intel oneAPI) — UNVALIDATED
+benchmark-build-intel:
+    @echo "WARNING: Intel Arc benchmark is unvalidated — no Intel Arc hardware has been tested"
+    icpx -O3 -fsycl -o {{mesh_dir}}/target/release/membench-fingerprint-intel benchmarks/membench-fingerprint-intel.cpp
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-intel"
 
 # Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
 ui-dev api="http://127.0.0.1:3131" port="5173":

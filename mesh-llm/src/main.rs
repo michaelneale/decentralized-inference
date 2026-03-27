@@ -1,5 +1,6 @@
 mod api;
 mod autoupdate;
+mod benchmark;
 mod download;
 mod election;
 mod hardware;
@@ -1210,6 +1211,42 @@ async fn run_auto(
 
     // Start periodic health check to detect dead peers
     node.start_heartbeat();
+
+    // Launch memory bandwidth benchmark in background (non-blocking)
+    // Skip for client nodes — they have no GPU to benchmark
+    if !is_client {
+        let hw = hardware::survey();
+        if hw.gpu_count > 0 {
+            let bw_arc = node.gpu_bandwidth_gbps.clone();
+            let bin_dir_clone = bin_dir.clone();
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    tokio::task::spawn_blocking(move || {
+                        let hw = hardware::survey();
+                        benchmark::run_or_load(&hw, &bin_dir_clone)
+                    })
+                ).await
+                .map_err(|_| tracing::warn!("benchmark timed out after 30s — bandwidth will not be gossiped"))
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+
+                if let Some(ref per_gpu) = result {
+                    let total: f64 = per_gpu.iter().sum();
+                    tracing::info!("Memory bandwidth fingerprint: {} GPUs, {:.1} GB/s total", per_gpu.len(), total);
+                    for (i, gbps) in per_gpu.iter().enumerate() {
+                        tracing::debug!("  GPU {}: {:.1} GB/s", i, gbps);
+                    }
+                }
+                *bw_arc.lock().await = result;
+            });
+        } else {
+            tracing::debug!("no GPUs detected — skipping memory bandwidth benchmark");
+        }
+    } else {
+        tracing::debug!("client node — skipping memory bandwidth benchmark");
+    }
 
     // Join mesh if --join was given
     if !cli.join.is_empty() {
