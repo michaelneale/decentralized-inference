@@ -27,6 +27,12 @@ add_sm() {
     SM_VALUES+=("$sm")
 }
 
+# ── Check if any NVIDIA GPU exists first ───────────────────────────────────────
+if ! command -v nvidia-smi &>/dev/null && [[ ! -d /proc/driver/nvidia/gpus ]]; then
+    echo "cpu"
+    exit 0
+fi
+
 # ── Strategy 1: nvidia-smi (fastest and most reliable) ────────────────────────
 if command -v nvidia-smi &>/dev/null; then
     # Query ALL GPUs (remove head -1 to capture every device)
