@@ -1084,11 +1084,7 @@ async fn start_llama(
     // In split mode (pipeline parallel), pass total group VRAM so context size
     // accounts for the host only holding its share of layers. KV cache is also
     // distributed — each node holds KV for its own layers.
-    let group_vram = if !rpc_ports.is_empty() {
-        Some(total as u64)
-    } else {
-        None
-    };
+    let group_vram = if !rpc_ports.is_empty() { Some(total as u64) } else { None };
 
     match launch::start_llama_server(
         bin_dir,
