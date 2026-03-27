@@ -676,7 +676,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         // ── Blackboard ──
         ("GET", "/api/blackboard/feed") => {
             let plugin_manager = state.inner.lock().await.plugin_manager.clone();
-            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID) {
+            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID).await {
                 respond_error(&mut stream, 404, "Blackboard is disabled on this node").await?;
             } else {
                 let query_str = path.split('?').nth(1).unwrap_or("");
@@ -726,7 +726,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
 
         ("GET", "/api/blackboard/search") => {
             let plugin_manager = state.inner.lock().await.plugin_manager.clone();
-            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID) {
+            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID).await {
                 respond_error(&mut stream, 404, "Blackboard is disabled on this node").await?;
             } else {
                 let query_str = path.split('?').nth(1).unwrap_or("");
@@ -783,7 +783,7 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
                 let inner = state.inner.lock().await;
                 (inner.node.clone(), inner.plugin_manager.clone())
             };
-            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID) {
+            if !plugin_manager.is_enabled(plugin::BLACKBOARD_PLUGIN_ID).await {
                 respond_error(&mut stream, 404, "Blackboard is disabled on this node").await?;
             } else {
                 let body = req.split("\r\n\r\n").nth(1).unwrap_or("");

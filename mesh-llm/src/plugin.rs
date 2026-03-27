@@ -13,6 +13,7 @@ pub const BLACKBOARD_PLUGIN_ID: &str = "blackboard";
 const PROTOCOL_VERSION: u32 = 2;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
 
 #[allow(dead_code)]
 pub mod proto {
@@ -103,11 +104,20 @@ struct PluginManagerInner {
 }
 
 struct ExternalPlugin {
-    summary: PluginSummary,
-    _child: Mutex<Child>,
+    spec: ExternalPluginSpec,
+    summary: Arc<Mutex<PluginSummary>>,
+    runtime: Arc<Mutex<Option<PluginRuntime>>>,
+    mesh_tx: mpsc::Sender<PluginMeshEvent>,
+    restart_lock: Arc<Mutex<()>>,
+    next_request_id: AtomicU64,
+    next_generation: AtomicU64,
+}
+
+struct PluginRuntime {
+    generation: u64,
+    _child: Child,
     outbound_tx: mpsc::Sender<proto::Envelope>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>,
-    next_request_id: AtomicU64,
 }
 
 enum LocalStream {
@@ -240,34 +250,42 @@ impl PluginManager {
                     return Err(err);
                 }
             };
+            let summary = plugin.summary.lock().await.clone();
             tracing::info!(
-                plugin = %plugin.summary.name,
-                version = %plugin.summary.version.as_deref().unwrap_or("unknown"),
-                capabilities = %format_slice_for_log(&plugin.summary.capabilities),
-                tools = %format_tool_names_for_log(&plugin.summary.tools),
+                plugin = %summary.name,
+                version = %summary.version.as_deref().unwrap_or("unknown"),
+                capabilities = %format_slice_for_log(&summary.capabilities),
+                tools = %format_tool_names_for_log(&summary.tools),
                 "Plugin loaded successfully"
             );
             plugins.insert(spec.name.clone(), plugin);
         }
-        Ok(Self {
+        let manager = Self {
             inner: Arc::new(PluginManagerInner { plugins }),
-        })
+        };
+        manager.start_supervisor();
+        Ok(manager)
     }
 
     pub async fn list(&self) -> Vec<PluginSummary> {
-        self.inner
-            .plugins
-            .values()
-            .map(|plugin| plugin.summary.clone())
-            .collect()
+        let mut summaries = Vec::with_capacity(self.inner.plugins.len());
+        for plugin in self.inner.plugins.values() {
+            summaries.push(plugin.summary.lock().await.clone());
+        }
+        summaries
     }
 
-    pub fn is_enabled(&self, name: &str) -> bool {
-        self.inner
+    pub async fn is_enabled(&self, name: &str) -> bool {
+        if let Some(plugin) = self
+            .inner
             .plugins
             .get(name)
-            .map(|plugin| plugin.summary.enabled && plugin.summary.status == "running")
-            .unwrap_or(false)
+        {
+            let summary = plugin.summary.lock().await;
+            summary.enabled && summary.status == "running"
+        } else {
+            false
+        }
     }
 
     pub async fn tools(&self, name: &str) -> Result<Vec<ToolSummary>> {
@@ -276,7 +294,7 @@ impl PluginManager {
             .plugins
             .get(name)
             .with_context(|| format!("Unknown plugin '{name}'"))?;
-        Ok(plugin.summary.tools.clone())
+        Ok(plugin.summary.lock().await.tools.clone())
     }
 
     pub async fn call_tool(
@@ -327,56 +345,33 @@ impl PluginManager {
         }
         Ok(())
     }
+
+    fn start_supervisor(&self) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
+            loop {
+                ticker.tick().await;
+                for plugin in manager.inner.plugins.values() {
+                    if let Err(err) = plugin.supervise().await {
+                        tracing::warn!(
+                            plugin = %plugin.spec.name,
+                            error = %err,
+                            "Plugin supervision round failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
 }
 
 impl ExternalPlugin {
     async fn spawn(spec: &ExternalPluginSpec, mesh_tx: mpsc::Sender<PluginMeshEvent>) -> Result<Self> {
-        let listener = bind_local_listener(&spec.name).await?;
-        let endpoint = listener.endpoint();
-        let transport = listener.transport_name();
-        tracing::debug!(
-            plugin = %spec.name,
-            endpoint = %endpoint,
-            transport,
-            "Waiting for plugin connection"
-        );
-
-        let mut child = Command::new(&spec.command);
-        child.args(&spec.args);
-        child.env("MESH_LLM_PLUGIN_ENDPOINT", &endpoint);
-        child.env("MESH_LLM_PLUGIN_TRANSPORT", transport);
-        child.env("MESH_LLM_PLUGIN_NAME", &spec.name);
-        child.stdin(std::process::Stdio::null());
-        child.stdout(std::process::Stdio::null());
-        child.stderr(std::process::Stdio::inherit());
-        child.kill_on_drop(true);
-
-        let child = child.spawn().with_context(|| {
-            format!(
-                "Failed to launch plugin '{}' via {}",
-                spec.name, spec.command
-            )
-        })?;
-
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            listener.accept(),
-        )
-        .await
-        .with_context(|| format!("Timed out waiting for plugin '{}'", spec.name))??;
-
-        let (outbound_tx, outbound_rx) = mpsc::channel(256);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(connection_loop(
-            stream,
-            outbound_rx,
-            pending.clone(),
-            mesh_tx,
-            spec.name.clone(),
-        ));
-
-        let mut plugin = Self {
-            summary: PluginSummary {
+        let plugin = Self {
+            spec: spec.clone(),
+            summary: Arc::new(Mutex::new(PluginSummary {
                 name: spec.name.clone(),
                 kind: "external".into(),
                 enabled: true,
@@ -387,51 +382,182 @@ impl ExternalPlugin {
                 args: spec.args.clone(),
                 tools: Vec::new(),
                 error: None,
-            },
-            _child: Mutex::new(child),
-            outbound_tx,
-            pending,
+            })),
+            runtime: Arc::new(Mutex::new(None)),
+            mesh_tx,
+            restart_lock: Arc::new(Mutex::new(())),
             next_request_id: AtomicU64::new(1),
+            next_generation: AtomicU64::new(1),
         };
+        plugin.ensure_running().await?;
+        Ok(plugin)
+    }
 
-        let response = plugin
-            .request(proto::envelope::Payload::InitializeRequest(
-                proto::InitializeRequest {
-                    host_protocol_version: PROTOCOL_VERSION,
-                    host_version: crate::VERSION.to_string(),
-                    requested_capabilities: Vec::new(),
-                },
-            ))
+    async fn supervise(&self) -> Result<()> {
+        self.ensure_running().await?;
+        let response = self
+            .request(proto::envelope::Payload::HealthRequest(proto::HealthRequest {}))
             .await?;
-
-        let init = match response.payload {
-            Some(proto::envelope::Payload::InitializeResponse(resp)) => resp,
-            Some(proto::envelope::Payload::ErrorResponse(err)) => {
-                bail!("Plugin '{}' rejected initialize: {}", spec.name, err.message)
+        match response.payload {
+            Some(proto::envelope::Payload::HealthResponse(resp))
+                if resp.status == proto::health_response::Status::Ok as i32 =>
+            {
+                let mut summary = self.summary.lock().await;
+                summary.status = "running".into();
+                summary.error = None;
+                Ok(())
             }
-            _ => bail!("Plugin '{}' returned an unexpected initialize payload", spec.name),
+            Some(proto::envelope::Payload::HealthResponse(resp)) => {
+                self.handle_runtime_failure(
+                    None,
+                    format!("health check reported status {}", resp.status),
+                )
+                .await;
+                self.ensure_running().await
+            }
+            Some(proto::envelope::Payload::ErrorResponse(err)) => {
+                self.handle_runtime_failure(None, err.message).await;
+                self.ensure_running().await
+            }
+            _ => {
+                self.handle_runtime_failure(None, "unexpected health payload".into())
+                    .await;
+                self.ensure_running().await
+            }
+        }
+    }
+
+    async fn ensure_running(&self) -> Result<()> {
+        if self.runtime.lock().await.is_some() {
+            return Ok(());
+        }
+        let _guard = self.restart_lock.lock().await;
+        if self.runtime.lock().await.is_some() {
+            return Ok(());
+        }
+
+        {
+            let mut summary = self.summary.lock().await;
+            summary.status = "starting".into();
+            summary.error = None;
+        }
+
+        let listener = bind_local_listener(&self.spec.name).await?;
+        let endpoint = listener.endpoint();
+        let transport = listener.transport_name();
+        tracing::debug!(
+            plugin = %self.spec.name,
+            endpoint = %endpoint,
+            transport,
+            "Waiting for plugin connection"
+        );
+
+        let mut child = Command::new(&self.spec.command);
+        child.args(&self.spec.args);
+        child.env("MESH_LLM_PLUGIN_ENDPOINT", &endpoint);
+        child.env("MESH_LLM_PLUGIN_TRANSPORT", transport);
+        child.env("MESH_LLM_PLUGIN_NAME", &self.spec.name);
+        child.stdin(std::process::Stdio::null());
+        child.stdout(std::process::Stdio::null());
+        child.stderr(std::process::Stdio::inherit());
+        child.kill_on_drop(true);
+
+        let child = child.spawn().with_context(|| {
+            format!(
+                "Failed to launch plugin '{}' via {}",
+                self.spec.name, self.spec.command
+            )
+        })?;
+
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            listener.accept(),
+        )
+        .await
+        .with_context(|| format!("Timed out waiting for plugin '{}'", self.spec.name))??;
+
+        let (outbound_tx, outbound_rx) = mpsc::channel(256);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        *self.runtime.lock().await = Some(PluginRuntime {
+            generation,
+            _child: child,
+            outbound_tx,
+            pending: pending.clone(),
+        });
+        tokio::spawn(connection_loop(
+            stream,
+            outbound_rx,
+            pending,
+            self.mesh_tx.clone(),
+            self.spec.name.clone(),
+            self.summary.clone(),
+            self.runtime.clone(),
+            generation,
+        ));
+
+        let (_, outbound_tx, pending) = self.runtime_handles().await?;
+        let init_result: Result<proto::InitializeResponse> = async {
+            let response = self
+                .request_once(
+                    generation,
+                    outbound_tx,
+                    pending,
+                    proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
+                        host_protocol_version: PROTOCOL_VERSION,
+                        host_version: crate::VERSION.to_string(),
+                        requested_capabilities: Vec::new(),
+                    }),
+                )
+                .await?;
+
+            let init = match response.payload {
+                Some(proto::envelope::Payload::InitializeResponse(resp)) => resp,
+                Some(proto::envelope::Payload::ErrorResponse(err)) => {
+                    bail!("Plugin '{}' rejected initialize: {}", self.spec.name, err.message)
+                }
+                _ => bail!(
+                    "Plugin '{}' returned an unexpected initialize payload",
+                    self.spec.name
+                ),
+            };
+
+            if init.plugin_id != self.spec.name {
+                bail!(
+                    "Plugin '{}' identified itself as '{}'",
+                    self.spec.name,
+                    init.plugin_id
+                );
+            }
+            if init.plugin_protocol_version != PROTOCOL_VERSION {
+                bail!(
+                    "Plugin '{}' uses protocol {}, host uses {}",
+                    self.spec.name,
+                    init.plugin_protocol_version,
+                    PROTOCOL_VERSION
+                );
+            }
+
+            Ok(init)
+        }
+        .await;
+        let init = match init_result {
+            Ok(init) => init,
+            Err(err) => {
+                self.handle_runtime_failure(
+                    Some(generation),
+                    format!("Plugin '{}' failed initialize: {err}", self.spec.name),
+                )
+                .await;
+                return Err(err);
+            }
         };
 
-        if init.plugin_id != spec.name {
-            bail!(
-                "Plugin '{}' identified itself as '{}'",
-                spec.name,
-                init.plugin_id
-            );
-        }
-        if init.plugin_protocol_version != PROTOCOL_VERSION {
-            bail!(
-                "Plugin '{}' uses protocol {}, host uses {}",
-                spec.name,
-                init.plugin_protocol_version,
-                PROTOCOL_VERSION
-            );
-        }
-
-        plugin.summary.status = "running".into();
-        plugin.summary.version = Some(init.plugin_version);
-        plugin.summary.capabilities = init.capabilities;
-        plugin.summary.tools = init
+        let mut summary = self.summary.lock().await;
+        summary.status = "running".into();
+        summary.version = Some(init.plugin_version);
+        summary.capabilities = init.capabilities;
+        summary.tools = init
             .tool_schemas
             .into_iter()
             .map(|tool| ToolSummary {
@@ -440,8 +566,8 @@ impl ExternalPlugin {
                 input_schema_json: tool.input_schema_json,
             })
             .collect();
-
-        Ok(plugin)
+        summary.error = None;
+        Ok(())
     }
 
     async fn call_tool(&self, tool_name: &str, arguments_json: &str) -> Result<ToolCallResult> {
@@ -463,73 +589,160 @@ impl ExternalPlugin {
             }
             _ => bail!(
                 "Plugin '{}' returned an unexpected tool payload",
-                self.summary.name
+                self.spec.name
             ),
         }
     }
 
     async fn send_channel_message(&self, message: proto::ChannelMessage) -> Result<()> {
-        self.outbound_tx
-            .send(proto::Envelope {
-                protocol_version: PROTOCOL_VERSION,
-                plugin_id: self.summary.name.clone(),
-                request_id: 0,
-                payload: Some(proto::envelope::Payload::ChannelMessage(message)),
-            })
+        self.send_unsolicited(proto::envelope::Payload::ChannelMessage(message), "messages")
             .await
-            .map_err(|_| anyhow!("Plugin '{}' is not accepting messages", self.summary.name))
     }
 
     async fn send_bulk_transfer_message(&self, message: proto::BulkTransferMessage) -> Result<()> {
-        self.outbound_tx
-            .send(proto::Envelope {
-                protocol_version: PROTOCOL_VERSION,
-                plugin_id: self.summary.name.clone(),
-                request_id: 0,
-                payload: Some(proto::envelope::Payload::BulkTransferMessage(message)),
-            })
-            .await
-            .map_err(|_| anyhow!("Plugin '{}' is not accepting bulk transfers", self.summary.name))
+        self.send_unsolicited(
+            proto::envelope::Payload::BulkTransferMessage(message),
+            "bulk transfers",
+        )
+        .await
     }
 
     async fn send_mesh_event(&self, event: proto::MeshEvent) -> Result<()> {
-        self.outbound_tx
-            .send(proto::Envelope {
-                protocol_version: PROTOCOL_VERSION,
-                plugin_id: self.summary.name.clone(),
-                request_id: 0,
-                payload: Some(proto::envelope::Payload::MeshEvent(event)),
-            })
+        self.send_unsolicited(proto::envelope::Payload::MeshEvent(event), "mesh events")
             .await
-            .map_err(|_| anyhow!("Plugin '{}' is not accepting mesh events", self.summary.name))
     }
 
     async fn request(&self, payload: proto::envelope::Payload) -> Result<proto::Envelope> {
+        for attempt in 0..2 {
+            self.ensure_running().await?;
+            let (generation, outbound_tx, pending) = self.runtime_handles().await?;
+            match self
+                .request_once(generation, outbound_tx, pending, payload.clone())
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(err) if attempt == 0 => {
+                    tracing::debug!(
+                        plugin = %self.spec.name,
+                        error = %err,
+                        "Retrying plugin request after restart"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        bail!("Plugin '{}' request failed after restart", self.spec.name)
+    }
+
+    async fn send_unsolicited(
+        &self,
+        payload: proto::envelope::Payload,
+        kind: &str,
+    ) -> Result<()> {
+        for attempt in 0..2 {
+            self.ensure_running().await?;
+            let (generation, outbound_tx, _) = self.runtime_handles().await?;
+            let envelope = proto::Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                plugin_id: self.spec.name.clone(),
+                request_id: 0,
+                payload: Some(payload.clone()),
+            };
+            if outbound_tx.send(envelope).await.is_ok() {
+                return Ok(());
+            }
+            self.handle_runtime_failure(
+                Some(generation),
+                format!("Plugin '{}' is not accepting {kind}", self.spec.name),
+            )
+            .await;
+            if attempt == 1 {
+                break;
+            }
+        }
+        bail!("Plugin '{}' is not accepting {}", self.spec.name, kind)
+    }
+
+    async fn runtime_handles(
+        &self,
+    ) -> Result<(
+        u64,
+        mpsc::Sender<proto::Envelope>,
+        Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>,
+    )> {
+        let runtime = self.runtime.lock().await;
+        let runtime = runtime
+            .as_ref()
+            .with_context(|| format!("Plugin '{}' is not running", self.spec.name))?;
+        Ok((
+            runtime.generation,
+            runtime.outbound_tx.clone(),
+            runtime.pending.clone(),
+        ))
+    }
+
+    async fn request_once(
+        &self,
+        generation: u64,
+        outbound_tx: mpsc::Sender<proto::Envelope>,
+        pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>,
+        payload: proto::envelope::Payload,
+    ) -> Result<proto::Envelope> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(request_id, tx);
+        pending.lock().await.insert(request_id, tx);
 
         let envelope = proto::Envelope {
             protocol_version: PROTOCOL_VERSION,
-            plugin_id: self.summary.name.clone(),
+            plugin_id: self.spec.name.clone(),
             request_id,
             payload: Some(payload),
         };
 
-        if let Err(_send_err) = self.outbound_tx.send(envelope).await {
-            self.pending.lock().await.remove(&request_id);
-            bail!("Plugin '{}' is not accepting requests", self.summary.name);
+        if let Err(_send_err) = outbound_tx.send(envelope).await {
+            pending.lock().await.remove(&request_id);
+            self.handle_runtime_failure(
+                Some(generation),
+                format!("Plugin '{}' is not accepting requests", self.spec.name),
+            )
+            .await;
+            bail!("Plugin '{}' is not accepting requests", self.spec.name);
         }
 
-        match tokio::time::timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await
-        {
+        match tokio::time::timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
             Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => bail!("Plugin '{}' dropped the response channel", self.summary.name),
+            Ok(Err(_)) => {
+                self.handle_runtime_failure(
+                    Some(generation),
+                    format!("Plugin '{}' dropped the response channel", self.spec.name),
+                )
+                .await;
+                bail!("Plugin '{}' dropped the response channel", self.spec.name);
+            }
             Err(_) => {
-                self.pending.lock().await.remove(&request_id);
-                bail!("Plugin '{}' timed out", self.summary.name)
+                pending.lock().await.remove(&request_id);
+                self.handle_runtime_failure(
+                    Some(generation),
+                    format!("Plugin '{}' timed out", self.spec.name),
+                )
+                .await;
+                bail!("Plugin '{}' timed out", self.spec.name);
             }
         }
+    }
+
+    async fn handle_runtime_failure(&self, generation: Option<u64>, reason: String) {
+        let mut runtime = self.runtime.lock().await;
+        let should_clear = generation
+            .map(|generation| runtime.as_ref().map(|r| r.generation) == Some(generation))
+            .unwrap_or(true);
+        if should_clear {
+            *runtime = None;
+        }
+        drop(runtime);
+        let mut summary = self.summary.lock().await;
+        summary.status = "restarting".into();
+        summary.error = Some(reason);
     }
 }
 
@@ -539,6 +752,9 @@ async fn connection_loop(
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<proto::Envelope>>>>>,
     mesh_tx: mpsc::Sender<PluginMeshEvent>,
     plugin_name: String,
+    summary: Arc<Mutex<PluginSummary>>,
+    runtime: Arc<Mutex<Option<PluginRuntime>>>,
+    generation: u64,
 ) {
     let result: Result<()> = async {
         loop {
@@ -604,6 +820,16 @@ async fn connection_loop(
             error = %err,
             "Plugin connection closed"
         );
+    }
+
+    {
+        let mut runtime = runtime.lock().await;
+        if runtime.as_ref().map(|runtime| runtime.generation) == Some(generation) {
+            *runtime = None;
+            let mut summary = summary.lock().await;
+            summary.status = "stopped".into();
+            summary.error = Some(format!("Plugin '{}' disconnected", plugin_name));
+        }
     }
 
     let mut pending = pending.lock().await;

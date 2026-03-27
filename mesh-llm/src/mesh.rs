@@ -669,11 +669,42 @@ impl Node {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json)
     }
 
+    async fn build_mesh_event(
+        &self,
+        kind: crate::plugin::proto::mesh_event::Kind,
+        peer: Option<crate::plugin::proto::MeshPeer>,
+        detail_json: String,
+    ) -> crate::plugin::proto::MeshEvent {
+        crate::plugin::proto::MeshEvent {
+            kind: kind as i32,
+            peer,
+            local_peer_id: endpoint_id_hex(self.endpoint.id()),
+            mesh_id: self.mesh_id.lock().await.clone().unwrap_or_default(),
+            detail_json,
+        }
+    }
+
     /// Enable accepting inbound connections. Call before join() or when ready to participate.
     /// Until this is called, the accept loop blocks waiting.
     pub fn start_accepting(&self) {
         self.accepting.1.store(true, std::sync::atomic::Ordering::Release);
         self.accepting.0.notify_waiters();
+        let node = self.clone();
+        tokio::spawn(async move {
+            let plugin_manager = node.plugin_manager.lock().await.clone();
+            if let Some(plugin_manager) = plugin_manager {
+                let _ = plugin_manager
+                    .broadcast_mesh_event(
+                        node.build_mesh_event(
+                            crate::plugin::proto::mesh_event::Kind::LocalAccepting,
+                            None,
+                            String::new(),
+                        )
+                        .await,
+                    )
+                    .await;
+            }
+        });
     }
 
     pub async fn join(&self, invite_token: &str) -> Result<()> {
@@ -738,12 +769,36 @@ impl Node {
             state.peers.values().cloned().collect::<Vec<_>>()
         };
         *self.plugin_manager.lock().await = Some(plugin_manager.clone());
+        let local_kind = if self.accepting.1.load(std::sync::atomic::Ordering::Acquire) {
+            crate::plugin::proto::mesh_event::Kind::LocalAccepting
+        } else {
+            crate::plugin::proto::mesh_event::Kind::LocalStandby
+        };
+        let _ = plugin_manager
+            .broadcast_mesh_event(self.build_mesh_event(local_kind, None, String::new()).await)
+            .await;
+        if self.mesh_id.lock().await.is_some() {
+            let _ = plugin_manager
+                .broadcast_mesh_event(
+                    self.build_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::MeshIdUpdated,
+                        None,
+                        String::new(),
+                    )
+                    .await,
+                )
+                .await;
+        }
         for peer in peers {
             if let Err(err) = plugin_manager
-                .broadcast_mesh_event(crate::plugin::proto::MeshEvent {
-                    kind: crate::plugin::proto::mesh_event::Kind::PeerUp as i32,
-                    peer: Some(peer_info_to_mesh_peer(&peer)),
-                })
+                .broadcast_mesh_event(
+                    self.build_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::PeerUp,
+                        Some(peer_info_to_mesh_peer(&peer)),
+                        String::new(),
+                    )
+                    .await,
+                )
                 .await
             {
                 tracing::debug!(
@@ -771,21 +826,23 @@ impl Node {
     async fn emit_plugin_mesh_event(
         &self,
         kind: crate::plugin::proto::mesh_event::Kind,
-        peer: &PeerInfo,
+        peer: Option<&PeerInfo>,
+        detail_json: String,
     ) {
         let plugin_manager = self.plugin_manager.lock().await.clone();
         if let Some(plugin_manager) = plugin_manager {
             if let Err(err) = plugin_manager
-                .broadcast_mesh_event(crate::plugin::proto::MeshEvent {
-                    kind: kind as i32,
-                    peer: Some(peer_info_to_mesh_peer(peer)),
-                })
+                .broadcast_mesh_event(
+                    self.build_mesh_event(kind, peer.map(peer_info_to_mesh_peer), detail_json)
+                        .await,
+                )
                 .await
             {
                 tracing::debug!(
                     "Failed to deliver plugin mesh event {:?} for {}: {err}",
                     kind,
-                    peer.id.fmt_short()
+                    peer.map(|p| p.id.fmt_short().to_string())
+                        .unwrap_or_else(|| self.endpoint.id().fmt_short().to_string())
                 );
             }
         }
@@ -803,8 +860,12 @@ impl Node {
         };
         if let Some(peer) = updated_peer {
             tracing::info!("Peer {} RTT: {}ms", id.fmt_short(), rtt_ms);
-            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUpdated, &peer)
-                .await;
+            self.emit_plugin_mesh_event(
+                crate::plugin::proto::mesh_event::Kind::PeerUpdated,
+                Some(&peer),
+                String::new(),
+            )
+            .await;
         }
     }
 
@@ -860,12 +921,25 @@ impl Node {
         let mut current = self.mesh_id.lock().await;
         if current.is_none() {
             *current = Some(id);
+            drop(current);
+            self.emit_plugin_mesh_event(
+                crate::plugin::proto::mesh_event::Kind::MeshIdUpdated,
+                None,
+                String::new(),
+            )
+            .await;
         }
     }
 
     /// Set mesh ID unconditionally (for originator).
     pub async fn set_mesh_id_force(&self, id: String) {
         *self.mesh_id.lock().await = Some(id);
+        self.emit_plugin_mesh_event(
+            crate::plugin::proto::mesh_event::Kind::MeshIdUpdated,
+            None,
+            String::new(),
+        )
+        .await;
     }
 
     pub async fn set_available_models(&self, models: Vec<String>) {
@@ -2369,8 +2443,12 @@ impl Node {
             let count = state.peers.len();
             drop(state);
             let _ = self.peer_change_tx.send(count);
-            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerDown, &peer)
-                .await;
+            self.emit_plugin_mesh_event(
+                crate::plugin::proto::mesh_event::Kind::PeerDown,
+                Some(&peer),
+                String::new(),
+            )
+            .await;
         }
     }
 
@@ -2421,7 +2499,8 @@ impl Node {
                 if changed {
                     self.emit_plugin_mesh_event(
                         crate::plugin::proto::mesh_event::Kind::PeerUpdated,
-                        &updated_peer,
+                        Some(&updated_peer),
+                        String::new(),
                     )
                     .await;
                 }
@@ -2430,7 +2509,8 @@ impl Node {
                 if changed {
                     self.emit_plugin_mesh_event(
                         crate::plugin::proto::mesh_event::Kind::PeerUpdated,
-                        &updated_peer,
+                        Some(&updated_peer),
+                        String::new(),
                     )
                     .await;
                 }
@@ -2465,8 +2545,12 @@ impl Node {
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
-        self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUp, &peer)
-            .await;
+        self.emit_plugin_mesh_event(
+            crate::plugin::proto::mesh_event::Kind::PeerUp,
+            Some(&peer),
+            String::new(),
+        )
+        .await;
     }
 
     /// Update a peer learned transitively through gossip (not directly connected).
@@ -2502,7 +2586,8 @@ impl Node {
                 if changed {
                     self.emit_plugin_mesh_event(
                         crate::plugin::proto::mesh_event::Kind::PeerUpdated,
-                        &updated_peer,
+                        Some(&updated_peer),
+                        String::new(),
                     )
                     .await;
                 }
@@ -2511,7 +2596,8 @@ impl Node {
                 if changed {
                     self.emit_plugin_mesh_event(
                         crate::plugin::proto::mesh_event::Kind::PeerUpdated,
-                        &updated_peer,
+                        Some(&updated_peer),
+                        String::new(),
                     )
                     .await;
                 }
@@ -2539,8 +2625,12 @@ impl Node {
             };
             state.peers.insert(id, peer.clone());
             drop(state);
-            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUp, &peer)
-                .await;
+            self.emit_plugin_mesh_event(
+                crate::plugin::proto::mesh_event::Kind::PeerUp,
+                Some(&peer),
+                String::new(),
+            )
+            .await;
         }
     }
 

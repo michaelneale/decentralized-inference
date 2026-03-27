@@ -278,8 +278,12 @@ Current event kinds:
 - `PEER_UP`
 - `PEER_DOWN`
 - `PEER_UPDATED`
+- `LOCAL_ACCEPTING`
+- `LOCAL_STANDBY`
+- `MESH_ID_UPDATED`
 
-Each event carries a `MeshPeer` snapshot.
+Peer events carry a `MeshPeer` snapshot. Local-state events populate the mesh-level fields and leave
+`peer` empty.
 
 The current `MeshPeer` payload includes:
 
@@ -294,7 +298,23 @@ The current `MeshPeer` payload includes:
 - `rtt_ms`
 - `model_source`
 
+Every `MeshEvent` also carries:
+
+- `local_peer_id`
+- `mesh_id`
+- `detail_json`
+
 Plugins should treat these events as advisory runtime state from the local host.
+
+On initial attach, the host now sends:
+
+- one local readiness event: `LOCAL_ACCEPTING` or `LOCAL_STANDBY`
+- `MESH_ID_UPDATED` when the node already knows its mesh id
+- a `PEER_UP` snapshot for every known peer
+
+At runtime, external plugins are supervised by the host. If the plugin disconnects, stops
+responding, or fails health checks, the host marks it as restarting and attempts to relaunch it on
+the next supervision round before redelivering control, bulk, or mesh events.
 
 ### Tool Schemas
 

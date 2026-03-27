@@ -79,10 +79,16 @@ message MeshEvent {
     PEER_UP = 1;
     PEER_DOWN = 2;
     PEER_UPDATED = 3;
+    LOCAL_ACCEPTING = 4;
+    LOCAL_STANDBY = 5;
+    MESH_ID_UPDATED = 6;
   }
 
   Kind kind = 1;
   MeshPeer peer = 2;
+  string local_peer_id = 3;
+  string mesh_id = 4;
+  string detail_json = 5;
 }
 
 message ToolSchema {
