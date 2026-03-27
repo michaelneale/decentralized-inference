@@ -3,8 +3,8 @@ pub use mesh_llm_plugin::proto;
 use mesh_llm_plugin::{MeshVisibility, STARTUP_DISABLED_ERROR_CODE};
 use prost::Message;
 use rmcp::model::{
-    CallToolResult as McpCallToolResult, ErrorCode, InitializeRequestParams, ListToolsResult,
-    PaginatedRequestParams, ServerInfo,
+    CallToolResult as McpCallToolResult, ErrorCode, ListToolsResult, PaginatedRequestParams,
+    ServerInfo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -18,6 +18,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub const BLACKBOARD_PLUGIN_ID: &str = "blackboard";
+pub const INFERENCE_PLUGIN_ID: &str = "inference";
 pub(crate) const PROTOCOL_VERSION: u32 = mesh_llm_plugin::PROTOCOL_VERSION;
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -38,6 +39,8 @@ pub struct PluginConfigEntry {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub config: Option<toml::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,11 +54,13 @@ pub struct ExternalPluginSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    pub config_json: String,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PluginHostMode {
     pub mesh_visibility: MeshVisibility,
+    pub startup_context_json: String,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +217,19 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
             blackboard_enabled = enabled;
             continue;
         }
+        if entry.name == INFERENCE_PLUGIN_ID && entry.command.is_none() {
+            if !entry.args.is_empty() {
+                bail!(
+                    "Plugin '{}' is served by mesh-llm itself; `args` may not be set",
+                    INFERENCE_PLUGIN_ID
+                );
+            }
+            if !enabled {
+                continue;
+            }
+            externals.push(inference_plugin_spec(entry.config.as_ref())?);
+            continue;
+        }
         if !enabled {
             continue;
         }
@@ -223,6 +241,7 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
             name: entry.name.clone(),
             command,
             args: entry.args.clone(),
+            config_json: config_json(entry.config.as_ref())?,
         });
     }
 
@@ -245,6 +264,20 @@ pub fn blackboard_plugin_spec() -> Result<ExternalPluginSpec> {
         name: BLACKBOARD_PLUGIN_ID.to_string(),
         command,
         args: vec!["--plugin".into(), BLACKBOARD_PLUGIN_ID.into()],
+        config_json: "{}".into(),
+    })
+}
+
+pub fn inference_plugin_spec(config: Option<&toml::Value>) -> Result<ExternalPluginSpec> {
+    let command = std::env::current_exe()
+        .context("Cannot determine mesh-llm executable path")?
+        .display()
+        .to_string();
+    Ok(ExternalPluginSpec {
+        name: INFERENCE_PLUGIN_ID.to_string(),
+        command,
+        args: vec!["--plugin".into(), INFERENCE_PLUGIN_ID.into()],
+        config_json: config_json(config)?,
     })
 }
 
@@ -279,20 +312,24 @@ impl PluginManager {
                 args = %format_args_for_log(&spec.args),
                 "Loading plugin"
             );
-            let plugin =
-                match ExternalPlugin::spawn(spec, host_mode, mesh_tx.clone(), rpc_bridge.clone())
-                    .await
-                {
-                    Ok(plugin) => plugin,
-                    Err(err) => {
-                        tracing::error!(
-                            plugin = %spec.name,
-                            error = %err,
-                            "Plugin failed to load"
-                        );
-                        return Err(err);
-                    }
-                };
+            let plugin = match ExternalPlugin::spawn(
+                spec,
+                host_mode.clone(),
+                mesh_tx.clone(),
+                rpc_bridge.clone(),
+            )
+            .await
+            {
+                Ok(plugin) => plugin,
+                Err(err) => {
+                    tracing::error!(
+                        plugin = %spec.name,
+                        error = %err,
+                        "Plugin failed to load"
+                    );
+                    return Err(err);
+                }
+            };
             let summary = plugin.summary.lock().await.clone();
             tracing::info!(
                 plugin = %summary.name,
@@ -640,7 +677,6 @@ impl ExternalPlugin {
 
         let (_, outbound_tx, pending) = self.runtime_handles().await?;
         let init_result: Result<proto::InitializeResponse> = async {
-            let host_info_json = serde_json::to_string(&InitializeRequestParams::default())?;
             let response = self
                 .request_once(
                     generation,
@@ -649,8 +685,9 @@ impl ExternalPlugin {
                     proto::envelope::Payload::InitializeRequest(proto::InitializeRequest {
                         host_protocol_version: PROTOCOL_VERSION,
                         host_version: crate::VERSION.to_string(),
-                        host_info_json,
+                        host_context_json: self.host_mode.startup_context_json.clone(),
                         mesh_visibility: proto_mesh_visibility(self.host_mode.mesh_visibility),
+                        plugin_config_json: self.spec.config_json.clone(),
                     }),
                 )
                 .await?;
@@ -1333,6 +1370,7 @@ fn runtime_dir() -> Result<PathBuf> {
 pub async fn run_plugin_process(name: String) -> Result<()> {
     match name.as_str() {
         BLACKBOARD_PLUGIN_ID => crate::plugins::blackboard::run_plugin(name).await,
+        INFERENCE_PLUGIN_ID => crate::plugins::inference::run_plugin(name).await,
         _ => bail!("Unknown built-in plugin '{}'", name),
     }
 }
@@ -1457,6 +1495,13 @@ fn proto_mesh_visibility(mesh_visibility: MeshVisibility) -> i32 {
     }
 }
 
+fn config_json(config: Option<&toml::Value>) -> Result<String> {
+    match config {
+        Some(value) => serde_json::to_string(value).context("serialize plugin config"),
+        None => Ok("{}".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1464,6 +1509,7 @@ mod tests {
     fn private_host_mode() -> PluginHostMode {
         PluginHostMode {
             mesh_visibility: MeshVisibility::Private,
+            startup_context_json: "{}".into(),
         }
     }
 
@@ -1483,6 +1529,7 @@ mod tests {
                 enabled: Some(false),
                 command: None,
                 args: Vec::new(),
+                config: None,
             }],
         };
         let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
@@ -1496,6 +1543,7 @@ mod tests {
             &MeshConfig::default(),
             PluginHostMode {
                 mesh_visibility: MeshVisibility::Public,
+                startup_context_json: "{}".into(),
             },
         )
         .unwrap();
@@ -1512,11 +1560,33 @@ mod tests {
                 enabled: Some(true),
                 command: Some("/tmp/demo".into()),
                 args: vec!["--flag".into()],
+                config: None,
             }],
         };
         let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
         assert_eq!(resolved.externals.len(), 2);
         assert_eq!(resolved.externals[1].name, "demo");
         assert!(resolved.inactive.is_empty());
+    }
+
+    #[test]
+    fn resolves_builtin_inference_plugin() {
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: INFERENCE_PLUGIN_ID.into(),
+                enabled: Some(true),
+                command: None,
+                args: Vec::new(),
+                config: Some(toml::Value::Table(
+                    [("api_port".to_string(), toml::Value::Integer(19400))]
+                        .into_iter()
+                        .collect(),
+                )),
+            }],
+        };
+        let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
+        assert_eq!(resolved.externals.len(), 2);
+        assert_eq!(resolved.externals[1].name, INFERENCE_PLUGIN_ID);
+        assert!(resolved.externals[1].config_json.contains("19400"));
     }
 }

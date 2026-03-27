@@ -21,6 +21,7 @@ pub use plugins::blackboard::mcp as blackboard_mcp;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mesh::NodeRole;
+use serde::Serialize;
 use std::path::PathBuf;
 
 pub const VERSION: &str = "0.49.0";
@@ -582,7 +583,7 @@ async fn main() -> Result<()> {
                 Some(d) => d.clone(),
                 None => detect_bin_dir()?,
             };
-            return run_idle(cli, bin_dir).await;
+            return plugins::inference::run_idle(cli, bin_dir).await;
         }
     }
 
@@ -610,7 +611,7 @@ async fn main() -> Result<()> {
         None => detect_bin_dir()?,
     };
 
-    run_auto(cli, resolved_models, requested_model_names, bin_dir).await
+    plugins::inference::run_auto(cli, resolved_models, requested_model_names, bin_dir).await
 }
 
 /// Resolve a model path: local file, catalog name, or HuggingFace URL.
@@ -1051,7 +1052,58 @@ fn plugin_host_mode(cli: &Cli) -> plugin::PluginHostMode {
         } else {
             mesh_llm_plugin::MeshVisibility::Private
         },
+        startup_context_json: build_plugin_startup_context(cli),
     }
+}
+
+#[derive(Serialize)]
+struct PluginStartupContext {
+    argv: Vec<String>,
+    cwd: String,
+    api_port: u16,
+    console_port: u16,
+    listen_all: bool,
+    client: bool,
+    auto: bool,
+    publish: bool,
+    mesh_name: Option<String>,
+    region: Option<String>,
+    display_name: Option<String>,
+    bind_port: Option<u16>,
+    raw_models: Vec<String>,
+    join_tokens: Vec<String>,
+    bin_dir_hint: Option<String>,
+    config_path: Option<String>,
+}
+
+fn build_plugin_startup_context(cli: &Cli) -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    serde_json::to_string(&PluginStartupContext {
+        argv: std::env::args().collect(),
+        cwd,
+        api_port: cli.port,
+        console_port: cli.console,
+        listen_all: cli.listen_all,
+        client: cli.client,
+        auto: cli.auto,
+        publish: cli.publish,
+        mesh_name: cli.mesh_name.clone(),
+        region: cli.region.clone(),
+        display_name: cli.name.clone(),
+        bind_port: cli.bind_port,
+        raw_models: cli
+            .model
+            .iter()
+            .map(|model| model.display().to_string())
+            .collect(),
+        join_tokens: cli.join.clone(),
+        bin_dir_hint: cli.bin_dir.as_ref().map(|path| path.display().to_string()),
+        config_path: cli.config.as_ref().map(|path| path.display().to_string()),
+    })
+    .unwrap_or_else(|_| "{}".into())
 }
 
 fn blackboard_display_name(cli: &Cli, node: &mesh::Node) -> String {

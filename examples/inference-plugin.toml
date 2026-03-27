@@ -1,0 +1,4 @@
+[[plugin]]
+name = "inference"
+enabled = true
+config = { api_port = 19400, console_port = 19401, bind_address = "127.0.0.1" }

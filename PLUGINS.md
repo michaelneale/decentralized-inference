@@ -70,6 +70,7 @@ enabled = false
 name = "notes"
 command = "/Users/jdumay/.mesh-llm/plugin/notes-plugin"
 args = ["--workspace", "default"]
+config = { workspace = "default" }
 enabled = true
 ```
 
@@ -79,6 +80,43 @@ Field meanings:
 - `enabled`: whether the plugin is active on this node. Omit to use the default.
 - `command`: executable to launch for a custom plugin.
 - `args`: startup arguments passed to that executable.
+- `config`: plugin-specific config object. This is serialized to JSON and sent to the plugin in `InitializeRequest`.
+
+### Runnable Inference Plugin Example
+
+The built-in `inference` plugin is opt-in. It is not enabled by default.
+
+This proof-of-concept hosts its own HTTP listeners from inside the plugin process and exposes the startup context the host passed in.
+
+Example config:
+
+```toml
+[[plugin]]
+name = "inference"
+enabled = true
+config = { api_port = 19400, console_port = 19401, bind_address = "127.0.0.1" }
+```
+
+You can copy this directly from:
+
+```text
+examples/inference-plugin.toml
+```
+
+Run:
+
+```text
+MESH_LLM_CONFIG=examples/inference-plugin.toml mesh-llm
+```
+
+Inspect:
+
+```text
+curl http://127.0.0.1:19400/startup-context
+open http://127.0.0.1:19401/
+```
+
+This uses plugin-owned listeners so it does not rely on the main process serving those HTTP endpoints.
 
 ### Built-In Default Plugins
 

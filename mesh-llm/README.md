@@ -4,7 +4,7 @@ Rust sidecar for distributed llama.cpp inference over QUIC. See the [project REA
 
 ```
 src/
-├── main.rs        CLI, orchestration, startup flows (auto, idle, passive)
+├── main.rs        CLI, shared helpers, plugin/bootstrap dispatch
 ├── mesh.rs        QUIC endpoint, gossip, peer management, request rate sharing
 ├── election.rs    Per-model host election, latency-aware split, llama-server lifecycle
 ├── proxy.rs       HTTP proxy plumbing: request parsing, model routing, response helpers
@@ -19,6 +19,7 @@ src/
 │   ├── mod.rs                 Plugin module registry
 │   ├── blackboard/mod.rs      Shared ephemeral messages across the mesh (plugin runtime/state)
 │   ├── blackboard/mcp.rs      Standalone MCP server for blackboard
+│   ├── inference/mod.rs       Inference runtime orchestration, console startup, API proxy bootstrap
 │   └── example/               Standalone example plugin crate for tools, channel, bulk, and mesh events
 ```
 
