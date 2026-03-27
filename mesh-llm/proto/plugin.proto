@@ -35,8 +35,9 @@ enum MeshVisibility {
 message InitializeRequest {
   uint32 host_protocol_version = 1;
   string host_version = 2;
-  string host_info_json = 3;
+  string host_context_json = 3;
   MeshVisibility mesh_visibility = 4;
+  string plugin_config_json = 5;
 }
 
 message InitializeResponse {

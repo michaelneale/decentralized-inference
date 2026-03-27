@@ -54,8 +54,9 @@ pub enum PluginStartupPolicy {
 pub struct PluginInitializeRequest {
     pub host_protocol_version: u32,
     pub host_version: String,
-    pub host_info_json: String,
+    pub host_context_json: String,
     pub mesh_visibility: MeshVisibility,
+    pub plugin_config_json: String,
 }
 
 impl From<proto::InitializeRequest> for PluginInitializeRequest {
@@ -63,8 +64,9 @@ impl From<proto::InitializeRequest> for PluginInitializeRequest {
         Self {
             host_protocol_version: value.host_protocol_version,
             host_version: value.host_version,
-            host_info_json: value.host_info_json,
+            host_context_json: value.host_context_json,
             mesh_visibility: MeshVisibility::from_proto(value.mesh_visibility),
+            plugin_config_json: value.plugin_config_json,
         }
     }
 }
