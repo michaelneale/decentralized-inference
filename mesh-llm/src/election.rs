@@ -231,6 +231,7 @@ pub async fn election_loop(
     draft: Option<std::path::PathBuf>,
     draft_max: u16,
     force_split: bool,
+    ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     mut on_change: impl FnMut(bool, bool) + Send,
 ) {
@@ -265,7 +266,7 @@ pub async fn election_loop(
         if need_moe_split {
             moe_election_loop(
                 node, tunnel_mgr, bin_dir, model, model_name, moe_cfg.clone(),
-                my_vram, model_bytes as u64,
+                my_vram, model_bytes as u64, ctx_size_override,
                 target_tx, &mut on_change,
             ).await;
             return;
@@ -438,6 +439,7 @@ pub async fn election_loop(
                 draft.as_deref(),
                 draft_max,
                 force_split,
+                ctx_size_override,
             )
             .await
             {
@@ -547,6 +549,7 @@ async fn moe_election_loop(
     moe_cfg: download::MoeConfig,
     my_vram: u64,
     model_bytes: u64,
+    ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     on_change: &mut impl FnMut(bool, bool),
 ) {
@@ -606,7 +609,7 @@ async fn moe_election_loop(
 
                 let mb = total_model_bytes(&model);
                 match launch::start_llama_server(
-                    &bin_dir, &model, llama_port, &[], None, None, 0, mb, my_vram, None,
+                    &bin_dir, &model, llama_port, &[], None, None, 0, mb, my_vram, None, ctx_size_override, None,
                 ).await {
                     Ok(_death_rx) => {
                         node.set_role(NodeRole::Host { http_port: llama_port }).await;
@@ -677,7 +680,7 @@ async fn moe_election_loop(
 
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
             match launch::start_llama_server(
-                &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes, my_vram, None,
+                &bin_dir, &shard_path, llama_port, &[], None, None, 0, shard_bytes, my_vram, None, ctx_size_override, None,
             ).await {
                 Ok(_death_rx) => {
                     node.set_role(NodeRole::Host { http_port: llama_port }).await;
@@ -793,6 +796,7 @@ async fn start_llama(
     draft: Option<&Path>,
     draft_max: u16,
     force_split: bool,
+    ctx_size_override: Option<u32>,
 ) -> Option<(u16, tokio::sync::oneshot::Receiver<()>)> {
     let my_vram = node.vram_bytes();
     let model_bytes = total_model_bytes(model);
@@ -955,6 +959,11 @@ async fn start_llama(
         .map(|(filename, _url)| download::models_dir().join(filename))
         .filter(|p| p.exists());
 
+    // In split mode (pipeline parallel), pass total group VRAM so context size
+    // accounts for the host only holding its share of layers. KV cache is also
+    // distributed — each node holds KV for its own layers.
+    let group_vram = if !rpc_ports.is_empty() { Some(total as u64) } else { None };
+
     match launch::start_llama_server(
         bin_dir,
         model,
@@ -966,6 +975,8 @@ async fn start_llama(
         model_bytes,
         my_vram,
         mmproj_path.as_deref(),
+        ctx_size_override,
+        group_vram,
     )
     .await
     {

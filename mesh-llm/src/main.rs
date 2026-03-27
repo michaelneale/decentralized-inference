@@ -99,6 +99,10 @@ struct Cli {
     #[arg(long, hide = true)]
     split: bool,
 
+    /// Override context size (tokens). Default: auto-scaled to available VRAM.
+    #[arg(long, hide = true)]
+    ctx_size: Option<u32>,
+
     /// Limit VRAM advertised to the mesh (GB).
     #[arg(long, hide = true)]
     max_vram: Option<f64>,
@@ -1194,7 +1198,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
     tokio::spawn(async move {
         election::election_loop(
             node2, tunnel_mgr2, rpc_port, bin_dir2, model2, model_name_for_election,
-            draft2, draft_max, force_split, primary_target_tx,
+            draft2, draft_max, force_split, cli.ctx_size, primary_target_tx,
             move |is_host, llama_ready| {
                 if llama_ready {
                     let n = node_for_cb.clone();
@@ -1256,7 +1260,7 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
             tokio::spawn(async move {
                 election::election_loop(
                     extra_node, extra_tunnel, 0, extra_bin, extra_path, extra_model_name.clone(),
-                    None, 8, false, extra_target_tx,
+                    None, 8, false, cli.ctx_size, extra_target_tx,
                     move |is_host, llama_ready| {
                         if is_host && llama_ready {
                             eprintln!("✅ [{extra_model_name}] ready (multi-model)");

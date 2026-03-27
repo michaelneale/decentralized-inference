@@ -127,6 +127,8 @@ pub async fn start_llama_server(
     model_bytes: u64,
     my_vram: u64,
     mmproj: Option<&Path>,
+    ctx_size_override: Option<u32>,
+    total_group_vram: Option<u64>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>> {
     let llama_server = bin_dir.join("llama-server");
     anyhow::ensure!(
@@ -159,11 +161,29 @@ pub async fn start_llama_server(
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.
-    // Context size: scale to available VRAM. We want 64K+ for agent workloads
-    // but must not OOM on small machines (e.g. 16GB with an 8B model).
+    // Context size: scale to available VRAM on the host node.
+    // In split mode (pipeline parallel), each node holds a range of layers
+    // and the KV cache for those layers is allocated on the same device.
+    // So both weights and KV are distributed. The host only needs VRAM for
+    // its share of weights + its share of KV. We estimate the host's weight
+    // share proportionally and let llama-server pick the largest -c that fits.
     const GB: u64 = 1_000_000_000;
-    let vram_after_model = my_vram.saturating_sub(model_bytes);
-    let ctx_size: u32 = if vram_after_model >= 30 * GB {
+    let host_model_bytes = if let Some(group_vram) = total_group_vram {
+        // Split mode: host holds its share of the weights
+        if group_vram > 0 {
+            let host_fraction = my_vram as f64 / group_vram as f64;
+            (model_bytes as f64 * host_fraction) as u64
+        } else {
+            model_bytes
+        }
+    } else {
+        // Local mode: host holds all weights
+        model_bytes
+    };
+    let vram_after_model = my_vram.saturating_sub(host_model_bytes);
+    let ctx_size: u32 = if let Some(override_ctx) = ctx_size_override {
+        override_ctx
+    } else if vram_after_model >= 30 * GB {
         65536  // 30GB+ free: full 64K context
     } else if vram_after_model >= 12 * GB {
         32768  // 12-30GB free: 32K
@@ -174,7 +194,10 @@ pub async fn start_llama_server(
     } else {
         4096   // <3GB free: minimal
     };
-    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB, {:.0}GB VRAM, {:.1}GB free)", model_bytes as f64 / GB as f64, my_vram as f64 / GB as f64, vram_after_model as f64 / GB as f64);
+    tracing::info!("Context size: {ctx_size} tokens (model {:.1}GB, host weights ~{:.1}GB, {:.0}GB VRAM, {:.1}GB free{})",
+        model_bytes as f64 / GB as f64, host_model_bytes as f64 / GB as f64,
+        my_vram as f64 / GB as f64, vram_after_model as f64 / GB as f64,
+        if total_group_vram.is_some() { " [split]" } else { "" });
 
     let mut args = vec![
         "-m".to_string(), model.to_string_lossy().to_string(),
@@ -185,6 +208,7 @@ pub async fn start_llama_server(
     }
     args.extend_from_slice(&[
         "-ngl".to_string(), "99".to_string(),
+        "-fa".to_string(), "on".to_string(),  // Flash attention: reduces KV memory, enables longer contexts
         "-fit".to_string(), "off".to_string(),
         "--no-mmap".to_string(),
         "--host".to_string(), "0.0.0.0".to_string(),
