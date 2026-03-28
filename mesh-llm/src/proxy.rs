@@ -55,6 +55,100 @@ pub fn extract_session_hint(buf: &[u8]) -> Option<String> {
     None
 }
 
+/// Compute a sticky routing key from a peeked HTTP request.
+///
+/// Tries (in order):
+/// 1. Explicit `"user"` or `"session_id"` field (cooperative clients)
+/// 2. Conversation fingerprint: hash of system prompt + first user message
+///    (this matches what llama.cpp's prompt cache keys on, so same conversation
+///    prefix → same backend → KV cache hit)
+///
+/// Returns None only for requests with no parseable body (e.g. GET /v1/models).
+pub fn sticky_key(buf: &[u8]) -> Option<u64> {
+    // Fast path: explicit session hint
+    if let Some(hint) = extract_session_hint(buf) {
+        return Some(hash_bytes(hint.as_bytes()));
+    }
+    // Slow path: fingerprint the conversation prefix
+    conversation_fingerprint(buf)
+}
+
+/// Hash the system prompt + first user message from a chat completion request.
+/// This is cheap — we already peeked the buffer, just scan for the text.
+fn conversation_fingerprint(buf: &[u8]) -> Option<u64> {
+    let s = std::str::from_utf8(buf).ok()?;
+    let body_start = s.find("\r\n\r\n")? + 4;
+    let body = &s[body_start..];
+
+    // We need system + first user message. Do lightweight JSON scanning
+    // rather than a full parse — these fields are always near the start.
+    let mut hasher: u64 = 0;
+    let mut found = false;
+
+    // Find "messages" array and extract role/content pairs
+    // We hash: all system messages + the first user message content
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
+            for msg in messages {
+                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                match role {
+                    "system" => {
+                        if let Some(content) = msg_content_text(msg) {
+                            hasher = hash_combine(hasher, hash_bytes(content.as_bytes()));
+                            found = true;
+                        }
+                    }
+                    "user" => {
+                        if let Some(content) = msg_content_text(msg) {
+                            hasher = hash_combine(hasher, hash_bytes(content.as_bytes()));
+                            found = true;
+                        }
+                        break; // Only first user message — that's the KV prefix key
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if found {
+        Some(hasher)
+    } else {
+        None
+    }
+}
+
+/// Extract text content from a message (handles both string and Anthropic-style content blocks).
+fn msg_content_text(msg: &serde_json::Value) -> Option<String> {
+    // Simple string content
+    if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
+        return Some(s.to_string());
+    }
+    // Anthropic-style: [{"type":"text","text":"..."}]
+    if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+        let mut out = String::new();
+        for b in blocks {
+            if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                out.push_str(t);
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    None
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325u64, |acc, &b| {
+        (acc ^ b as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn hash_combine(a: u64, b: u64) -> u64 {
+    a.wrapping_mul(31).wrapping_add(b)
+}
+
 /// Try to parse the JSON body from a peeked HTTP request buffer.
 pub fn extract_body_json(buf: &[u8]) -> Option<serde_json::Value> {
     let s = std::str::from_utf8(buf).ok()?;
@@ -134,8 +228,10 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
         }
     }
 
-    // Resolve target hosts by model name, fall back to any host
-    let target_hosts = if let Some(ref name) = effective_model {
+    // Resolve target hosts by model name, fall back to any host.
+    // Use conversation fingerprint to put the sticky-preferred host first
+    // so the same multi-turn conversation hits the same backend (KV cache affinity).
+    let mut target_hosts = if let Some(ref name) = effective_model {
         node.hosts_for_model(name).await
     } else {
         vec![]
@@ -149,6 +245,14 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
             }
         }
     } else {
+        // Sticky routing: rotate the host list so the conversation-preferred
+        // host is first. Falls back to the existing hash-of-node-id ordering.
+        if target_hosts.len() > 1 {
+            if let Some(key) = sticky_key(&buf[..n]) {
+                let idx = (key as usize) % target_hosts.len();
+                target_hosts.rotate_left(idx);
+            }
+        }
         target_hosts
     };
 
@@ -513,5 +617,75 @@ mod tests {
     fn test_extract_model_from_http_basic() {
         let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"Qwen3-30B\"}";
         assert_eq!(extract_model_from_http(req), Some("Qwen3-30B".to_string()));
+    }
+
+    // ── Sticky routing tests ──
+
+    #[test]
+    fn test_sticky_key_uses_session_hint_when_present() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"user\":\"alice\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let key = sticky_key(req);
+        assert!(key.is_some());
+
+        // Same user → same key
+        let req2 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"user\":\"alice\",\"messages\":[{\"role\":\"user\",\"content\":\"different message\"}]}";
+        assert_eq!(sticky_key(req), sticky_key(req2));
+
+        // Different user → different key
+        let req3 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"user\":\"bob\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        assert_ne!(sticky_key(req), sticky_key(req3));
+    }
+
+    #[test]
+    fn test_sticky_key_fingerprints_conversation_without_user() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"messages\":[{\"role\":\"system\",\"content\":\"You are helpful.\"},{\"role\":\"user\",\"content\":\"Hello\"}]}";
+        let key = sticky_key(req);
+        assert!(key.is_some());
+
+        // Same system + first user message → same key (multi-turn stickiness)
+        let req_turn2 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"messages\":[{\"role\":\"system\",\"content\":\"You are helpful.\"},{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hi!\"},{\"role\":\"user\",\"content\":\"How are you?\"}]}";
+        assert_eq!(sticky_key(req), sticky_key(req_turn2));
+    }
+
+    #[test]
+    fn test_sticky_key_different_system_prompt_different_key() {
+        let req1 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"system\",\"content\":\"You are a coder.\"},{\"role\":\"user\",\"content\":\"Hello\"}]}";
+        let req2 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"system\",\"content\":\"You are a poet.\"},{\"role\":\"user\",\"content\":\"Hello\"}]}";
+        assert_ne!(sticky_key(req1), sticky_key(req2));
+    }
+
+    #[test]
+    fn test_sticky_key_different_first_user_message_different_key() {
+        let req1 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":\"Write Python code\"}]}";
+        let req2 = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":\"Write Rust code\"}]}";
+        assert_ne!(sticky_key(req1), sticky_key(req2));
+    }
+
+    #[test]
+    fn test_sticky_key_none_for_get_request() {
+        let req = b"GET /v1/models HTTP/1.1\r\n\r\n";
+        assert!(sticky_key(req).is_none());
+    }
+
+    #[test]
+    fn test_sticky_key_none_for_empty_messages() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"messages\":[]}";
+        assert!(sticky_key(req).is_none());
+    }
+
+    #[test]
+    fn test_sticky_key_works_with_anthropic_content_blocks() {
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}]}";
+        let key = sticky_key(req);
+        assert!(key.is_some());
+    }
+
+    #[test]
+    fn test_conversation_fingerprint_stability() {
+        // The fingerprint must be deterministic — same input, same output, always.
+        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"hello\"}]}";
+        let k1 = sticky_key(req);
+        let k2 = sticky_key(req);
+        assert_eq!(k1, k2);
     }
 }

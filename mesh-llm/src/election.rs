@@ -111,6 +111,19 @@ impl ModelTargets {
         }
     }
 
+    /// Get target for a model using a sticky key (e.g. conversation fingerprint).
+    /// Same key always maps to the same target, giving KV cache affinity.
+    /// Falls back to `get()` if no targets exist.
+    pub fn get_sticky(&self, model: &str, sticky_key: u64) -> InferenceTarget {
+        match self.targets.get(model) {
+            Some(targets) if !targets.is_empty() => {
+                let idx = (sticky_key as usize) % targets.len();
+                targets[idx].clone()
+            }
+            _ => InferenceTarget::None,
+        }
+    }
+
     /// Get MoE target for a session (hash-based routing).
     /// Returns None if not in MoE mode.
     pub fn get_moe_target(&self, session_hint: &str) -> Option<InferenceTarget> {
@@ -1091,7 +1104,11 @@ async fn start_llama(
     // In split mode (pipeline parallel), pass total group VRAM so context size
     // accounts for the host only holding its share of layers. KV cache is also
     // distributed — each node holds KV for its own layers.
-    let group_vram = if !rpc_ports.is_empty() { Some(total as u64) } else { None };
+    let group_vram = if !rpc_ports.is_empty() {
+        Some(total as u64)
+    } else {
+        None
+    };
 
     match launch::start_llama_server(
         bin_dir,
@@ -1341,5 +1358,62 @@ mod tests {
         // Union should cover all 128
         let union: std::collections::HashSet<u32> = a_experts.union(&b_experts).cloned().collect();
         assert_eq!(union.len(), 128);
+    }
+
+    // ── Sticky routing ──
+
+    #[test]
+    fn test_get_sticky_consistent() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "qwen".to_string(),
+            vec![InferenceTarget::Remote(id_a), InferenceTarget::Remote(id_b)],
+        );
+
+        // Same key always picks the same target
+        let t1 = targets.get_sticky("qwen", 42);
+        let t2 = targets.get_sticky("qwen", 42);
+        assert_eq!(format!("{t1:?}"), format!("{t2:?}"));
+    }
+
+    #[test]
+    fn test_get_sticky_different_keys_can_differ() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "qwen".to_string(),
+            vec![InferenceTarget::Remote(id_a), InferenceTarget::Remote(id_b)],
+        );
+
+        // With 2 targets, keys 0 and 1 must pick different targets
+        let t_even = targets.get_sticky("qwen", 0);
+        let t_odd = targets.get_sticky("qwen", 1);
+        assert_ne!(format!("{t_even:?}"), format!("{t_odd:?}"));
+    }
+
+    #[test]
+    fn test_get_sticky_missing_model() {
+        let targets = ModelTargets::default();
+        let t = targets.get_sticky("nonexistent", 42);
+        assert!(matches!(t, InferenceTarget::None));
+    }
+
+    #[test]
+    fn test_get_sticky_single_target_always_same() {
+        let id = make_id(1);
+        let mut targets = ModelTargets::default();
+        targets
+            .targets
+            .insert("qwen".to_string(), vec![InferenceTarget::Remote(id)]);
+
+        // Any key → same target (only one option)
+        let t1 = targets.get_sticky("qwen", 0);
+        let t2 = targets.get_sticky("qwen", 999);
+        assert_eq!(format!("{t1:?}"), format!("{t2:?}"));
     }
 }

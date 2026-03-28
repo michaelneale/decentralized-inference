@@ -2082,7 +2082,8 @@ async fn api_proxy(
                         // Fall through to normal routing if pipeline setup fails
                     }
 
-                    // MoE routing: use session hint for sticky routing across shards
+                    // Routing: MoE uses session-sticky sharding, normal uses
+                    // conversation-fingerprint sticky routing for KV cache affinity.
                     let target = if targets.moe.is_some() {
                         let session_hint = proxy::extract_session_hint(&buf[..n])
                             .unwrap_or_else(|| format!("{_addr}"));
@@ -2090,7 +2091,14 @@ async fn api_proxy(
                             .get_moe_target(&session_hint)
                             .unwrap_or(first_available_target(&targets))
                     } else if let Some(ref name) = effective_model {
-                        let t = targets.get(name);
+                        // Sticky routing: hash the conversation prefix so the same
+                        // multi-turn conversation always hits the same backend,
+                        // maximising llama.cpp KV cache hits.
+                        let t = if let Some(key) = proxy::sticky_key(&buf[..n]) {
+                            targets.get_sticky(name, key)
+                        } else {
+                            targets.get(name)
+                        };
                         if matches!(t, election::InferenceTarget::None) {
                             tracing::debug!("Model '{}' not found, trying first available", name);
                             first_available_target(&targets)
