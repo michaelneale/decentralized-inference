@@ -73,6 +73,39 @@ function Set-GitHubEnv([string]$Name, [string]$Value) {
     }
 }
 
+function Resolve-RocmInstallRoot {
+    $candidates = @()
+
+    if ($env:ProgramFiles) {
+        $candidates += (Join-Path $env:ProgramFiles 'AMD\ROCm')
+        $candidates += (Join-Path $env:ProgramFiles 'AMD\HIP')
+    }
+
+    foreach ($base in $candidates) {
+        if (-not (Test-Path $base)) {
+            continue
+        }
+
+        $directHipConfig = Join-Path $base 'lib\cmake\hip\hip-config.cmake'
+        if (Test-Path $directHipConfig) {
+            return $base
+        }
+
+        $versionedRoot = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-Path (Join-Path $_.FullName 'lib\cmake\hip\hip-config.cmake')
+            } |
+            Sort-Object Name -Descending |
+            Select-Object -ExpandProperty FullName -First 1
+
+        if ($versionedRoot) {
+            return $versionedRoot
+        }
+    }
+
+    return $null
+}
+
 function Test-ExeHeader([string]$Path) {
     if (-not (Test-Path $Path)) {
         return $false
@@ -145,10 +178,7 @@ switch ($Backend.ToLowerInvariant()) {
             throw "HIP SDK installer exited with code $($process.ExitCode). See $installLog"
         }
 
-        $rocmRoot = @(
-            (Join-Path $env:ProgramFiles 'AMD\ROCm'),
-            (Join-Path $env:ProgramFiles 'AMD\HIP')
-        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        $rocmRoot = Resolve-RocmInstallRoot
 
         if (-not $rocmRoot) {
             throw "HIP SDK install completed, but ROCM_PATH was not found. See $installLog"

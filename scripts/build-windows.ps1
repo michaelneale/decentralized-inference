@@ -116,28 +116,47 @@ function Ensure-MsvcToolchain {
         return
     }
 
+    $programFilesX86 = ${env:ProgramFiles(x86)}
     $vswhereCandidates = @()
-    if ($env:ProgramFiles_x86) {
-        $vswhereCandidates += (Join-Path $env:ProgramFiles_x86 "Microsoft Visual Studio\Installer\vswhere.exe")
+    if ($programFilesX86) {
+        $vswhereCandidates += (Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe")
     }
     if ($env:ProgramFiles) {
         $vswhereCandidates += (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe")
     }
-
-    $vswhere = $vswhereCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $vswhere) {
-        throw "vswhere.exe not found. Install Visual Studio Build Tools with the MSVC C++ toolchain."
+    $vswhereFromPath = Resolve-CommandPath "vswhere"
+    if ($vswhereFromPath) {
+        $vswhereCandidates += $vswhereFromPath
     }
 
-    $installationPathOutput = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
-    $installationPath = if ($installationPathOutput) { $installationPathOutput.Trim() } else { "" }
-    if (-not $installationPath) {
-        throw "Visual Studio Build Tools with the MSVC C++ toolchain were not found."
+    $vcvars64 = $null
+    $vswhere = $vswhereCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique -First 1
+    if ($vswhere) {
+        $installationPathOutput = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+        $installationPath = if ($installationPathOutput) { $installationPathOutput.Trim() } else { "" }
+        if ($installationPath) {
+            $candidate = Join-Path $installationPath "VC\Auxiliary\Build\vcvars64.bat"
+            if (Test-Path $candidate) {
+                $vcvars64 = $candidate
+            }
+        }
     }
 
-    $vcvars64 = Join-Path $installationPath "VC\Auxiliary\Build\vcvars64.bat"
+    if (-not $vcvars64) {
+        $searchRoots = @($programFilesX86, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique
+        foreach ($searchRoot in $searchRoots) {
+            $candidate = Get-ChildItem -Path $searchRoot -Filter vcvars64.bat -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -like '*Microsoft Visual Studio*VC\Auxiliary\Build\vcvars64.bat' } |
+                Select-Object -First 1
+            if ($candidate) {
+                $vcvars64 = $candidate.FullName
+                break
+            }
+        }
+    }
+
     if (-not (Test-Path $vcvars64)) {
-        throw "vcvars64.bat not found under Visual Studio installation: $installationPath"
+        throw "Visual Studio Build Tools with vcvars64.bat were not found on this Windows runner."
     }
 
     Import-CmdEnvironment "`"$vcvars64`" >nul"
@@ -147,12 +166,53 @@ function Ensure-MsvcToolchain {
     }
 }
 
-function Resolve-RocmRoot {
-    if ($env:ROCM_PATH -and (Test-Path $env:ROCM_PATH)) {
-        return $env:ROCM_PATH
+function Resolve-HipPackageRoot {
+    $roots = @()
+    if ($env:HIP_PATH) {
+        $roots += $env:HIP_PATH
     }
-    if ($env:HIP_PATH -and (Test-Path $env:HIP_PATH)) {
-        return $env:HIP_PATH
+    if ($env:ROCM_PATH) {
+        $roots += $env:ROCM_PATH
+    }
+
+    $roots = $roots | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+
+        $directConfig = Join-Path $root "lib\cmake\hip\hip-config.cmake"
+        if (Test-Path $directConfig) {
+            return [PSCustomObject]@{
+                Root   = $root
+                HipDir = Split-Path -Parent $directConfig
+            }
+        }
+
+        $versionedRoot = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-Path (Join-Path $_.FullName "lib\cmake\hip\hip-config.cmake")
+            } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+
+        if ($versionedRoot) {
+            $configPath = Join-Path $versionedRoot.FullName "lib\cmake\hip\hip-config.cmake"
+            return [PSCustomObject]@{
+                Root   = $versionedRoot.FullName
+                HipDir = Split-Path -Parent $configPath
+            }
+        }
+    }
+
+    return $null
+}
+
+function Resolve-RocmRoot {
+    $hipPackage = Resolve-HipPackageRoot
+    if ($hipPackage) {
+        return $hipPackage.Root
     }
     if ($env:ProgramFiles) {
         foreach ($candidate in @(
@@ -250,21 +310,34 @@ function Ensure-CudaToolchain {
 
 function Ensure-RocmToolchain {
     $rocmRoot = Resolve-RocmRoot
+    $hipPackage = Resolve-HipPackageRoot
     if ($rocmRoot) {
         $binDir = Join-Path $rocmRoot "bin"
         $llvmBinDir = Join-Path $rocmRoot "llvm\bin"
         Add-ToPath $binDir
         Add-ToPath $llvmBinDir
-        if (-not $env:ROCM_PATH) {
-            $env:ROCM_PATH = $rocmRoot
-        }
-        if (-not $env:HIP_PATH) {
-            $env:HIP_PATH = $rocmRoot
-        }
+        $env:ROCM_PATH = $rocmRoot
+        $env:HIP_PATH = $rocmRoot
         $env:CMAKE_PREFIX_PATH = if ($env:CMAKE_PREFIX_PATH) {
             "$rocmRoot;$env:CMAKE_PREFIX_PATH"
         } else {
             $rocmRoot
+        }
+        if ($hipPackage) {
+            $env:hip_DIR = $hipPackage.HipDir
+        }
+        if (-not $env:HIPCXX) {
+            foreach ($candidate in @(
+                (Join-Path $llvmBinDir "clang++.exe"),
+                (Join-Path $binDir "clang++.exe"),
+                (Join-Path $llvmBinDir "clang.exe"),
+                (Join-Path $binDir "clang.exe")
+            )) {
+                if (Test-Path $candidate) {
+                    $env:HIPCXX = $candidate
+                    break
+                }
+            }
         }
     }
 
@@ -288,8 +361,12 @@ function Ensure-RocmToolchain {
             $hipRoot = (& $hipConfig -R).Trim()
             if ($hipRoot -and (Test-Path $hipRoot)) {
                 $env:HIP_PATH = $hipRoot
-                if (-not $env:ROCM_PATH) {
-                    $env:ROCM_PATH = $hipRoot
+                $env:ROCM_PATH = $hipRoot
+                if (-not $hipPackage) {
+                    $hipPackage = Resolve-HipPackageRoot
+                    if ($hipPackage) {
+                        $env:hip_DIR = $hipPackage.HipDir
+                    }
                 }
             }
         } catch {
@@ -299,6 +376,14 @@ function Ensure-RocmToolchain {
     if (-not (Resolve-CommandPath "hipconfig") -and -not (Resolve-CommandPath "hipInfo") -and -not $rocmRoot) {
         throw "ROCm/HIP toolchain not found. Install ROCm on Windows and ensure hipconfig or hipInfo is available."
     }
+
+    if (-not $hipPackage) {
+        $hipPackage = Resolve-HipPackageRoot
+    }
+    if (-not $hipPackage) {
+        throw "HIP package config not found. Expected hip-config.cmake under the HIP SDK installation."
+    }
+    $env:hip_DIR = $hipPackage.HipDir
 }
 
 function Ensure-VulkanToolchain {
@@ -420,6 +505,15 @@ Invoke-InRepo {
         }
         "rocm" {
             $cmakeArgs += "-DGGML_HIP=ON"
+            if ($env:HIPCXX) {
+                $cmakeArgs += "-DCMAKE_CXX_COMPILER=$env:HIPCXX"
+            }
+            if ($env:hip_DIR) {
+                $cmakeArgs += "-Dhip_DIR=$env:hip_DIR"
+            }
+            if ($env:ROCM_PATH) {
+                $cmakeArgs += "-DCMAKE_PREFIX_PATH=$env:ROCM_PATH"
+            }
             if ($RocmArch) {
                 $cmakeArgs += "-DAMDGPU_TARGETS=$RocmArch"
             }
