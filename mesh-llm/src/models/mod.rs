@@ -611,22 +611,23 @@ pub async fn download_curated_model(model: &CuratedModel) -> Result<PathBuf> {
 }
 
 pub async fn download_huggingface_model(repo: &str, file: &str) -> Result<PathBuf> {
-    let filename = Path::new(file)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("Cannot extract filename from {file}"))?;
-    let dest = primary_models_dir().join(filename);
-    if existing_download(&dest).await {
-        return Ok(dest);
-    }
-    let url = huggingface_resolve_url(repo, file);
-    eprintln!("📥 Downloading {repo}/{file}...");
-    download_url(&url, &dest).await?;
-    Ok(dest)
+    let assets = huggingface_download_assets(repo, file)?;
+    download_remote_assets(&format!("{repo}/{file}"), assets).await
 }
 
 pub async fn download_url(url: &str, dest: &Path) -> Result<()> {
     download_with_resume(dest, url, |_, _| {}).await
+}
+
+pub fn huggingface_download_assets(repo: &str, file: &str) -> Result<Vec<(String, String)>> {
+    remote_split_parts(file)?
+        .unwrap_or_else(|| vec![file.to_string()])
+        .into_iter()
+        .map(|part| {
+            let filename = remote_basename(&part)?;
+            Ok((filename, huggingface_resolve_url(repo, &part)))
+        })
+        .collect()
 }
 
 pub async fn download_url_with_progress<F>(url: &str, dest: &Path, on_progress: F) -> Result<()>
@@ -680,6 +681,89 @@ fn remote_filename(input: &str) -> Result<String> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .ok_or_else(|| anyhow!("Cannot extract filename from URL: {input}"))
+}
+
+fn remote_basename(input: &str) -> Result<String> {
+    Path::new(input)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("Cannot extract filename from {input}"))
+}
+
+fn remote_split_parts(input: &str) -> Result<Option<Vec<String>>> {
+    let re = regex_lite::Regex::new(r"-00001-of-(\d{5})\.gguf$").unwrap();
+    let Some(caps) = re.captures(input) else {
+        return Ok(None);
+    };
+    let part_count: u32 = caps[1]
+        .parse()
+        .with_context(|| format!("Parse split GGUF part count from {input}"))?;
+    let parts = (1..=part_count)
+        .map(|index| input.replacen("-00001-of-", &format!("-{index:05}-of-"), 1))
+        .collect();
+    Ok(Some(parts))
+}
+
+async fn download_remote_assets(label: &str, assets: Vec<(String, String)>) -> Result<PathBuf> {
+    let dir = primary_models_dir();
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let primary = assets
+        .first()
+        .map(|(file, _)| dir.join(file))
+        .ok_or_else(|| anyhow!("No download assets for {label}"))?;
+
+    let mut all_present = true;
+    for (file, _) in &assets {
+        if !existing_download(&dir.join(file)).await {
+            all_present = false;
+            break;
+        }
+    }
+    if all_present {
+        return Ok(primary);
+    }
+
+    eprintln!("📥 Downloading {label}...");
+    let mut needed = Vec::new();
+    for (file, url) in assets {
+        let path = dir.join(&file);
+        if existing_download(&path).await {
+            let size = tokio::fs::metadata(&path)
+                .await
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            eprintln!("  ✅ {file} already exists ({:.1}GB)", size as f64 / 1e9);
+            continue;
+        }
+        needed.push((file, url));
+    }
+
+    if needed.len() > 1 {
+        eprintln!("  ⚡ Downloading {} files in parallel...", needed.len());
+        let total = needed.len();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for (file, url) in needed {
+            let path = dir.join(&file);
+            let completed = completed.clone();
+            handles.push(tokio::spawn(async move {
+                download_url(&url, &path).await?;
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                eprintln!("  ✅ {file} [{done}/{total}]");
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+        for handle in handles {
+            handle.await??;
+        }
+    } else if let Some((file, url)) = needed.into_iter().next() {
+        download_url(&url, &dir.join(file)).await?;
+    }
+
+    Ok(primary)
 }
 
 async fn existing_download(path: &Path) -> bool {
@@ -966,6 +1050,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(matched.id, "Qwen3.5-27B-Q4_K_M");
+    }
+
+    #[test]
+    fn expands_split_huggingface_download_assets() {
+        let assets = huggingface_download_assets(
+            "Qwen/Qwen3-Coder-Next-GGUF",
+            "Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf",
+        )
+        .unwrap();
+        assert_eq!(assets.len(), 4);
+        assert_eq!(assets[0].0, "Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf");
+        assert_eq!(
+            assets[3].1,
+            "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF/resolve/main/Qwen3-Coder-Next-Q4_K_M/Qwen3-Coder-Next-Q4_K_M-00004-of-00004.gguf"
+        );
     }
 
     #[test]

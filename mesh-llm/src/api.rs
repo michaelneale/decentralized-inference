@@ -694,14 +694,11 @@ async fn run_model_download_job(
             )
         }
         models::ExactModelRef::HuggingFace { repo, file } => {
-            let filename = std::path::Path::new(file)
-                .file_name()
-                .and_then(|value| value.to_str())
+            let mut assets = models::huggingface_download_assets(repo, file)?;
+            let filename = assets
+                .first()
+                .map(|(file, _)| file.clone())
                 .ok_or_else(|| anyhow::anyhow!("Cannot extract filename from {file}"))?;
-            let mut assets = vec![(
-                filename.to_string(),
-                models::huggingface_resolve_url(repo, file),
-            )];
             let draft_path = if request.draft {
                 models::show_exact_model(&request.model_ref)
                     .await
