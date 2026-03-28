@@ -56,7 +56,6 @@ jobs:
 
   build_linux_cuda:
     name: Build Linux CUDA
-    if: false
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:12.8.0-devel-ubuntu22.04
@@ -109,7 +108,6 @@ jobs:
 
   build_linux_amd:
     name: Build Linux AMD ROCm
-    if: false
     runs-on: ubuntu-latest
     container:
       image: rocm/dev-ubuntu-24.04:7.0-complete
@@ -217,6 +215,8 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build
+      - build_linux_cuda
+      - build_linux_amd
       - build_linux_vulkan
 
     steps:

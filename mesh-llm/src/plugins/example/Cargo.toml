@@ -1,6 +1,6 @@
 [package]
 name = "plugin-surface-example"
-version = "0.48.8"
+version = "0.48.9"
 edition = "2021"
 publish = false
 
