@@ -159,6 +159,7 @@ struct Qwen3Engine {
     chat_template: String,
     model: qwen3::Model,
     stop_ids: Vec<u32>,
+    prompt_cache: Option<PromptCacheEntry>,
 }
 
 #[cfg(feature = "native-mlx")]
@@ -1793,9 +1794,11 @@ impl FamilyAdapter for Qwen3Engine {
             &mut self.model,
             &mut self.tokenizer,
             &self.stop_ids,
+            &prompt_ids,
             &prompt_tokens,
             max_tokens,
             temperature,
+            &mut self.prompt_cache,
         )
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
@@ -1826,9 +1829,11 @@ impl FamilyAdapter for Qwen3Engine {
             &mut self.model,
             &mut self.tokenizer,
             &self.stop_ids,
+            &prompt_ids,
             &prompt_tokens,
             max_tokens,
             temperature,
+            &mut self.prompt_cache,
         )
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
@@ -1857,10 +1862,12 @@ impl FamilyAdapter for Qwen3Engine {
             &mut self.model,
             &mut self.tokenizer,
             &self.stop_ids,
+            &prompt_ids,
             &prompt_tokens,
             max_tokens,
             temperature,
             on_chunk,
+            &mut self.prompt_cache,
         )
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
@@ -1891,10 +1898,12 @@ impl FamilyAdapter for Qwen3Engine {
             &mut self.model,
             &mut self.tokenizer,
             &self.stop_ids,
+            &prompt_ids,
             &prompt_tokens,
             max_tokens,
             temperature,
             on_chunk,
+            &mut self.prompt_cache,
         )
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
@@ -2040,6 +2049,7 @@ fn load_qwen3_engine(model_path: &Path) -> Result<Qwen3Engine> {
         chat_template: normalize_qwen3_chat_template(chat_template),
         model,
         stop_ids,
+        prompt_cache: None,
     })
 }
 
@@ -2251,6 +2261,91 @@ fn get_or_create_llama_prefill(
 }
 
 #[cfg(feature = "native-mlx")]
+fn prefill_qwen3_prompt(
+    model: &mut qwen3::Model,
+    prompt_tokens: &Array,
+) -> Result<(Array, Vec<Option<ConcatKeyValueCache>>)> {
+    let mut cache = Vec::<Option<ConcatKeyValueCache>>::new();
+    let input = qwen3::ModelInput {
+        inputs: prompt_tokens,
+        mask: None,
+        cache: &mut cache,
+    };
+    let logits = model.forward(input)?;
+    let logits = logits.index((.., -1, ..));
+    eval([&logits])?;
+    Ok((logits, cache))
+}
+
+#[cfg(feature = "native-mlx")]
+fn extend_qwen3_prefill_one_token_at_a_time(
+    model: &mut qwen3::Model,
+    prompt_ids: &[u32],
+    start_at: usize,
+    mut cache: Vec<Option<ConcatKeyValueCache>>,
+) -> Result<(Array, Vec<Option<ConcatKeyValueCache>>)> {
+    let mut last_logits = None;
+    for token_id in &prompt_ids[start_at..] {
+        let chunk_tokens = build_prompt_array(&[*token_id])?;
+        let input = qwen3::ModelInput {
+            inputs: &chunk_tokens,
+            mask: None,
+            cache: &mut cache,
+        };
+        let logits = model.forward(input)?;
+        let logits = logits.index((.., -1, ..));
+        eval([&logits])?;
+        last_logits = Some(logits.clone());
+    }
+    let prefill_logits =
+        last_logits.ok_or_else(|| anyhow!("qwen3 prompt must contain at least one token"))?;
+    Ok((prefill_logits, cache))
+}
+
+#[cfg(feature = "native-mlx")]
+fn get_or_create_qwen3_prefill(
+    model: &mut qwen3::Model,
+    prompt_ids: &[u32],
+    prompt_tokens: &Array,
+    prompt_cache: &mut Option<PromptCacheEntry>,
+) -> Result<(Array, Vec<Option<ConcatKeyValueCache>>, usize)> {
+    if let Some(entry) = prompt_cache.as_ref() {
+        let reused_prompt_tokens = common_prefix_len(&entry.prompt_ids, prompt_ids);
+        if entry.prompt_ids == prompt_ids {
+            return Ok((
+                entry.prefill_logits.clone(),
+                entry.prefill_cache.clone(),
+                entry.prompt_ids.len(),
+            ));
+        }
+
+        if reused_prompt_tokens == entry.prompt_ids.len() && reused_prompt_tokens < prompt_ids.len()
+        {
+            let (prefill_logits, prefill_cache) = extend_qwen3_prefill_one_token_at_a_time(
+                model,
+                prompt_ids,
+                reused_prompt_tokens,
+                entry.prefill_cache.clone(),
+            )?;
+            *prompt_cache = Some(PromptCacheEntry {
+                prompt_ids: prompt_ids.to_vec(),
+                prefill_cache: prefill_cache.clone(),
+                prefill_logits: prefill_logits.clone(),
+            });
+            return Ok((prefill_logits, prefill_cache, reused_prompt_tokens));
+        }
+    }
+
+    let (prefill_logits, prefill_cache) = prefill_qwen3_prompt(model, prompt_tokens)?;
+    *prompt_cache = Some(PromptCacheEntry {
+        prompt_ids: prompt_ids.to_vec(),
+        prefill_cache: prefill_cache.clone(),
+        prefill_logits: prefill_logits.clone(),
+    });
+    Ok((prefill_logits, prefill_cache, 0))
+}
+
+#[cfg(feature = "native-mlx")]
 fn generate_llama_tokens(
     model: &mut llama::Model,
     tokenizer: &mut Tokenizer,
@@ -2268,7 +2363,6 @@ fn generate_llama_tokens(
         get_or_create_llama_prefill(model, prompt_ids, prompt_tokens, prompt_cache)?;
     set_profile_reused_prompt_tokens(reused_prompt_tokens);
     let mut y = llama::sample(&prefill_logits, temperature)?;
-    eval([&y])?;
     let first_token_ms = Some(duration_ms(decode_started.elapsed()));
     let mut token_id = y.item::<u32>();
     if stop_ids.contains(&token_id) {
@@ -2286,7 +2380,6 @@ fn generate_llama_tokens(
         };
         let logits = model.forward(input)?;
         y = llama::sample(&logits.index((.., -1, ..)), temperature)?;
-        eval([&y])?;
         token_id = y.item::<u32>();
         if stop_ids.contains(&token_id) {
             finish_reason = "stop";
@@ -2326,7 +2419,6 @@ fn stream_llama_tokens(
         get_or_create_llama_prefill(model, prompt_ids, prompt_tokens, prompt_cache)?;
     set_profile_reused_prompt_tokens(reused_prompt_tokens);
     let mut y = llama::sample(&prefill_logits, temperature)?;
-    eval([&y])?;
     let first_token_ms = Some(duration_ms(decode_started.elapsed()));
     let mut token_id = y.item::<u32>();
     if !stop_ids.contains(&token_id) {
@@ -2352,7 +2444,6 @@ fn stream_llama_tokens(
         };
         let logits = model.forward(input)?;
         y = llama::sample(&logits.index((.., -1, ..)), temperature)?;
-        eval([&y])?;
         token_id = y.item::<u32>();
         if stop_ids.contains(&token_id) {
             finish_reason = "stop";
@@ -2395,7 +2486,6 @@ fn generate_gemma2_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2437,7 +2527,6 @@ fn stream_gemma2_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2478,7 +2567,6 @@ fn generate_gemma3_text_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2519,7 +2607,6 @@ fn stream_gemma3_text_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2565,7 +2652,6 @@ fn generate_mistral_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2611,7 +2697,6 @@ fn stream_mistral_tokens(
 
     for (token, _) in generate.zip(0..max_tokens) {
         let token = token?;
-        eval([&token])?;
         if first_token_ms.is_none() {
             first_token_ms = Some(duration_ms(decode_started.elapsed()));
         }
@@ -2639,25 +2724,37 @@ fn generate_qwen3_tokens(
     model: &mut qwen3::Model,
     tokenizer: &mut Tokenizer,
     stop_ids: &[u32],
+    prompt_ids: &[u32],
     prompt_tokens: &Array,
     max_tokens: usize,
     temperature: f32,
+    prompt_cache: &mut Option<PromptCacheEntry>,
 ) -> Result<(String, &'static str, usize)> {
     let decode_started = Instant::now();
-    let mut first_token_ms = None;
-    let mut cache = Vec::<Option<ConcatKeyValueCache>>::new();
     let mut output_ids = Vec::new();
     let mut finish_reason = "length";
-    let generate =
-        qwen3::Generate::<ConcatKeyValueCache>::new(model, &mut cache, temperature, prompt_tokens);
+    let (prefill_logits, mut cache, reused_prompt_tokens) =
+        get_or_create_qwen3_prefill(model, prompt_ids, prompt_tokens, prompt_cache)?;
+    set_profile_reused_prompt_tokens(reused_prompt_tokens);
+    let mut y = qwen3::sample(&prefill_logits, temperature)?;
+    let first_token_ms = Some(duration_ms(decode_started.elapsed()));
+    let mut token_id = y.item::<u32>();
+    if stop_ids.contains(&token_id) {
+        finish_reason = "stop";
+    } else {
+        output_ids.push(token_id);
+    }
 
-    for (token, _) in generate.zip(0..max_tokens) {
-        let token = token?;
-        eval([&token])?;
-        if first_token_ms.is_none() {
-            first_token_ms = Some(duration_ms(decode_started.elapsed()));
-        }
-        let token_id = token.item::<u32>();
+    while output_ids.len() < max_tokens && finish_reason != "stop" {
+        let inputs = y.index((.., NewAxis));
+        let input = qwen3::ModelInput {
+            inputs: &inputs,
+            mask: None,
+            cache: &mut cache,
+        };
+        let logits = model.forward(input)?;
+        y = qwen3::sample(&logits.index((.., -1, ..)), temperature)?;
+        token_id = y.item::<u32>();
         if stop_ids.contains(&token_id) {
             finish_reason = "stop";
             break;
@@ -2680,41 +2777,64 @@ fn stream_qwen3_tokens(
     model: &mut qwen3::Model,
     tokenizer: &mut Tokenizer,
     stop_ids: &[u32],
+    prompt_ids: &[u32],
     prompt_tokens: &Array,
     max_tokens: usize,
     temperature: f32,
     on_chunk: &mut dyn FnMut(String) -> Result<(), ApiError>,
+    prompt_cache: &mut Option<PromptCacheEntry>,
 ) -> Result<(&'static str, usize)> {
     let decode_started = Instant::now();
-    let mut first_token_ms = None;
-    let mut cache = Vec::<Option<ConcatKeyValueCache>>::new();
     let mut completion_tokens = 0usize;
     let mut finish_reason = "length";
     let mut output_ids = Vec::new();
-    let mut emitted_text = String::new();
-    let generate =
-        qwen3::Generate::<ConcatKeyValueCache>::new(model, &mut cache, temperature, prompt_tokens);
-
-    for (token, _) in generate.zip(0..max_tokens) {
-        let token = token?;
-        eval([&token])?;
-        if first_token_ms.is_none() {
-            first_token_ms = Some(duration_ms(decode_started.elapsed()));
+    let mut in_thinking = false;
+    let (prefill_logits, mut cache, reused_prompt_tokens) =
+        get_or_create_qwen3_prefill(model, prompt_ids, prompt_tokens, prompt_cache)?;
+    set_profile_reused_prompt_tokens(reused_prompt_tokens);
+    let mut y = qwen3::sample(&prefill_logits, temperature)?;
+    let first_token_ms = Some(duration_ms(decode_started.elapsed()));
+    let think_start = "<think>";
+    let think_end = "</think>";
+    let mut token_id = y.item::<u32>();
+    if !stop_ids.contains(&token_id) {
+        output_ids.push(token_id);
+        completion_tokens += 1;
+        let chunk = decode_token_chunk(tokenizer, token_id)?;
+        if chunk == think_start {
+            in_thinking = true;
+        } else if chunk == think_end {
+            in_thinking = false;
+        } else if !in_thinking && !chunk.is_empty() {
+            on_chunk(chunk).map_err(|err| anyhow!(err.message))?;
         }
-        let token_id = token.item::<u32>();
+    } else {
+        finish_reason = "stop";
+    }
+
+    while completion_tokens < max_tokens && finish_reason != "stop" {
+        let inputs = y.index((.., NewAxis));
+        let input = qwen3::ModelInput {
+            inputs: &inputs,
+            mask: None,
+            cache: &mut cache,
+        };
+        let logits = model.forward(input)?;
+        y = qwen3::sample(&logits.index((.., -1, ..)), temperature)?;
+        token_id = y.item::<u32>();
         if stop_ids.contains(&token_id) {
             finish_reason = "stop";
             break;
         }
         output_ids.push(token_id);
         completion_tokens += 1;
-        let decoded = tokenizer
-            .decode(&output_ids, true)
-            .map_err(|err| anyhow!(err.to_string()))?;
-        let sanitized = sanitize_qwen3_output(&decoded);
-        if let Some(chunk) = emitted_suffix(&emitted_text, &sanitized) {
+        let chunk = decode_token_chunk(tokenizer, token_id)?;
+        if chunk == think_start {
+            in_thinking = true;
+        } else if chunk == think_end {
+            in_thinking = false;
+        } else if !in_thinking && !chunk.is_empty() {
             on_chunk(chunk).map_err(|err| anyhow!(err.message))?;
-            emitted_text = sanitized;
         }
     }
 
@@ -3591,6 +3711,55 @@ mod tests {
         assert_eq!(
             reused_repeat,
             extended_ids.len(),
+            "exact repeated prompt should reuse the full cached prompt"
+        );
+    }
+
+    #[cfg(feature = "native-mlx")]
+    #[test]
+    #[ignore = "requires a real local Qwen3 MLX model"]
+    fn real_qwen3_exact_repeat_cache_smoke() {
+        let path =
+            resolve_or_download_test_model(ModelFamily::Qwen3).expect("resolve qwen3 test model");
+        let Some(path) = path else {
+            eprintln!("skipping real_qwen3_exact_repeat_cache_smoke: no local model configured");
+            return;
+        };
+
+        let mut engine = load_qwen3_engine(&path).expect("load qwen3 engine");
+
+        let prompt = "Write exactly three short words about startup speed, separated by spaces.";
+
+        let prompt_ids = render_qwen3_completion_prompt(
+            &mut engine.tokenizer,
+            engine.chat_template.clone(),
+            prompt,
+        )
+        .map(|ids| prepare_qwen3_prompt_ids(&engine.tokenizer, ids))
+        .expect("encode qwen3 prompt");
+        let prompt_tokens = build_prompt_array(&prompt_ids).expect("build qwen3 prompt array");
+        let (_, _, reused_base) = get_or_create_qwen3_prefill(
+            &mut engine.model,
+            &prompt_ids,
+            &prompt_tokens,
+            &mut engine.prompt_cache,
+        )
+        .expect("prefill base prompt");
+        assert_eq!(
+            reused_base, 0,
+            "first prompt should not reuse cached tokens"
+        );
+
+        let (_, _, reused_repeat) = get_or_create_qwen3_prefill(
+            &mut engine.model,
+            &prompt_ids,
+            &prompt_tokens,
+            &mut engine.prompt_cache,
+        )
+        .expect("prefill repeated prompt");
+        assert_eq!(
+            reused_repeat,
+            prompt_ids.len(),
             "exact repeated prompt should reuse the full cached prompt"
         );
     }
