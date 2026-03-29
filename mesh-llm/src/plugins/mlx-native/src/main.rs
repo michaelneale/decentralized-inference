@@ -129,6 +129,15 @@ struct LlamaEngine {
 }
 
 #[cfg(feature = "native-mlx")]
+struct Qwen2Engine {
+    tokenizer: Tokenizer,
+    chat_template: Option<String>,
+    model: qwen2::Model,
+    stop_ids: Vec<u32>,
+    prompt_cache: Option<PromptCacheEntry>,
+}
+
+#[cfg(feature = "native-mlx")]
 struct Gemma2Engine {
     tokenizer: Tokenizer,
     chat_template: Option<String>,
@@ -1415,6 +1424,121 @@ impl FamilyAdapter for LlamaEngine {
 }
 
 #[cfg(feature = "native-mlx")]
+impl FamilyAdapter for Qwen2Engine {
+    fn generate_completion(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+    ) -> GenerationResult {
+        let prompt_ids = encode_prompt_ids(&mut self.tokenizer, prompt)?;
+        let prompt_tokens =
+            build_prompt_array(&prompt_ids).map_err(|err| ApiError::internal(err.to_string()))?;
+        let (text, finish_reason, completion_tokens) = generate_qwen2_tokens(
+            &mut self.model,
+            &mut self.tokenizer,
+            &self.stop_ids,
+            &prompt_ids,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            &mut self.prompt_cache,
+        )
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+
+        Ok((text, finish_reason, prompt_ids.len(), completion_tokens))
+    }
+
+    fn generate_chat(
+        &mut self,
+        messages: &[ChatMessage],
+        max_tokens: usize,
+        temperature: f32,
+    ) -> GenerationResult {
+        let prompt_ids =
+            render_chat_prompt(&mut self.tokenizer, self.chat_template.clone(), messages)
+                .map_err(ApiError::bad_request)?;
+        let prompt_tokens =
+            build_prompt_array(&prompt_ids).map_err(|err| ApiError::internal(err.to_string()))?;
+        let (text, finish_reason, completion_tokens) = generate_qwen2_tokens(
+            &mut self.model,
+            &mut self.tokenizer,
+            &self.stop_ids,
+            &prompt_ids,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            &mut self.prompt_cache,
+        )
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+
+        Ok((text, finish_reason, prompt_ids.len(), completion_tokens))
+    }
+
+    fn stream_completion(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        on_chunk: &mut dyn FnMut(String) -> Result<(), ApiError>,
+    ) -> StreamingGenerationResult {
+        let prompt_ids = encode_prompt_ids(&mut self.tokenizer, prompt)?;
+        let prompt_tokens =
+            build_prompt_array(&prompt_ids).map_err(|err| ApiError::internal(err.to_string()))?;
+        let (finish_reason, completion_tokens) = stream_qwen2_tokens(
+            &mut self.model,
+            &mut self.tokenizer,
+            &self.stop_ids,
+            &prompt_ids,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            on_chunk,
+            &mut self.prompt_cache,
+        )
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+
+        Ok(GenerationStats {
+            finish_reason,
+            prompt_tokens: prompt_ids.len(),
+            completion_tokens,
+        })
+    }
+
+    fn stream_chat(
+        &mut self,
+        messages: &[ChatMessage],
+        max_tokens: usize,
+        temperature: f32,
+        on_chunk: &mut dyn FnMut(String) -> Result<(), ApiError>,
+    ) -> StreamingGenerationResult {
+        let prompt_ids =
+            render_chat_prompt(&mut self.tokenizer, self.chat_template.clone(), messages)
+                .map_err(ApiError::bad_request)?;
+        let prompt_tokens =
+            build_prompt_array(&prompt_ids).map_err(|err| ApiError::internal(err.to_string()))?;
+        let (finish_reason, completion_tokens) = stream_qwen2_tokens(
+            &mut self.model,
+            &mut self.tokenizer,
+            &self.stop_ids,
+            &prompt_ids,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            on_chunk,
+            &mut self.prompt_cache,
+        )
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+
+        Ok(GenerationStats {
+            finish_reason,
+            prompt_tokens: prompt_ids.len(),
+            completion_tokens,
+        })
+    }
+}
+
+#[cfg(feature = "native-mlx")]
 impl FamilyAdapter for Gemma2Engine {
     fn generate_completion(
         &mut self,
@@ -2020,18 +2144,17 @@ fn load_mistral_engine(model_path: &Path) -> Result<MistralEngine> {
 }
 
 #[cfg(feature = "native-mlx")]
-fn load_qwen2_engine(model_path: &Path) -> Result<LlamaEngine> {
+fn load_qwen2_engine(model_path: &Path) -> Result<Qwen2Engine> {
     let tokenizer = Tokenizer::from_file(model_path.join("tokenizer.json"))
         .map_err(|err| anyhow!(err.to_string()))?;
     let model = qwen2::load_qwen2_model(model_path)?;
     let stop_ids = stop_token_ids(model_path, &tokenizer)?;
-    Ok(LlamaEngine {
+    Ok(Qwen2Engine {
         tokenizer,
         chat_template: load_chat_template(model_path)?,
         model,
         stop_ids,
         prompt_cache: None,
-        _compat_dir: None,
     })
 }
 
@@ -2205,6 +2328,16 @@ fn get_or_create_llama_prefill(
 }
 
 #[cfg(feature = "native-mlx")]
+fn get_or_create_qwen2_prefill(
+    model: &mut qwen2::Model,
+    prompt_ids: &[u32],
+    prompt_tokens: &Array,
+    prompt_cache: &mut Option<PromptCacheEntry>,
+) -> Result<(Array, Vec<Option<ConcatKeyValueCache>>, usize)> {
+    get_or_create_llama_prefill(model, prompt_ids, prompt_tokens, prompt_cache)
+}
+
+#[cfg(feature = "native-mlx")]
 fn prefill_qwen3_prompt(
     model: &mut qwen3::Model,
     prompt_tokens: &Array,
@@ -2368,6 +2501,29 @@ fn generate_llama_tokens(
 }
 
 #[cfg(feature = "native-mlx")]
+fn generate_qwen2_tokens(
+    model: &mut qwen2::Model,
+    tokenizer: &mut Tokenizer,
+    stop_ids: &[u32],
+    prompt_ids: &[u32],
+    prompt_tokens: &Array,
+    max_tokens: usize,
+    temperature: f32,
+    prompt_cache: &mut Option<PromptCacheEntry>,
+) -> Result<(String, &'static str, usize)> {
+    generate_llama_tokens(
+        model,
+        tokenizer,
+        stop_ids,
+        prompt_ids,
+        prompt_tokens,
+        max_tokens,
+        temperature,
+        prompt_cache,
+    )
+}
+
+#[cfg(feature = "native-mlx")]
 fn stream_llama_tokens(
     model: &mut llama::Model,
     tokenizer: &mut Tokenizer,
@@ -2434,6 +2590,31 @@ fn stream_llama_tokens(
         decode_ms: duration_ms(decode_started.elapsed()),
     });
     Ok((finish_reason, completion_tokens))
+}
+
+#[cfg(feature = "native-mlx")]
+fn stream_qwen2_tokens(
+    model: &mut qwen2::Model,
+    tokenizer: &mut Tokenizer,
+    stop_ids: &[u32],
+    prompt_ids: &[u32],
+    prompt_tokens: &Array,
+    max_tokens: usize,
+    temperature: f32,
+    on_chunk: &mut dyn FnMut(String) -> Result<(), ApiError>,
+    prompt_cache: &mut Option<PromptCacheEntry>,
+) -> Result<(&'static str, usize)> {
+    stream_llama_tokens(
+        model,
+        tokenizer,
+        stop_ids,
+        prompt_ids,
+        prompt_tokens,
+        max_tokens,
+        temperature,
+        on_chunk,
+        prompt_cache,
+    )
 }
 
 #[cfg(feature = "native-mlx")]
@@ -3871,6 +4052,57 @@ mod tests {
         assert!(
             matches!(finish_reason, "length" | "stop"),
             "unexpected finish reason: {finish_reason}"
+        );
+    }
+
+    #[cfg(feature = "native-mlx")]
+    #[test]
+    #[ignore = "requires a real local Qwen2 MLX model"]
+    fn real_qwen2_exact_repeat_cache_smoke() {
+        let path =
+            resolve_or_download_test_model(ModelFamily::Qwen2).expect("resolve qwen2 test model");
+        let Some(path) = path else {
+            eprintln!("skipping real_qwen2_exact_repeat_cache_smoke: no local model configured");
+            return;
+        };
+
+        let mut engine = load_qwen2_engine(&path).expect("load qwen2 engine");
+
+        let prompt = "Write exactly three short words about startup speed, separated by spaces.";
+        let prompt_ids = render_chat_prompt(
+            &mut engine.tokenizer,
+            engine.chat_template.clone(),
+            &[ChatMessage {
+                role: "user".into(),
+                content: serde_json::Value::String(prompt.into()),
+            }],
+        )
+        .expect("encode qwen2 prompt");
+        let prompt_tokens = build_prompt_array(&prompt_ids).expect("build qwen2 prompt array");
+
+        let (_, _, reused_base) = get_or_create_qwen2_prefill(
+            &mut engine.model,
+            &prompt_ids,
+            &prompt_tokens,
+            &mut engine.prompt_cache,
+        )
+        .expect("prefill base prompt");
+        assert_eq!(
+            reused_base, 0,
+            "first prompt should not reuse cached tokens"
+        );
+
+        let (_, _, reused_repeat) = get_or_create_qwen2_prefill(
+            &mut engine.model,
+            &prompt_ids,
+            &prompt_tokens,
+            &mut engine.prompt_cache,
+        )
+        .expect("prefill repeated prompt");
+        assert_eq!(
+            reused_repeat,
+            prompt_ids.len(),
+            "exact repeated prompt should reuse the full cached prompt"
         );
     }
 
