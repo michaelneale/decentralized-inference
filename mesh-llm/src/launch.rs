@@ -127,6 +127,106 @@ pub async fn kill_llama_server() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
+/// Kill managed native MLX workers started by mesh-llm.
+pub async fn kill_mlx_native_server() {
+    for pattern in ["mesh-llm-mlx"] {
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", pattern])
+            .status();
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let mut alive = false;
+        for pattern in ["mesh-llm-mlx"] {
+            let output = std::process::Command::new("pgrep")
+                .args(["-f", pattern])
+                .output();
+            if let Ok(o) = output {
+                if !o.stdout.is_empty() {
+                    alive = true;
+                    break;
+                }
+            }
+        }
+        if !alive {
+            return;
+        }
+    }
+    for pattern in ["mesh-llm-mlx"] {
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "-f", pattern])
+            .status();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
+/// Start the local native MLX OpenAI-compatible worker.
+/// Returns a oneshot receiver that fires when the process exits.
+pub async fn start_mlx_native_server(
+    command: &str,
+    model: &Path,
+    http_port: u16,
+) -> Result<tokio::sync::oneshot::Receiver<()>> {
+    let command_path = Path::new(command);
+    if command.contains(std::path::MAIN_SEPARATOR) || command_path.is_absolute() {
+        anyhow::ensure!(
+            command_path.exists(),
+            "MLX worker executable not found at {}",
+            command_path.display()
+        );
+    }
+
+    tracing::info!(
+        "Starting native MLX worker on :{http_port} with model {}",
+        model.display()
+    );
+
+    let log_path = format!("/tmp/mesh-llm-mlx-{http_port}.log");
+    let log_file = std::fs::File::create(&log_path)
+        .with_context(|| format!("Failed to create MLX worker log file {log_path}"))?;
+    let log_file2 = log_file.try_clone()?;
+
+    let args = vec![
+        "--model".to_string(),
+        model.to_string_lossy().to_string(),
+        "--listen".to_string(),
+        format!("127.0.0.1:{http_port}"),
+        "serve".to_string(),
+    ];
+
+    let mut child = Command::new(command)
+        .args(&args)
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file2))
+        .spawn()
+        .with_context(|| format!("Failed to start MLX worker with command {}", command))?;
+
+    let url = format!("http://127.0.0.1:{http_port}/v1/models");
+    for _ in 0..300 {
+        if reqwest_health_check(&url).await {
+            let (death_tx, death_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+                let _ = death_tx.send(());
+            });
+            return Ok(death_rx);
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                "MLX worker exited with status {} before becoming ready. Check {}",
+                status,
+                log_path
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!(
+        "MLX worker failed to become ready within 300s. Check {}",
+        log_path
+    );
+}
+
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
 /// `model_bytes` is the total GGUF file size, used to select KV cache quantization:
 ///   - < 5GB: FP16 (default) — small models, KV cache is tiny
@@ -169,8 +269,9 @@ pub async fn start_llama_server(
         rpc_arg
     );
 
-    let log_file = std::fs::File::create("/tmp/mesh-llm-llama-server.log")
-        .context("Failed to create llama-server log file")?;
+    let log_path = format!("/tmp/mesh-llm-llama-server-{http_port}.log");
+    let log_file = std::fs::File::create(&log_path)
+        .with_context(|| format!("Failed to create llama-server log file {log_path}"))?;
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.
@@ -349,11 +450,11 @@ pub async fn start_llama_server(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    anyhow::bail!("llama-server failed to become healthy within 600s");
+    anyhow::bail!("llama-server failed to become healthy within 600s. Check {log_path}");
 }
 
 /// Find an available TCP port
-async fn find_free_port() -> Result<u16> {
+pub async fn find_free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     drop(listener);

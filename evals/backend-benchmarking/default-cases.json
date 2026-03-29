@@ -1,0 +1,82 @@
+[
+  {
+    "label": "short-chat",
+    "max_tokens": 48,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello in one short sentence."
+      }
+    ]
+  },
+  {
+    "label": "long-briefing",
+    "max_tokens": 160,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a concise operations assistant. Answer with three short bullet points and keep each point under 14 words."
+      },
+      {
+        "role": "user",
+        "content": "Context:\\nMesh-LLM is being evaluated for deployment on a small set of Apple Silicon Macs in a lab. The operators care about startup speed, time-to-first-token, generation throughput, and whether the backend can behave consistently across different prompt styles. They also care about whether the backend is easy to package, whether logs are understandable when a node fails to come up, and whether a model family behaves differently between quantized and bf16 checkpoints.\\n\\nRecent observations:\\n- The llama backend is already stable and widely used.\\n- The native MLX path now supports streaming, but some families behave inconsistently.\\n- Qwen3 bf16 tends to stop very early under greedy decoding.\\n- Some 4-bit MLX checkpoints still fail with shape mismatches during generation.\\n- A Llama bf16 MLX checkpoint appears to behave normally.\\n\\nTask: summarize the operational implications of these observations."
+      }
+    ]
+  },
+  {
+    "label": "cache-base",
+    "max_tokens": 96,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a concise operations assistant. Answer with three short bullet points."
+      },
+      {
+        "role": "user",
+        "content": "Context:\\nMesh-LLM is being evaluated for deployment on a small set of Apple Silicon Macs in a lab. The operators care about startup speed, time-to-first-token, generation throughput, and whether the backend can behave consistently across different prompt styles. They also care about whether the backend is easy to package, whether logs are understandable when a node fails to come up, and whether a model family behaves differently between quantized and bf16 checkpoints.\\n\\nRecent observations:\\n- The llama backend is already stable and widely used.\\n- The native MLX path now supports streaming, but some families behave inconsistently.\\n- Qwen3 bf16 tends to stop very early under greedy decoding.\\n- Some 4-bit MLX checkpoints still fail with shape mismatches during generation.\\n- A Llama bf16 MLX checkpoint appears to behave normally.\\n\\nTask: summarize the operational implications of these observations."
+      }
+    ]
+  },
+  {
+    "label": "cache-extend",
+    "max_tokens": 96,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a concise operations assistant. Answer with three short bullet points."
+      },
+      {
+        "role": "user",
+        "content": "Context:\\nMesh-LLM is being evaluated for deployment on a small set of Apple Silicon Macs in a lab. The operators care about startup speed, time-to-first-token, generation throughput, and whether the backend can behave consistently across different prompt styles. They also care about whether the backend is easy to package, whether logs are understandable when a node fails to come up, and whether a model family behaves differently between quantized and bf16 checkpoints.\\n\\nRecent observations:\\n- The llama backend is already stable and widely used.\\n- The native MLX path now supports streaming, but some families behave inconsistently.\\n- Qwen3 bf16 tends to stop very early under greedy decoding.\\n- Some 4-bit MLX checkpoints still fail with shape mismatches during generation.\\n- A Llama bf16 MLX checkpoint appears to behave normally.\\n\\nTask: summarize the operational implications of these observations. Then add one final bullet naming the highest-priority next experiment."
+      }
+    ]
+  },
+  {
+    "label": "context-extraction",
+    "max_tokens": 128,
+    "messages": [
+      {
+        "role": "system",
+        "content": "Extract only information grounded in the provided text. Do not add facts."
+      },
+      {
+        "role": "user",
+        "content": "Passage:\\nThe benchmark harness starts mesh-llm once with the llama backend and once with the mlx backend. It waits for /v1/models to become ready, runs a warmup request, measures multiple timed requests, and writes both raw JSONL data and a summary JSON file. The harness is intentionally serial: it never benchmarks both backends at the same time, and it cleans up mesh-llm, mesh-llm-mlx, llama-server, and rpc-server before each backend run.\\n\\nQuestion:\\nList the three most important safeguards that keep the comparison stable."
+      }
+    ]
+  },
+  {
+    "label": "code-context",
+    "max_tokens": 160,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are reviewing a benchmark harness. Answer in two short paragraphs."
+      },
+      {
+        "role": "user",
+        "content": "Code:\\n```bash\\ncleanup_processes() {\\n    pkill -x \\\"mesh-llm-mlx\\\" 2>/dev/null || true\\n    pkill -x \\\"mesh-llm\\\" 2>/dev/null || true\\n    pkill -x \\\"llama-server\\\" 2>/dev/null || true\\n    pkill -x \\\"rpc-server\\\" 2>/dev/null || true\\n    sleep 1\\n}\\n\\nrun_measure() {\\n    python3 \\\"$MEASURE_PY\\\" \\\\\\n        --url \\\"http://127.0.0.1:${PORT}/v1/chat/completions\\\" \\\\\\n        --model \\\"$model_id\\\" \\\\\\n        --messages-json \\\"$messages_json\\\" \\\\\\n        --max-tokens \\\"$max_tokens\\\"\\n}\\n```\\n\\nQuestion:\\nWhat reliability problem does this cleanup strategy solve, and what benchmark risk still remains?"
+      }
+    ]
+  }
+]

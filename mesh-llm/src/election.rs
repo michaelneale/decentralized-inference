@@ -30,7 +30,27 @@ pub fn total_model_bytes(model: &Path) -> u64 {
             }
         }
     }
-    std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
+    path_size_bytes(model)
+}
+
+fn path_size_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| path_size_bytes(&entry.path()))
+        .sum()
 }
 
 use std::sync::Arc;
@@ -1084,7 +1104,11 @@ async fn start_llama(
     // In split mode (pipeline parallel), pass total group VRAM so context size
     // accounts for the host only holding its share of layers. KV cache is also
     // distributed — each node holds KV for its own layers.
-    let group_vram = if !rpc_ports.is_empty() { Some(total as u64) } else { None };
+    let group_vram = if !rpc_ports.is_empty() {
+        Some(total as u64)
+    } else {
+        None
+    };
 
     match launch::start_llama_server(
         bin_dir,

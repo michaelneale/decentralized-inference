@@ -47,6 +47,40 @@ build-mac:
         echo "Mesh binary: target/release/mesh-llm"
     fi
 
+# Build the MLX worker (requires the Metal toolchain on macOS)
+[macos]
+build-mlx:
+    cargo build --release -p mesh-llm-mlx --features native-mlx
+
+# Run MLX worker unit tests, including model-family support checks.
+[macos]
+test-mlx:
+    cargo test -p mesh-llm-mlx --features native-mlx
+
+# Run real-inference MLX worker tests against local model directories.
+[macos]
+test-mlx-inference:
+    cargo test -p mesh-llm-mlx --features native-mlx -- --ignored --nocapture --test-threads=1
+
+# Run one real-inference MLX worker test by name.
+[macos]
+test-mlx-family name:
+    cargo test -p mesh-llm-mlx --features native-mlx {{name}} -- --ignored --nocapture --test-threads=1
+
+# Benchmark the llama backend against the mlx backend on one machine.
+[macos]
+bench-backends llama_model mlx_model runs="3":
+    ./evals/backend-benchmarking/bench-backends.sh \
+        --llama-model "{{llama_model}}" \
+        --mlx-model "{{mlx_model}}" \
+        --runs "{{runs}}"
+
+# Run the checked-in backend benchmark matrix serially.
+[macos]
+bench-backends-matrix runs="3":
+    ./evals/backend-benchmarking/run-matrix.sh \
+        --runs "{{runs}}"
+
 # Build on Linux with CUDA — delegates to scripts/build-linux.sh
 # cuda_arch overrides auto-detection (see scripts/detect-cuda-arch.sh for supported GPUs)
 build-linux cuda_arch="":
@@ -136,6 +170,9 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     cp {{mesh_bin}} "$BUNDLE/"
     cp {{build_dir}}/bin/rpc-server "$BUNDLE/"
     cp {{build_dir}}/bin/llama-server "$BUNDLE/"
+    if [ -f target/release/mesh-llm-mlx ]; then
+        cp target/release/mesh-llm-mlx "$BUNDLE/"
+    fi
     for lib in {{build_dir}}/bin/*.dylib; do
         cp "$lib" "$BUNDLE/" 2>/dev/null || true
     done
@@ -144,6 +181,9 @@ bundle output="/tmp/mesh-bundle.tar.gz":
         [ -f "$bin" ] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done
+    if [ -f "$BUNDLE/mesh-llm-mlx" ]; then
+        install_name_tool -add_rpath @executable_path/ "$BUNDLE/mesh-llm-mlx" 2>/dev/null || true
+    fi
     tar czf {{output}} -C "$DIR" mesh-bundle/
     rm -rf "$DIR"
     echo "Bundle: {{output}} ($(du -sh {{output}} | cut -f1))"

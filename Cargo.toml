@@ -3,6 +3,7 @@ members = [
     "mesh-llm",
     "mesh-llm/plugin",
     "mesh-llm/src/plugins/example",
+    "mesh-llm/src/plugins/mlx-native",
 ]
 default-members = [
     "mesh-llm",

@@ -34,7 +34,7 @@ Each should only show the binary name — no `/opt/homebrew/` paths.
 just bundle
 ```
 
-Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm`, `rpc-server`, `llama-server`.
+Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm`, `rpc-server`, `llama-server`, and `mesh-llm-mlx` if that binary has been built locally.
 
 ### 4. Smoke test the bundle
 

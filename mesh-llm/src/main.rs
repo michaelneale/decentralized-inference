@@ -19,11 +19,17 @@ pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mesh::NodeRole;
 use std::path::PathBuf;
 
-pub const VERSION: &str = "0.49.0";
+pub const VERSION: &str = "0.49.1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Backend {
+    Llama,
+    Mlx,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION,
@@ -52,6 +58,10 @@ struct Cli {
     /// Model to serve (path, catalog name, or HuggingFace URL).
     #[arg(long)]
     model: Vec<PathBuf>,
+
+    /// Inference backend to use.
+    #[arg(long, value_enum, default_value_t = Backend::Llama)]
+    backend: Backend,
 
     /// API port (default: 9337).
     #[arg(long, default_value = "9337")]
@@ -88,6 +98,10 @@ struct Cli {
     /// Internal plugin service mode.
     #[arg(long, hide = true)]
     plugin: Option<String>,
+
+    /// Override the native MLX worker executable used by --backend mlx.
+    #[arg(long, hide = true)]
+    mlx_native_bin: Option<PathBuf>,
 
     // ── Advanced options (hidden from default --help) ─────────────
     /// Draft model for speculative decoding.
@@ -323,8 +337,13 @@ async fn main() -> Result<()> {
 
     // Clean up orphan processes from previous runs (skip for client — never runs llama-server)
     if !cli.client {
-        launch::kill_llama_server().await;
-        launch::kill_orphan_rpc_servers().await;
+        match cli.backend {
+            Backend::Llama => {
+                launch::kill_llama_server().await;
+                launch::kill_orphan_rpc_servers().await;
+            }
+            Backend::Mlx => {}
+        }
     }
 
     // Background version check (non-blocking)
@@ -577,13 +596,15 @@ async fn main() -> Result<()> {
     }
     // No args at all = idle mode with console for browsing/joining
     if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
-        {
-            let bin_dir = match &cli.bin_dir {
+        let bin_dir = if cli.backend == Backend::Llama {
+            match &cli.bin_dir {
                 Some(d) => d.clone(),
                 None => detect_bin_dir()?,
-            };
-            return run_idle(cli, bin_dir).await;
-        }
+            }
+        } else {
+            PathBuf::new()
+        };
+        return run_idle(cli, bin_dir).await;
     }
 
     // --- Resolve models from CLI ---
@@ -598,12 +619,12 @@ async fn main() -> Result<()> {
     // Strip split GGUF suffix so "MiniMax-M2.5-Q4_K_M-00001-of-00004" → "MiniMax-M2.5-Q4_K_M"
     let requested_model_names: Vec<String> = resolved_models
         .iter()
-        .filter_map(|m| {
-            m.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| router::strip_split_suffix_owned(s))
-        })
+        .filter_map(|m| model_path_name(m).map(|s| router::strip_split_suffix_owned(&s)))
         .collect();
+
+    if cli.backend == Backend::Mlx {
+        return run_mlx(cli, resolved_models, requested_model_names).await;
+    }
 
     let bin_dir = match &cli.bin_dir {
         Some(d) => d.clone(),
@@ -1044,6 +1065,52 @@ fn load_resolved_plugins(cli: &Cli) -> Result<plugin::ResolvedPlugins> {
     plugin::resolve_plugins(&config, plugin_host_mode(cli))
 }
 
+fn detect_mlx_native_command(cli: &Cli) -> Result<String> {
+    if let Some(path) = &cli.mlx_native_bin {
+        return Ok(path.display().to_string());
+    }
+
+    let current_exe =
+        std::env::current_exe().context("Cannot determine mesh-llm executable path")?;
+    let exe_dir = current_exe
+        .parent()
+        .context("mesh-llm executable has no parent directory")?;
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+    for candidate in [exe_dir.join(format!("mesh-llm-mlx{exe_suffix}"))] {
+        if candidate.exists() {
+            return Ok(candidate.display().to_string());
+        }
+    }
+
+    for command in ["mesh-llm-mlx"] {
+        if command_on_path(command) {
+            return Ok(command.to_string());
+        }
+    }
+
+    anyhow::bail!(
+        "Couldn't find the native MLX worker for --backend mlx. Build `mesh-llm-mlx`, put it next to `mesh-llm`, put it on PATH, or pass --mlx-native-bin."
+    );
+}
+
+fn command_on_path(command: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+    std::env::split_paths(&path_var).any(|dir| {
+        let candidate = dir.join(format!("{command}{exe_suffix}"));
+        if candidate.exists() {
+            return true;
+        }
+        if exe_suffix.is_empty() {
+            dir.join(command).exists()
+        } else {
+            false
+        }
+    })
+}
+
 fn plugin_host_mode(cli: &Cli) -> plugin::PluginHostMode {
     plugin::PluginHostMode {
         mesh_visibility: if cli.publish || cli.nostr_discovery {
@@ -1397,11 +1464,7 @@ async fn run_auto(
     };
 
     let model_name = {
-        let stem = model
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let stem = model_path_name(&model).unwrap_or_default();
         // Strip split GGUF suffix: "MiniMax-M2.5-Q4_K_M-00001-of-00004" → "MiniMax-M2.5-Q4_K_M"
         router::strip_split_suffix_owned(&stem)
     };
@@ -1578,23 +1641,14 @@ async fn run_auto(
         // Announce all models to mesh
         let all_names: Vec<String> = resolved_models
             .iter()
-            .map(|m| {
-                m.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .map(|m| model_path_name(m).unwrap_or_default())
             .collect();
         node.set_models(all_names).await;
         node.regossip().await;
 
         for extra_model in resolved_models.iter().skip(1) {
             let extra_name = {
-                let stem = extra_model
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                let stem = model_path_name(extra_model).unwrap_or_default();
                 router::strip_split_suffix_owned(&stem)
             };
             let extra_node = node.clone();
@@ -1693,6 +1747,304 @@ async fn run_auto(
 
     launch::kill_llama_server().await;
     launch::kill_orphan_rpc_servers().await;
+    Ok(())
+}
+
+async fn run_mlx(
+    cli: Cli,
+    resolved_models: Vec<PathBuf>,
+    _requested_model_names: Vec<String>,
+) -> Result<()> {
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        "--backend mlx is currently supported on macOS only"
+    );
+    anyhow::ensure!(
+        !cli.client,
+        "--backend mlx currently runs as a host node; use the default client/passive path on remote consumers"
+    );
+    anyhow::ensure!(
+        !cli.split && cli.tensor_split.is_none(),
+        "--backend mlx does not support split mode yet"
+    );
+    anyhow::ensure!(
+        cli.draft.is_none(),
+        "--backend mlx does not support draft/speculative mode yet"
+    );
+    anyhow::ensure!(
+        resolved_models.len() == 1,
+        "--backend mlx currently supports exactly one --model"
+    );
+
+    let api_port = cli.port;
+    let model = resolved_models[0].clone();
+    let model_name = model_path_name(&model).unwrap_or_else(|| "local".to_string());
+    let mlx_port = launch::find_free_port().await?;
+    let mlx_command = detect_mlx_native_command(&cli)?;
+    let mut mlx_death = launch::start_mlx_native_server(&mlx_command, &model, mlx_port).await?;
+    let resolved_plugins = load_resolved_plugins(&cli)?;
+
+    let mut local_models = mesh::scan_local_models();
+    let (node, channels) = mesh::Node::start(
+        NodeRole::Worker,
+        &cli.relay,
+        cli.bind_port,
+        cli.max_vram,
+        cli.enumerate_host,
+    )
+    .await?;
+    node.start_accepting();
+    let token = node.invite_token();
+    node.set_blackboard_name(blackboard_display_name(&cli, &node))
+        .await;
+
+    let (plugin_mesh_tx, plugin_mesh_rx) = tokio::sync::mpsc::channel(256);
+    let plugin_manager =
+        plugin::PluginManager::start(&resolved_plugins, plugin_host_mode(&cli), plugin_mesh_tx)
+            .await?;
+    node.set_plugin_manager(plugin_manager.clone()).await;
+    node.start_plugin_channel_forwarder(plugin_mesh_rx);
+    if !local_models.contains(&model_name) {
+        local_models.push(model_name.clone());
+        local_models.sort();
+    }
+
+    node.set_available_models(local_models).await;
+    node.set_requested_models(vec![model_name.clone()]).await;
+    node.set_model_source(
+        cli.model
+            .first()
+            .map(|m| m.to_string_lossy().to_string())
+            .unwrap_or_else(|| model.display().to_string()),
+    )
+    .await;
+    node.set_serving_models(vec![model_name.clone()]).await;
+    node.set_models(vec![model_name.clone()]).await;
+    node.set_role(NodeRole::Host {
+        http_port: mlx_port,
+    })
+    .await;
+    node.set_llama_ready(true).await;
+    node.regossip().await;
+    node.start_heartbeat();
+
+    let tunnel_mgr = tunnel::Manager::start(node.clone(), 0, channels.rpc, channels.http).await?;
+    tunnel_mgr.set_http_port(mlx_port);
+
+    if !cli.join.is_empty() {
+        let mut joined = false;
+        for t in &cli.join {
+            match node.join(t).await {
+                Ok(()) => {
+                    eprintln!("Joined mesh");
+                    joined = true;
+                    break;
+                }
+                Err(e) => tracing::warn!("Failed to join via token: {e}"),
+            }
+        }
+        if !joined {
+            eprintln!("Failed to join any peer — running standalone");
+        }
+
+        {
+            let save_node = node.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Some(id) = save_node.mesh_id().await {
+                    mesh::save_last_mesh_id(&id);
+                    tracing::info!("Mesh ID: {id}");
+                }
+            });
+        }
+
+        eprintln!("This node's token (for others to join): {token}");
+
+        let rejoin_node = node.clone();
+        let rejoin_tokens: Vec<String> = cli.join.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                for t in &rejoin_tokens {
+                    if let Err(e) = rejoin_node.join(t).await {
+                        tracing::debug!("Rejoin failed: {e}");
+                    }
+                }
+            }
+        });
+
+        if cli.auto {
+            let rediscover_node = node.clone();
+            let rediscover_relays = nostr_relays(&cli.nostr_relay);
+            let rediscover_relay_urls = cli.relay.clone();
+            let rediscover_mesh_name = cli.mesh_name.clone();
+            tokio::spawn(async move {
+                nostr_rediscovery(
+                    rediscover_node,
+                    rediscover_relays,
+                    rediscover_relay_urls,
+                    rediscover_mesh_name,
+                )
+                .await;
+            });
+        }
+    } else {
+        let nostr_pubkey = if cli.publish {
+            nostr::load_or_create_keys()
+                .ok()
+                .map(|k| k.public_key().to_hex())
+        } else {
+            None
+        };
+        let mesh_id = mesh::generate_mesh_id(cli.mesh_name.as_deref(), nostr_pubkey.as_deref());
+        node.set_mesh_id_force(mesh_id.clone()).await;
+        mesh::save_last_mesh_id(&mesh_id);
+        tracing::info!("Mesh ID: {mesh_id}");
+        eprintln!("Invite: {token}");
+        eprintln!("Waiting for peers...");
+
+        if cli.auto {
+            let rediscover_node = node.clone();
+            let rediscover_relays = nostr_relays(&cli.nostr_relay);
+            let rediscover_relay_urls = cli.relay.clone();
+            let rediscover_mesh_name = cli.mesh_name.clone();
+            tokio::spawn(async move {
+                nostr_rediscovery(
+                    rediscover_node,
+                    rediscover_relays,
+                    rediscover_relay_urls,
+                    rediscover_mesh_name,
+                )
+                .await;
+            });
+        }
+    }
+
+    let mut targets = election::ModelTargets::default();
+    targets.targets.insert(
+        model_name.clone(),
+        vec![election::InferenceTarget::Local(mlx_port)],
+    );
+    let (target_tx, target_rx) = tokio::sync::watch::channel(targets.clone());
+    target_tx.send_replace(targets);
+    let (console_target_tx, console_target_rx) =
+        tokio::sync::watch::channel(election::InferenceTarget::Local(mlx_port));
+    console_target_tx.send_replace(election::InferenceTarget::Local(mlx_port));
+    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let proxy_node = node.clone();
+    tokio::spawn(async move {
+        api_proxy(
+            proxy_node,
+            api_port,
+            target_rx,
+            drop_tx,
+            None,
+            cli.listen_all,
+        )
+        .await;
+    });
+
+    if cli.console > 0 {
+        let cs = api::MeshApi::new(
+            node.clone(),
+            model_name.clone(),
+            api_port,
+            election::total_model_bytes(&model),
+            plugin_manager.clone(),
+        );
+        cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
+        cs.set_nostr_discovery(cli.nostr_discovery).await;
+        if let Some(ref name) = cli.mesh_name {
+            cs.set_mesh_name(name.clone()).await;
+        }
+        cs.set_llama_port(Some(mlx_port)).await;
+        cs.update(true, true).await;
+        tokio::spawn(async move {
+            api::start(cli.console, cs, console_target_rx, cli.listen_all).await;
+        });
+    }
+
+    eprintln!("✅ [{}] MLX backend ready", model_name);
+    eprintln!("  API: http://localhost:{api_port}");
+    if cli.console > 0 {
+        eprintln!("  Console: http://localhost:{}", cli.console);
+    }
+    eprintln!("  MLX upstream: http://127.0.0.1:{mlx_port}");
+    eprintln!("  MLX worker: {mlx_command}");
+
+    let nostr_publisher = if cli.publish {
+        let nostr_keys = nostr::load_or_create_keys()?;
+        let relays = nostr_relays(&cli.nostr_relay);
+        let pub_node = node.clone();
+        let pub_name = cli.mesh_name.clone();
+        let pub_region = cli.region.clone();
+        let pub_max_clients = cli.max_clients;
+        Some(tokio::spawn(async move {
+            nostr::publish_loop(
+                pub_node,
+                nostr_keys,
+                relays,
+                pub_name,
+                pub_region,
+                pub_max_clients,
+                60,
+            )
+            .await;
+        }))
+    } else if cli.auto {
+        let relays = nostr_relays(&cli.nostr_relay);
+        let wd_node = node.clone();
+        let wd_name = cli.mesh_name.clone();
+        let wd_region = cli.region.clone();
+        Some(tokio::spawn(async move {
+            nostr::publish_watchdog(wd_node, relays, wd_name, wd_region, 120).await;
+        }))
+    } else {
+        None
+    };
+
+    let drop_model_name = model_name.clone();
+    let drop_node = node.clone();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nShutting down...");
+        }
+        dropped = async {
+            while let Some(name) = drop_rx.recv().await {
+                if name == drop_model_name {
+                    return name;
+                }
+                eprintln!("⚠ Drop request for '{}' — not our model ({}), ignoring", name, drop_model_name);
+            }
+            drop_model_name.clone()
+        } => {
+            eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", dropped);
+            drop_node.set_serving(None).await;
+        }
+        _ = &mut mlx_death => {
+            eprintln!("\n⚠️ MLX worker exited unexpectedly — shutting down");
+            drop_node.set_serving(None).await;
+        }
+    }
+
+    node.broadcast_leaving().await;
+
+    if cli.publish {
+        if let Ok(keys) = nostr::load_or_create_keys() {
+            let relays = nostr_relays(&cli.nostr_relay);
+            if let Ok(publisher) = nostr::Publisher::new(keys, &relays).await {
+                let _ = publisher.unpublish().await;
+                eprintln!("Removed Nostr listing");
+            }
+        }
+    }
+    if let Some(handle) = nostr_publisher {
+        handle.abort();
+    }
+
+    launch::kill_mlx_native_server().await;
+
     Ok(())
 }
 
@@ -2470,7 +2822,7 @@ async fn run_discover(
 fn run_stop() -> Result<()> {
     use std::process::Command as Cmd;
     let mut killed = 0u32;
-    for name in &["mesh-llm", "llama-server", "rpc-server"] {
+    for name in &["mesh-llm", "llama-server", "rpc-server", "mesh-llm-mlx"] {
         // pkill sends SIGTERM; ignore errors (process might not exist)
         let status = Cmd::new("pkill").arg("-f").arg(name).status();
         match status {
@@ -2998,11 +3350,7 @@ fn build_serving_list(resolved_models: &[PathBuf], model_name: &str) -> Vec<Stri
     let mut all: Vec<String> = resolved_models
         .iter()
         .map(|m| {
-            let stem = m
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
+            let stem = model_path_name(m).unwrap_or_default();
             // Strip split GGUF suffix: "Model-00001-of-00004" → "Model"
             router::strip_split_suffix_owned(&stem)
         })
@@ -3011,6 +3359,33 @@ fn build_serving_list(resolved_models: &[PathBuf], model_name: &str) -> Vec<Stri
         all.insert(0, clean_name);
     }
     all
+}
+
+fn model_path_name(path: &std::path::Path) -> Option<String> {
+    if let Some(model_name) = huggingface_snapshot_model_name(path) {
+        return Some(model_name);
+    }
+    if path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.ends_with(".gguf"))
+        .unwrap_or(false)
+    {
+        path.file_stem().map(|s| s.to_string_lossy().to_string())
+    } else {
+        path.file_name().map(|s| s.to_string_lossy().to_string())
+    }
+}
+
+fn huggingface_snapshot_model_name(path: &std::path::Path) -> Option<String> {
+    let snapshots_dir = path.parent()?;
+    if snapshots_dir.file_name()?.to_str()? != "snapshots" {
+        return None;
+    }
+
+    let repo_dir = snapshots_dir.parent()?.file_name()?.to_str()?;
+    let repo_id = repo_dir.strip_prefix("models--")?.replace("--", "/");
+    repo_id.rsplit('/').next().map(ToString::to_string)
 }
 
 #[cfg(test)]
@@ -3071,6 +3446,26 @@ mod tests {
         let result = build_serving_list(&resolved, "MiniMax-M2.5-Q4_K_M-00001-of-00004");
         assert_eq!(result, vec!["MiniMax-M2.5-Q4_K_M"]);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_build_serving_list_mlx_directory_keeps_full_name() {
+        let resolved = vec![PathBuf::from(
+            "/home/.models/mlx/Qwen2.5-0.5B-Instruct-4bit",
+        )];
+        let result = build_serving_list(&resolved, "Qwen2.5-0.5B-Instruct-4bit");
+        assert_eq!(result, vec!["Qwen2.5-0.5B-Instruct-4bit"]);
+    }
+
+    #[test]
+    fn test_model_path_name_huggingface_snapshot_uses_repo_name() {
+        let path = PathBuf::from(
+            "/home/.cache/huggingface/hub/models--mlx-community--Llama-3.2-1B-Instruct-bf16/snapshots/863c846a9ac6fad4e49e1743d52984dff262e953",
+        );
+        assert_eq!(
+            model_path_name(&path).as_deref(),
+            Some("Llama-3.2-1B-Instruct-bf16")
+        );
     }
 
     #[test]
