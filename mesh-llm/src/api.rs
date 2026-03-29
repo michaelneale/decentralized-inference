@@ -2,13 +2,17 @@
 //!
 //! Endpoints:
 //!   GET  /api/status    — live mesh state (JSON)
+//!   GET  /api/runtime   — local runtime model state (JSON)
+//!   GET  /api/runtime/processes — local inference process state (JSON)
+//!   POST /api/runtime/models — load a local runtime model
+//!   DELETE /api/runtime/models/{model} — unload a local runtime model
 //!   GET  /api/events    — SSE stream of status updates
 //!   GET  /api/discover  — browse Nostr-published meshes
 //!   POST /api/chat      — proxy to inference API
 //!   GET  /              — embedded web dashboard
 //!
-//! The dashboard is read-only — shows status, topology, models.
-//! All mutations happen via CLI flags (--join, --model, --auto).
+//! The dashboard is mostly read-only — shows status, topology, and models.
+//! Local runtime model load/unload is exposed for operator control.
 
 use crate::{download, election, mesh, nostr, plugin};
 use include_dir::{include_dir, Dir};
@@ -22,6 +26,49 @@ static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 const MESH_LLM_VERSION: &str = crate::VERSION;
 
 // ── Shared state ──
+
+pub enum RuntimeControlRequest {
+    Load {
+        spec: String,
+        resp: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
+    },
+    Unload {
+        model: String,
+        resp: tokio::sync::oneshot::Sender<anyhow::Result<bool>>,
+    },
+}
+
+#[derive(Clone, Serialize)]
+pub struct RuntimeModelPayload {
+    pub name: String,
+    pub kind: String,
+    pub backend: String,
+    pub status: String,
+    pub port: Option<u16>,
+    pub startup_managed: bool,
+}
+
+#[derive(Serialize)]
+struct RuntimeStatusPayload {
+    primary_model: Option<String>,
+    models: Vec<RuntimeModelPayload>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RuntimeProcessPayload {
+    pub name: String,
+    pub kind: String,
+    pub backend: String,
+    pub status: String,
+    pub port: u16,
+    pub pid: u32,
+    pub startup_managed: bool,
+}
+
+#[derive(Serialize)]
+struct RuntimeProcessesPayload {
+    processes: Vec<RuntimeProcessPayload>,
+}
 
 /// Shared live state — written by the main process, read by API handlers.
 #[derive(Clone)]
@@ -37,6 +84,7 @@ struct ApiInner {
     llama_ready: bool,
     llama_port: Option<u16>,
     model_name: String,
+    primary_backend: Option<String>,
     draft_name: Option<String>,
     api_port: u16,
     model_size_bytes: u64,
@@ -44,6 +92,8 @@ struct ApiInner {
     latest_version: Option<String>,
     nostr_relays: Vec<String>,
     nostr_discovery: bool,
+    runtime_control: Option<tokio::sync::mpsc::UnboundedSender<RuntimeControlRequest>>,
+    local_processes: Vec<RuntimeProcessPayload>,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
@@ -89,6 +139,8 @@ struct StatusPayload {
     llama_ready: bool,
     model_name: String,
     serving_models: Vec<String>,
+    assigned_models: Vec<String>,
+    hosted_models: Vec<String>,
     draft_name: Option<String>,
     api_port: u16,
     my_vram_gb: f64,
@@ -117,6 +169,8 @@ struct PeerPayload {
     vram_gb: f64,
     serving: Option<String>,
     serving_models: Vec<String>,
+    assigned_models: Vec<String>,
+    hosted_models: Vec<String>,
     rtt_ms: Option<u32>,
     hostname: Option<String>,
     is_soc: Option<bool>,
@@ -156,6 +210,7 @@ impl MeshApi {
                 llama_ready: false,
                 llama_port: None,
                 model_name,
+                primary_backend: None,
                 draft_name: None,
                 api_port,
                 model_size_bytes,
@@ -166,9 +221,15 @@ impl MeshApi {
                     .map(|s| s.to_string())
                     .collect(),
                 nostr_discovery: false,
+                runtime_control: None,
+                local_processes: Vec::new(),
                 sse_clients: Vec::new(),
             })),
         }
+    }
+
+    pub async fn set_primary_backend(&self, backend: String) {
+        self.inner.lock().await.primary_backend = Some(backend);
     }
 
     pub async fn set_draft_name(&self, name: String) {
@@ -191,6 +252,30 @@ impl MeshApi {
         self.inner.lock().await.nostr_discovery = v;
     }
 
+    pub async fn set_runtime_control(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<RuntimeControlRequest>,
+    ) {
+        self.inner.lock().await.runtime_control = Some(tx);
+    }
+
+    pub async fn upsert_local_process(&self, process: RuntimeProcessPayload) {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.local_processes.retain(|p| p.name != process.name);
+            inner.local_processes.push(process);
+        }
+        self.push_status().await;
+    }
+
+    pub async fn remove_local_process(&self, model_name: &str) {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.local_processes.retain(|p| p.name != model_name);
+        }
+        self.push_status().await;
+    }
+
     pub async fn update(&self, is_host: bool, llama_ready: bool) {
         {
             let mut inner = self.inner.lock().await;
@@ -202,6 +287,33 @@ impl MeshApi {
 
     pub async fn set_llama_port(&self, port: Option<u16>) {
         self.inner.lock().await.llama_port = port;
+    }
+
+    async fn runtime_status(&self) -> RuntimeStatusPayload {
+        let (model_name, primary_backend, is_host, llama_ready, llama_port, local_processes) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.model_name.clone(),
+                inner.primary_backend.clone(),
+                inner.is_host,
+                inner.llama_ready,
+                inner.llama_port,
+                inner.local_processes.clone(),
+            )
+        };
+        build_runtime_status_payload(
+            &model_name,
+            primary_backend,
+            is_host,
+            llama_ready,
+            llama_port,
+            local_processes,
+        )
+    }
+
+    async fn runtime_processes(&self) -> RuntimeProcessesPayload {
+        let local_processes = self.inner.lock().await.local_processes.clone();
+        build_runtime_processes_payload(local_processes)
     }
 
     async fn status(&self) -> StatusPayload {
@@ -259,6 +371,8 @@ impl MeshApi {
                 vram_gb: p.vram_bytes as f64 / 1e9,
                 serving: p.serving.clone(),
                 serving_models: p.serving_models.clone(),
+                assigned_models: p.assigned_models.clone(),
+                hosted_models: p.hosted_models.clone(),
                 rtt_ms: p.rtt_ms,
                 hostname: p.hostname.clone(),
                 is_soc: p.is_soc,
@@ -269,7 +383,8 @@ impl MeshApi {
         let catalog = node.mesh_catalog().await;
         let served = node.models_being_served().await;
         let active_demand = node.active_demand().await;
-        let my_serving_models = node.serving_models().await;
+        let my_assigned_models = node.serving_models().await;
+        let my_hosted_models = node.hosted_models().await;
         let now_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -279,15 +394,8 @@ impl MeshApi {
             .map(|name| {
                 let is_warm = served.contains(name);
                 let node_count = if is_warm {
-                    let peer_count = all_peers
-                        .iter()
-                        .filter(|p| {
-                            p.serving_models.iter().any(|s| s == name)
-                                || p.serving.as_deref() == Some(name.as_str())
-                        })
-                        .count();
-                    // Count self: check all serving models, fall back to primary model_name
-                    let me = if my_serving_models.iter().any(|s| s == name) || *name == model_name {
+                    let peer_count = all_peers.iter().filter(|p| p.routes_model(name)).count();
+                    let me = if my_hosted_models.iter().any(|s| s == name) {
                         1
                     } else {
                         0
@@ -357,8 +465,7 @@ impl MeshApi {
             "Client".to_string()
         } else if is_host && llama_ready {
             let has_split_workers = all_peers.iter().any(|p| {
-                matches!(p.role, mesh::NodeRole::Worker)
-                    && p.serving.as_deref() == Some(model_name.as_str())
+                matches!(p.role, mesh::NodeRole::Worker) && p.is_assigned_model(model_name.as_str())
             });
             if has_split_workers {
                 "Serving (split)".to_string()
@@ -387,7 +494,9 @@ impl MeshApi {
             is_client,
             llama_ready,
             model_name,
-            serving_models: my_serving_models,
+            serving_models: my_hosted_models.clone(),
+            assigned_models: my_assigned_models,
+            hosted_models: my_hosted_models,
             draft_name,
             api_port,
             my_vram_gb,
@@ -599,16 +708,120 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("GET", "/api/status") => {
             match tokio::time::timeout(std::time::Duration::from_secs(5), state.status()).await {
                 Ok(status) => {
-                    let json = serde_json::to_string(&status)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(),
-                        json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
+                    respond_json(&mut stream, 200, &status).await?;
                 }
                 Err(_) => {
                     respond_error(&mut stream, 503, "Status temporarily unavailable").await?;
+                }
+            }
+        }
+
+        ("GET", "/api/runtime") => {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), state.runtime_status())
+                .await
+            {
+                Ok(runtime_status) => {
+                    respond_json(&mut stream, 200, &runtime_status).await?;
+                }
+                Err(_) => {
+                    respond_error(&mut stream, 503, "Runtime status temporarily unavailable")
+                        .await?;
+                }
+            }
+        }
+
+        ("GET", "/api/runtime/processes") => {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), state.runtime_processes())
+                .await
+            {
+                Ok(runtime_processes) => {
+                    respond_json(&mut stream, 200, &runtime_processes).await?;
+                }
+                Err(_) => {
+                    respond_error(
+                        &mut stream,
+                        503,
+                        "Runtime process status temporarily unavailable",
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        ("POST", "/api/runtime/models") => {
+            let Some(control_tx) = state.inner.lock().await.runtime_control.clone() else {
+                respond_error(&mut stream, 503, "Runtime control unavailable").await?;
+                return Ok(());
+            };
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
+            match parsed {
+                Ok(val) => {
+                    let spec = val["model"].as_str().unwrap_or("").to_string();
+                    if spec.is_empty() {
+                        respond_error(&mut stream, 400, "Missing 'model' field").await?;
+                    } else {
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                        let _ = control_tx.send(RuntimeControlRequest::Load {
+                            spec,
+                            resp: resp_tx,
+                        });
+                        match resp_rx.await {
+                            Ok(Ok(loaded)) => {
+                                respond_json(
+                                    &mut stream,
+                                    201,
+                                    &serde_json::json!({ "loaded": loaded }),
+                                )
+                                .await?;
+                            }
+                            Ok(Err(e)) => {
+                                respond_runtime_error(&mut stream, &e.to_string()).await?;
+                            }
+                            Err(_) => {
+                                respond_error(&mut stream, 503, "Runtime control unavailable")
+                                    .await?;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    respond_error(&mut stream, 400, "Invalid JSON body").await?;
+                }
+            }
+        }
+
+        ("DELETE", p) if p.starts_with("/api/runtime/models/") => {
+            let Some(control_tx) = state.inner.lock().await.runtime_control.clone() else {
+                respond_error(&mut stream, 503, "Runtime control unavailable").await?;
+                return Ok(());
+            };
+            let Some(model_name) = decode_runtime_model_path(p) else {
+                respond_error(&mut stream, 400, "Missing model path").await?;
+                return Ok(());
+            };
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let _ = control_tx.send(RuntimeControlRequest::Unload {
+                model: model_name.clone(),
+                resp: resp_tx,
+            });
+            match resp_rx.await {
+                Ok(Ok(primary_shutdown)) => {
+                    respond_json(
+                        &mut stream,
+                        200,
+                        &serde_json::json!({
+                            "dropped": model_name,
+                            "shutdown": primary_shutdown
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(Err(e)) => {
+                    respond_runtime_error(&mut stream, &e.to_string()).await?;
+                }
+                Err(_) => {
+                    respond_error(&mut stream, 503, "Runtime control unavailable").await?;
                 }
             }
         }
@@ -929,11 +1142,14 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
     let body = format!("{{\"error\":\"{msg}\"}}");
     let status = match code {
         400 => "Bad Request",
+        404 => "Not Found",
+        409 => "Conflict",
+        422 => "Unprocessable Content",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
-        _ => "Not Found",
+        _ => "Unknown",
     };
     let resp = format!(
         "HTTP/1.1 {code} {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -941,6 +1157,144 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
     );
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
+}
+
+async fn respond_json<T: Serialize>(
+    stream: &mut TcpStream,
+    code: u16,
+    value: &T,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(value)?;
+    let status = match code {
+        200 => "OK",
+        201 => "Created",
+        _ => "OK",
+    };
+    let resp = format!(
+        "HTTP/1.1 {code} {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        json.len(),
+        json
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+fn build_runtime_status_payload(
+    model_name: &str,
+    primary_backend: Option<String>,
+    is_host: bool,
+    llama_ready: bool,
+    llama_port: Option<u16>,
+    mut local_processes: Vec<RuntimeProcessPayload>,
+) -> RuntimeStatusPayload {
+    local_processes.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    let mut models: Vec<RuntimeModelPayload> = local_processes
+        .into_iter()
+        .map(|process| RuntimeModelPayload {
+            name: process.name,
+            kind: process.kind,
+            backend: process.backend,
+            status: process.status,
+            port: Some(process.port),
+            startup_managed: process.startup_managed,
+        })
+        .collect();
+
+    let has_primary_process = models.iter().any(|model| model.kind == "primary");
+    if is_host
+        && !llama_ready
+        && !has_primary_process
+        && model_name != "(idle)"
+        && !model_name.is_empty()
+    {
+        models.insert(
+            0,
+            RuntimeModelPayload {
+                name: model_name.to_string(),
+                kind: "primary".into(),
+                backend: primary_backend.unwrap_or_else(|| "unknown".into()),
+                status: "starting".into(),
+                port: llama_port,
+                startup_managed: true,
+            },
+        );
+    }
+
+    RuntimeStatusPayload {
+        primary_model: models
+            .iter()
+            .find(|m| m.kind == "primary")
+            .map(|m| m.name.clone()),
+        models,
+    }
+}
+
+fn build_runtime_processes_payload(
+    mut local_processes: Vec<RuntimeProcessPayload>,
+) -> RuntimeProcessesPayload {
+    local_processes.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    RuntimeProcessesPayload {
+        processes: local_processes,
+    }
+}
+
+fn classify_runtime_error(msg: &str) -> u16 {
+    if msg.contains("not loaded") {
+        404
+    } else if msg.contains("already loaded")
+        || msg.contains("startup-managed")
+        || msg.contains("supports models loaded after startup")
+    {
+        409
+    } else if msg.contains("fit locally") || msg.contains("runtime load only supports") {
+        422
+    } else {
+        400
+    }
+}
+
+async fn respond_runtime_error(stream: &mut TcpStream, msg: &str) -> anyhow::Result<()> {
+    respond_error(stream, classify_runtime_error(msg), msg).await
+}
+
+fn decode_runtime_model_path(path: &str) -> Option<String> {
+    let raw = path.strip_prefix("/api/runtime/models/")?;
+    if raw.is_empty() {
+        return None;
+    }
+
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = bytes[i + 1] as char;
+                let lo = bytes[i + 2] as char;
+                let hex = [hi, lo].iter().collect::<String>();
+                if let Ok(value) = u8::from_str_radix(&hex, 16) {
+                    out.push(value as char);
+                    i += 3;
+                    continue;
+                } else {
+                    return None;
+                }
+            }
+            b'+' => out.push(' '),
+            b => out.push(b as char),
+        }
+        i += 1;
+    }
+    Some(out)
 }
 
 async fn respond_console_index(stream: &mut TcpStream) -> anyhow::Result<bool> {
@@ -1090,5 +1444,107 @@ mod tests {
         let result = build_gpus(Some("NVIDIA RTX 4090"), Some(" 25769803776 "));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].vram_bytes, 25_769_803_776);
+    }
+
+    #[test]
+    fn test_build_runtime_status_payload_uses_local_processes() {
+        let payload = build_runtime_status_payload(
+            "Qwen",
+            Some("llama".into()),
+            true,
+            true,
+            Some(9337),
+            vec![
+                RuntimeProcessPayload {
+                    name: "Qwen".into(),
+                    kind: "primary".into(),
+                    backend: "llama".into(),
+                    status: "ready".into(),
+                    port: 9337,
+                    pid: 100,
+                    startup_managed: true,
+                },
+                RuntimeProcessPayload {
+                    name: "Llama".into(),
+                    kind: "runtime".into(),
+                    backend: "llama".into(),
+                    status: "ready".into(),
+                    port: 9444,
+                    pid: 101,
+                    startup_managed: false,
+                },
+            ],
+        );
+
+        assert_eq!(payload.primary_model.as_deref(), Some("Qwen"));
+        assert_eq!(payload.models.len(), 2);
+        assert_eq!(payload.models[0].name, "Qwen");
+        assert_eq!(payload.models[0].port, Some(9337));
+        assert_eq!(payload.models[1].name, "Llama");
+        assert!(!payload.models[1].startup_managed);
+    }
+
+    #[test]
+    fn test_build_runtime_status_payload_adds_starting_primary() {
+        let payload = build_runtime_status_payload(
+            "Qwen",
+            Some("llama".into()),
+            true,
+            false,
+            Some(9337),
+            vec![],
+        );
+
+        assert_eq!(payload.primary_model.as_deref(), Some("Qwen"));
+        assert_eq!(payload.models.len(), 1);
+        assert_eq!(payload.models[0].status, "starting");
+        assert_eq!(payload.models[0].port, Some(9337));
+    }
+
+    #[test]
+    fn test_build_runtime_processes_payload_sorts_processes() {
+        let payload = build_runtime_processes_payload(vec![
+            RuntimeProcessPayload {
+                name: "Zulu".into(),
+                kind: "runtime".into(),
+                backend: "llama".into(),
+                status: "ready".into(),
+                port: 9444,
+                pid: 11,
+                startup_managed: false,
+            },
+            RuntimeProcessPayload {
+                name: "Alpha".into(),
+                kind: "primary".into(),
+                backend: "llama".into(),
+                status: "ready".into(),
+                port: 9337,
+                pid: 10,
+                startup_managed: true,
+            },
+        ]);
+
+        assert_eq!(payload.processes.len(), 2);
+        assert_eq!(payload.processes[0].name, "Alpha");
+        assert_eq!(payload.processes[1].name, "Zulu");
+    }
+
+    #[test]
+    fn test_classify_runtime_error_codes() {
+        assert_eq!(classify_runtime_error("model 'x' is not loaded"), 404);
+        assert_eq!(classify_runtime_error("model 'x' is already loaded"), 409);
+        assert_eq!(
+            classify_runtime_error("runtime load only supports models that fit locally"),
+            422
+        );
+        assert_eq!(classify_runtime_error("bad request"), 400);
+    }
+
+    #[test]
+    fn test_decode_runtime_model_path_decodes_percent_and_plus() {
+        assert_eq!(
+            decode_runtime_model_path("/api/runtime/models/Llama%203.2+1B"),
+            Some("Llama 3.2 1B".into())
+        );
     }
 }

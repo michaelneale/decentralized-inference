@@ -1,5 +1,6 @@
 mod api;
 mod autoupdate;
+mod backend;
 mod download;
 mod election;
 mod hardware;
@@ -23,6 +24,7 @@ pub use plugins::blackboard::mcp as blackboard_mcp;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mesh::NodeRole;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = "0.49.0";
@@ -183,13 +185,32 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
-    /// Drop a model from the mesh.
-    #[command(hide = true)]
+    /// Load a local-only model into a running mesh-llm instance.
+    Load {
+        /// Model name/path/url to load
+        name: String,
+        /// API port of the running mesh-llm instance (default: 9337)
+        #[arg(long, default_value = "9337")]
+        port: u16,
+    },
+    /// Drop a local runtime-loaded model from a running mesh-llm instance.
     Drop {
         /// Model name to drop
         name: String,
         /// API port of the running mesh-llm instance (default: 9337)
         #[arg(long, default_value = "9337")]
+        port: u16,
+    },
+    /// Show locally served models on a running mesh-llm instance.
+    Models {
+        /// Console/API port of the running mesh-llm instance (default: 3131)
+        #[arg(long, default_value = "3131")]
+        port: u16,
+    },
+    /// Show local inference processes on a running mesh-llm instance.
+    Ps {
+        /// Console/API port of the running mesh-llm instance (default: 3131)
+        #[arg(long, default_value = "3131")]
         port: u16,
     },
     /// Discover meshes on Nostr and optionally auto-join one.
@@ -280,6 +301,200 @@ enum Command {
     },
 }
 
+#[derive(Debug)]
+enum RuntimeEvent {
+    Exited { model: String, port: u16 },
+}
+
+#[derive(Debug)]
+struct LocalRuntimeModelHandle {
+    port: u16,
+    backend: backend::BackendKind,
+    process: launch::InferenceServerHandle,
+}
+
+fn resolved_model_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    router::strip_split_suffix_owned(&stem)
+}
+
+fn mmproj_path_for_model(model_name: &str) -> Option<PathBuf> {
+    download::MODEL_CATALOG
+        .iter()
+        .find(|m| {
+            m.name == model_name || m.file.strip_suffix(".gguf").unwrap_or(m.file) == model_name
+        })
+        .and_then(|m| m.mmproj)
+        .map(|(filename, _url)| download::models_dir().join(filename))
+        .filter(|p| p.exists())
+}
+
+async fn alloc_local_port() -> Result<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+fn add_runtime_local_target(
+    target_tx: &std::sync::Arc<tokio::sync::watch::Sender<election::ModelTargets>>,
+    model_name: &str,
+    port: u16,
+) {
+    let mut targets = target_tx.borrow().clone();
+    let entry = targets.targets.entry(model_name.to_string()).or_default();
+    entry.retain(|target| !matches!(target, election::InferenceTarget::Local(_)));
+    entry.insert(0, election::InferenceTarget::Local(port));
+    target_tx.send_replace(targets);
+}
+
+fn remove_runtime_local_target(
+    target_tx: &std::sync::Arc<tokio::sync::watch::Sender<election::ModelTargets>>,
+    model_name: &str,
+    port: u16,
+) {
+    let mut targets = target_tx.borrow().clone();
+    let mut should_remove_model = false;
+    if let Some(entry) = targets.targets.get_mut(model_name) {
+        entry.retain(|target| {
+            !matches!(target, election::InferenceTarget::Local(local_port) if *local_port == port)
+        });
+        should_remove_model = entry.is_empty();
+    }
+    if should_remove_model {
+        targets.targets.remove(model_name);
+    }
+    target_tx.send_replace(targets);
+}
+
+async fn advertise_model_ready(node: &mesh::Node, primary_model_name: &str, model_name: &str) {
+    let mut hosted_models = node.hosted_models().await;
+    if hosted_models.iter().any(|m| m == model_name) {
+        return;
+    }
+    hosted_models.push(model_name.to_string());
+    hosted_models.sort();
+    if let Some(pos) = hosted_models.iter().position(|m| m == primary_model_name) {
+        let primary = hosted_models.remove(pos);
+        hosted_models.insert(0, primary);
+    }
+    node.set_hosted_models(hosted_models).await;
+    node.regossip().await;
+}
+
+async fn withdraw_advertised_model(node: &mesh::Node, model_name: &str) {
+    let mut hosted_models = node.hosted_models().await;
+    let old_len = hosted_models.len();
+    hosted_models.retain(|m| m != model_name);
+    if hosted_models.len() == old_len {
+        return;
+    }
+    node.set_hosted_models(hosted_models).await;
+    node.regossip().await;
+}
+
+async fn add_serving_assignment(node: &mesh::Node, primary_model_name: &str, model_name: &str) {
+    let mut serving_models = node.serving_models().await;
+    if serving_models.iter().any(|m| m == model_name) {
+        return;
+    }
+    serving_models.push(model_name.to_string());
+    serving_models.sort();
+    if let Some(pos) = serving_models.iter().position(|m| m == primary_model_name) {
+        let primary = serving_models.remove(pos);
+        serving_models.insert(0, primary);
+    }
+    node.set_serving_models(serving_models).await;
+    node.regossip().await;
+}
+
+async fn remove_serving_assignment(node: &mesh::Node, model_name: &str) {
+    let mut serving_models = node.serving_models().await;
+    let old_len = serving_models.len();
+    serving_models.retain(|m| m != model_name);
+    if serving_models.len() == old_len {
+        return;
+    }
+    node.set_serving_models(serving_models).await;
+    node.regossip().await;
+}
+
+async fn start_runtime_local_model(
+    bin_dir: &Path,
+    binary_flavor: Option<launch::BinaryFlavor>,
+    node: &mesh::Node,
+    model_path: &Path,
+    ctx_size_override: Option<u32>,
+) -> Result<(
+    String,
+    LocalRuntimeModelHandle,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
+    let model_name = resolved_model_name(model_path);
+    let backend = backend::detect_backend(model_path);
+    let model_bytes = election::total_model_bytes(model_path);
+    let my_vram = node.vram_bytes();
+    anyhow::ensure!(
+        my_vram >= (model_bytes as f64 * 1.1) as u64,
+        "runtime load only supports models that fit locally on this node"
+    );
+
+    let port = alloc_local_port().await?;
+    let mmproj_path = mmproj_path_for_model(&model_name);
+    let process = launch::start_model_server(
+        bin_dir,
+        binary_flavor,
+        launch::ModelLaunchSpec {
+            backend,
+            model: model_path,
+            http_port: port,
+            tunnel_ports: &[],
+            tensor_split: None,
+            draft: None,
+            draft_max: 0,
+            model_bytes,
+            my_vram,
+            mmproj: mmproj_path.as_deref(),
+            ctx_size_override,
+            total_group_vram: None,
+        },
+    )
+    .await?;
+
+    Ok((
+        model_name,
+        LocalRuntimeModelHandle {
+            port,
+            backend,
+            process: process.handle,
+        },
+        process.death_rx,
+    ))
+}
+
+fn local_process_payload(
+    model_name: &str,
+    kind: &str,
+    backend: backend::BackendKind,
+    port: u16,
+    pid: u32,
+    startup_managed: bool,
+) -> api::RuntimeProcessPayload {
+    api::RuntimeProcessPayload {
+        name: model_name.to_string(),
+        kind: kind.into(),
+        backend: backend.as_str().into(),
+        status: "ready".into(),
+        port,
+        pid,
+        startup_managed,
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum PluginCommand {
     /// Compatibility shim for the old install workflow.
@@ -337,12 +552,6 @@ async fn main() -> Result<()> {
         false
     };
 
-    // Clean up orphan processes from previous runs (skip for client — never runs llama-server)
-    if !cli.client {
-        launch::kill_llama_server().await;
-        launch::kill_orphan_rpc_servers().await;
-    }
-
     // Finish the release check before startup continues.
     if !checked_updates {
         autoupdate::check_for_update().await;
@@ -376,8 +585,17 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            Command::Load { name, port } => {
+                return run_load(name, *port).await;
+            }
             Command::Drop { name, port } => {
                 return run_drop(name, *port).await;
+            }
+            Command::Models { port } => {
+                return run_models(*port).await;
+            }
+            Command::Ps { port } => {
+                return run_ps(*port).await;
             }
             Command::Stop => {
                 return run_stop();
@@ -436,6 +654,14 @@ async fn main() -> Result<()> {
                 return run_plugin_command(command, &cli).await;
             }
         }
+    }
+
+    // Clean up orphan processes from previous runs (skip for client — never runs llama-server).
+    // This intentionally happens after subcommand dispatch so control commands
+    // targeting a live instance don't kill it before sending the request.
+    if !cli.client {
+        launch::kill_llama_server().await;
+        launch::kill_orphan_rpc_servers().await;
     }
 
     // Auto-enable publishing when mesh is named
@@ -786,7 +1012,7 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 
     if demand.is_empty() {
         // No API requests yet — log what the mesh is serving for visibility
-        let served: Vec<&str> = peers.iter().filter_map(|p| p.serving.as_deref()).collect();
+        let served: Vec<String> = peers.iter().flat_map(|p| p.routable_models()).collect();
         if !served.is_empty() {
             eprintln!(
                 "📋 No demand yet — mesh is serving {:?}, staying standby until needed",
@@ -804,8 +1030,8 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
     let mut serving_count: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for p in &peers {
-        if let Some(ref s) = p.serving {
-            *serving_count.entry(s.clone()).or_default() += 1;
+        for served_model in p.routable_models() {
+            *serving_count.entry(served_model).or_default() += 1;
         }
     }
 
@@ -974,8 +1200,8 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
     let mut serving_count: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for p in &peers {
-        if let Some(ref s) = p.serving {
-            *serving_count.entry(s.clone()).or_default() += 1;
+        for served_model in p.routable_models() {
+            *serving_count.entry(served_model).or_default() += 1;
         }
     }
 
@@ -1429,11 +1655,15 @@ async fn run_auto(
         model_name.clone()
     };
     node.set_model_source(model_source).await;
-    // Set all serving models (primary + extras)
-    let all_serving = build_serving_list(&resolved_models, &model_name);
-    node.set_serving_models(all_serving.clone()).await;
-    node.set_models(all_serving).await;
-    // Re-gossip so peers learn what we're serving
+    // Declare which models this node may serve, but do not advertise them as
+    // live/routable until their local processes have passed health checks.
+    let all_declared = build_serving_list(&resolved_models, &model_name);
+    node.set_serving_models(all_declared.clone()).await;
+    node.set_hosted_models(Vec::new()).await;
+    node.set_models(all_declared.clone()).await;
+    let static_model_names = all_declared.clone();
+    // Re-gossip so peers learn our catalog/requested state without prematurely
+    // routing requests to not-yet-ready local processes.
     node.regossip().await;
 
     // Ensure draft model is available (downloads if needed, <1GB)
@@ -1464,8 +1694,12 @@ async fn run_auto(
     let (target_tx, target_rx) = tokio::sync::watch::channel(election::ModelTargets::default());
     let target_tx = std::sync::Arc::new(target_tx);
 
-    // Drop channel: API proxy sends model names to drop, main loop handles shutdown
-    let (drop_tx, mut drop_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Runtime control for local load/unload of extra models.
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<api::RuntimeControlRequest>();
+    let (runtime_event_tx, mut runtime_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
+    let mut runtime_models: HashMap<String, LocalRuntimeModelHandle> = HashMap::new();
 
     // Take over listener from bootstrap proxy (if running), or bind a new one
     let existing_listener = if let Some(tx) = bootstrap_listener_tx {
@@ -1480,12 +1714,13 @@ async fn run_auto(
     // API proxy: model-aware routing
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
+    let api_control_tx = control_tx.clone();
     tokio::spawn(async move {
         api_proxy(
             proxy_node,
             api_port,
             proxy_rx,
-            drop_tx,
+            api_control_tx,
             existing_listener,
             cli.listen_all,
         )
@@ -1503,6 +1738,9 @@ async fn run_auto(
             model_size_bytes,
             plugin_manager.clone(),
         );
+        cs.set_primary_backend(backend::detect_backend(&model).as_str().into())
+            .await;
+        cs.set_runtime_control(control_tx.clone()).await;
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         cs.set_nostr_discovery(cli.nostr_discovery).await;
         if let Some(draft) = &cli.draft {
@@ -1556,11 +1794,25 @@ async fn run_auto(
     let model_name_for_election = model_name.clone();
     let node_for_cb = node.clone();
     let primary_target_tx = target_tx.clone();
+    let console_state_for_election = console_state.clone();
+    let console_state_for_primary_process = console_state.clone();
+    let primary_process_model_name = model_name.clone();
+    let primary_model_name_for_advertise = model_name.clone();
     tokio::spawn(async move {
         election::election_loop(
-            node2, tunnel_mgr2, rpc_port, bin_dir2, model2, model_name_for_election,
+            node2, tunnel_mgr2, api_port, rpc_port, bin_dir2, model2, model_name_for_election,
             draft2, draft_max, force_split, llama_flavor, cli.ctx_size, primary_target_tx,
             move |is_host, llama_ready| {
+                let advertise_node = node_for_cb.clone();
+                let advertise_model = primary_model_name_for_advertise.clone();
+                tokio::spawn(async move {
+                    if is_host && llama_ready {
+                        advertise_model_ready(&advertise_node, &advertise_model, &advertise_model)
+                            .await;
+                    } else {
+                        withdraw_advertised_model(&advertise_node, &advertise_model).await;
+                    }
+                });
                 if llama_ready {
                     let n = node_for_cb.clone();
                     tokio::spawn(async move { n.set_llama_ready(true).await; });
@@ -1580,10 +1832,34 @@ async fn run_auto(
                 } else {
                     eprintln!("  API: http://localhost:{api_port} (proxied to host)");
                 }
-                if let Some(ref cs) = console_state {
+                if let Some(ref cs) = console_state_for_election {
                     let cs = cs.clone();
                     tokio::spawn(async move {
                         cs.update(is_host, llama_ready).await;
+                    });
+                }
+            },
+            move |process| {
+                if let Some(ref cs) = console_state_for_primary_process {
+                    let cs = cs.clone();
+                    let model_name = primary_process_model_name.clone();
+                    tokio::spawn(async move {
+                        match process {
+                            Some(process) => {
+                                cs.upsert_local_process(local_process_payload(
+                                    &model_name,
+                                    "primary",
+                                    process.backend,
+                                    process.port,
+                                    process.pid,
+                                    true,
+                                ))
+                                .await;
+                            }
+                            None => {
+                                cs.remove_local_process(&model_name).await;
+                            }
+                        }
                     });
                 }
             },
@@ -1628,15 +1904,56 @@ async fn run_auto(
             let extra_model_name = extra_name.clone();
             let api_port_extra = api_port;
             let extra_llama_flavor = cli.llama_flavor;
+            let extra_console_state = console_state.clone();
+            let extra_model_name_for_status = extra_model_name.clone();
+            let extra_model_name_for_process = extra_model_name.clone();
+            let extra_model_name_for_advertise = extra_model_name.clone();
+            let extra_node_for_advertise = node.clone();
+            let primary_model_name_for_extra = model_name.clone();
             eprintln!("  + {extra_name}");
             tokio::spawn(async move {
                 election::election_loop(
-                    extra_node, extra_tunnel, 0, extra_bin, extra_path, extra_model_name.clone(),
+                    extra_node, extra_tunnel, api_port_extra, 0, extra_bin, extra_path, extra_model_name.clone(),
                     None, 8, false, extra_llama_flavor, cli.ctx_size, extra_target_tx,
                     move |is_host, llama_ready| {
+                        let advertise_node = extra_node_for_advertise.clone();
+                        let model_name = extra_model_name_for_advertise.clone();
+                        let primary_model_name = primary_model_name_for_extra.clone();
+                        tokio::spawn(async move {
+                            if is_host && llama_ready {
+                                advertise_model_ready(&advertise_node, &primary_model_name, &model_name)
+                                    .await;
+                            } else {
+                                withdraw_advertised_model(&advertise_node, &model_name).await;
+                            }
+                        });
                         if is_host && llama_ready {
-                            eprintln!("✅ [{extra_model_name}] ready (multi-model)");
-                            eprintln!("  API: http://localhost:{api_port_extra} (model={extra_model_name})");
+                            eprintln!("✅ [{extra_model_name_for_status}] ready (multi-model)");
+                            eprintln!("  API: http://localhost:{api_port_extra} (model={extra_model_name_for_status})");
+                        }
+                    },
+                    move |process| {
+                        if let Some(ref cs) = extra_console_state {
+                            let cs = cs.clone();
+                            let model_name = extra_model_name_for_process.clone();
+                            tokio::spawn(async move {
+                                match process {
+                                    Some(process) => {
+                                        cs.upsert_local_process(local_process_payload(
+                                            &model_name,
+                                            "startup",
+                                            process.backend,
+                                            process.port,
+                                            process.pid,
+                                            true,
+                                        ))
+                                        .await;
+                                    }
+                                    None => {
+                                        cs.remove_local_process(&model_name).await;
+                                    }
+                                }
+                            });
                         }
                     },
                 ).await;
@@ -1677,24 +1994,139 @@ async fn run_auto(
         None
     };
 
-    // Wait for ctrl-c or a drop command for our model
-    let drop_model_name = model_name.clone();
-    let drop_node = node.clone();
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("\nShutting down...");
-        }
-        dropped = async {
-            while let Some(name) = drop_rx.recv().await {
-                if name == drop_model_name {
-                    return name;
-                }
-                eprintln!("⚠ Drop request for '{}' — not our model ({}), ignoring", name, drop_model_name);
+    // Wait for ctrl-c or runtime model control commands.
+    let primary_model_name = model_name.clone();
+    let mut shutdown_primary = false;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nShutting down...");
+                break;
             }
-            drop_model_name.clone() // channel closed
-        } => {
-            eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", dropped);
-            drop_node.set_serving(None).await;
+            Some(cmd) = control_rx.recv() => {
+                match cmd {
+                    api::RuntimeControlRequest::Load { spec, resp } => {
+                        let mut assigned_runtime_model: Option<String> = None;
+                        let result = async {
+                            let model_path = resolve_model(&PathBuf::from(&spec)).await?;
+                            let runtime_model_name = resolved_model_name(&model_path);
+                            anyhow::ensure!(
+                                !static_model_names.iter().any(|name| name == &runtime_model_name),
+                                "model '{runtime_model_name}' is startup-managed; restart the node to change it"
+                            );
+                            anyhow::ensure!(
+                                !runtime_models.contains_key(&runtime_model_name),
+                                "model '{runtime_model_name}' is already loaded"
+                            );
+
+                            assigned_runtime_model = Some(runtime_model_name.clone());
+                            add_serving_assignment(&node, &primary_model_name, &runtime_model_name)
+                                .await;
+                            let (loaded_name, handle, death_rx) = start_runtime_local_model(
+                                &bin_dir,
+                                cli.llama_flavor,
+                                &node,
+                                &model_path,
+                                cli.ctx_size,
+                            )
+                            .await?;
+
+                            add_runtime_local_target(&target_tx, &loaded_name, handle.port);
+                            advertise_model_ready(&node, &primary_model_name, &loaded_name).await;
+                            node.set_available_models(mesh::scan_local_models()).await;
+                            if let Some(ref cs) = console_state {
+                                cs.upsert_local_process(local_process_payload(
+                                    &loaded_name,
+                                    "runtime",
+                                    handle.backend,
+                                    handle.port,
+                                    handle.process.pid(),
+                                    false,
+                                ))
+                                .await;
+                            }
+
+                            let event_tx = runtime_event_tx.clone();
+                            let event_name = loaded_name.clone();
+                            let event_port = handle.port;
+                            tokio::spawn(async move {
+                                let _ = death_rx.await;
+                                let _ = event_tx.send(RuntimeEvent::Exited {
+                                    model: event_name,
+                                    port: event_port,
+                                });
+                            });
+
+                            eprintln!(
+                                "✅ Runtime-loaded {} model '{}' on :{}",
+                                handle.backend.as_str(),
+                                loaded_name,
+                                handle.port
+                            );
+                            runtime_models.insert(loaded_name.clone(), handle);
+                            Ok(loaded_name)
+                        }
+                        .await;
+                        if let Err(err) = &result {
+                            let _ = err;
+                            if let Some(name) = assigned_runtime_model.as_deref() {
+                                remove_serving_assignment(&node, name).await;
+                            }
+                        }
+                        let _ = resp.send(result);
+                    }
+                    api::RuntimeControlRequest::Unload { model, resp } => {
+                        let result = if let Some(handle) = runtime_models.remove(&model) {
+                            remove_runtime_local_target(&target_tx, &model, handle.port);
+                            withdraw_advertised_model(&node, &model).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            handle.process.shutdown().await;
+                            remove_serving_assignment(&node, &model).await;
+                            if let Some(ref cs) = console_state {
+                                cs.remove_local_process(&model).await;
+                            }
+                            eprintln!("🗑 Unloaded runtime model '{}' from :{}", model, handle.port);
+                            Ok(false)
+                        } else if model == primary_model_name {
+                            eprintln!("\n🗑 Model '{}' dropped from mesh — shutting down", model);
+                            node.set_serving(None).await;
+                            shutdown_primary = true;
+                            Ok(true)
+                        } else if static_model_names.iter().any(|name| name == &model) {
+                            Err(anyhow::anyhow!(
+                                "runtime unload only supports models loaded after startup"
+                            ))
+                        } else {
+                            Err(anyhow::anyhow!("model '{model}' is not loaded"))
+                        };
+                        let should_stop = result.as_ref().ok().copied().unwrap_or(false);
+                        let _ = resp.send(result);
+                        if should_stop {
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(event) = runtime_event_rx.recv() => {
+                match event {
+                    RuntimeEvent::Exited { model, port } => {
+                        let matches = runtime_models
+                            .get(&model)
+                            .map(|handle| handle.port == port)
+                            .unwrap_or(false);
+                        if matches {
+                            runtime_models.remove(&model);
+                            remove_runtime_local_target(&target_tx, &model, port);
+                            withdraw_advertised_model(&node, &model).await;
+                            remove_serving_assignment(&node, &model).await;
+                            if let Some(ref cs) = console_state {
+                                cs.remove_local_process(&model).await;
+                            }
+                            eprintln!("⚠ Runtime model '{}' exited on :{}", model, port);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1713,6 +2145,20 @@ async fn run_auto(
     }
     if let Some(handle) = nostr_publisher {
         handle.abort();
+    }
+
+    for (name, handle) in runtime_models.drain() {
+        remove_runtime_local_target(&target_tx, &name, handle.port);
+        withdraw_advertised_model(&node, &name).await;
+        remove_serving_assignment(&node, &name).await;
+        if let Some(ref cs) = console_state {
+            cs.remove_local_process(&name).await;
+        }
+        handle.process.shutdown().await;
+    }
+
+    if !shutdown_primary {
+        node.set_serving(None).await;
     }
 
     launch::kill_llama_server().await;
@@ -1938,7 +2384,7 @@ async fn api_proxy(
     node: mesh::Node,
     port: u16,
     target_rx: tokio::sync::watch::Receiver<election::ModelTargets>,
-    drop_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<api::RuntimeControlRequest>,
     existing_listener: Option<tokio::net::TcpListener>,
     listen_all: bool,
 ) {
@@ -1966,7 +2412,7 @@ async fn api_proxy(
         let targets = target_rx.borrow().clone();
         let node = node.clone();
 
-        let drop_tx = drop_tx.clone();
+        let control_tx = control_tx.clone();
         tokio::spawn(async move {
             // Read the HTTP request to extract the model name
             let mut buf = vec![0u8; 32768];
@@ -1978,14 +2424,57 @@ async fn api_proxy(
                         return;
                     }
 
+                    if proxy::is_load_request(&buf[..n]) {
+                        if let Some(ref spec) = model_name {
+                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                            let _ = control_tx.send(api::RuntimeControlRequest::Load {
+                                spec: spec.clone(),
+                                resp: resp_tx,
+                            });
+                            match resp_rx.await {
+                                Ok(Ok(loaded)) => {
+                                    let _ = proxy::send_json_ok(
+                                        tcp_stream,
+                                        &serde_json::json!({"loaded": loaded}),
+                                    )
+                                    .await;
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = proxy::send_400(tcp_stream, &e.to_string()).await;
+                                }
+                                Err(_) => {
+                                    let _ = proxy::send_503(tcp_stream).await;
+                                }
+                            }
+                        } else {
+                            let _ = proxy::send_400(tcp_stream, "missing 'model' field").await;
+                        }
+                        return;
+                    }
+
                     if proxy::is_drop_request(&buf[..n]) {
                         if let Some(ref name) = model_name {
-                            let _ = drop_tx.send(name.clone());
-                            let _ = proxy::send_json_ok(
-                                tcp_stream,
-                                &serde_json::json!({"dropped": name}),
-                            )
-                            .await;
+                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                            let _ = control_tx.send(api::RuntimeControlRequest::Unload {
+                                model: name.clone(),
+                                resp: resp_tx,
+                            });
+                            match resp_rx.await {
+                                Ok(Ok(primary_shutdown)) => {
+                                    let body = if primary_shutdown {
+                                        serde_json::json!({"dropped": name, "shutdown": true})
+                                    } else {
+                                        serde_json::json!({"dropped": name})
+                                    };
+                                    let _ = proxy::send_json_ok(tcp_stream, &body).await;
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = proxy::send_400(tcp_stream, &e.to_string()).await;
+                                }
+                                Err(_) => {
+                                    let _ = proxy::send_503(tcp_stream).await;
+                                }
+                            }
                         } else {
                             let _ = proxy::send_400(tcp_stream, "missing 'model' field").await;
                         }
@@ -2535,11 +3024,128 @@ fn run_stop() -> Result<()> {
 }
 
 async fn run_drop(model_name: &str, port: u16) -> Result<()> {
+    run_control_request("/mesh/drop", model_name, port, "Dropped").await
+}
+
+async fn run_load(model_name: &str, port: u16) -> Result<()> {
+    run_control_request("/mesh/load", model_name, port, "Loaded").await
+}
+
+async fn run_models(port: u16) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let url = format!("http://127.0.0.1:{port}/api/runtime");
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| {
+            format!("Can't connect to mesh-llm console on port {port}. Is it running?")
+        })?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let models = body["models"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid runtime status payload"))?;
+
+    if models.is_empty() {
+        eprintln!("No local models are currently being served.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38} {:<8} {:<8} {:<10} {:<6} {:<7}",
+        "MODEL", "KIND", "BACKEND", "STATUS", "PORT", "SOURCE"
+    );
+    for model in models {
+        let name = model["name"].as_str().unwrap_or("unknown");
+        let kind = model["kind"].as_str().unwrap_or("unknown");
+        let backend = model["backend"].as_str().unwrap_or("unknown");
+        let status = model["status"].as_str().unwrap_or("unknown");
+        let port = model["port"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let source = if model["startup_managed"].as_bool().unwrap_or(false) {
+            "startup"
+        } else {
+            "runtime"
+        };
+        println!(
+            "{:<38} {:<8} {:<8} {:<10} {:<6} {:<7}",
+            name, kind, backend, status, port, source
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_ps(port: u16) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let url = format!("http://127.0.0.1:{port}/api/runtime/processes");
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| {
+            format!("Can't connect to mesh-llm console on port {port}. Is it running?")
+        })?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let processes = body["processes"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid runtime process payload"))?;
+
+    if processes.is_empty() {
+        eprintln!("No local inference processes are currently running.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38} {:<8} {:<8} {:<10} {:<6} {:<8} {:<7}",
+        "MODEL", "KIND", "BACKEND", "STATUS", "PORT", "PID", "SOURCE"
+    );
+    for process in processes {
+        let name = process["name"].as_str().unwrap_or("unknown");
+        let kind = process["kind"].as_str().unwrap_or("unknown");
+        let backend = process["backend"].as_str().unwrap_or("unknown");
+        let status = process["status"].as_str().unwrap_or("unknown");
+        let port = process["port"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let pid = process["pid"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let source = if process["startup_managed"].as_bool().unwrap_or(false) {
+            "startup"
+        } else {
+            "runtime"
+        };
+        println!(
+            "{:<38} {:<8} {:<8} {:<10} {:<6} {:<8} {:<7}",
+            name, kind, backend, status, port, pid, source
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_control_request(path: &str, model_name: &str, port: u16, verb: &str) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let body = serde_json::json!({ "model": model_name }).to_string();
+    let verb_lower = verb.to_lowercase();
     let request = format!(
-        "POST /mesh/drop HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
 
@@ -2553,10 +3159,11 @@ async fn run_drop(model_name: &str, port: u16) -> Result<()> {
     let resp = String::from_utf8_lossy(&response[..n]);
 
     if resp.contains("200 OK") {
-        eprintln!("✅ Dropped model: {model_name}");
+        eprintln!("✅ {verb} model: {model_name}");
     } else {
         eprintln!(
-            "❌ Failed to drop model: {}",
+            "❌ Failed to {} model: {}",
+            verb_lower,
             resp.lines().last().unwrap_or("unknown error")
         );
     }

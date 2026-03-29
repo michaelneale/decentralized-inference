@@ -79,6 +79,9 @@ fn peer_meaningfully_changed(old: &PeerInfo, new: &PeerInfo) -> bool {
         || old.model_source != new.model_source
         || old.serving != new.serving
         || old.serving_models != new.serving_models
+        || old.assigned_models != new.assigned_models
+        || old.hosted_models_known != new.hosted_models_known
+        || old.hosted_models != new.hosted_models
         || old.available_models != new.available_models
         || old.requested_models != new.requested_models
         || old.version != new.version
@@ -146,9 +149,17 @@ struct PeerAnnouncement {
     /// Kept for backward compat — old nodes only read this field.
     #[serde(default)]
     serving: Option<String>,
-    /// All models currently loaded in VRAM (multi-model per node).
+    /// All models this node can currently route inference for.
+    /// Old nodes read this as the ready/routable set.
     #[serde(default)]
     serving_models: Vec<String>,
+    /// All models assigned to this node, even if not yet healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assigned_models: Option<Vec<String>>,
+    /// Models this node can currently accept inference for.
+    /// This duplicates the ready/routable serving set for newer nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted_models: Option<Vec<String>>,
     /// All GGUF filenames on disk in ~/.models/ (for mesh catalog)
     #[serde(default)]
     available_models: Vec<String>,
@@ -189,8 +200,14 @@ pub struct PeerInfo {
     pub model_source: Option<String>,
     /// Primary model currently loaded in VRAM
     pub serving: Option<String>,
-    /// All models currently loaded in VRAM (multi-model per node)
+    /// All models this peer can currently route inference for.
     pub serving_models: Vec<String>,
+    /// All models assigned to this peer, even if not yet healthy.
+    pub assigned_models: Vec<String>,
+    /// Models this node is actively routing inference for.
+    pub hosted_models: Vec<String>,
+    /// True when this peer explicitly advertised `hosted_models`.
+    pub hosted_models_known: bool,
     /// All GGUFs on disk
     pub available_models: Vec<String>,
     /// Models this node has requested the mesh to serve
@@ -206,6 +223,52 @@ pub struct PeerInfo {
     pub hostname: Option<String>,
     pub is_soc: Option<bool>,
     pub gpu_vram: Option<String>,
+}
+
+impl PeerInfo {
+    pub fn assigned_models(&self) -> Vec<String> {
+        if !self.assigned_models.is_empty() {
+            self.assigned_models.clone()
+        } else if !self.serving_models.is_empty() {
+            self.serving_models.clone()
+        } else {
+            self.serving.clone().into_iter().collect()
+        }
+    }
+
+    pub fn is_assigned_model(&self, model: &str) -> bool {
+        if !self.assigned_models.is_empty() {
+            self.assigned_models.iter().any(|m| m == model)
+        } else if !self.serving_models.is_empty() {
+            self.serving_models.iter().any(|m| m == model)
+        } else {
+            self.serving.as_deref() == Some(model)
+        }
+    }
+
+    pub fn routable_models(&self) -> Vec<String> {
+        if !self.serving_models.is_empty() {
+            self.serving_models.clone()
+        } else if self.hosted_models_known {
+            self.hosted_models.clone()
+        } else if matches!(self.role, NodeRole::Host { .. }) {
+            self.serving.clone().into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn routes_model(&self, model: &str) -> bool {
+        if !self.serving_models.is_empty() {
+            self.serving_models.iter().any(|m| m == model)
+        } else if self.hosted_models_known {
+            self.hosted_models.iter().any(|m| m == model)
+        } else if matches!(self.role, NodeRole::Host { .. }) {
+            self.serving.as_deref() == Some(model)
+        } else {
+            false
+        }
+    }
 }
 
 /// Peers not directly verified within this window are considered stale
@@ -435,6 +498,7 @@ pub struct Node {
     model_source: Arc<Mutex<Option<String>>>,
     serving: Arc<Mutex<Option<String>>>,
     serving_models: Arc<Mutex<Vec<String>>>,
+    hosted_models: Arc<Mutex<Vec<String>>>,
     llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
@@ -653,6 +717,7 @@ impl Node {
             model_source: Arc::new(Mutex::new(None)),
             serving: Arc::new(Mutex::new(None)),
             serving_models: Arc::new(Mutex::new(Vec::new())),
+            hosted_models: Arc::new(Mutex::new(Vec::new())),
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
@@ -796,6 +861,14 @@ impl Node {
 
     pub async fn serving_models(&self) -> Vec<String> {
         self.serving_models.lock().await.clone()
+    }
+
+    pub async fn set_hosted_models(&self, models: Vec<String>) {
+        *self.hosted_models.lock().await = models;
+    }
+
+    pub async fn hosted_models(&self) -> Vec<String> {
+        self.hosted_models.lock().await.clone()
     }
 
     /// Set the display name for blackboard posts.
@@ -1873,33 +1946,18 @@ impl Node {
 
     /// Get all models currently being served in the mesh (loaded in VRAM somewhere).
     pub async fn models_being_served(&self) -> Vec<String> {
-        let my_serving_models = self.serving_models.lock().await.clone();
-        let my_serving = self.serving.lock().await.clone();
+        let my_hosted_models = self.hosted_models.lock().await.clone();
         let peer_data: Vec<_> = {
             let state = self.state.lock().await;
-            state
-                .peers
-                .values()
-                .map(|p| (p.serving_models.clone(), p.serving.clone()))
-                .collect()
+            state.peers.values().cloned().collect()
         };
         let mut served = std::collections::HashSet::new();
-        for s in &my_serving_models {
+        for s in &my_hosted_models {
             served.insert(s.clone());
         }
-        if my_serving_models.is_empty() {
-            if let Some(ref s) = my_serving {
-                served.insert(s.clone());
-            }
-        }
-        for (sm, s) in &peer_data {
-            for m in sm {
+        for peer in &peer_data {
+            for m in peer.routable_models() {
                 served.insert(m.clone());
-            }
-            if sm.is_empty() {
-                if let Some(ref s) = s {
-                    served.insert(s.clone());
-                }
             }
         }
         let mut result: Vec<String> = served.into_iter().collect();
@@ -1916,9 +1974,7 @@ impl Node {
         let mut hosts: Vec<EndpointId> = state
             .peers
             .values()
-            .filter(|p| {
-                matches!(p.role, NodeRole::Host { .. }) && p.serving.as_deref() == Some(model)
-            })
+            .filter(|p| p.routes_model(model))
             .map(|p| p.id)
             .collect();
         hosts.sort();
@@ -1941,29 +1997,25 @@ impl Node {
         state
             .peers
             .values()
-            .find(|p| matches!(p.role, NodeRole::Host { .. }))
+            .find(|p| !p.routable_models().is_empty())
             .cloned()
     }
 
     /// Build the current routing table from this node's view of the mesh.
     pub async fn routing_table(&self) -> RoutingTable {
-        let my_serving = self.serving.lock().await.clone();
+        let my_hosted_models = self.hosted_models.lock().await.clone();
         let my_role = self.role.lock().await.clone();
         let peer_data: Vec<_> = {
             let state = self.state.lock().await;
-            state
-                .peers
-                .values()
-                .map(|p| (p.id, p.role.clone(), p.serving.clone(), p.vram_bytes))
-                .collect()
+            state.peers.values().cloned().collect()
         };
         let mut hosts = Vec::new();
 
-        // Include self if we're a host
-        if matches!(my_role, NodeRole::Host { .. }) {
-            if let Some(ref model) = my_serving {
+        // Include self if we're serving through the local API proxy
+        if !matches!(my_role, NodeRole::Client) {
+            for model in my_hosted_models {
                 hosts.push(RouteEntry {
-                    model: model.clone(),
+                    model,
                     node_id: format!("{}", self.endpoint.id().fmt_short()),
                     endpoint_id: self.endpoint.id(),
                     vram_gb: self.vram_bytes as f64 / 1e9,
@@ -1971,17 +2023,15 @@ impl Node {
             }
         }
 
-        // Include peers that are hosts
-        for (id, role, serving, vram_bytes) in &peer_data {
-            if matches!(role, NodeRole::Host { .. }) {
-                if let Some(ref model) = serving {
-                    hosts.push(RouteEntry {
-                        model: model.clone(),
-                        node_id: format!("{}", id.fmt_short()),
-                        endpoint_id: *id,
-                        vram_gb: *vram_bytes as f64 / 1e9,
-                    });
-                }
+        // Include peers that are serving through their local API proxies
+        for peer in &peer_data {
+            for model in peer.routable_models() {
+                hosts.push(RouteEntry {
+                    model,
+                    node_id: format!("{}", peer.id.fmt_short()),
+                    endpoint_id: peer.id,
+                    vram_gb: peer.vram_bytes as f64 / 1e9,
+                });
             }
         }
 
@@ -2761,7 +2811,22 @@ impl Node {
         if let Some(existing) = state.peers.get_mut(&id) {
             let old_peer = existing.clone();
             let role_changed = existing.role != ann.role;
-            let serving_changed = existing.serving != ann.serving;
+            let ann_assigned_models = ann.assigned_models.clone().unwrap_or_else(|| {
+                if !ann.serving_models.is_empty() {
+                    ann.serving_models.clone()
+                } else {
+                    ann.serving.clone().into_iter().collect()
+                }
+            });
+            let ann_hosted_models = ann
+                .hosted_models
+                .clone()
+                .unwrap_or_else(|| ann.serving_models.clone());
+            let serving_changed = existing.serving != ann.serving
+                || existing.serving_models != ann.serving_models
+                || existing.assigned_models != ann_assigned_models
+                || existing.hosted_models != ann_hosted_models
+                || existing.hosted_models_known != ann.hosted_models.is_some();
             if role_changed {
                 tracing::info!(
                     "Peer {} role updated: {:?} → {:?}",
@@ -2782,6 +2847,9 @@ impl Node {
             }
             existing.serving = ann.serving.clone();
             existing.serving_models = ann.serving_models.clone();
+            existing.assigned_models = ann_assigned_models;
+            existing.hosted_models = ann_hosted_models;
+            existing.hosted_models_known = ann.hosted_models.is_some();
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
             existing.last_seen = std::time::Instant::now();
@@ -2839,6 +2907,18 @@ impl Node {
             model_source: ann.model_source.clone(),
             serving: ann.serving.clone(),
             serving_models: ann.serving_models.clone(),
+            assigned_models: ann.assigned_models.clone().unwrap_or_else(|| {
+                if !ann.serving_models.is_empty() {
+                    ann.serving_models.clone()
+                } else {
+                    ann.serving.clone().into_iter().collect()
+                }
+            }),
+            hosted_models: ann
+                .hosted_models
+                .clone()
+                .unwrap_or_else(|| ann.serving_models.clone()),
+            hosted_models_known: ann.hosted_models.is_some(),
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
             last_seen: std::time::Instant::now(),
@@ -2880,11 +2960,28 @@ impl Node {
         }
         if let Some(existing) = state.peers.get_mut(&id) {
             let old_peer = existing.clone();
+            let ann_assigned_models = ann.assigned_models.clone().unwrap_or_else(|| {
+                if !ann.serving_models.is_empty() {
+                    ann.serving_models.clone()
+                } else {
+                    ann.serving.clone().into_iter().collect()
+                }
+            });
+            let ann_hosted_models = ann
+                .hosted_models
+                .clone()
+                .unwrap_or_else(|| ann.serving_models.clone());
             // Update serving info only — don't touch last_seen
-            let serving_changed =
-                existing.serving != ann.serving || existing.serving_models != ann.serving_models;
+            let serving_changed = existing.serving != ann.serving
+                || existing.serving_models != ann.serving_models
+                || existing.assigned_models != ann_assigned_models
+                || existing.hosted_models != ann_hosted_models
+                || existing.hosted_models_known != ann.hosted_models.is_some();
             existing.serving = ann.serving.clone();
             existing.serving_models = ann.serving_models.clone();
+            existing.assigned_models = ann_assigned_models;
+            existing.hosted_models = ann_hosted_models;
+            existing.hosted_models_known = ann.hosted_models.is_some();
             existing.role = ann.role.clone();
             existing.vram_bytes = ann.vram_bytes;
             if !addr.addrs.is_empty() {
@@ -2944,6 +3041,18 @@ impl Node {
                 model_source: ann.model_source.clone(),
                 serving: ann.serving.clone(),
                 serving_models: ann.serving_models.clone(),
+                assigned_models: ann.assigned_models.clone().unwrap_or_else(|| {
+                    if !ann.serving_models.is_empty() {
+                        ann.serving_models.clone()
+                    } else {
+                        ann.serving.clone().into_iter().collect()
+                    }
+                }),
+                hosted_models: ann
+                    .hosted_models
+                    .clone()
+                    .unwrap_or_else(|| ann.serving_models.clone()),
+                hosted_models_known: ann.hosted_models.is_some(),
                 available_models: ann.available_models.clone(),
                 requested_models: ann.requested_models.clone(),
                 last_seen: std::time::Instant::now(),
@@ -2969,8 +3078,8 @@ impl Node {
         let my_role = self.role.lock().await.clone();
         let my_models = self.models.lock().await.clone();
         let my_source = self.model_source.lock().await.clone();
-        let my_serving = self.serving.lock().await.clone();
-        let my_serving_models = self.serving_models.lock().await.clone();
+        let my_assigned_models = self.serving_models.lock().await.clone();
+        let my_hosted_models = self.hosted_models.lock().await.clone();
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
         let my_mesh_id = self.mesh_id.lock().await.clone();
@@ -2991,6 +3100,9 @@ impl Node {
                     model_source: p.model_source.clone(),
                     serving: p.serving.clone(),
                     serving_models: p.serving_models.clone(),
+                    assigned_models: (!p.assigned_models.is_empty())
+                        .then(|| p.assigned_models.clone()),
+                    hosted_models: p.hosted_models_known.then(|| p.hosted_models.clone()),
                     available_models: p.available_models.clone(),
                     requested_models: p.requested_models.clone(),
                     version: p.version.clone(),
@@ -3010,8 +3122,10 @@ impl Node {
             models: my_models,
             vram_bytes: self.vram_bytes,
             model_source: my_source,
-            serving: my_serving,
-            serving_models: my_serving_models,
+            serving: my_hosted_models.first().cloned(),
+            serving_models: my_hosted_models.clone(),
+            assigned_models: Some(my_assigned_models),
+            hosted_models: Some(my_hosted_models),
             available_models: my_available,
             requested_models: my_requested,
             version: Some(crate::VERSION.to_string()),
@@ -3419,6 +3533,104 @@ mod tests {
             decoded.gpu_vram, None,
             "old nodes without gpu_vram should default to None"
         );
+    }
+
+    #[test]
+    fn test_peer_announcement_backward_compat_hosted_models_presence() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestAnnouncement {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            assigned_models: Option<Vec<String>>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            hosted_models: Option<Vec<String>>,
+        }
+
+        let omitted = TestAnnouncement {
+            assigned_models: None,
+            hosted_models: None,
+        };
+        let omitted_json = serde_json::to_string(&omitted).unwrap();
+        assert!(!omitted_json.contains("assigned_models"));
+        assert!(!omitted_json.contains("hosted_models"));
+
+        let explicit_empty = TestAnnouncement {
+            assigned_models: Some(vec!["Primary".into(), "Runtime".into()]),
+            hosted_models: Some(Vec::new()),
+        };
+        let explicit_empty_json = serde_json::to_string(&explicit_empty).unwrap();
+        assert!(explicit_empty_json.contains("\"assigned_models\":[\"Primary\",\"Runtime\"]"));
+        assert!(explicit_empty_json.contains("\"hosted_models\":[]"));
+
+        let decoded_missing: TestAnnouncement = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded_missing.assigned_models, None);
+        assert_eq!(decoded_missing.hosted_models, None);
+    }
+
+    #[test]
+    fn test_peer_info_prefers_assigned_models_for_election_and_serving_models_for_routing() {
+        let id = SecretKey::generate(&mut rand::rng()).public();
+        let peer = PeerInfo {
+            id,
+            addr: EndpointAddr::new(id),
+            tunnel_port: None,
+            role: NodeRole::Worker,
+            models: Vec::new(),
+            vram_bytes: 0,
+            rtt_ms: None,
+            model_source: None,
+            serving: Some("Runtime".into()),
+            serving_models: vec!["Runtime".into()],
+            assigned_models: vec!["Primary".into(), "Runtime".into()],
+            hosted_models: vec!["Runtime".into()],
+            hosted_models_known: true,
+            available_models: Vec::new(),
+            requested_models: Vec::new(),
+            last_seen: std::time::Instant::now(),
+            version: None,
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+        };
+
+        assert_eq!(peer.assigned_models(), vec!["Primary", "Runtime"]);
+        assert!(peer.is_assigned_model("Runtime"));
+        assert!(peer.is_assigned_model("Primary"));
+        assert!(!peer.is_assigned_model("Missing"));
+        assert_eq!(peer.routable_models(), vec!["Runtime"]);
+        assert!(peer.routes_model("Runtime"));
+        assert!(!peer.routes_model("Primary"));
+    }
+
+    #[test]
+    fn test_peer_info_routable_models_fall_back_for_legacy_hosts() {
+        let id = SecretKey::generate(&mut rand::rng()).public();
+        let peer = PeerInfo {
+            id,
+            addr: EndpointAddr::new(id),
+            tunnel_port: None,
+            role: NodeRole::Host { http_port: 3131 },
+            models: Vec::new(),
+            vram_bytes: 0,
+            rtt_ms: None,
+            model_source: None,
+            serving: Some("Primary".into()),
+            serving_models: vec!["Primary".into()],
+            assigned_models: Vec::new(),
+            hosted_models: Vec::new(),
+            hosted_models_known: false,
+            available_models: Vec::new(),
+            requested_models: Vec::new(),
+            last_seen: std::time::Instant::now(),
+            version: Some("0.29.0".into()),
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+        };
+
+        assert_eq!(peer.routable_models(), vec!["Primary"]);
+        assert!(peer.routes_model("Primary"));
     }
 }
 

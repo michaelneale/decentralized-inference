@@ -5,7 +5,7 @@
 //! Every mesh change: kill llama-server, re-elect, winner starts fresh.
 //! mesh-llm owns :api_port and proxies to the right host by model name.
 
-use crate::{download, launch, mesh, moe, tunnel};
+use crate::{backend, download, launch, mesh, moe, tunnel};
 use mesh::NodeRole;
 use std::collections::HashMap;
 use std::path::Path;
@@ -94,6 +94,13 @@ pub struct ModelTargets {
     /// Round-robin counter for load balancing (not cloned — each clone starts fresh,
     /// but that's fine since the proxy clones per-request anyway)
     counter: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalProcessInfo {
+    pub backend: backend::BackendKind,
+    pub pid: u32,
+    pub port: u16,
 }
 
 impl ModelTargets {
@@ -236,6 +243,7 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
 pub async fn election_loop(
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
+    ingress_http_port: u16,
     rpc_port: u16,
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
@@ -247,13 +255,15 @@ pub async fn election_loop(
     ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     mut on_change: impl FnMut(bool, bool) + Send,
+    mut on_process: impl FnMut(Option<LocalProcessInfo>) + Send,
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
 
     // Track the set of model-group worker IDs to detect when we actually need to restart
     let mut last_worker_set: Vec<iroh::EndpointId> = vec![];
     let mut currently_host = false;
-    let mut llama_death_rx: Option<tokio::sync::oneshot::Receiver<()>> = None;
+    let mut current_local_port: Option<u16> = None;
+    let mut llama_process: Option<launch::InferenceServerProcess> = None;
 
     // Initial settle
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -282,6 +292,7 @@ pub async fn election_loop(
             moe_election_loop(
                 node,
                 tunnel_mgr,
+                ingress_http_port,
                 bin_dir,
                 model,
                 model_name,
@@ -292,6 +303,7 @@ pub async fn election_loop(
                 ctx_size_override,
                 target_tx,
                 &mut on_change,
+                &mut on_process,
             )
             .await;
             return;
@@ -311,7 +323,7 @@ pub async fn election_loop(
         let peers = node.peers().await;
         let model_peers: Vec<mesh::PeerInfo> = peers
             .iter()
-            .filter(|p| p.serving.as_deref() == Some(&model_name))
+            .filter(|p| p.is_assigned_model(&model_name))
             .cloned()
             .collect();
 
@@ -369,11 +381,11 @@ pub async fn election_loop(
         // If we're already host and nothing changed, skip restart
         if currently_host && i_am_host && new_worker_set == last_worker_set {
             // Just update the target map (in case other models' hosts changed)
-            if let NodeRole::Host { http_port } = node.role().await {
+            if let Some(local_port) = current_local_port {
                 update_targets(
                     &node,
                     &model_name,
-                    InferenceTarget::Local(http_port),
+                    InferenceTarget::Local(local_port),
                     &target_tx,
                 )
                 .await;
@@ -387,16 +399,18 @@ pub async fn election_loop(
                     continue;
                 }
                 _ = async {
-                    if let Some(ref mut rx) = llama_death_rx {
-                        let _ = rx.await;
+                    if let Some(ref mut process) = llama_process {
+                        let _ = (&mut process.death_rx).await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
                     eprintln!("🔄 [{}] llama-server died — restarting...", model_name);
-                    llama_death_rx = None;
+                    llama_process = None;
                     currently_host = false;
+                    current_local_port = None;
                     update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                    on_process(None);
                     on_change(false, false);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     // Fall through to restart
@@ -406,10 +420,14 @@ pub async fn election_loop(
 
         // Something changed — kill llama-server if we were running it
         if currently_host {
-            launch::kill_llama_server().await;
+            if let Some(process) = llama_process.take() {
+                process.handle.shutdown().await;
+            }
             tunnel_mgr.set_http_port(0);
             node.set_role(NodeRole::Worker).await;
+            current_local_port = None;
             update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+            on_process(None);
             on_change(false, false);
             currently_host = false;
         }
@@ -461,7 +479,7 @@ pub async fn election_loop(
 
             // In solo mode, pass empty model_peers so start_llama won't use any workers
             let peers_for_launch = if need_split { &model_peers[..] } else { &[] };
-            let (llama_port, death_rx) = match start_llama(
+            let (llama_port, process) = match start_llama(
                 &node,
                 &tunnel_mgr,
                 rpc_port,
@@ -488,11 +506,12 @@ pub async fn election_loop(
             };
 
             node.set_role(NodeRole::Host {
-                http_port: llama_port,
+                http_port: ingress_http_port,
             })
             .await;
-            tunnel_mgr.set_http_port(llama_port);
+            tunnel_mgr.set_http_port(ingress_http_port);
             currently_host = true;
+            current_local_port = Some(llama_port);
             last_worker_set = new_worker_set;
             // Re-gossip so peers learn we're the host for this model
             node.regossip().await;
@@ -503,7 +522,14 @@ pub async fn election_loop(
                 &target_tx,
             )
             .await;
-            llama_death_rx = Some(death_rx);
+            llama_process = Some(process);
+            if let Some(ref process) = llama_process {
+                on_process(Some(LocalProcessInfo {
+                    backend: backend::detect_backend(&model),
+                    pid: process.handle.pid(),
+                    port: llama_port,
+                }));
+            }
             on_change(true, true);
             eprintln!(
                 "✅ [{}] llama-server ready on internal port {llama_port}",
@@ -550,14 +576,14 @@ pub async fn election_loop(
                 eprintln!("⚡ Mesh changed — re-electing...");
             }
             _ = async {
-                if let Some(ref mut rx) = llama_death_rx {
-                    let _ = rx.await;
+                if let Some(ref mut process) = llama_process {
+                    let _ = (&mut process.death_rx).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
             } => {
                 eprintln!("🔄 [{}] llama-server died — restarting...", model_name);
-                llama_death_rx = None;
+                llama_process = None;
                 currently_host = false;
                 update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
                 on_change(false, false);
@@ -577,6 +603,7 @@ pub async fn election_loop(
 async fn moe_election_loop(
     node: mesh::Node,
     tunnel_mgr: tunnel::Manager,
+    ingress_http_port: u16,
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
     model_name: String,
@@ -587,17 +614,19 @@ async fn moe_election_loop(
     ctx_size_override: Option<u32>,
     target_tx: Arc<watch::Sender<ModelTargets>>,
     on_change: &mut impl FnMut(bool, bool),
+    on_process: &mut impl FnMut(Option<LocalProcessInfo>),
 ) {
     let mut peer_rx = node.peer_change_rx.clone();
     let mut currently_running = false;
     let mut last_n_nodes: usize = 0;
+    let mut llama_process: Option<launch::InferenceServerProcess> = None;
 
     loop {
         // Count how many nodes (including us) are serving this model
         let peers = node.peers().await;
         let model_peers: Vec<mesh::PeerInfo> = peers
             .iter()
-            .filter(|p| p.serving.as_deref() == Some(&model_name))
+            .filter(|p| p.is_assigned_model(&model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
             .cloned()
             .collect();
@@ -619,9 +648,12 @@ async fn moe_election_loop(
 
         // Something changed — kill existing llama-server
         if currently_running {
-            launch::kill_llama_server().await;
+            if let Some(process) = llama_process.take() {
+                process.handle.shutdown().await;
+            }
             tunnel_mgr.set_http_port(0);
             currently_running = false;
+            on_process(None);
             on_change(false, false);
         }
 
@@ -652,30 +684,41 @@ async fn moe_election_loop(
                 };
 
                 let mb = total_model_bytes(&model);
-                match launch::start_llama_server(
+                match launch::start_model_server(
                     &bin_dir,
                     binary_flavor,
-                    &model,
-                    llama_port,
-                    &[],
-                    None,
-                    None,
-                    0,
-                    mb,
-                    my_vram,
-                    None,
-                    ctx_size_override,
-                    None,
+                    launch::ModelLaunchSpec {
+                        backend: backend::detect_backend(&model),
+                        model: &model,
+                        http_port: llama_port,
+                        tunnel_ports: &[],
+                        tensor_split: None,
+                        draft: None,
+                        draft_max: 0,
+                        model_bytes: mb,
+                        my_vram,
+                        mmproj: None,
+                        ctx_size_override,
+                        total_group_vram: None,
+                    },
                 )
                 .await
                 {
-                    Ok(_death_rx) => {
+                    Ok(process) => {
                         node.set_role(NodeRole::Host {
-                            http_port: llama_port,
+                            http_port: ingress_http_port,
                         })
                         .await;
-                        tunnel_mgr.set_http_port(llama_port);
+                        tunnel_mgr.set_http_port(ingress_http_port);
                         currently_running = true;
+                        llama_process = Some(process);
+                        if let Some(ref process) = llama_process {
+                            on_process(Some(LocalProcessInfo {
+                                backend: backend::detect_backend(&model),
+                                pid: process.handle.pid(),
+                                port: llama_port,
+                            }));
+                        }
                         update_targets(
                             &node,
                             &model_name,
@@ -760,30 +803,41 @@ async fn moe_election_loop(
             };
 
             let shard_bytes = std::fs::metadata(&shard_path).map(|m| m.len()).unwrap_or(0);
-            match launch::start_llama_server(
+            match launch::start_model_server(
                 &bin_dir,
                 binary_flavor,
-                &shard_path,
-                llama_port,
-                &[],
-                None,
-                None,
-                0,
-                shard_bytes,
-                my_vram,
-                None,
-                ctx_size_override,
-                None,
+                launch::ModelLaunchSpec {
+                    backend: backend::detect_backend(&shard_path),
+                    model: &shard_path,
+                    http_port: llama_port,
+                    tunnel_ports: &[],
+                    tensor_split: None,
+                    draft: None,
+                    draft_max: 0,
+                    model_bytes: shard_bytes,
+                    my_vram,
+                    mmproj: None,
+                    ctx_size_override,
+                    total_group_vram: None,
+                },
             )
             .await
             {
-                Ok(_death_rx) => {
+                Ok(process) => {
                     node.set_role(NodeRole::Host {
-                        http_port: llama_port,
+                        http_port: ingress_http_port,
                     })
                     .await;
-                    tunnel_mgr.set_http_port(llama_port);
+                    tunnel_mgr.set_http_port(ingress_http_port);
                     currently_running = true;
+                    llama_process = Some(process);
+                    if let Some(ref process) = llama_process {
+                        on_process(Some(LocalProcessInfo {
+                            backend: backend::detect_backend(&shard_path),
+                            pid: process.handle.pid(),
+                            port: llama_port,
+                        }));
+                    }
                     node.regossip().await;
 
                     // Build and publish MoE target map
@@ -860,13 +914,7 @@ async fn update_targets(
     // All peers — group by model (multi-model aware)
     for p in &peers {
         // Collect all models this peer is serving
-        let peer_models: Vec<String> = if !p.serving_models.is_empty() {
-            p.serving_models.clone()
-        } else if let Some(ref s) = p.serving {
-            vec![s.clone()]
-        } else {
-            vec![]
-        };
+        let peer_models = p.assigned_models();
         for serving in &peer_models {
             if matches!(p.role, NodeRole::Host { .. }) {
                 // Peer is a confirmed host — add as target
@@ -923,7 +971,7 @@ async fn start_llama(
     force_split: bool,
     binary_flavor: Option<launch::BinaryFlavor>,
     ctx_size_override: Option<u32>,
-) -> Option<(u16, tokio::sync::oneshot::Receiver<()>)> {
+) -> Option<(u16, launch::InferenceServerProcess)> {
     let my_vram = node.vram_bytes();
     let model_bytes = total_model_bytes(model);
     let min_vram = (model_bytes as f64 * 1.1) as u64;
@@ -938,9 +986,7 @@ async fn start_llama(
     let worker_ids: Vec<_> = if need_split {
         let mut candidates: Vec<_> = model_peers
             .iter()
-            .filter(|p| {
-                matches!(p.role, NodeRole::Worker) || p.serving.as_deref() == Some(model_name)
-            })
+            .filter(|p| matches!(p.role, NodeRole::Worker) || p.is_assigned_model(model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
             .filter(|p| match p.rtt_ms {
                 Some(rtt) if rtt > MAX_RTT_MS => {
@@ -1091,26 +1137,33 @@ async fn start_llama(
     // In split mode (pipeline parallel), pass total group VRAM so context size
     // accounts for the host only holding its share of layers. KV cache is also
     // distributed — each node holds KV for its own layers.
-    let group_vram = if !rpc_ports.is_empty() { Some(total as u64) } else { None };
+    let group_vram = if !rpc_ports.is_empty() {
+        Some(total as u64)
+    } else {
+        None
+    };
 
-    match launch::start_llama_server(
+    match launch::start_model_server(
         bin_dir,
         binary_flavor,
-        model,
-        llama_port,
-        &rpc_ports,
-        split.as_deref(),
-        draft,
-        draft_max,
-        model_bytes,
-        my_vram,
-        mmproj_path.as_deref(),
-        ctx_size_override,
-        group_vram,
+        launch::ModelLaunchSpec {
+            backend: backend::detect_backend(model),
+            model,
+            http_port: llama_port,
+            tunnel_ports: &rpc_ports,
+            tensor_split: split.as_deref(),
+            draft,
+            draft_max,
+            model_bytes,
+            my_vram,
+            mmproj: mmproj_path.as_deref(),
+            ctx_size_override,
+            total_group_vram: group_vram,
+        },
     )
     .await
     {
-        Ok(death_rx) => Some((llama_port, death_rx)),
+        Ok(process) => Some((llama_port, process)),
         Err(e) => {
             eprintln!("  Failed to start llama-server: {e}");
             None

@@ -1,11 +1,14 @@
-//! Process management for llama.cpp binaries.
+//! Process management for backend server binaries.
 //!
-//! Starts rpc-server and optionally llama-server as child processes,
-//! wired up to the mesh tunnel ports.
+//! Starts rpc-server and backend inference processes wired up to the mesh
+//! tunnel ports. Concrete backends plug into this module via BackendOps.
 
+use crate::backend;
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
@@ -144,6 +147,44 @@ fn resolve_binary_path(
 
 fn temp_log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
+}
+
+#[derive(Clone, Debug)]
+pub struct InferenceServerHandle {
+    pid: u32,
+    expected_exit: Arc<AtomicBool>,
+}
+
+impl InferenceServerHandle {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub async fn shutdown(&self) {
+        self.expected_exit.store(true, Ordering::Relaxed);
+        terminate_process(self.pid).await;
+    }
+}
+
+#[derive(Debug)]
+pub struct InferenceServerProcess {
+    pub handle: InferenceServerHandle,
+    pub death_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub struct ModelLaunchSpec<'a> {
+    pub backend: backend::BackendKind,
+    pub model: &'a Path,
+    pub http_port: u16,
+    pub tunnel_ports: &'a [u16],
+    pub tensor_split: Option<&'a str>,
+    pub draft: Option<&'a Path>,
+    pub draft_max: u16,
+    pub model_bytes: u64,
+    pub my_vram: u64,
+    pub mmproj: Option<&'a Path>,
+    pub ctx_size_override: Option<u32>,
+    pub total_group_vram: Option<u64>,
 }
 
 fn log_tail(path: &Path, max_lines: usize) -> String {
@@ -301,8 +342,11 @@ pub async fn start_rpc_server(
         .stderr(std::process::Stdio::from(rpc_log_file2))
         .spawn()
         .with_context(|| {
-        format!("Failed to start rpc-server at {}", rpc_server.path.display())
-    })?;
+            format!(
+                "Failed to start rpc-server at {}",
+                rpc_server.path.display()
+            )
+        })?;
 
     // Wait for it to be listening
     for _ in 0..startup_polls {
@@ -399,27 +443,72 @@ pub async fn kill_llama_server() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
+async fn terminate_process(pid: u32) {
+    let pid_str = pid.to_string();
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid_str])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid_str])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
+/// Start a backend server for a model. This dispatches to the concrete backend
+/// implementation so other runtimes can plug into the same control plane.
+pub async fn start_model_server(
+    bin_dir: &Path,
+    binary_flavor: Option<BinaryFlavor>,
+    spec: ModelLaunchSpec<'_>,
+) -> Result<InferenceServerProcess> {
+    let ops = backend::backend_ops(spec.backend);
+    tracing::debug!(
+        "dispatching backend '{}' via {} (health: {})",
+        ops.as_str(),
+        ops.process_label(),
+        ops.health_path()
+    );
+    ops.start_server(bin_dir, binary_flavor, spec).await
+}
+
 /// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
 /// `model_bytes` is the total GGUF file size, used to select KV cache quantization:
 ///   - < 5GB: FP16 (default) — small models, KV cache is tiny
 ///   - 5-50GB: Q8_0 — no measurable quality loss, saves ~50% KV memory
 ///   - > 50GB: Q4_0 — slight long-context degradation, but these models need every byte
-/// Start llama-server. Returns a oneshot receiver that fires when the process exits.
-pub async fn start_llama_server(
+pub(crate) async fn start_llama_server(
     bin_dir: &Path,
     binary_flavor: Option<BinaryFlavor>,
-    model: &Path,
-    http_port: u16,
-    tunnel_ports: &[u16],
-    tensor_split: Option<&str>,
-    draft: Option<&Path>,
-    draft_max: u16,
-    model_bytes: u64,
-    my_vram: u64,
-    mmproj: Option<&Path>,
-    ctx_size_override: Option<u32>,
-    total_group_vram: Option<u64>,
-) -> Result<tokio::sync::oneshot::Receiver<()>> {
+    spec: ModelLaunchSpec<'_>,
+) -> Result<InferenceServerProcess> {
+    let model = spec.model;
+    let http_port = spec.http_port;
+    let tunnel_ports = spec.tunnel_ports;
+    let tensor_split = spec.tensor_split;
+    let draft = spec.draft;
+    let draft_max = spec.draft_max;
+    let model_bytes = spec.model_bytes;
+    let my_vram = spec.my_vram;
+    let mmproj = spec.mmproj;
+    let ctx_size_override = spec.ctx_size_override;
+    let total_group_vram = spec.total_group_vram;
     let llama_server = resolve_binary_path(bin_dir, "llama-server", binary_flavor)?;
 
     anyhow::ensure!(model.exists(), "Model not found at {}", model.display());
@@ -550,8 +639,7 @@ pub async fn start_llama_server(
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
     }
-    let local_device =
-        resolve_device_for_binary(&llama_server.path, llama_server.flavor, None)?;
+    let local_device = resolve_device_for_binary(&llama_server.path, llama_server.flavor, None)?;
     if let Some(draft_path) = draft {
         if draft_path.exists() {
             if local_device != "CPU" {
@@ -599,7 +687,12 @@ pub async fn start_llama_server(
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file2))
         .spawn()
-        .with_context(|| format!("Failed to start llama-server at {}", llama_server.path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to start llama-server at {}",
+                llama_server.path.display()
+            )
+        })?;
 
     // Wait for health check
     let url = format!("http://localhost:{http_port}/health");
@@ -621,13 +714,23 @@ pub async fn start_llama_server(
             );
         }
         if reqwest_health_check(&url).await {
+            let pid = child
+                .id()
+                .context("llama-server started but did not expose a PID")?;
+            let expected_exit = Arc::new(AtomicBool::new(false));
+            let handle = InferenceServerHandle {
+                pid,
+                expected_exit: expected_exit.clone(),
+            };
             let (death_tx, death_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _ = child.wait().await;
-                eprintln!("⚠️  llama-server process exited unexpectedly");
+                if !expected_exit.load(Ordering::Relaxed) {
+                    eprintln!("⚠️  llama-server process exited unexpectedly");
+                }
                 let _ = death_tx.send(());
             });
-            return Ok(death_rx);
+            return Ok(InferenceServerProcess { handle, death_rx });
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }

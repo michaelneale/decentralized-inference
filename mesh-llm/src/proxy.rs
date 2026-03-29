@@ -75,6 +75,11 @@ pub fn is_drop_request(buf: &[u8]) -> bool {
     s.starts_with("POST ") && s.contains("/mesh/drop")
 }
 
+pub fn is_load_request(buf: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(buf);
+    s.starts_with("POST ") && s.contains("/mesh/load")
+}
+
 // ── Model-aware tunnel routing ──
 
 /// The common request-handling path used by idle proxy, passive proxy, and bootstrap proxy.
