@@ -187,7 +187,7 @@ asset_name() {
     local flavor="$1"
     case "$(platform_id)" in
         Darwin/arm64)
-            echo "mesh-bundle.tar.gz"
+            echo "mesh-llm-aarch64-apple-darwin.tar.gz"
             ;;
         Linux/x86_64)
             case "$flavor" in
