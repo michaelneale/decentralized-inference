@@ -180,6 +180,7 @@ pub struct InferenceServerProcess {
 pub struct ModelLaunchSpec<'a> {
     pub backend: backend::BackendKind,
     pub model: &'a Path,
+    pub served_model_name: &'a str,
     pub http_port: u16,
     pub tunnel_ports: &'a [u16],
     pub tensor_split: Option<&'a str>,

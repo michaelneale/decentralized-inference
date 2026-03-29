@@ -13,6 +13,10 @@ use std::path::Path;
 /// Calculate total model size, summing all split files if present.
 /// Split files follow the pattern: name-00001-of-00004.gguf
 pub fn total_model_bytes(model: &Path) -> u64 {
+    if model.is_dir() {
+        return total_dir_bytes(model);
+    }
+
     let name = model.to_string_lossy();
     // Check for split pattern: *-00001-of-NNNNN.gguf
     if let Some(pos) = name.find("-00001-of-") {
@@ -31,6 +35,24 @@ pub fn total_model_bytes(model: &Path) -> u64 {
         }
     }
     std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
+}
+
+fn total_dir_bytes(dir: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += total_dir_bytes(&path);
+        } else {
+            total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+
+    total
 }
 
 use std::sync::Arc;
@@ -271,6 +293,7 @@ pub async fn election_loop(
     let model_bytes = total_model_bytes(&model);
     let my_vram = node.vram_bytes();
     let model_fits_locally = my_vram >= (model_bytes as f64 * 1.1) as u64;
+    let backend_kind = backend::detect_backend(&model);
 
     // Check if this is a MoE model with pre-computed expert routing
     let moe_config = lookup_moe_config(&model_name, &model);
@@ -327,11 +350,39 @@ pub async fn election_loop(
             .cloned()
             .collect();
 
+        if !backend::supports_rpc_split(backend_kind) {
+            if force_split {
+                eprintln!(
+                    "⚠ [{}] backend '{}' ignores --split (solo-only for now)",
+                    model_name,
+                    backend_kind.as_str()
+                );
+            }
+            if !model_fits_locally {
+                eprintln!(
+                    "⏳ [{}] backend '{}' requires local fit ({:.1}GB model, {:.1}GB VRAM)",
+                    model_name,
+                    backend_kind.as_str(),
+                    model_bytes as f64 / 1e9,
+                    my_vram as f64 / 1e9
+                );
+                update_targets(&node, &model_name, InferenceTarget::None, &target_tx).await;
+                on_change(false, false);
+                last_worker_set.clear();
+                if peer_rx.changed().await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        }
+
         // Splitting decision: only split when forced OR when the model
         // genuinely doesn't fit on this node alone. If it fits, every
         // node serving this model runs its own independent llama-server
         // (no election needed — everyone is a host).
-        let need_split = force_split || !model_fits_locally;
+        let need_split =
+            backend::supports_rpc_split(backend_kind) && (force_split || !model_fits_locally);
 
         let i_am_host = if need_split {
             // Distributed mode: elect one host from the model group
@@ -690,6 +741,7 @@ async fn moe_election_loop(
                     launch::ModelLaunchSpec {
                         backend: backend::detect_backend(&model),
                         model: &model,
+                        served_model_name: &model_name,
                         http_port: llama_port,
                         tunnel_ports: &[],
                         tensor_split: None,
@@ -809,6 +861,7 @@ async fn moe_election_loop(
                 launch::ModelLaunchSpec {
                     backend: backend::detect_backend(&shard_path),
                     model: &shard_path,
+                    served_model_name: &model_name,
                     http_port: llama_port,
                     tunnel_ports: &[],
                     tensor_split: None,
@@ -1149,6 +1202,7 @@ async fn start_llama(
         launch::ModelLaunchSpec {
             backend: backend::detect_backend(model),
             model,
+            served_model_name: model_name,
             http_port: llama_port,
             tunnel_ports: &rpc_ports,
             tensor_split: split.as_deref(),
@@ -1182,6 +1236,24 @@ async fn find_free_port() -> anyhow::Result<u16> {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn total_model_bytes_sums_directory_contents() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mesh-llm-model-bytes-{unique}"));
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(nested.join("weights.bin"), vec![0u8; 1024]).unwrap();
+
+        assert_eq!(total_model_bytes(&dir), 1026);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// Create a deterministic EndpointId from a byte seed.
     fn make_id(seed: u8) -> iroh::EndpointId {

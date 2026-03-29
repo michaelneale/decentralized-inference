@@ -451,6 +451,7 @@ async fn start_runtime_local_model(
         launch::ModelLaunchSpec {
             backend,
             model: model_path,
+            served_model_name: &model_name,
             http_port: port,
             tunnel_ports: &[],
             tensor_split: None,
@@ -1674,18 +1675,30 @@ async fn run_auto(
         }
     }
 
-    // Clean up stale processes from previous runs
-    launch::kill_orphan_rpc_servers().await;
+    let primary_backend = backend::detect_backend(&model);
 
-    // Start rpc-server
-    let rpc_port = launch::start_rpc_server(
-        &bin_dir,
-        cli.llama_flavor,
-        cli.device.as_deref(),
-        Some(&model),
-    )
-    .await?;
-    tracing::info!("rpc-server on 127.0.0.1:{rpc_port} serving {model_name}");
+    // Clean up stale processes from previous runs
+    if backend::requires_rpc_server(primary_backend) {
+        launch::kill_orphan_rpc_servers().await;
+    }
+
+    let rpc_port = if backend::requires_rpc_server(primary_backend) {
+        let port = launch::start_rpc_server(
+            &bin_dir,
+            cli.llama_flavor,
+            cli.device.as_deref(),
+            Some(&model),
+        )
+        .await?;
+        tracing::info!("rpc-server on 127.0.0.1:{port} serving {model_name}");
+        port
+    } else {
+        tracing::info!(
+            "Primary backend '{}' does not require rpc-server",
+            primary_backend.as_str()
+        );
+        0
+    };
 
     let tunnel_mgr =
         tunnel::Manager::start(node.clone(), rpc_port, channels.rpc, channels.http).await?;
