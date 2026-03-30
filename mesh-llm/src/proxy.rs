@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
+const MAX_HEADERS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 struct HttpReadLimits {
@@ -27,6 +28,16 @@ const HTTP_READ_LIMITS: HttpReadLimits = HttpReadLimits {
     max_body_bytes: MAX_BODY_BYTES,
     max_chunked_wire_bytes: MAX_CHUNKED_WIRE_BYTES,
 };
+
+/// Parsed header metadata extracted via httparse.
+struct ParsedHeaders {
+    header_end: usize,
+    method: String,
+    path: String,
+    content_length: Option<usize>,
+    is_chunked: bool,
+    expects_continue: bool,
+}
 
 #[derive(Debug)]
 pub struct BufferedHttpRequest {
@@ -60,22 +71,11 @@ async fn read_http_request_with_limits(
     limits: HttpReadLimits,
 ) -> Result<BufferedHttpRequest> {
     let mut raw = Vec::with_capacity(8192);
-    let header_end = read_until_header_end(stream, &mut raw, limits.max_header_bytes).await?;
-    let header_text = std::str::from_utf8(&raw[..header_end]).context("invalid HTTP headers")?;
+    let parsed = read_until_headers_parsed(stream, &mut raw, limits.max_header_bytes).await?;
 
-    let mut parts = header_text
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .split_whitespace();
-    let method = parts.next().unwrap_or("GET").to_string();
-    let path = parts.next().unwrap_or("/").to_string();
+    let header_end = parsed.header_end;
 
-    let content_length = content_length(header_text)?;
-    let is_chunked = header_has_token(header_text, "transfer-encoding", "chunked");
-    let expects_continue = header_has_token(header_text, "expect", "100-continue");
-
-    let body = if is_chunked {
+    let body = if parsed.is_chunked {
         let mut sent_continue = false;
         loop {
             if let Some((consumed, decoded)) =
@@ -84,7 +84,7 @@ async fn read_http_request_with_limits(
                 raw.truncate(header_end + consumed);
                 break decoded;
             }
-            if !sent_continue && expects_continue {
+            if !sent_continue && parsed.expects_continue {
                 stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
                 sent_continue = true;
             }
@@ -96,14 +96,14 @@ async fn read_http_request_with_limits(
                 );
             }
         }
-    } else if let Some(content_length) = content_length {
+    } else if let Some(content_length) = parsed.content_length {
         if content_length > limits.max_body_bytes {
             bail!("HTTP body exceeds {} bytes", limits.max_body_bytes);
         }
         let body_end = header_end + content_length;
         let mut sent_continue = false;
         while raw.len() < body_end {
-            if !sent_continue && expects_continue && content_length > 0 {
+            if !sent_continue && parsed.expects_continue && content_length > 0 {
                 stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
                 sent_continue = true;
             }
@@ -123,12 +123,12 @@ async fn read_http_request_with_limits(
     };
     let model_name = body_json.as_ref().and_then(extract_model_from_json);
     let session_hint = body_json.as_ref().and_then(extract_session_hint_from_json);
-    let raw = finalize_forwarded_request(raw, header_end, expects_continue)?;
+    let raw = finalize_forwarded_request(raw, header_end, parsed.expects_continue)?;
 
     Ok(BufferedHttpRequest {
         raw,
-        method,
-        path,
+        method: parsed.method,
+        path: parsed.path,
         body_json,
         model_name,
         session_hint,
@@ -141,29 +141,27 @@ fn finalize_forwarded_request(
     strip_expect: bool,
 ) -> Result<Vec<u8>> {
     let body = raw.split_off(header_end);
-    let headers = std::str::from_utf8(&raw).context("invalid HTTP headers")?;
-    let mut lines = headers.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
+    // Re-parse with httparse so we iterate over validated header structs.
+    let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut headers_buf);
+    let _ = req.parse(&raw).context("re-parse headers for forwarding")?;
 
-    let mut rebuilt = String::new();
-    rebuilt.push_str(request_line);
-    rebuilt.push_str("\r\n");
+    let method = req.method.unwrap_or("GET");
+    let path = req.path.unwrap_or("/");
+    let version = req.version.unwrap_or(1);
 
-    for line in lines {
-        if line.is_empty() {
+    let mut rebuilt = format!("{method} {path} HTTP/1.{version}\r\n");
+
+    for header in req.headers.iter() {
+        let name = header.name;
+        if name.eq_ignore_ascii_case("connection") {
             continue;
         }
-        let Some((name, _)) = line.split_once(':') else {
-            continue;
-        };
-        if name.trim().eq_ignore_ascii_case("connection") {
+        if strip_expect && name.eq_ignore_ascii_case("expect") {
             continue;
         }
-        if strip_expect && name.trim().eq_ignore_ascii_case("expect") {
-            continue;
-        }
-        rebuilt.push_str(line);
-        rebuilt.push_str("\r\n");
+        let value = std::str::from_utf8(header.value).unwrap_or("");
+        rebuilt.push_str(&format!("{name}: {value}\r\n"));
     }
 
     // The proxy buffers exactly one request for routing, so force a single-request
@@ -175,19 +173,71 @@ fn finalize_forwarded_request(
     Ok(forwarded)
 }
 
-async fn read_until_header_end(
+/// Read from the stream until httparse can fully parse the request headers.
+/// Returns parsed metadata; `buf` contains all bytes read so far (headers +
+/// any trailing body bytes that arrived in the same read).
+async fn read_until_headers_parsed(
     stream: &mut TcpStream,
     buf: &mut Vec<u8>,
     max_header_bytes: usize,
-) -> Result<usize> {
+) -> Result<ParsedHeaders> {
     loop {
-        if let Some(header_end) = find_header_end(buf) {
-            return Ok(header_end);
+        let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
+        let mut req = httparse::Request::new(&mut headers_buf);
+        match req.parse(buf) {
+            Ok(httparse::Status::Complete(header_end)) => {
+                let method = req.method.unwrap_or("GET").to_string();
+                let path = req.path.unwrap_or("/").to_string();
+
+                let mut content_length = None;
+                let mut is_chunked = false;
+                let mut expects_continue = false;
+
+                for header in req.headers.iter() {
+                    if header.name.eq_ignore_ascii_case("content-length") {
+                        let val = std::str::from_utf8(header.value)
+                            .context("invalid Content-Length encoding")?;
+                        content_length = Some(
+                            val.trim()
+                                .parse::<usize>()
+                                .with_context(|| format!("invalid Content-Length: {val}"))?,
+                        );
+                    } else if header.name.eq_ignore_ascii_case("transfer-encoding") {
+                        let val = std::str::from_utf8(header.value).unwrap_or("");
+                        is_chunked = val
+                            .split(',')
+                            .any(|part| part.trim().eq_ignore_ascii_case("chunked"));
+                    } else if header.name.eq_ignore_ascii_case("expect") {
+                        let val = std::str::from_utf8(header.value).unwrap_or("");
+                        expects_continue = val
+                            .split(',')
+                            .any(|part| part.trim().eq_ignore_ascii_case("100-continue"));
+                    }
+                }
+
+                // RFC 7230 §3.3.3: if both Transfer-Encoding and Content-Length
+                // are present, Transfer-Encoding wins and Content-Length is ignored.
+                if is_chunked {
+                    content_length = None;
+                }
+
+                return Ok(ParsedHeaders {
+                    header_end,
+                    method,
+                    path,
+                    content_length,
+                    is_chunked,
+                    expects_continue,
+                });
+            }
+            Ok(httparse::Status::Partial) => {
+                if buf.len() >= max_header_bytes {
+                    bail!("HTTP headers exceed {max_header_bytes} bytes");
+                }
+                read_more(stream, buf).await?;
+            }
+            Err(e) => bail!("HTTP parse error: {e}"),
         }
-        if buf.len() >= max_header_bytes {
-            bail!("HTTP headers exceed {max_header_bytes} bytes");
-        }
-        read_more(stream, buf).await?;
     }
 }
 
@@ -199,44 +249,6 @@ async fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<()> {
     }
     buf.extend_from_slice(&chunk[..n]);
     Ok(())
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|idx| idx + 4)
-}
-
-fn content_length(headers: &str) -> Result<Option<usize>> {
-    let Some(raw) = header_value(headers, "content-length") else {
-        return Ok(None);
-    };
-    let len = raw
-        .trim()
-        .parse::<usize>()
-        .with_context(|| format!("invalid Content-Length: {raw}"))?;
-    Ok(Some(len))
-}
-
-fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
-    headers.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        if key.trim().eq_ignore_ascii_case(name) {
-            Some(value.trim())
-        } else {
-            None
-        }
-    })
-}
-
-fn header_has_token(headers: &str, name: &str, token: &str) -> bool {
-    header_value(headers, name)
-        .map(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case(token))
-        })
-        .unwrap_or(false)
 }
 
 fn try_decode_chunked_body(buf: &[u8], max_body_bytes: usize) -> Result<Option<(usize, Vec<u8>)>> {

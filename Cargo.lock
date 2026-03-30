@@ -2160,6 +2160,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "httparse",
  "include_dir",
  "iroh",
  "libc",
