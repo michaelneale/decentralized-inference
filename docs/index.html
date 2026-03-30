@@ -168,7 +168,7 @@
             <div class="feature">
                 <div class="feature-icon">🎯</div>
                 <h3>Speculative decoding</h3>
-                <p>Draft model runs locally, proposes tokens verified in one batched pass. +38% throughput on code. Auto-detected from catalog.</p>
+                <p>Draft model runs locally, proposes tokens verified in one batched pass. +38% throughput on code. Auto-detected from curated metadata.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">💻</div>
@@ -282,16 +282,16 @@
     <section id="models">
         <div class="section-tag">Models</div>
         <h2>Specifying models</h2>
-        <p class="section-lead"><code>--model</code> accepts catalog names, URLs, or local paths. Models are auto-downloaded to <code>~/.models/</code> on first use with resume support.</p>
+        <p class="section-lead"><code>--model</code> accepts curated model ids, Hugging Face URLs/refs, or local paths. Models are auto-downloaded to <code>~/.models/</code> on first use with resume support.</p>
 
         <div class="code-block">
             <span class="comment"># Short name (fuzzy match — finds Qwen3-8B-Q4_K_M)</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen3-8B</span><br><br>
-            <span class="comment"># Full catalog name</span><br>
+            <span class="comment"># Full curated model id</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen3-8B-Q4_K_M</span><br><br>
-            <span class="comment"># Any GGUF from HuggingFace (auto-downloaded)</span><br>
+            <span class="comment"># Any GGUF from Hugging Face (auto-downloaded)</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf</span><br><br>
-            <span class="comment"># HuggingFace shorthand (org/repo/file.gguf)</span><br>
+            <span class="comment"># Hugging Face shorthand (org/repo/file.gguf)</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf</span><br><br>
             <span class="comment"># Local GGUF file</span><br>
             <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">~/my-models/custom-model.gguf</span><br><br>
@@ -333,7 +333,7 @@
             </tbody>
         </table>
         </div>
-        <p style="font-size:0.75rem; color:var(--text3); margin-top:0.8rem;">Full catalog: <code>mesh-llm download</code> · Not in the catalog? Use a HuggingFace URL — any GGUF works.</p>
+        <p style="font-size:0.75rem; color:var(--text3); margin-top:0.8rem;">Curated models: <code>mesh-llm models</code> · Want something else? Use <code>mesh-llm search</code> or a Hugging Face URL/ref.</p>
     </section>
 
     <section id="blackboard">

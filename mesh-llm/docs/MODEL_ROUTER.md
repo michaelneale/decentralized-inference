@@ -129,7 +129,7 @@ This is **Phase 2** — start with one model per node, route across nodes.
 
 ### Phase 1: Heuristic Router (this branch)
 
-1. Add `ModelProfile` to `CatalogModel` in `download.rs`
+1. Add `ModelProfile` to the curated model metadata in `models/mod.rs`
 2. Add `classify_request()` in new `router.rs` — heuristic only
 3. Add `ModelStats` tracking in `proxy.rs` — observe tok/s from responses
 4. Modify proxy to pick model based on classification + available models

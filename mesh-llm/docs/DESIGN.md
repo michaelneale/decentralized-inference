@@ -17,7 +17,7 @@ src/
 ├── tunnel.rs      TCP ↔ QUIC relay (RPC + HTTP), B2B rewrite map
 ├── rewrite.rs     REGISTER_PEER interception and endpoint rewriting
 ├── launch.rs      rpc-server and llama-server process management
-├── download.rs    Model catalog and HuggingFace download (reqwest, resume support)
+├── models/mod.rs  Model discovery, curated metadata overlay, local storage, Hugging Face search/download
 ├── nostr.rs       Nostr publish/discover: mesh listings, smart auto-join, publish watchdog
 ├── hardware.rs    GPU/host hardware detection: Collector trait, DefaultCollector, TegraCollector
 ```

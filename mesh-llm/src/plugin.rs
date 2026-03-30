@@ -28,6 +28,10 @@ const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
 pub struct MeshConfig {
     #[serde(default)]
     pub self_update: Option<bool>,
+    #[serde(default)]
+    pub huggingface: HuggingFaceConfig,
+    #[serde(default)]
+    pub models: ModelStorageConfig,
     #[serde(rename = "plugin", default)]
     pub plugins: Vec<PluginConfigEntry>,
 }
@@ -36,6 +40,41 @@ impl MeshConfig {
     pub fn self_update_enabled(&self) -> bool {
         self.self_update.unwrap_or(true)
     }
+
+    pub fn huggingface_token(&self) -> Option<String> {
+        std::env::var("HF_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| {
+                self.huggingface
+                    .token
+                    .clone()
+                    .filter(|token| !token.trim().is_empty())
+            })
+    }
+
+    pub fn model_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(dir) = &self.models.dir {
+            dirs.push(dir.clone());
+        }
+        dirs.extend(self.models.dirs.clone());
+        dirs
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct HuggingFaceConfig {
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ModelStorageConfig {
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    #[serde(default)]
+    pub dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1522,6 +1561,7 @@ mod tests {
                 command: None,
                 args: Vec::new(),
             }],
+            ..Default::default()
         };
         let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
         assert!(resolved.externals.is_empty());
@@ -1552,6 +1592,7 @@ mod tests {
                 command: Some("/tmp/demo".into()),
                 args: vec!["--flag".into()],
             }],
+            ..Default::default()
         };
         let resolved = resolve_plugins(&config, private_host_mode()).unwrap();
         assert_eq!(resolved.externals.len(), 2);

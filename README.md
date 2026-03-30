@@ -205,6 +205,19 @@ mesh-llm --model Qwen2.5-32B    # dashboard at http://localhost:3131
 
 Live topology, VRAM bars per node, model picker, built-in chat. Everything comes from `/api/status` (JSON) and `/api/events` (SSE).
 
+Model management is also available on the console port:
+
+```bash
+curl 'http://localhost:3131/api/models'
+curl 'http://localhost:3131/api/models/search?q=qwen+coder+30b'
+curl 'http://localhost:3131/api/models/show?ref=Qwen3-8B-Q4_K_M'
+curl -X POST http://localhost:3131/api/models/download \
+  -H 'Content-Type: application/json' \
+  -d '{"ref":"Qwen3-8B-Q4_K_M","draft":true}'
+curl 'http://localhost:3131/api/models/download?ref=Qwen3-8B-Q4_K_M&draft=true'
+curl -X DELETE 'http://localhost:3131/api/models/download?ref=Qwen3-8B-Q4_K_M&draft=true'
+```
+
 ### Development
 
 Build-from-source and UI development instructions are in [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -376,12 +389,14 @@ Cross-network (Sydney ↔ Queensland, ~20ms RTT): 10-25 tok/s. Overhead dominate
 
 Stock llama.cpp RPC transfers 16.88GB on connect. This fork: **0 bytes, ~9 seconds**.
 
-## Model catalog
+## Model discovery
 
 ```bash
-mesh-llm download           # list models
-mesh-llm download 32b       # Qwen2.5-32B (~20GB)
-mesh-llm download 72b --draft  # Qwen2.5-72B + draft model
+mesh-llm models                     # list curated mesh-llm models
+mesh-llm search qwen coder 30b      # search Hugging Face GGUFs
+mesh-llm search --curated qwen      # search curated metadata only
+mesh-llm show Qwen3-8B-Q4_K_M       # inspect one exact model ref
+mesh-llm download Qwen3-8B-Q4_K_M --draft
 ```
 
 Draft pairings for speculative decoding:
@@ -395,26 +410,106 @@ Draft pairings for speculative decoding:
 
 ## Specifying models
 
-`--model` accepts several formats. Models are auto-downloaded to `~/.models/` on first use.
+`--model` accepts several formats. Models are auto-downloaded to your configured model directory on first use (defaults to `~/.models/`).
 
 ```bash
-# Catalog name (fuzzy match — finds Qwen3-8B-Q4_K_M)
+# Curated name (fuzzy match — finds Qwen3-8B-Q4_K_M)
 mesh-llm --model Qwen3-8B
 
-# Full catalog name
+# Full curated model id
 mesh-llm --model Qwen3-8B-Q4_K_M
 
-# HuggingFace URL (any GGUF)
+# Hugging Face URL (any GGUF)
 mesh-llm --model https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
-# HuggingFace shorthand (org/repo/file.gguf)
+# Hugging Face shorthand (org/repo/file.gguf)
 mesh-llm --model bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 # Local file path
 mesh-llm --model ~/my-models/custom-model.gguf
 ```
 
-Catalog models are downloaded with resume support — if a download is interrupted, it picks up where it left off. Use `mesh-llm download` to browse the catalog.
+Downloads have resume support, so interrupted transfers pick up where they left off.
+
+## Manifest sidecars
+
+Downloaded models get a sibling manifest file with the suffix `.manifest.json`.
+
+- `Qwen3-8B-Q4_K_M.gguf` writes `Qwen3-8B-Q4_K_M.gguf.manifest.json`
+- `Qwen3-30B-A3B-UD-Q4_K_XL-00001-of-00002.gguf` writes `Qwen3-30B-A3B-UD-Q4_K_XL-00001-of-00002.gguf.manifest.json`
+- directory-style model bundles write a sibling manifest next to the directory, for example `MyModel/` writes `MyModel.manifest.json`
+
+Current manifest schema:
+
+```json
+{
+  "version": 1,
+  "source": {
+    "provider": "huggingface",
+    "repo": "Qwen/Qwen3-8B-GGUF",
+    "revision": "abc123",
+    "file": "Qwen3-8B-Q4_K_M.gguf",
+    "resolved_url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/abc123/Qwen3-8B-Q4_K_M.gguf"
+  },
+  "identity": {
+    "canonical_id": "huggingface:Qwen/Qwen3-8B-GGUF@abc123/Qwen3-8B-Q4_K_M.gguf",
+    "display_name": "Qwen3-8B-Q4_K_M.gguf",
+    "family": "qwen3",
+    "architecture": null,
+    "format": "gguf",
+    "quantization": "Q4_K_M"
+  },
+  "compatibility": {
+    "tokenizer_hash": null,
+    "chat_template_hash": null,
+    "base_model": null
+  },
+  "local": {
+    "downloaded_at": "1743321600",
+    "sha256": null,
+    "size_bytes": 4921161728
+  }
+}
+```
+
+Field notes:
+
+- `version` is the manifest schema version. Bump it if the on-disk format changes.
+- `source` is the authoritative origin record. Current writers emit `provider` values `huggingface` and `direct_url`.
+- `source.revision` is the resolved Hugging Face revision when known. If the user did not pin a revision, mesh-llm resolves the current repo SHA when it can.
+- `identity.canonical_id` is the stable mesh-llm identity key used for cross-format and cross-location comparisons.
+- `identity.family` and `identity.quantization` are best-effort hints inferred from the filename.
+- `identity.format` comes from the file extension, or `directory` for model directories.
+- `compatibility` is reserved for stronger tokenizer and chat-template matching. These fields are present now but usually null.
+- `local.downloaded_at` is currently stored as Unix epoch seconds in a string.
+- `local.sha256` is reserved for future hashing and is currently null.
+- `local.size_bytes` is the local file size when mesh-llm writes the manifest.
+
+If older downloads are missing manifests, rebuild them with:
+
+```bash
+mesh-llm provenance repair --source huggingface
+```
+
+## Config
+
+Create `~/.mesh-llm/config.toml` to customize storage and Hugging Face auth:
+
+```toml
+[huggingface]
+token = "hf_..."
+
+[models]
+dirs = [
+  "/Volumes/LLM/models",
+  "~/.models",
+]
+```
+
+- `HF_TOKEN` overrides the config token when set.
+- `models.dir` also works for a single directory.
+- The first configured model directory is the default download destination.
+- Without a Hugging Face token, search and download still work, but requests may be slower or throttled.
 
 ## Community
 

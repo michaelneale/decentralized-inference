@@ -5,7 +5,7 @@
 //! Every mesh change: kill llama-server, re-elect, winner starts fresh.
 //! mesh-llm owns :api_port and proxies to the right host by model name.
 
-use crate::{download, launch, mesh, moe, tunnel};
+use crate::{launch, mesh, models, moe, tunnel};
 use mesh::NodeRole;
 use std::collections::HashMap;
 use std::path::Path;
@@ -184,19 +184,22 @@ pub fn build_moe_targets(
 /// Look up MoE config for a model. Two tiers:
 /// 1. Catalog (has pre-computed ranking) — instant, optimal
 /// 2. GGUF header detection (no ranking) — uses conservative defaults
-fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::MoeConfig> {
+fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<models::MoeConfig> {
     // Tier 1: catalog lookup (has ranking)
     let q = model_name.to_lowercase();
-    if let Some(cfg) = download::MODEL_CATALOG
-        .iter()
-        .find(|m| m.name.to_lowercase() == q || m.file.to_lowercase().contains(&q))
+    if let Some(cfg) = crate::models::metadata_for_model_name(model_name)
+        .or_else(|| {
+            models::CURATED_MODELS
+                .iter()
+                .find(|m| m.file.to_lowercase().contains(&q))
+        })
         .and_then(|m| m.moe.clone())
     {
         if !cfg.ranking.is_empty() {
             return Some(cfg);
         }
-        // Catalog says MoE but no ranking — fall through to GGUF detect + sequential fallback
-        // (keeps n_expert/n_expert_used/min_experts from catalog)
+        // Curated metadata says MoE but no ranking — fall through to GGUF detect + sequential fallback
+        // (keeps n_expert/n_expert_used/min_experts from curated metadata)
     }
 
     // Tier 2: auto-detect from GGUF header
@@ -216,7 +219,7 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
         eprintln!("  Using cached ranking from {}", ranking_path.display());
         // Leak the ranking into a static slice so it matches MoeConfig's &'static [u32]
         let ranking: &'static [u32] = Vec::leak(ranking);
-        return Some(download::MoeConfig {
+        return Some(models::MoeConfig {
             n_expert: info.expert_count,
             n_expert_used: info.expert_used_count,
             min_experts_per_node: min_experts,
@@ -228,7 +231,7 @@ fn lookup_moe_config(model_name: &str, model_path: &Path) -> Option<download::Mo
     // The election loop can run moe-analyze to compute a proper ranking.
     let sequential: Vec<u32> = (0..info.expert_count).collect();
     let ranking: &'static [u32] = Vec::leak(sequential);
-    Some(download::MoeConfig {
+    Some(models::MoeConfig {
         n_expert: info.expert_count,
         n_expert_used: info.expert_used_count,
         min_experts_per_node: min_experts,
@@ -602,7 +605,7 @@ async fn moe_election_loop(
     bin_dir: std::path::PathBuf,
     model: std::path::PathBuf,
     model_name: String,
-    moe_cfg: download::MoeConfig,
+    moe_cfg: models::MoeConfig,
     my_vram: u64,
     model_bytes: u64,
     binary_flavor: Option<launch::BinaryFlavor>,
@@ -1104,13 +1107,9 @@ async fn start_llama(
     };
 
     // Look up mmproj for vision models
-    let mmproj_path = download::MODEL_CATALOG
-        .iter()
-        .find(|m| {
-            m.name == model_name || m.file.strip_suffix(".gguf").unwrap_or(m.file) == model_name
-        })
-        .and_then(|m| m.mmproj)
-        .map(|(filename, _url)| download::models_dir().join(filename))
+    let mmproj_path = crate::models::metadata_for_model_name(model_name)
+        .and_then(|m| m.mmproj.as_ref())
+        .map(|asset| models::primary_models_dir().join(asset.file))
         .filter(|p| p.exists());
 
     // In split mode (pipeline parallel), pass total group VRAM so context size

@@ -72,5 +72,5 @@ See `tests/test_reasoning_compat.sh` for the contract tests validating this beha
 - [ ] **Multi-node tensor split recovery**: If one split peer dies, re-split across remaining.
 
 ## Vision — Future
-- [ ] **More catalog entries**: Gemma-3-12B, Pixtral-12B, larger Qwen3.5 (35B-A3B MoE, 122B-A10B MoE)
+- [ ] **More curated model entries**: Gemma-3-12B, Pixtral-12B, larger Qwen3.5 (35B-A3B MoE, 122B-A10B MoE)
 - [ ] **Image generation**: Not supported by llama.cpp (transformers only), but could add diffusion backend later.

@@ -4,16 +4,23 @@
 //!   GET  /api/status    — live mesh state (JSON)
 //!   GET  /api/events    — SSE stream of status updates
 //!   GET  /api/discover  — browse Nostr-published meshes
+//!   GET  /api/models    — list curated model metadata
+//!   GET  /api/models/search?q=... — search Hugging Face or curated metadata
+//!   GET  /api/models/show?ref=... — inspect one exact model ref
+//!   POST /api/models/download     — start or resume a background model download
+//!   GET  /api/models/download?ref=... — inspect download progress
+//!   DELETE /api/models/download?ref=... — cancel a background download
 //!   POST /api/chat      — proxy to inference API
 //!   GET  /              — embedded web dashboard
 //!
-//! The dashboard is read-only — shows status, topology, models.
-//! All mutations happen via CLI flags (--join, --model, --auto).
+//! The dashboard is mostly read-only — status, topology, and models.
+//! Mesh mutations happen via CLI flags (--join, --model, --auto); model acquisition can also be driven via HTTP.
 
-use crate::{affinity, download, election, mesh, nostr, plugin, proxy};
+use crate::{affinity, election, mesh, models, nostr, plugin, proxy};
 use include_dir::{include_dir, Dir};
-use serde::Serialize;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
@@ -27,6 +34,7 @@ const MESH_LLM_VERSION: &str = crate::VERSION;
 #[derive(Clone)]
 pub struct MeshApi {
     inner: Arc<Mutex<ApiInner>>,
+    downloads: Arc<StdMutex<HashMap<String, ModelDownloadJob>>>,
 }
 
 struct ApiInner {
@@ -46,6 +54,22 @@ struct ApiInner {
     nostr_relays: Vec<String>,
     nostr_discovery: bool,
     sse_clients: Vec<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+#[derive(Clone)]
+struct ModelDownloadJob {
+    model_ref: String,
+    include_draft: bool,
+    status: String,
+    current_file: Option<String>,
+    files_completed: usize,
+    files_total: usize,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    path: Option<String>,
+    draft_path: Option<String>,
+    error: Option<String>,
+    abort_handle: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Serialize)]
@@ -147,6 +171,174 @@ struct MeshModelPayload {
     last_active_secs_ago: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct CuratedModelPayload {
+    id: String,
+    file: String,
+    size: String,
+    description: String,
+    draft: Option<String>,
+    vision: bool,
+    download_url: String,
+}
+
+#[derive(Serialize)]
+struct ModelSearchHitPayload {
+    exact_ref: String,
+    downloads: Option<u64>,
+    likes: Option<u64>,
+    curated: Option<CuratedModelPayload>,
+}
+
+#[derive(Serialize)]
+struct ModelDetailsPayload {
+    name: String,
+    exact_ref: String,
+    source: String,
+    download_url: String,
+    size: Option<String>,
+    description: Option<String>,
+    draft: Option<String>,
+    vision: bool,
+    moe: Option<crate::models::MoeConfig>,
+}
+
+#[derive(Deserialize)]
+struct ModelDownloadRequest {
+    #[serde(rename = "ref")]
+    model_ref: String,
+    #[serde(default)]
+    draft: bool,
+}
+
+#[derive(Serialize)]
+struct ModelDownloadPayload {
+    model_ref: String,
+    draft: bool,
+    status: String,
+    current_file: Option<String>,
+    files_completed: usize,
+    files_total: usize,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    path: Option<String>,
+    draft_path: Option<String>,
+    error: Option<String>,
+}
+
+fn curated_model_payload(model: &models::CuratedModel) -> CuratedModelPayload {
+    CuratedModelPayload {
+        id: model.id.to_string(),
+        file: model.file.to_string(),
+        size: model.size.to_string(),
+        description: model.description.to_string(),
+        draft: model.draft.map(str::to_string),
+        vision: model.mmproj.is_some(),
+        download_url: model.url.to_string(),
+    }
+}
+
+fn model_details_payload(details: models::ModelDetails) -> ModelDetailsPayload {
+    ModelDetailsPayload {
+        name: details.display_name,
+        exact_ref: details.exact_ref,
+        source: details.source.to_string(),
+        download_url: details.download_url,
+        size: details.size_label,
+        description: details.description,
+        draft: details.draft,
+        vision: details.vision,
+        moe: details.moe,
+    }
+}
+
+fn download_job_key(model_ref: &str, include_draft: bool) -> String {
+    format!("{}|draft={include_draft}", model_ref.trim())
+}
+
+fn download_job_payload(job: &ModelDownloadJob) -> ModelDownloadPayload {
+    ModelDownloadPayload {
+        model_ref: job.model_ref.clone(),
+        draft: job.include_draft,
+        status: job.status.clone(),
+        current_file: job.current_file.clone(),
+        files_completed: job.files_completed,
+        files_total: job.files_total,
+        downloaded_bytes: job.downloaded_bytes,
+        total_bytes: job.total_bytes,
+        path: job.path.clone(),
+        draft_path: job.draft_path.clone(),
+        error: job.error.clone(),
+    }
+}
+
+fn set_download_job<F>(
+    downloads: &Arc<StdMutex<HashMap<String, ModelDownloadJob>>>,
+    key: &str,
+    f: F,
+) where
+    F: FnOnce(&mut ModelDownloadJob),
+{
+    if let Ok(mut jobs) = downloads.lock() {
+        if let Some(job) = jobs.get_mut(key) {
+            f(job);
+        }
+    }
+}
+
+fn download_assets_for_model(model: &models::CuratedModel) -> Vec<(String, String)> {
+    let mut assets = vec![(model.file.to_string(), model.url.to_string())];
+    for asset in model.extra_files {
+        assets.push((asset.file.to_string(), asset.url.to_string()));
+    }
+    if let Some(asset) = &model.mmproj {
+        assets.push((asset.file.to_string(), asset.url.to_string()));
+    }
+    assets
+}
+
+fn parse_query_params(path: &str) -> HashMap<String, String> {
+    path.split('?')
+        .nth(1)
+        .unwrap_or("")
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            (decode_url_component(key), decode_url_component(value))
+        })
+        .collect()
+}
+
+fn decode_url_component(input: &str) -> String {
+    let mut decoded = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                decoded.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = &input[i + 1..i + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    decoded.push(byte);
+                    i += 3;
+                } else {
+                    decoded.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 impl MeshApi {
     pub fn new(
         node: mesh::Node,
@@ -178,6 +370,7 @@ impl MeshApi {
                 nostr_discovery: false,
                 sse_clients: Vec::new(),
             })),
+            downloads: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -315,16 +508,9 @@ impl MeshApi {
                 let size_gb = if *name == model_name && model_size_bytes > 0 {
                     model_size_bytes as f64 / 1e9
                 } else {
-                    download::parse_size_gb(
-                        download::MODEL_CATALOG
-                            .iter()
-                            .find(|m| {
-                                m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
-                                    || m.name == name.as_str()
-                            })
-                            .map(|m| m.size)
-                            .unwrap_or("0"),
-                    )
+                    crate::models::metadata_for_model_name(name)
+                        .map(|m| crate::models::parse_size_gb(m.size))
+                        .unwrap_or(0.0)
                 };
                 let (request_count, last_active_secs_ago) = match active_demand.get(name) {
                     Some(d) => (
@@ -333,12 +519,7 @@ impl MeshApi {
                     ),
                     None => (None, None),
                 };
-                let vision = download::MODEL_CATALOG
-                    .iter()
-                    .find(|m| {
-                        m.name == name.as_str()
-                            || m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
-                    })
+                let vision = crate::models::metadata_for_model_name(name)
                     .map(|m| m.mmproj.is_some())
                     .unwrap_or(false);
                 MeshModelPayload {
@@ -447,6 +628,234 @@ impl MeshApi {
             }
         }
     }
+}
+
+async fn spawn_model_download_job(
+    state: MeshApi,
+    request: ModelDownloadRequest,
+) -> anyhow::Result<ModelDownloadPayload> {
+    let key = download_job_key(&request.model_ref, request.draft);
+    {
+        let mut jobs = state.downloads.lock().unwrap();
+        if let Some(existing) = jobs.get(&key) {
+            let status = existing.status.as_str();
+            if matches!(status, "queued" | "downloading" | "completed") {
+                return Ok(download_job_payload(existing));
+            }
+        }
+        jobs.insert(
+            key.clone(),
+            ModelDownloadJob {
+                model_ref: request.model_ref.clone(),
+                include_draft: request.draft,
+                status: "queued".to_string(),
+                current_file: None,
+                files_completed: 0,
+                files_total: 0,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                path: None,
+                draft_path: None,
+                error: None,
+                abort_handle: None,
+            },
+        );
+    }
+
+    let job_state = state.clone();
+    let job_key = key.clone();
+    let request_for_task = request;
+    let handle = tokio::spawn(async move {
+        if let Err(error) =
+            run_model_download_job(job_state.clone(), &job_key, request_for_task).await
+        {
+            set_download_job(&job_state.downloads, &job_key, |job| {
+                if job.status != "cancelled" {
+                    job.status = "failed".to_string();
+                    job.error = Some(error.to_string());
+                    job.current_file = None;
+                }
+            });
+        }
+    });
+    let abort_handle = handle.abort_handle();
+    set_download_job(&state.downloads, &key, |job| {
+        job.abort_handle = Some(abort_handle);
+    });
+
+    let jobs = state.downloads.lock().unwrap();
+    Ok(download_job_payload(
+        jobs.get(&key).expect("download job exists"),
+    ))
+}
+
+async fn run_model_download_job(
+    state: MeshApi,
+    key: &str,
+    request: ModelDownloadRequest,
+) -> anyhow::Result<()> {
+    set_download_job(&state.downloads, key, |job| {
+        job.status = "downloading".to_string();
+        job.error = None;
+    });
+
+    let exact_ref = models::parse_exact_model_ref(&request.model_ref)?;
+    let model_dir = models::primary_models_dir();
+    tokio::fs::create_dir_all(&model_dir).await?;
+
+    let (path, mut assets, draft_path) = match &exact_ref {
+        models::ExactModelRef::Curated(model) => {
+            let mut assets = download_assets_for_model(model);
+            let draft_path = if request.draft {
+                model
+                    .draft
+                    .and_then(models::find_curated_model_exact)
+                    .map(|draft_model| {
+                        assets.extend(download_assets_for_model(draft_model));
+                        model_dir.join(draft_model.file).display().to_string()
+                    })
+            } else {
+                None
+            };
+            (
+                model_dir.join(model.file).display().to_string(),
+                assets,
+                draft_path,
+            )
+        }
+        models::ExactModelRef::HuggingFace {
+            repo,
+            revision,
+            file,
+        } => {
+            let mut assets = models::huggingface_download_assets(repo, revision.as_deref(), file)?;
+            let filename = assets
+                .first()
+                .map(|(file, _)| file.clone())
+                .ok_or_else(|| anyhow::anyhow!("Cannot extract filename from {file}"))?;
+            let draft_path = if request.draft {
+                models::show_exact_model(&request.model_ref)
+                    .await
+                    .ok()
+                    .and_then(|details| details.draft)
+                    .and_then(|draft| models::find_curated_model_exact(&draft))
+                    .map(|draft_model| {
+                        assets.extend(download_assets_for_model(draft_model));
+                        model_dir.join(draft_model.file).display().to_string()
+                    })
+            } else {
+                None
+            };
+            (
+                model_dir.join(filename).display().to_string(),
+                assets,
+                draft_path,
+            )
+        }
+        models::ExactModelRef::Url { url, filename } => {
+            let mut assets = vec![(filename.clone(), url.clone())];
+            let draft_path = if request.draft {
+                models::show_exact_model(&request.model_ref)
+                    .await
+                    .ok()
+                    .and_then(|details| details.draft)
+                    .and_then(|draft| models::find_curated_model_exact(&draft))
+                    .map(|draft_model| {
+                        assets.extend(download_assets_for_model(draft_model));
+                        model_dir.join(draft_model.file).display().to_string()
+                    })
+            } else {
+                None
+            };
+            (
+                model_dir.join(filename).display().to_string(),
+                assets,
+                draft_path,
+            )
+        }
+    };
+
+    set_download_job(&state.downloads, key, |job| {
+        job.files_total = assets.len();
+        job.path = Some(path.clone());
+        job.draft_path = draft_path.clone();
+    });
+
+    let mut completed = 0usize;
+    for (file, url) in assets.drain(..) {
+        let dest = model_dir.join(&file);
+        if tokio::fs::metadata(&dest)
+            .await
+            .map(|meta| meta.len() > 1_000_000)
+            .unwrap_or(false)
+        {
+            completed += 1;
+            let existing_bytes = std::fs::metadata(&dest).map(|meta| meta.len()).unwrap_or(0);
+            set_download_job(&state.downloads, key, |job| {
+                job.files_completed = completed;
+                job.current_file = Some(file.clone());
+                job.downloaded_bytes = existing_bytes;
+                job.total_bytes = Some(job.downloaded_bytes);
+            });
+            continue;
+        }
+
+        set_download_job(&state.downloads, key, |job| {
+            job.current_file = Some(file.clone());
+            job.downloaded_bytes = 0;
+            job.total_bytes = None;
+        });
+        let downloads = state.downloads.clone();
+        let progress_key = key.to_string();
+        models::download_url_with_progress(&url, &dest, move |downloaded, total| {
+            set_download_job(&downloads, &progress_key, |job| {
+                job.downloaded_bytes = downloaded;
+                job.total_bytes = total;
+            });
+        })
+        .await?;
+        completed += 1;
+        set_download_job(&state.downloads, key, |job| {
+            job.files_completed = completed;
+            job.downloaded_bytes = job.total_bytes.unwrap_or(job.downloaded_bytes);
+        });
+    }
+
+    set_download_job(&state.downloads, key, |job| {
+        if job.status != "cancelled" {
+            job.status = "completed".to_string();
+            job.current_file = None;
+            job.abort_handle = None;
+        }
+    });
+    Ok(())
+}
+
+fn get_model_download_job(
+    state: &MeshApi,
+    model_ref: &str,
+    include_draft: bool,
+) -> Option<ModelDownloadPayload> {
+    let key = download_job_key(model_ref, include_draft);
+    let jobs = state.downloads.lock().unwrap();
+    jobs.get(&key).map(download_job_payload)
+}
+
+fn cancel_model_download_job(
+    state: &MeshApi,
+    model_ref: &str,
+    include_draft: bool,
+) -> Option<ModelDownloadPayload> {
+    let key = download_job_key(model_ref, include_draft);
+    let mut jobs = state.downloads.lock().unwrap();
+    let job = jobs.get_mut(&key)?;
+    if let Some(handle) = job.abort_handle.take() {
+        handle.abort();
+    }
+    job.status = "cancelled".to_string();
+    job.error = None;
+    job.current_file = None;
+    Some(download_job_payload(job))
 }
 
 // ── Server ──
@@ -629,17 +1038,124 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("GET", "/api/status") => {
             match tokio::time::timeout(std::time::Duration::from_secs(5), state.status()).await {
                 Ok(status) => {
-                    let json = serde_json::to_string(&status)?;
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                        json.len(),
-                        json
-                    );
-                    stream.write_all(resp.as_bytes()).await?;
+                    respond_json(&mut stream, &status).await?;
                 }
                 Err(_) => {
                     respond_error(&mut stream, 503, "Status temporarily unavailable").await?;
                 }
+            }
+        }
+
+        // ── Model management ──
+        ("GET", "/api/models") => {
+            let payload: Vec<CuratedModelPayload> = models::CURATED_MODELS
+                .iter()
+                .map(curated_model_payload)
+                .collect();
+            respond_json(&mut stream, &payload).await?;
+        }
+
+        ("GET", "/api/models/search") => {
+            let params = parse_query_params(path);
+            let query = params.get("q").map(|q| q.trim()).unwrap_or("");
+            if query.is_empty() {
+                respond_error(&mut stream, 400, "Missing required query param 'q'").await?;
+            } else {
+                let limit = params
+                    .get("limit")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(10)
+                    .clamp(1, 50);
+                let curated_only = params
+                    .get("curated")
+                    .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                    .unwrap_or(false);
+                if curated_only {
+                    let payload: Vec<CuratedModelPayload> = models::search_curated_models(query)
+                        .into_iter()
+                        .take(limit)
+                        .map(curated_model_payload)
+                        .collect();
+                    respond_json(&mut stream, &payload).await?;
+                } else {
+                    let payload: Vec<ModelSearchHitPayload> =
+                        models::search_huggingface(query, limit)
+                            .await?
+                            .into_iter()
+                            .map(|hit| ModelSearchHitPayload {
+                                exact_ref: hit.exact_ref,
+                                downloads: hit.downloads,
+                                likes: hit.likes,
+                                curated: hit.curated.map(curated_model_payload),
+                            })
+                            .collect();
+                    respond_json(&mut stream, &payload).await?;
+                }
+            }
+        }
+
+        ("GET", "/api/models/show") => {
+            let params = parse_query_params(path);
+            let Some(model_ref) = params.get("ref").map(|value| value.trim()) else {
+                respond_error(&mut stream, 400, "Missing required query param 'ref'").await?;
+                return Ok(());
+            };
+            if model_ref.is_empty() {
+                respond_error(&mut stream, 400, "Missing required query param 'ref'").await?;
+            } else {
+                let details = models::show_exact_model(model_ref).await?;
+                respond_json(&mut stream, &model_details_payload(details)).await?;
+            }
+        }
+
+        ("POST", "/api/models/download") => {
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+            let payload: ModelDownloadRequest = match serde_json::from_str(body) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    respond_error(&mut stream, 400, "Invalid JSON body").await?;
+                    return Ok(());
+                }
+            };
+            if payload.model_ref.trim().is_empty() {
+                respond_error(&mut stream, 400, "Missing required field 'ref'").await?;
+                return Ok(());
+            }
+            let payload = spawn_model_download_job(state.clone(), payload).await?;
+            respond_json_status(&mut stream, 202, "Accepted", &payload).await?;
+        }
+
+        ("GET", "/api/models/download") => {
+            let params = parse_query_params(path);
+            let Some(model_ref) = params.get("ref").map(|value| value.trim()) else {
+                respond_error(&mut stream, 400, "Missing required query param 'ref'").await?;
+                return Ok(());
+            };
+            let include_draft = params
+                .get("draft")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            if let Some(payload) = get_model_download_job(&state, model_ref, include_draft) {
+                respond_json(&mut stream, &payload).await?;
+            } else {
+                respond_error(&mut stream, 404, "Download job not found").await?;
+            }
+        }
+
+        ("DELETE", "/api/models/download") => {
+            let params = parse_query_params(path);
+            let Some(model_ref) = params.get("ref").map(|value| value.trim()) else {
+                respond_error(&mut stream, 400, "Missing required query param 'ref'").await?;
+                return Ok(());
+            };
+            let include_draft = params
+                .get("draft")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            if let Some(payload) = cancel_model_download_job(&state, model_ref, include_draft) {
+                respond_json(&mut stream, &payload).await?;
+            } else {
+                respond_error(&mut stream, 404, "Download job not found").await?;
             }
         }
 
@@ -980,6 +1496,26 @@ async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::
     Ok(())
 }
 
+async fn respond_json<T: Serialize>(stream: &mut TcpStream, value: &T) -> anyhow::Result<()> {
+    respond_json_status(stream, 200, "OK", value).await
+}
+
+async fn respond_json_status<T: Serialize>(
+    stream: &mut TcpStream,
+    code: u16,
+    status: &str,
+    value: &T,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(value)?;
+    let resp = format!(
+        "HTTP/1.1 {code} {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        json.len(),
+        json
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
 async fn respond_console_index(stream: &mut TcpStream) -> anyhow::Result<bool> {
     if let Some(file) = CONSOLE_DIST.get_file("index.html") {
         respond_bytes(
@@ -1174,6 +1710,22 @@ mod tests {
             "unparsable bandwidth should be None, not shift indices"
         );
         assert_eq!(result[2].bandwidth_gbps, Some(3.0));
+    }
+
+    #[test]
+    fn test_decode_url_component_decodes_spaces_and_percent_escapes() {
+        assert_eq!(decode_url_component("qwen+coder+30b"), "qwen coder 30b");
+        assert_eq!(
+            decode_url_component("Qwen%2FQwen3-Coder-Next-GGUF"),
+            "Qwen/Qwen3-Coder-Next-GGUF"
+        );
+    }
+
+    #[test]
+    fn test_parse_query_params_decodes_values() {
+        let params = parse_query_params("/api/models/search?q=qwen+coder&limit=5");
+        assert_eq!(params.get("q"), Some(&"qwen coder".to_string()));
+        assert_eq!(params.get("limit"), Some(&"5".to_string()));
     }
 
     #[test]

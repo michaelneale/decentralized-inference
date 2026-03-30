@@ -2,11 +2,11 @@ mod affinity;
 mod api;
 mod autoupdate;
 mod benchmark;
-mod download;
 mod election;
 mod hardware;
 mod launch;
 mod mesh;
+mod models;
 mod moe;
 mod nostr;
 mod pipeline;
@@ -23,7 +23,7 @@ pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mesh::NodeRole;
 use std::path::{Path, PathBuf};
 
@@ -53,7 +53,7 @@ struct Cli {
     #[arg(long)]
     auto: bool,
 
-    /// Model to serve (path, catalog name, or HuggingFace URL).
+    /// Model to serve (path, curated name/id, or Hugging Face URL/ref).
     #[arg(long)]
     model: Vec<PathBuf>,
 
@@ -170,6 +170,10 @@ struct Cli {
     #[arg(long, hide = true)]
     config: Option<PathBuf>,
 
+    /// Override the model storage directory (repeatable).
+    #[arg(long, hide = true)]
+    models_dir: Vec<PathBuf>,
+
     /// Internal: set when this node joined via Nostr discovery (not --join).
     #[arg(skip)]
     nostr_discovery: bool,
@@ -177,13 +181,37 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Download a model from the catalog
+    /// List curated models from the embedded mesh metadata.
+    Models,
+    /// Search for GGUF models.
+    Search {
+        /// Search terms.
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// Search only the curated mesh metadata instead of Hugging Face.
+        #[arg(long)]
+        curated: bool,
+        /// Maximum number of results to show.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Show details for one exact model reference.
+    Show {
+        /// Exact curated id, Hugging Face ref, or direct URL.
+        model: String,
+    },
+    /// Download one exact model reference.
     Download {
-        /// Model name (e.g. "Qwen2.5-32B-Instruct-Q4_K_M" or just "32b")
-        name: Option<String>,
+        /// Exact curated id, Hugging Face ref, or direct URL.
+        model: String,
         /// Also download the recommended draft model for speculative decoding
         #[arg(long)]
         draft: bool,
+    },
+    /// Manage model provenance sidecars.
+    Provenance {
+        #[command(subcommand)]
+        command: ProvenanceCommand,
     },
     /// Drop a model from the mesh.
     #[command(hide = true)]
@@ -293,6 +321,33 @@ enum PluginCommand {
     List,
 }
 
+#[derive(Subcommand, Debug)]
+enum ProvenanceCommand {
+    /// Rebuild provenance sidecars for local models.
+    Repair {
+        /// Provenance source to query.
+        #[arg(long, value_enum)]
+        source: ProvenanceSourceArg,
+        /// Limit the scan to one model directory.
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+        /// Overwrite existing sidecars.
+        #[arg(long)]
+        force: bool,
+        /// Preview matches without writing sidecars.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProvenanceSourceArg {
+    Huggingface,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -328,6 +383,8 @@ async fn main() -> Result<()> {
     }
 
     let mut cli = Cli::parse();
+    let app_config = plugin::load_config(cli.config.as_deref())?;
+    models::init_runtime(&app_config, &cli.models_dir);
 
     if let Some(name) = cli.plugin.clone() {
         return plugin::run_plugin_process(name).await;
@@ -353,31 +410,15 @@ async fn main() -> Result<()> {
     // Subcommand dispatch
     if let Some(cmd) = &cli.command {
         match cmd {
-            Command::Download { name, draft } => {
-                match name {
-                    Some(query) => {
-                        let model = download::find_model(query)
-                            .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
-                        download::download_model(model).await?;
-                        if *draft {
-                            if let Some(draft_name) = model.draft {
-                                let draft_model =
-                                    download::find_model(draft_name).ok_or_else(|| {
-                                        anyhow::anyhow!(
-                                            "Draft model '{}' not found in catalog",
-                                            draft_name
-                                        )
-                                    })?;
-                                download::download_model(draft_model).await?;
-                            } else {
-                                eprintln!("⚠ No draft model available for {}", model.name);
-                            }
-                        }
-                    }
-                    None => download::list_models(),
-                }
-                return Ok(());
-            }
+            Command::Models => return run_models(),
+            Command::Search {
+                query,
+                curated,
+                limit,
+            } => return run_model_search(query, *curated, *limit).await,
+            Command::Show { model } => return run_model_show(model).await,
+            Command::Download { model, draft } => return run_model_download(model, *draft).await,
+            Command::Provenance { command } => return run_provenance_command(command).await,
             Command::Drop { name, port } => {
                 return run_drop(name, *port).await;
             }
@@ -631,81 +672,25 @@ async fn main() -> Result<()> {
     run_auto(cli, resolved_models, requested_model_names, bin_dir).await
 }
 
-/// Resolve a model path: local file, catalog name, or HuggingFace URL.
+/// Resolve a model path: local file, curated model, or Hugging Face URL/ref.
 async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
-    let s = input.to_string_lossy();
-
-    // Already a local file
-    if input.exists() {
-        return Ok(input.to_path_buf());
-    }
-
-    // Check all model directories (including goose) for just a filename
-    if !s.contains('/') {
-        for dir in mesh::model_dirs() {
-            let candidate = dir.join(input);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-        // Try catalog match
-        if let Some(entry) = download::find_model(&s) {
-            return download::download_model(entry).await;
-        }
-        anyhow::bail!(
-            "Model not found: {}\nNot a local file, not in ~/.models/ or goose models, not in catalog.\n\
-             Use a path, a catalog name (run `mesh-llm download` to list), or a HuggingFace URL.",
-            s
-        );
-    }
-
-    // HuggingFace URL (auto-detects split GGUFs like -00001-of-00004.gguf)
-    if s.starts_with("https://huggingface.co/") || s.starts_with("http://huggingface.co/") {
-        let filename = s
-            .rsplit('/')
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Can't extract filename from URL: {}", s))?;
-        return download::download_hf_split_gguf(&s, filename).await;
-    }
-
-    // HF shorthand: org/repo/file.gguf
-    if s.contains('/') && s.ends_with(".gguf") {
-        let url = if s.contains("/resolve/") {
-            format!("https://huggingface.co/{}", s)
-        } else {
-            let parts: Vec<&str> = s.splitn(3, '/').collect();
-            if parts.len() == 3 {
-                format!(
-                    "https://huggingface.co/{}/{}/resolve/main/{}",
-                    parts[0], parts[1], parts[2]
-                )
-            } else {
-                anyhow::bail!("Can't parse HF shorthand: {}. Use org/repo/file.gguf", s);
-            }
-        };
-        let filename = s.rsplit('/').next().unwrap();
-        return download::download_hf_split_gguf(&url, filename).await;
-    }
-
-    anyhow::bail!("Model not found: {}", s);
+    models::resolve_model_input(input).await
 }
 
-/// Look up the model filename in the catalog and check if its draft model exists on disk.
+/// Look up the model filename in the curated metadata and check if its draft model exists on disk.
 /// If not on disk, downloads it (drafts are <1GB).
 pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
     let filename = model.file_name()?.to_str()?;
-    let catalog_entry = download::MODEL_CATALOG
-        .iter()
-        .find(|m| m.file == filename)?;
+    let catalog_entry = models::CURATED_MODELS.iter().find(|m| m.file == filename)?;
     let draft_name = catalog_entry.draft?;
-    let draft_entry = download::MODEL_CATALOG
+    let draft_entry = models::CURATED_MODELS
         .iter()
         .find(|m| m.name == draft_name)?;
     let draft_stem = draft_entry
         .file
         .strip_suffix(".gguf")
         .unwrap_or(draft_entry.file);
-    let draft_path = mesh::find_model_path(draft_stem);
+    let draft_path = models::find_model_path(draft_stem);
     if draft_path.exists() {
         return Some(draft_path);
     }
@@ -714,7 +699,7 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
         "📥 Downloading draft model {} ({})...",
         draft_entry.name, draft_entry.size
     );
-    match download::download_model(draft_entry).await {
+    match models::download_curated_model(draft_entry).await {
         Ok(_path) => {
             eprintln!("✅ Draft model ready: {}", draft_entry.name);
             Some(draft_path)
@@ -732,8 +717,8 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
 ///
 /// Priority:
 /// 1. Models the mesh needs that we already have on disk
-/// 2. Models in the mesh catalog that nobody is serving yet (on disk preferred)
-/// Parse a catalog size string like "18.3GB" or "491MB" into bytes.
+/// 2. Models in the curated metadata that nobody is serving yet (on disk preferred)
+/// Parse a curated size string like "18.3GB" or "491MB" into bytes.
 fn parse_size_str(s: &str) -> u64 {
     let s = s.trim();
     if let Some(gb) = s.strip_suffix("GB") {
@@ -750,7 +735,7 @@ fn parse_size_str(s: &str) -> u64 {
 /// Priority:
 /// 1. Unserved models with active demand that we have on disk (hottest first)
 /// 2. Underserved models with demand that we have on disk
-/// 3. Unserved models with demand that we can download from catalog
+/// 3. Unserved models with demand that we can download from curated metadata
 /// 4. Standby if everything is covered
 async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Option<String> {
     let peers = node.peers().await;
@@ -787,7 +772,7 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 
     /// Check if a model fits in our VRAM. Returns false and logs if it doesn't.
     fn model_fits(model: &str, my_vram: u64) -> bool {
-        let model_path = mesh::find_model_path(model);
+        let model_path = models::find_model_path(model);
         let model_bytes = std::fs::metadata(&model_path)
             .map(|md| md.len())
             .unwrap_or(0);
@@ -869,13 +854,13 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         return Some(pick.clone());
     }
 
-    // Priority 3: Unserved models we can download from catalog
+    // Priority 3: Unserved models we can download from curated metadata
     let mut downloadable: Vec<(String, u64)> = Vec::new(); // (model, demand)
     for (m, d) in &demand_sorted {
         if serving_count.get(m).copied().unwrap_or(0) > 0 {
             continue;
         }
-        if let Some(cat) = download::find_model(m) {
+        if let Some(cat) = models::find_curated_model(m) {
             let size_bytes = parse_size_str(cat.size);
             let needed = (size_bytes as f64 * 1.1) as u64;
             if needed <= my_vram {
@@ -965,7 +950,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
     let mut unserved: Vec<(String, u64)> = Vec::new();
     for (m, d) in &demand {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
+            let model_path = models::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path)
                 .map(|md| md.len())
                 .unwrap_or(0);
@@ -991,7 +976,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
         }
         let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
         if servers > 0.0 && d.request_count > 0 && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
+            let model_path = models::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path)
                 .map(|md| md.len())
                 .unwrap_or(0);
@@ -1146,7 +1131,7 @@ async fn run_auto(
     let local_models = if is_client {
         vec![]
     } else {
-        mesh::scan_local_models()
+        models::scan_local_models()
     };
     tracing::info!("Local models on disk: {:?}", local_models);
 
@@ -1376,18 +1361,18 @@ async fn run_auto(
         };
         if let Some(model_name) = assignment {
             eprintln!("Mesh assigned model: {model_name}");
-            let model_path = mesh::find_model_path(&model_name);
+            let model_path = models::find_model_path(&model_name);
             if model_path.exists() {
                 model_path
-            } else if let Some(cat) = download::find_model(&model_name) {
-                // Model not on disk but in catalog — download it
+            } else if let Some(cat) = models::find_curated_model(&model_name) {
+                // Model not on disk but in curated metadata — download it
                 eprintln!("📥 Downloading {} for mesh...", model_name);
-                let dest = download::models_dir().join(cat.file);
-                download::download_model(cat).await?;
+                let dest = models::primary_models_dir().join(cat.file);
+                models::download_curated_model(cat).await?;
                 dest
             } else {
-                // Not on disk and not in catalog — try common paths
-                let alt = download::models_dir().join(&model_name);
+                // Not on disk and not in curated metadata — try common paths
+                let alt = models::primary_models_dir().join(&model_name);
                 if alt.exists() {
                     alt
                 } else {
@@ -1414,11 +1399,11 @@ async fn run_auto(
             match run_passive(&cli, node.clone(), is_client, plugin_manager.clone()).await? {
                 Some(model_name) => {
                     // Promoted! Resolve the model path and continue to serving
-                    let model_path = mesh::find_model_path(&model_name);
+                    let model_path = models::find_model_path(&model_name);
                     if model_path.exists() {
                         model_path
                     } else {
-                        let alt = download::models_dir().join(&model_name);
+                        let alt = models::primary_models_dir().join(&model_name);
                         if alt.exists() {
                             alt
                         } else {
@@ -1747,7 +1732,7 @@ async fn run_auto(
 async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     let resolved_plugins = load_resolved_plugins(&cli)?;
     let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
-    let local_models = mesh::scan_local_models();
+    let local_models = models::scan_local_models();
     eprintln!(
         "mesh-llm v{VERSION} — {:.0}GB VRAM, {} models on disk",
         my_vram_gb,
@@ -1913,7 +1898,7 @@ async fn run_passive(
     if !is_client {
         let watch_node = node.clone();
         let mut peer_rx = node.peer_change_rx.clone();
-        let local_models = mesh::scan_local_models();
+        let local_models = models::scan_local_models();
         tokio::spawn(async move {
             // Wait for initial mesh settle
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -3014,6 +2999,169 @@ fn print_blackboard_items(items: &[blackboard::BlackboardItem]) {
             println!("  {line}");
         }
         println!();
+    }
+}
+
+fn run_models() -> Result<()> {
+    models::list_curated_models();
+    Ok(())
+}
+
+async fn run_model_search(query: &[String], curated_only: bool, limit: usize) -> Result<()> {
+    let query = query.join(" ");
+    if curated_only {
+        let results = models::search_curated_models(&query);
+        if results.is_empty() {
+            eprintln!("No curated models matched '{query}'.");
+            return Ok(());
+        }
+        for model in results.into_iter().take(limit) {
+            println!("{}  {}  {}", model.id, model.size, model.description);
+        }
+        return Ok(());
+    }
+
+    let results = models::search_huggingface(&query, limit).await?;
+    if results.is_empty() {
+        eprintln!("No Hugging Face GGUF matches for '{query}'.");
+        return Ok(());
+    }
+
+    for (index, result) in results.iter().enumerate() {
+        let mut summary = Vec::new();
+        if let Some(downloads) = result.downloads {
+            summary.push(format!("downloads {downloads}"));
+        }
+        if let Some(likes) = result.likes {
+            summary.push(format!("likes {likes}"));
+        }
+        if let Some(curated) = result.curated {
+            summary.push(format!("curated {} {}", curated.id, curated.size));
+        }
+        println!(
+            "{}. {}{}",
+            index + 1,
+            result.exact_ref,
+            if summary.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", summary.join(", "))
+            }
+        );
+        if let Some(curated) = result.curated {
+            println!("   {}", curated.description);
+        }
+    }
+    Ok(())
+}
+
+async fn run_model_show(model_ref: &str) -> Result<()> {
+    let details = models::show_exact_model(model_ref).await?;
+    println!("Name: {}", details.display_name);
+    println!("Ref: {}", details.exact_ref);
+    println!("Source: {}", details.source);
+    if let Some(size) = details.size_label {
+        println!("Size: {size}");
+    }
+    if let Some(description) = details.description {
+        println!("Description: {description}");
+    }
+    if let Some(draft) = details.draft {
+        println!("Draft: {draft}");
+    }
+    println!("Vision: {}", if details.vision { "yes" } else { "no" });
+    if let Some(moe) = details.moe {
+        println!(
+            "MoE: {} experts, top-{}, min per node {}{}",
+            moe.n_expert,
+            moe.n_expert_used,
+            moe.min_experts_per_node,
+            if moe.ranking.is_empty() {
+                ", no embedded ranking".to_string()
+            } else {
+                format!(", ranking {}", moe.ranking.len())
+            }
+        );
+    }
+    println!("Download: {}", details.download_url);
+    Ok(())
+}
+
+async fn run_model_download(model_ref: &str, include_draft: bool) -> Result<()> {
+    let path = models::download_exact_ref(model_ref).await?;
+    println!("{}", path.display());
+
+    if !include_draft {
+        return Ok(());
+    }
+
+    let Some(details) = models::show_exact_model(model_ref).await.ok() else {
+        return Ok(());
+    };
+    let Some(draft) = details.draft else {
+        eprintln!("⚠ No draft model available for {}", details.display_name);
+        return Ok(());
+    };
+    let draft_model = models::find_curated_model(&draft)
+        .ok_or_else(|| anyhow::anyhow!("Draft model '{}' not found in curated metadata", draft))?;
+    models::download_curated_model(draft_model).await?;
+    Ok(())
+}
+
+async fn run_provenance_command(command: &ProvenanceCommand) -> Result<()> {
+    match command {
+        ProvenanceCommand::Repair {
+            source,
+            model_dir,
+            force,
+            dry_run,
+            json,
+        } => {
+            let source = match source {
+                ProvenanceSourceArg::Huggingface => models::ProvenanceRepairSource::HuggingFace,
+            };
+            let report =
+                models::repair_provenance(source, model_dir.as_deref(), *force, !*dry_run).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+
+            let mut repaired = 0usize;
+            let mut skipped_existing = 0usize;
+            let mut ambiguous = 0usize;
+            let mut unmatched = 0usize;
+            for entry in &report.entries {
+                let label = match entry.status {
+                    models::ProvenanceRepairStatus::Repaired => {
+                        repaired += 1;
+                        if *dry_run {
+                            "would_repair"
+                        } else {
+                            "repaired"
+                        }
+                    }
+                    models::ProvenanceRepairStatus::SkippedExisting => {
+                        skipped_existing += 1;
+                        "skipped_existing"
+                    }
+                    models::ProvenanceRepairStatus::Ambiguous => {
+                        ambiguous += 1;
+                        "ambiguous"
+                    }
+                    models::ProvenanceRepairStatus::Unmatched => {
+                        unmatched += 1;
+                        "unmatched"
+                    }
+                };
+                println!("{label}\t{}\t{}", entry.path.display(), entry.detail);
+            }
+            eprintln!(
+                "summary: repaired={} skipped_existing={} ambiguous={} unmatched={}",
+                repaired, skipped_existing, ambiguous, unmatched
+            );
+            Ok(())
+        }
     }
 }
 

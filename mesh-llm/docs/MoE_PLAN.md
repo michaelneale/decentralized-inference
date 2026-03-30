@@ -9,11 +9,11 @@ See [ROADMAP.md](../../ROADMAP.md) for how this fits into mesh-llm.
 All core phases are complete and integrated into mesh-llm.
 
 ### Detection (`moe.rs`)
-- `detect_moe()` reads `expert_count` from GGUF header in ~1ms. Any MoE model works — no catalog entry needed.
+- `detect_moe()` reads `expert_count` from GGUF header in ~1ms. Any MoE model works — no curated entry needed.
 - Auto-detected in `election.rs` at model load time.
 
 ### Ranking
-- **Catalog models**: pre-computed expert gate mass rankings baked into `download.rs` (e.g. `QWEN3_30B_A3B_RANKING`).
+- **Curated models**: pre-computed expert gate mass rankings embedded from `models/metadata.toml`.
 - **Cached rankings**: `moe::load_cached_ranking()` loads from `~/.models/moe-rankings/<model>.csv`.
 - **Fallback**: no ranking → conservative 50% shared core with sequential expert IDs.
 - **Tool**: `llama-moe-analyze` (in `llama.cpp/tools/moe-analyze/`) runs inference on sample prompts and exports per-expert gate mass CSV.
@@ -38,7 +38,7 @@ All core phases are complete and integrated into mesh-llm.
 ### Tested
 - OLMoE-1B-7B: 2 nodes over WAN (225ms RTT Sydney↔Sydney), both shards coherent.
 - Qwen3-30B-A3B: local quality validation, 87/128 experts per node = excellent.
-- GLM-4.7-Flash-Q4_K_M: MoE auto-detected (64 experts, top-4), fits locally → solo mode, no split. No pre-baked ranking in catalog yet — would use 50% fallback if split.
+- GLM-4.7-Flash-Q4_K_M: MoE auto-detected (64 experts, top-4), fits locally → solo mode, no split. No pre-baked curated ranking yet — would use 50% fallback if split.
 
 ## What's NOT Implemented
 

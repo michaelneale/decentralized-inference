@@ -55,7 +55,7 @@ See `CONTRIBUTING.md` for full dev workflow.
 - `mesh-llm/src/proxy.rs` — HTTP proxy: request parsing, model routing, response helpers
 - `mesh-llm/src/api.rs` — Management API (:3131): `/api/status`, `/api/events`, `/api/discover`, `/api/join`
 - `mesh-llm/src/nostr.rs` — Nostr discovery, `score_mesh()`, `smart_auto()`
-- `mesh-llm/src/download.rs` — Model catalog (`MODEL_CATALOG`), HuggingFace downloads
+- `mesh-llm/src/models/mod.rs` — Model discovery, curated metadata overlay, local storage, Hugging Face search/download
 - `mesh-llm/src/moe.rs` — MoE detection, expert rankings, split orchestration
 - `mesh-llm/src/launch.rs` — llama-server/rpc-server process management
 
