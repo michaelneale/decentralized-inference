@@ -3430,7 +3430,7 @@ function shortName(name: string) {
 }
 
 function formatLatency(value?: number | null) {
-  if (value == null || !Number.isFinite(Number(value))) return 'n/a';
+  if (value == null || !Number.isFinite(Number(value))) return '—';
   const ms = Math.round(Number(value));
   if (ms <= 0) return '<1 ms';
   return `${ms} ms`;
