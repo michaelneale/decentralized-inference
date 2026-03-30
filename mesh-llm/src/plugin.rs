@@ -1345,6 +1345,7 @@ async fn bind_local_listener(instance_id: &str, name: &str) -> Result<LocalListe
     }
 }
 
+#[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     Ok(home.join(".mesh-llm").join("run").join("plugins"))

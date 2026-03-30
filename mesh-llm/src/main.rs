@@ -2239,12 +2239,22 @@ fn first_available_target(targets: &election::ModelTargets) -> election::Inferen
 }
 
 fn bundled_bin_names(name: &str) -> Vec<String> {
-    let mut names = vec![name.to_string()];
-    names.extend(
-        launch::BinaryFlavor::ALL
-            .into_iter()
-            .map(|flavor| format!("{name}-{}", flavor.suffix())),
-    );
+    #[cfg(windows)]
+    let add_platform_name = |items: &mut Vec<String>, base: String| {
+        items.push(base.clone());
+        items.push(format!("{base}.exe"));
+    };
+
+    #[cfg(not(windows))]
+    let add_platform_name = |items: &mut Vec<String>, base: String| {
+        items.push(base);
+    };
+
+    let mut names = Vec::new();
+    add_platform_name(&mut names, name.to_string());
+    for flavor in launch::BinaryFlavor::ALL {
+        add_platform_name(&mut names, format!("{name}-{}", flavor.suffix()));
+    }
     names
 }
 
@@ -2591,17 +2601,11 @@ async fn run_discover(
 
 /// Drop a model from the mesh by sending a control request to the running instance.
 fn run_stop() -> Result<()> {
-    use std::process::Command as Cmd;
     let mut killed = 0u32;
-    for name in &["mesh-llm", "llama-server", "rpc-server"] {
-        // pkill sends SIGTERM; ignore errors (process might not exist)
-        let status = Cmd::new("pkill").arg("-f").arg(name).status();
-        match status {
-            Ok(s) if s.success() => {
-                eprintln!("🧹 Stopped {name}");
-                killed += 1;
-            }
-            _ => {}
+    for name in &["llama-server", "rpc-server", "mesh-llm"] {
+        if crate::launch::terminate_process_by_name(name) {
+            eprintln!("🧹 Stopped {name}");
+            killed += 1;
         }
     }
     if killed == 0 {

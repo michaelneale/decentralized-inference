@@ -1,6 +1,9 @@
 /// Hardware detection via Collector trait pattern.
 /// VRAM formula preserved byte-identical from mesh.rs:detect_vram_bytes().
 
+#[cfg(any(target_os = "windows", test))]
+use serde_json::Value;
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct HardwareSurvey {
     pub vram_bytes: u64,
@@ -32,13 +35,25 @@ struct DefaultCollector;
 struct TegraCollector;
 
 /// Parse `nvidia-smi --query-gpu=name --format=csv,noheader` output → GPU name list.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn parse_nvidia_gpu_names(output: &str) -> Vec<String> {
     output
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
+        .collect()
+}
+
+/// Parse `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits` → per-GPU VRAM bytes.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+pub fn parse_nvidia_gpu_memory(output: &str) -> Vec<u64> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mib = line.trim().parse::<u64>().ok()?;
+            Some(mib * 1024 * 1024)
+        })
         .collect()
 }
 
@@ -82,7 +97,7 @@ pub fn parse_rocm_gpu_vrams(output: &str) -> Vec<u64> {
 }
 
 /// Summarize GPU names: empty→None, 1→name, N identical→"N× name", N mixed→"a, b".
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn summarize_gpu_name(names: &[String]) -> Option<String> {
     match names.len() {
         0 => None,
@@ -140,6 +155,43 @@ pub fn parse_hostname(output: &str) -> Option<String> {
     }
 }
 
+/// Parse PowerShell `Win32_VideoController | ConvertTo-Json` output → `(name, adapter_ram_bytes)`.
+#[cfg(any(target_os = "windows", test))]
+pub fn parse_windows_video_controller_json(output: &str) -> Vec<(String, u64)> {
+    fn parse_u64(value: &Value) -> Option<u64> {
+        match value {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.trim().parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn parse_entry(value: &Value) -> Option<(String, u64)> {
+        let name = value.get("Name")?.as_str()?.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let adapter_ram = value.get("AdapterRAM").and_then(parse_u64).unwrap_or(0);
+        Some((name.to_string(), adapter_ram))
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return Vec::new();
+    };
+
+    match value {
+        Value::Array(values) => values.iter().filter_map(parse_entry).collect(),
+        Value::Object(_) => parse_entry(&value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse `TotalPhysicalMemory` output from PowerShell/CIM.
+#[cfg(any(target_os = "windows", test))]
+pub fn parse_windows_total_physical_memory(output: &str) -> Option<u64> {
+    output.trim().parse::<u64>().ok()
+}
+
 fn detect_hostname() -> Option<String> {
     let out = std::process::Command::new("hostname").output().ok()?;
     if !out.status.success() {
@@ -175,6 +227,36 @@ fn try_tegrastats_ram() -> Option<u64> {
     let _ = child.kill();
     let _ = child.wait();
     parse_tegrastats_ram(&line)
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_output(script: &str) -> Option<String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_total_ram_bytes() -> Option<u64> {
+    let output = powershell_output(
+        "Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory",
+    )?;
+    parse_windows_total_physical_memory(&output)
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_video_controllers() -> Vec<(String, u64)> {
+    let Some(output) = powershell_output(
+        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+    ) else {
+        return Vec::new();
+    };
+    parse_windows_video_controller_json(&output)
 }
 
 impl Collector for DefaultCollector {
@@ -329,6 +411,107 @@ impl Collector for DefaultCollector {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            let system_ram = read_windows_total_ram_bytes().unwrap_or(0);
+            let want_gpu_info =
+                metrics.contains(&Metric::GpuName) || metrics.contains(&Metric::GpuCount);
+            let want_vram = metrics.contains(&Metric::VramBytes);
+
+            let nvidia_names = if want_gpu_info {
+                std::process::Command::new("nvidia-smi")
+                    .args(["--query-gpu=name", "--format=csv,noheader"])
+                    .output()
+                    .ok()
+                    .and_then(|out| {
+                        if !out.status.success() {
+                            return None;
+                        }
+                        let s = String::from_utf8(out.stdout).ok()?;
+                        let names = parse_nvidia_gpu_names(&s);
+                        if names.is_empty() {
+                            None
+                        } else {
+                            Some(names)
+                        }
+                    })
+            } else {
+                None
+            };
+
+            let nvidia_vram = if want_vram {
+                std::process::Command::new("nvidia-smi")
+                    .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+                    .output()
+                    .ok()
+                    .and_then(|out| {
+                        if !out.status.success() {
+                            return None;
+                        }
+                        let s = String::from_utf8(out.stdout).ok()?;
+                        let per_gpu = parse_nvidia_gpu_memory(&s);
+                        if per_gpu.is_empty() {
+                            None
+                        } else {
+                            Some(per_gpu)
+                        }
+                    })
+            } else {
+                None
+            };
+
+            let windows_gpus = if want_gpu_info || want_vram {
+                read_windows_video_controllers()
+            } else {
+                Vec::new()
+            };
+
+            if want_vram {
+                if let Some(per_gpu) = nvidia_vram {
+                    let total: u64 = per_gpu.iter().sum();
+                    if total > 0 {
+                        survey.gpu_vram = per_gpu;
+                        let ram_offload = system_ram.saturating_sub(total);
+                        survey.vram_bytes = total + (ram_offload as f64 * 0.75) as u64;
+                    }
+                } else {
+                    let per_gpu: Vec<u64> = windows_gpus
+                        .iter()
+                        .map(|(_, ram)| *ram)
+                        .filter(|ram| *ram > 0)
+                        .collect();
+                    let total: u64 = per_gpu.iter().sum();
+                    if total > 0 {
+                        survey.gpu_vram = per_gpu;
+                        let ram_offload = system_ram.saturating_sub(total);
+                        survey.vram_bytes = total + (ram_offload as f64 * 0.75) as u64;
+                    } else if system_ram > 0 {
+                        survey.vram_bytes = (system_ram as f64 * 0.75) as u64;
+                    }
+                }
+            }
+
+            if want_gpu_info {
+                if let Some(ref names) = nvidia_names {
+                    if metrics.contains(&Metric::GpuName) {
+                        survey.gpu_name = summarize_gpu_name(names);
+                    }
+                    if metrics.contains(&Metric::GpuCount) {
+                        survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
+                    }
+                } else {
+                    let names: Vec<String> =
+                        windows_gpus.iter().map(|(name, _)| name.clone()).collect();
+                    if metrics.contains(&Metric::GpuName) {
+                        survey.gpu_name = summarize_gpu_name(&names);
+                    }
+                    if metrics.contains(&Metric::GpuCount) {
+                        survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
+                    }
+                }
+            }
+        }
+
         survey
     }
 }
@@ -449,6 +632,14 @@ mod tests {
     #[test]
     fn test_parse_nvidia_gpu_name_empty() {
         assert!(parse_nvidia_gpu_names("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_nvidia_gpu_memory() {
+        assert_eq!(
+            parse_nvidia_gpu_memory("81920\n24576\n"),
+            vec![81_920u64 * 1024 * 1024, 24_576u64 * 1024 * 1024]
+        );
     }
 
     #[test]
@@ -661,6 +852,35 @@ card1,not-a-number,512000000";
     #[test]
     fn test_parse_hostname_whitespace() {
         assert_eq!(parse_hostname("  carrack  \n"), Some("carrack".to_string()));
+    }
+
+    #[test]
+    fn test_parse_windows_video_controller_json_array() {
+        let json = r#"[{"Name":"NVIDIA RTX 4090","AdapterRAM":25769803776},{"Name":"AMD Radeon PRO","AdapterRAM":"8589934592"}]"#;
+        assert_eq!(
+            parse_windows_video_controller_json(json),
+            vec![
+                ("NVIDIA RTX 4090".to_string(), 25_769_803_776),
+                ("AMD Radeon PRO".to_string(), 8_589_934_592),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_windows_video_controller_json_single_object() {
+        let json = r#"{"Name":"NVIDIA RTX 5090","AdapterRAM":34359738368}"#;
+        assert_eq!(
+            parse_windows_video_controller_json(json),
+            vec![("NVIDIA RTX 5090".to_string(), 34_359_738_368)]
+        );
+    }
+
+    #[test]
+    fn test_parse_windows_total_physical_memory() {
+        assert_eq!(
+            parse_windows_total_physical_memory("68719476736\r\n"),
+            Some(68_719_476_736)
+        );
     }
 
     #[test]

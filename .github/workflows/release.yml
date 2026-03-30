@@ -237,6 +237,92 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  build_windows:
+    name: Build Windows ${{ matrix.name }}
+    runs-on: windows-2022
+    env:
+      ROCM_HIP_SDK_FILENAME: AMD-Software-PRO-Edition-25.Q3-WinSvr2022-For-HIP.exe
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CPU
+            backend: cpu
+            build_recipe: release-build-windows
+            bundle_recipe: release-bundle-windows
+            artifact_name: release-windows-cpu
+          - name: CUDA
+            backend: cuda
+            build_recipe: release-build-cuda-windows
+            bundle_recipe: release-bundle-cuda-windows
+            artifact_name: release-windows-cuda
+          - name: ROCm
+            backend: rocm
+            build_recipe: release-build-amd-windows
+            bundle_recipe: release-bundle-amd-windows
+            artifact_name: release-windows-rocm
+          - name: Vulkan
+            backend: vulkan
+            build_recipe: release-build-vulkan-windows
+            bundle_recipe: release-bundle-vulkan-windows
+            artifact_name: release-windows-vulkan
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: taiki-e/install-action@just
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Cache Windows SDK installers
+        if: matrix.backend != 'cpu'
+        uses: actions/cache@v5
+        with:
+          path: ~\sdk-installer-cache\${{ matrix.backend }}
+          key: windows-sdk-installers-${{ matrix.backend }}-${{ env.ROCM_HIP_SDK_FILENAME }}-${{ hashFiles('scripts/install-windows-sdk.ps1') }}
+
+      - name: Install backend SDK
+        shell: pwsh
+        run: |
+          .\scripts\install-windows-sdk.ps1 `
+            -Backend '${{ matrix.backend }}' `
+            -RocmHipSdkFilename $env:ROCM_HIP_SDK_FILENAME `
+            -InstallerCacheDir (Join-Path $env:USERPROFILE 'sdk-installer-cache\${{ matrix.backend }}')
+
+      - name: Build Windows release bundle
+        shell: pwsh
+        run: |
+          just ${{ matrix.build_recipe }}
+          just ${{ matrix.bundle_recipe }} "${env:GITHUB_REF_NAME}" dist
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        shell: pwsh
+        run: |
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --show-stats
+          }
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
@@ -245,6 +331,7 @@ jobs:
       - build_linux_cuda
       - build_linux_amd
       - build_linux_vulkan
+      - build_windows
 
     steps:
       - name: Download release artifacts

@@ -18,6 +18,15 @@ just build
 
 On macOS, this clones/updates the llama.cpp fork if needed, builds with `-DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF`, and builds the Rust mesh-llm binary. Linux release workflows build CPU, CUDA, ROCm, and Vulkan variants separately.
 
+On Windows, use the release-specific recipes directly:
+
+```powershell
+just release-build-windows
+just release-build-cuda-windows
+just release-build-amd-windows
+just release-build-vulkan-windows
+```
+
 ### 2. Verify no homebrew dependencies
 
 ```bash
@@ -44,6 +53,18 @@ Bundle naming now follows the same convention everywhere:
 - ROCm Linux bundles package `rpc-server-rocm` and `llama-server-rocm`
 - Vulkan Linux bundles package `rpc-server-vulkan` and `llama-server-vulkan`
 
+On Windows, create release archives directly:
+
+```powershell
+just release-bundle-windows v0.X.0
+just release-bundle-cuda-windows v0.X.0
+just release-bundle-amd-windows v0.X.0
+just release-bundle-vulkan-windows v0.X.0
+```
+
+Those commands emit `.zip` assets in `dist/` with `mesh-llm.exe`, plus flavor-specific `rpc-server-<flavor>.exe` and `llama-server-<flavor>.exe`.
+If optional Windows benchmark binaries such as `membench-fingerprint-cuda.exe` or `membench-fingerprint-hip.exe` are present in `mesh-llm/target/release/`, the PowerShell packager also includes them in the `.zip`.
+
 ### 4. Smoke test the bundle
 
 ```bash
@@ -67,12 +88,17 @@ Run this from a clean local `main` branch. It bumps the version in source + Carg
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
 
-- builds release bundles on macOS, Linux CPU, Linux CUDA, Linux ROCm, and Linux Vulkan
+- builds release bundles on macOS, Linux CPU, Linux CUDA, Linux ROCm, Linux Vulkan, and Windows CPU/CUDA/ROCm/Vulkan
+- uses hosted `windows-2022` runners for Windows and installs the needed SDKs during the workflow
 - uploads versioned assets such as `mesh-llm-v0.X.0-aarch64-apple-darwin.tar.gz`
 - uploads stable `latest` assets such as `mesh-llm-x86_64-unknown-linux-gnu.tar.gz`
 - uploads CUDA-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz`
 - uploads ROCm-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz`
 - uploads Vulkan-specific Linux assets such as `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz`
+- uploads Windows CPU assets such as `mesh-llm-x86_64-pc-windows-msvc.zip`
+- uploads Windows CUDA assets such as `mesh-llm-x86_64-pc-windows-msvc-cuda.zip`
+- uploads Windows ROCm assets such as `mesh-llm-x86_64-pc-windows-msvc-rocm.zip`
+- uploads Windows Vulkan assets such as `mesh-llm-x86_64-pc-windows-msvc-vulkan.zip`
 - keeps the legacy macOS `mesh-bundle.tar.gz` asset available for direct archive installs
 - creates the GitHub release automatically with generated notes
 
@@ -86,14 +112,21 @@ After the workflow finishes, verify:
 - `mesh-llm-x86_64-unknown-linux-gnu-cuda.tar.gz` exists
 - `mesh-llm-x86_64-unknown-linux-gnu-rocm.tar.gz` exists
 - `mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz` exists
+- `mesh-llm-x86_64-pc-windows-msvc.zip` exists
+- `mesh-llm-x86_64-pc-windows-msvc-cuda.zip` exists
+- `mesh-llm-x86_64-pc-windows-msvc-rocm.zip` exists
+- `mesh-llm-x86_64-pc-windows-msvc-vulkan.zip` exists
 
 ## Notes
 
 - The unversioned asset name `mesh-bundle.tar.gz` is still kept for compatibility with direct archive installs.
 - The default Linux release bundle is a generic CPU build.
+- Windows source builds exist, and tagged releases now publish Windows CPU/CUDA/ROCm/Vulkan `.zip` assets.
+- Windows release artifacts can still be generated locally with the `*-windows` release recipes in `Justfile`.
 - Release bundles use flavor-specific `rpc-server-<flavor>` and `llama-server-<flavor>` names so multiple flavors can coexist in one install directory. Use `mesh-llm --llama-flavor <flavor>` to force a specific pair.
 - The CUDA Linux release bundle is built in CI with an explicit multi-arch `CMAKE_CUDA_ARCHITECTURES` list and is not runtime-tested during the workflow.
 - The ROCm and Vulkan Linux release bundles are compile-tested in CI, but not runtime-tested against real GPUs during the workflow.
+- The Windows release workflows are compile-and-package only. They do not run inference tests against real GPUs during the workflow.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
   ```bash
   codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server /usr/local/bin/llama-moe-split

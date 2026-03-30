@@ -107,12 +107,77 @@ pub fn hardware_changed(fingerprint: &BenchmarkFingerprint, hw: &HardwareSurvey)
 }
 
 /// Returns `~/.mesh-llm/benchmark-fingerprint.json`.
-/// Falls back to `/tmp/mesh-llm-benchmark-fingerprint.json` if home dir is unavailable.
+/// Falls back to the platform temp directory if home dir is unavailable.
 pub fn fingerprint_path() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".mesh-llm")
         .join("benchmark-fingerprint.json")
+}
+
+fn benchmark_binary_name_for(os: &str, base: &str) -> String {
+    if os == "windows" {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
+fn detect_benchmark_binary_for(os: &str, hw: &HardwareSurvey, bin_dir: &Path) -> Option<PathBuf> {
+    if hw.gpu_count == 0 {
+        tracing::debug!("no GPUs detected — skipping benchmark");
+        return None;
+    }
+
+    let gpu_upper = hw.gpu_name.as_deref().unwrap_or("").to_uppercase();
+
+    let candidate_name = if os == "macos" && hw.is_soc {
+        benchmark_binary_name_for(os, "membench-fingerprint")
+    } else if os == "linux" || os == "windows" {
+        if gpu_upper.contains("NVIDIA") {
+            benchmark_binary_name_for(os, "membench-fingerprint-cuda")
+        } else if gpu_upper.contains("AMD") || gpu_upper.contains("RADEON") {
+            benchmark_binary_name_for(os, "membench-fingerprint-hip")
+        } else if gpu_upper.contains("INTEL") || gpu_upper.contains("ARC") {
+            tracing::info!("Intel Arc benchmark is unvalidated — results may be inaccurate");
+            benchmark_binary_name_for(os, "membench-fingerprint-intel")
+        } else if os == "linux" && hw.is_soc {
+            tracing::warn!("Jetson benchmark is unvalidated for ARM CUDA — attempting");
+            benchmark_binary_name_for(os, "membench-fingerprint-cuda")
+        } else {
+            tracing::warn!(
+                "could not identify benchmark binary for this GPU platform: {:?}",
+                hw.gpu_name
+            );
+            return None;
+        }
+    } else {
+        tracing::warn!(
+            "could not identify benchmark binary for this GPU platform: {:?}",
+            hw.gpu_name
+        );
+        return None;
+    };
+
+    let candidate = bin_dir.join(&candidate_name);
+    if candidate.exists() {
+        return Some(candidate);
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let fallback = exe_dir.join(&candidate_name);
+            if fallback.exists() {
+                return Some(fallback);
+            }
+        }
+    }
+
+    tracing::warn!(
+        "{candidate_name} not found in {:?} or adjacent to mesh-llm executable",
+        bin_dir
+    );
+    None
 }
 
 /// Load a `BenchmarkFingerprint` from disk.  Returns `None` on any error.
@@ -160,67 +225,7 @@ pub fn save_fingerprint(path: &Path, fp: &BenchmarkFingerprint) {
 ///
 /// Never panics or hard-fails with `ensure!`.
 pub fn detect_benchmark_binary(hw: &HardwareSurvey, bin_dir: &Path) -> Option<PathBuf> {
-    if hw.gpu_count == 0 {
-        tracing::debug!("no GPUs detected — skipping benchmark");
-        return None;
-    }
-
-    let gpu_upper = hw.gpu_name.as_deref().unwrap_or("").to_uppercase();
-
-    let candidate = if cfg!(target_os = "macos") && hw.is_soc {
-        bin_dir.join("membench-fingerprint")
-    } else if cfg!(target_os = "linux") {
-        if gpu_upper.contains("NVIDIA") {
-            bin_dir.join("membench-fingerprint-cuda")
-        } else if gpu_upper.contains("AMD") || gpu_upper.contains("RADEON") {
-            bin_dir.join("membench-fingerprint-hip")
-        } else if gpu_upper.contains("INTEL") || gpu_upper.contains("ARC") {
-            tracing::info!("Intel Arc benchmark is unvalidated — results may be inaccurate");
-            bin_dir.join("membench-fingerprint-intel")
-        } else if hw.is_soc {
-            tracing::warn!("Jetson benchmark is unvalidated for ARM CUDA — attempting");
-            bin_dir.join("membench-fingerprint-cuda")
-        } else {
-            tracing::warn!(
-                "could not identify benchmark binary for this GPU platform: {:?}",
-                hw.gpu_name
-            );
-            return None;
-        }
-    } else {
-        tracing::warn!(
-            "could not identify benchmark binary for this GPU platform: {:?}",
-            hw.gpu_name
-        );
-        return None;
-    };
-
-    if candidate.exists() {
-        return Some(candidate);
-    }
-
-    // Fallback: try the directory containing the mesh-llm executable itself.
-    // In dev builds, benchmark binaries are built to `target/release/` (adjacent
-    // to `mesh-llm`) while `bin_dir` points to `llama.cpp/build/bin/`.
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let filename = candidate.file_name()?;
-            let fallback = exe_dir.join(filename);
-            if fallback.exists() {
-                return Some(fallback);
-            }
-        }
-    }
-
-    tracing::warn!(
-        "{} not found in {:?} or adjacent to mesh-llm executable",
-        candidate
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("benchmark binary"),
-        bin_dir
-    );
-    None
+    detect_benchmark_binary_for(std::env::consts::OS, hw, bin_dir)
 }
 
 /// Parse raw stdout bytes from a benchmark run into a vec of per-device outputs.
@@ -524,6 +529,41 @@ mod tests {
         };
         let result = detect_benchmark_binary(&hw, Path::new("/tmp"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_benchmark_binary_name_for_windows() {
+        assert_eq!(
+            benchmark_binary_name_for("windows", "membench-fingerprint-cuda"),
+            "membench-fingerprint-cuda.exe"
+        );
+        assert_eq!(
+            benchmark_binary_name_for("linux", "membench-fingerprint-cuda"),
+            "membench-fingerprint-cuda"
+        );
+    }
+
+    #[test]
+    fn test_detect_benchmark_binary_windows_cuda_missing_is_soft_failure() {
+        let hw = make_survey(1, vec![24_000_000_000], Some("NVIDIA RTX 4090"), false);
+        assert!(detect_benchmark_binary_for("windows", &hw, Path::new("C:\\bench")).is_none());
+    }
+
+    #[test]
+    fn test_detect_benchmark_binary_windows_hip_missing_is_soft_failure() {
+        let hw = make_survey(
+            1,
+            vec![24_000_000_000],
+            Some("AMD Radeon RX 7900 XTX"),
+            false,
+        );
+        assert!(detect_benchmark_binary_for("windows", &hw, Path::new("C:\\bench")).is_none());
+    }
+
+    #[test]
+    fn test_detect_benchmark_binary_windows_intel_missing_is_soft_failure() {
+        let hw = make_survey(1, vec![16_000_000_000], Some("Intel Arc A770"), false);
+        assert!(detect_benchmark_binary_for("windows", &hw, Path::new("C:\\bench")).is_none());
     }
 
     // 13. hardware_changed: same VRAM, different GPU name → true
