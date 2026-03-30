@@ -416,7 +416,9 @@ impl MeshApi {
             my_is_soc: node.is_soc,
             gpus: {
                 let bw = node.gpu_bandwidth_gbps.lock().await;
-                let bw_str = bw.as_ref().map(|v| v.iter().map(|f| format!("{:.2}", f)).collect::<Vec<_>>().join(","));
+                let bw_str = bw
+                    .as_ref()
+                    .map(|v| v.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
                 build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref(), bw_str.as_deref())
             },
             routing_affinity,
