@@ -13,6 +13,20 @@ use tokio::net::TcpStream;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpReadLimits {
+    max_header_bytes: usize,
+    max_body_bytes: usize,
+    max_chunked_wire_bytes: usize,
+}
+
+const HTTP_READ_LIMITS: HttpReadLimits = HttpReadLimits {
+    max_header_bytes: MAX_HEADER_BYTES,
+    max_body_bytes: MAX_BODY_BYTES,
+    max_chunked_wire_bytes: MAX_CHUNKED_WIRE_BYTES,
+};
 
 #[derive(Debug)]
 pub struct BufferedHttpRequest {
@@ -38,8 +52,15 @@ pub enum PipelineProxyResult {
 /// known via `Content-Length` or `Transfer-Encoding: chunked`. The raw request
 /// bytes are preserved so the chosen upstream sees the original payload.
 pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpRequest> {
+    read_http_request_with_limits(stream, HTTP_READ_LIMITS).await
+}
+
+async fn read_http_request_with_limits(
+    stream: &mut TcpStream,
+    limits: HttpReadLimits,
+) -> Result<BufferedHttpRequest> {
     let mut raw = Vec::with_capacity(8192);
-    let header_end = read_until_header_end(stream, &mut raw).await?;
+    let header_end = read_until_header_end(stream, &mut raw, limits.max_header_bytes).await?;
     let header_text = std::str::from_utf8(&raw[..header_end]).context("invalid HTTP headers")?;
 
     let mut parts = header_text
@@ -57,7 +78,9 @@ pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpReq
     let body = if is_chunked {
         let mut sent_continue = false;
         loop {
-            if let Some((consumed, decoded)) = try_decode_chunked_body(&raw[header_end..])? {
+            if let Some((consumed, decoded)) =
+                try_decode_chunked_body(&raw[header_end..], limits.max_body_bytes)?
+            {
                 raw.truncate(header_end + consumed);
                 break decoded;
             }
@@ -66,15 +89,18 @@ pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpReq
                 sent_continue = true;
             }
             read_more(stream, &mut raw).await?;
-            if raw.len().saturating_sub(header_end) > MAX_BODY_BYTES {
-                bail!("HTTP chunked body exceeds {MAX_BODY_BYTES} bytes");
+            if raw.len().saturating_sub(header_end) > limits.max_chunked_wire_bytes {
+                bail!(
+                    "HTTP chunked wire body exceeds {} bytes",
+                    limits.max_chunked_wire_bytes
+                );
             }
         }
     } else if let Some(content_length) = content_length {
-        let body_end = header_end + content_length;
-        if body_end > MAX_HEADER_BYTES + MAX_BODY_BYTES {
-            bail!("HTTP body exceeds {MAX_BODY_BYTES} bytes");
+        if content_length > limits.max_body_bytes {
+            bail!("HTTP body exceeds {} bytes", limits.max_body_bytes);
         }
+        let body_end = header_end + content_length;
         let mut sent_continue = false;
         while raw.len() < body_end {
             if !sent_continue && expects_continue && content_length > 0 {
@@ -149,20 +175,24 @@ fn finalize_forwarded_request(
     Ok(forwarded)
 }
 
-async fn read_until_header_end(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<usize> {
+async fn read_until_header_end(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    max_header_bytes: usize,
+) -> Result<usize> {
     loop {
         if let Some(header_end) = find_header_end(buf) {
             return Ok(header_end);
         }
-        if buf.len() >= MAX_HEADER_BYTES {
-            bail!("HTTP headers exceed {MAX_HEADER_BYTES} bytes");
+        if buf.len() >= max_header_bytes {
+            bail!("HTTP headers exceed {max_header_bytes} bytes");
         }
         read_more(stream, buf).await?;
     }
 }
 
 async fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<()> {
-    let mut chunk = vec![0u8; 8192];
+    let mut chunk = [0u8; 8192];
     let n = stream.read(&mut chunk).await?;
     if n == 0 {
         bail!("unexpected EOF while reading HTTP request");
@@ -209,7 +239,7 @@ fn header_has_token(headers: &str, name: &str, token: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn try_decode_chunked_body(buf: &[u8]) -> Result<Option<(usize, Vec<u8>)>> {
+fn try_decode_chunked_body(buf: &[u8], max_body_bytes: usize) -> Result<Option<(usize, Vec<u8>)>> {
     let mut pos = 0usize;
     let mut decoded = Vec::new();
 
@@ -251,8 +281,8 @@ fn try_decode_chunked_body(buf: &[u8]) -> Result<Option<(usize, Vec<u8>)>> {
         }
         pos += 2;
 
-        if decoded.len() > MAX_BODY_BYTES {
-            bail!("HTTP chunked body exceeds {MAX_BODY_BYTES} bytes");
+        if decoded.len() > max_body_bytes {
+            bail!("HTTP chunked body exceeds {max_body_bytes} bytes");
         }
     }
 }
@@ -798,13 +828,18 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
-    async fn read_request_from_parts(parts: Vec<Vec<u8>>) -> BufferedHttpRequest {
+    async fn read_request_from_parts_with_limits(
+        parts: Vec<Vec<u8>>,
+        limits: HttpReadLimits,
+    ) -> BufferedHttpRequest {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            read_http_request(&mut stream).await.unwrap()
+            read_http_request_with_limits(&mut stream, limits)
+                .await
+                .unwrap()
         });
 
         let client = tokio::spawn(async move {
@@ -818,6 +853,10 @@ mod tests {
         server.await.unwrap()
     }
 
+    async fn read_request_from_parts(parts: Vec<Vec<u8>>) -> BufferedHttpRequest {
+        read_request_from_parts_with_limits(parts, HTTP_READ_LIMITS).await
+    }
+
     fn build_chunked_request(body: &[u8], chunks: &[usize]) -> Vec<u8> {
         let mut out = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
         let mut pos = 0usize;
@@ -827,6 +866,23 @@ mod tests {
             out.extend_from_slice(&body[pos..end]);
             out.extend_from_slice(b"\r\n");
             pos = end;
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    fn build_chunked_request_one_byte_chunks(body: &[u8], extension_len: usize) -> Vec<u8> {
+        let mut out = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let extension = "x".repeat(extension_len);
+        for byte in body {
+            out.extend_from_slice(b"1");
+            if !extension.is_empty() {
+                out.extend_from_slice(b";");
+                out.extend_from_slice(extension.as_bytes());
+            }
+            out.extend_from_slice(b"\r\n");
+            out.push(*byte);
+            out.extend_from_slice(b"\r\n");
         }
         out.extend_from_slice(b"0\r\n\r\n");
         out
@@ -968,6 +1024,30 @@ mod tests {
             request.body_json.unwrap()["messages"][0]["content"],
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_http_request_chunked_body_allows_wire_overhead() {
+        let limits = HttpReadLimits {
+            max_header_bytes: MAX_HEADER_BYTES,
+            max_body_bytes: 256,
+            max_chunked_wire_bytes: 4 * 1024,
+        };
+        let large = "x".repeat(48);
+        let body = serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": large}],
+        })
+        .to_string();
+        let request = build_chunked_request_one_byte_chunks(body.as_bytes(), 16);
+
+        let request = read_request_from_parts_with_limits(vec![request], limits).await;
+
+        assert_eq!(request.model_name.as_deref(), Some("qwen"));
+        assert!(request.raw.len() > limits.max_body_bytes);
+        let body_json = request.body_json.unwrap();
+        let content = body_json["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(content.len(), 48);
     }
 
     #[tokio::test]
