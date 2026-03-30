@@ -416,6 +416,30 @@ mesh-llm --model ~/my-models/custom-model.gguf
 
 Catalog models are downloaded with resume support — if a download is interrupted, it picks up where it left off. Use `mesh-llm download` to browse the catalog.
 
+## Local runtime control
+
+Stage one supports local-only hot load/unload on a running node.
+
+```bash
+mesh-llm load Llama-3.2-1B-Instruct-Q4_K_M
+mesh-llm drop Llama-3.2-1B-Instruct-Q4_K_M
+mesh-llm models
+mesh-llm ps
+```
+
+REST endpoints on the management API:
+
+```bash
+curl localhost:3131/api/runtime
+curl localhost:3131/api/runtime/processes
+curl -X POST localhost:3131/api/runtime/models \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Llama-3.2-1B-Instruct-Q4_K_M"}'
+curl -X DELETE localhost:3131/api/runtime/models/Llama-3.2-1B-Instruct-Q4_K_M
+```
+
+This is intentionally node-local in stage one. Mesh-wide rebalancing and distributed load/unload are stage two.
+
 ## Community
 
 Join the [#mesh-llm channel on the Goose Discord](https://discord.gg/goose-oss) for discussion, support, and development chat.

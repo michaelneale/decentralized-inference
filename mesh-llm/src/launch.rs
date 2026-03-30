@@ -1,11 +1,15 @@
-//! Process management for llama.cpp binaries.
+//! Process management for backend server binaries.
 //!
-//! Starts rpc-server and optionally llama-server as child processes,
-//! wired up to the mesh tunnel ports.
+//! Starts rpc-server and backend inference processes wired up to the mesh
+//! tunnel ports. Concrete backends plug into this module via BackendOps.
 
+use crate::backend;
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
@@ -53,9 +57,9 @@ impl BinaryFlavor {
 }
 
 #[derive(Clone, Debug)]
-struct ResolvedBinary {
-    path: PathBuf,
-    flavor: Option<BinaryFlavor>,
+pub(crate) struct ResolvedBinary {
+    pub(crate) path: PathBuf,
+    pub(crate) flavor: Option<BinaryFlavor>,
 }
 
 pub(crate) fn platform_bin_name(name: &str) -> String {
@@ -116,7 +120,7 @@ fn infer_binary_flavor(name: &str, path: &Path) -> Option<BinaryFlavor> {
     None
 }
 
-fn resolve_binary_path(
+pub(crate) fn resolve_binary_path(
     bin_dir: &Path,
     name: &str,
     requested_flavor: Option<BinaryFlavor>,
@@ -186,8 +190,50 @@ fn resolve_binary_path(
     }
 }
 
-fn temp_log_path(name: &str) -> PathBuf {
+pub(crate) fn temp_log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
+}
+
+#[derive(Clone, Debug)]
+pub struct InferenceServerHandle {
+    pid: u32,
+    expected_exit: Arc<AtomicBool>,
+}
+
+impl InferenceServerHandle {
+    pub(crate) fn new(pid: u32, expected_exit: Arc<AtomicBool>) -> Self {
+        Self { pid, expected_exit }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub async fn shutdown(&self) {
+        self.expected_exit.store(true, Ordering::Relaxed);
+        terminate_process(self.pid).await;
+    }
+}
+
+#[derive(Debug)]
+pub struct InferenceServerProcess {
+    pub handle: InferenceServerHandle,
+    pub death_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub struct ModelLaunchSpec<'a> {
+    pub backend: backend::BackendKind,
+    pub model: &'a Path,
+    pub http_port: u16,
+    pub tunnel_ports: &'a [u16],
+    pub tensor_split: Option<&'a str>,
+    pub draft: Option<&'a Path>,
+    pub draft_max: u16,
+    pub model_bytes: u64,
+    pub my_vram: u64,
+    pub mmproj: Option<&'a Path>,
+    pub ctx_size_override: Option<u32>,
+    pub total_group_vram: Option<u64>,
 }
 
 fn log_tail(path: &Path, max_lines: usize) -> String {
@@ -256,7 +302,7 @@ fn preferred_device(available: &[String], flavor: Option<BinaryFlavor>) -> Optio
     available.first().cloned()
 }
 
-fn resolve_device_for_binary(
+pub(crate) fn resolve_device_for_binary(
     binary: &Path,
     flavor: Option<BinaryFlavor>,
     requested: Option<&str>,
@@ -425,6 +471,34 @@ pub async fn kill_orphan_rpc_servers() {
     }
 }
 
+async fn terminate_process(pid: u32) {
+    let pid_str = pid.to_string();
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid_str])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid_str])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid_str])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
 /// Kill all running llama-server processes.
 pub async fn kill_llama_server() {
     let _ = terminate_process_by_name("llama-server");
@@ -440,244 +514,21 @@ pub async fn kill_llama_server() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
-/// Start llama-server with the given model, HTTP port, and RPC tunnel ports.
-/// `model_bytes` is the total GGUF file size, used to select KV cache quantization:
-///   - < 5GB: FP16 (default) — small models, KV cache is tiny
-///   - 5-50GB: Q8_0 — no measurable quality loss, saves ~50% KV memory
-///   - > 50GB: Q4_0 — slight long-context degradation, but these models need every byte
-/// Start llama-server. Returns a oneshot receiver that fires when the process exits.
-pub async fn start_llama_server(
+/// Start a backend server for a model. This dispatches to the concrete backend
+/// implementation so other runtimes can plug into the same control plane.
+pub async fn start_model_server(
     bin_dir: &Path,
     binary_flavor: Option<BinaryFlavor>,
-    model: &Path,
-    http_port: u16,
-    tunnel_ports: &[u16],
-    tensor_split: Option<&str>,
-    draft: Option<&Path>,
-    draft_max: u16,
-    model_bytes: u64,
-    my_vram: u64,
-    mmproj: Option<&Path>,
-    ctx_size_override: Option<u32>,
-    total_group_vram: Option<u64>,
-) -> Result<tokio::sync::oneshot::Receiver<()>> {
-    let llama_server = resolve_binary_path(bin_dir, "llama-server", binary_flavor)?;
-
-    anyhow::ensure!(model.exists(), "Model not found at {}", model.display());
-
-    // Build --rpc argument: all tunnel ports as localhost endpoints
-    let rpc_endpoints: Vec<String> = tunnel_ports
-        .iter()
-        .map(|p| format!("127.0.0.1:{p}"))
-        .collect();
-    let rpc_arg = rpc_endpoints.join(",");
-
-    tracing::info!(
-        "Starting llama-server on :{http_port} with model {} and --rpc {}",
-        model.display(),
-        rpc_arg
+    spec: ModelLaunchSpec<'_>,
+) -> Result<InferenceServerProcess> {
+    let ops = backend::backend_ops(spec.backend);
+    tracing::debug!(
+        "dispatching backend '{}' via {} (health: {})",
+        ops.as_str(),
+        ops.process_label(),
+        ops.health_path()
     );
-
-    let llama_log = temp_log_path("mesh-llm-llama-server.log");
-    let log_file = std::fs::File::create(&llama_log).with_context(|| {
-        format!(
-            "Failed to create llama-server log file {}",
-            llama_log.display()
-        )
-    })?;
-    let log_file2 = log_file.try_clone()?;
-
-    // llama-server uses --rpc only for remote workers.
-    // Context size: scale to available VRAM on the host node.
-    // In split mode (pipeline parallel), each node holds a range of layers
-    // and the KV cache for those layers is allocated on the same device.
-    // So both weights and KV are distributed. The host only needs VRAM for
-    // its share of weights + its share of KV. We estimate the host's weight
-    // share proportionally and let llama-server pick the largest -c that fits.
-    const GB: u64 = 1_000_000_000;
-    let host_model_bytes = if let Some(group_vram) = total_group_vram {
-        // Split mode: host holds its share of the weights
-        if group_vram > 0 {
-            let host_fraction = my_vram as f64 / group_vram as f64;
-            (model_bytes as f64 * host_fraction) as u64
-        } else {
-            model_bytes
-        }
-    } else {
-        // Local mode: host holds all weights
-        model_bytes
-    };
-    let vram_after_model = my_vram.saturating_sub(host_model_bytes);
-    let ctx_size: u32 = if let Some(override_ctx) = ctx_size_override {
-        override_ctx
-    } else if vram_after_model >= 30 * GB {
-        65536 // 30GB+ free: full 64K context
-    } else if vram_after_model >= 12 * GB {
-        32768 // 12-30GB free: 32K
-    } else if vram_after_model >= 6 * GB {
-        16384 // 6-12GB free: 16K
-    } else if vram_after_model >= 3 * GB {
-        8192 // 3-6GB free: 8K
-    } else {
-        4096 // <3GB free: minimal
-    };
-    tracing::info!(
-        "Context size: {ctx_size} tokens (model {:.1}GB, host weights ~{:.1}GB, {:.0}GB VRAM, {:.1}GB free{})",
-        model_bytes as f64 / GB as f64,
-        host_model_bytes as f64 / GB as f64,
-        my_vram as f64 / GB as f64,
-        vram_after_model as f64 / GB as f64,
-        if total_group_vram.is_some() {
-            " [split]"
-        } else {
-            ""
-        }
-    );
-
-    let mut args = vec!["-m".to_string(), model.to_string_lossy().to_string()];
-    if !tunnel_ports.is_empty() {
-        args.push("--rpc".to_string());
-        args.push(rpc_arg);
-    }
-    args.extend_from_slice(&[
-        "-ngl".to_string(),
-        "99".to_string(),
-        "-fa".to_string(),
-        "on".to_string(),
-        "-fit".to_string(),
-        "off".to_string(),
-        "--no-mmap".to_string(),
-        "--host".to_string(),
-        "0.0.0.0".to_string(),
-        "--port".to_string(),
-        http_port.to_string(),
-        "-c".to_string(),
-        ctx_size.to_string(),
-        // Use deepseek format: thinking goes into reasoning_content field.
-        // Goose/OpenAI clients parse this correctly. "none" leaks raw <think>
-        // tags into content which is worse.
-        "--reasoning-format".to_string(),
-        "deepseek".to_string(),
-        // Disable thinking by default. Thinking models (Qwen3, MiniMax) burn
-        // 15-80s on hidden reasoning for no quality gain on most tasks, and
-        // Qwen3.5-9B is completely broken (reasoning consumes all max_tokens).
-        // API users can opt-in per-request with:
-        //   "chat_template_kwargs": {"enable_thinking": true}
-        "--reasoning-budget".to_string(),
-        "0".to_string(),
-    ]);
-    // KV cache quantization based on model size:
-    //   < 5GB: leave default (FP16) — small models, KV cache is negligible
-    //   5-50GB: Q8_0 — essentially lossless, halves KV memory
-    //   > 50GB: Q4_0 — slight long-context quality trade, but critical memory savings
-    if model_bytes >= 50 * GB {
-        args.extend_from_slice(&[
-            "--cache-type-k".to_string(),
-            "q4_0".to_string(),
-            "--cache-type-v".to_string(),
-            "q4_0".to_string(),
-        ]);
-        tracing::info!("KV cache: Q4_0 (model > 50GB)");
-    } else if model_bytes >= 5 * GB {
-        args.extend_from_slice(&[
-            "--cache-type-k".to_string(),
-            "q8_0".to_string(),
-            "--cache-type-v".to_string(),
-            "q8_0".to_string(),
-        ]);
-        tracing::info!("KV cache: Q8_0 (model 5-50GB)");
-    }
-    if let Some(ts) = tensor_split {
-        args.push("--tensor-split".to_string());
-        args.push(ts.to_string());
-    }
-    let local_device = resolve_device_for_binary(&llama_server.path, llama_server.flavor, None)?;
-    if let Some(draft_path) = draft {
-        if draft_path.exists() {
-            if local_device != "CPU" {
-                args.push("-md".to_string());
-                args.push(draft_path.to_string_lossy().to_string());
-                args.push("-ngld".to_string());
-                args.push("99".to_string());
-                args.push("--device-draft".to_string());
-                args.push(local_device.clone());
-                args.push("--draft-max".to_string());
-                args.push(draft_max.to_string());
-                tracing::info!(
-                    "Speculative decoding: draft={}, draft-max={}, device={}",
-                    draft_path.display(),
-                    draft_max,
-                    local_device
-                );
-            } else {
-                tracing::warn!(
-                    "Draft model present at {} but no GPU backend detected, skipping speculative decoding",
-                    draft_path.display()
-                );
-            }
-        } else {
-            tracing::warn!(
-                "Draft model not found at {}, skipping speculative decoding",
-                draft_path.display()
-            );
-        }
-    }
-    if let Some(proj) = mmproj {
-        if proj.exists() {
-            args.push("--mmproj".to_string());
-            args.push(proj.to_string_lossy().to_string());
-            // Vision images can produce large token batches — need ubatch >= 2048
-            args.push("--ubatch-size".to_string());
-            args.push("2048".to_string());
-            tracing::info!("Vision: mmproj={}", proj.display());
-        } else {
-            tracing::warn!("mmproj not found at {}, skipping vision", proj.display());
-        }
-    }
-    let mut child = Command::new(&llama_server.path)
-        .args(&args)
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file2))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to start llama-server at {}",
-                llama_server.path.display()
-            )
-        })?;
-
-    // Wait for health check
-    let url = format!("http://localhost:{http_port}/health");
-    for i in 0..600 {
-        if i > 0 && i % 10 == 0 {
-            let bytes = crate::tunnel::bytes_transferred();
-            let kb = bytes as f64 / 1024.0;
-            let mb = bytes as f64 / (1024.0 * 1024.0);
-            let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-            let transferred = if gb >= 1.0 {
-                format!("{gb:.1} GB")
-            } else if mb >= 1.0 {
-                format!("{mb:.1} MB")
-            } else {
-                format!("{kb:.0} KB")
-            };
-            tracing::info!(
-                "Still waiting for llama-server to load model... ({i}s, {transferred} transferred)"
-            );
-        }
-        if reqwest_health_check(&url).await {
-            let (death_tx, death_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-                eprintln!("⚠️  llama-server process exited unexpectedly");
-                let _ = death_tx.send(());
-            });
-            return Ok(death_rx);
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    anyhow::bail!("llama-server failed to become healthy within 600s");
+    ops.start_server(bin_dir, binary_flavor, spec).await
 }
 
 /// Find an available TCP port
@@ -820,7 +671,7 @@ fn command_succeeds(command: &str, args: &[&str]) -> bool {
 }
 
 /// Simple HTTP health check (avoid adding reqwest as a dep — just use TCP + raw HTTP)
-async fn reqwest_health_check(url: &str) -> bool {
+pub(crate) async fn reqwest_health_check(url: &str) -> bool {
     // Parse host:port from URL
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
@@ -843,9 +694,6 @@ async fn reqwest_health_check(url: &str) -> bool {
     let response = String::from_utf8_lossy(&response[..n]);
     response.contains("200 OK")
 }
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 #[cfg(test)]
 mod tests {
     use super::{parse_available_devices, preferred_device, BinaryFlavor};

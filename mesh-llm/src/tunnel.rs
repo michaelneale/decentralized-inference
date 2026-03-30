@@ -101,7 +101,8 @@ impl Manager {
             }
         });
 
-        // Handle inbound HTTP tunnel streams (plain byte relay to llama-server)
+        // Handle inbound HTTP tunnel streams.
+        // These terminate at the stable mesh HTTP ingress, which is the API proxy.
         let http_port_ref = mgr.http_port.clone();
         let http_node = mgr.node.clone();
         tokio::spawn(async move {
@@ -123,8 +124,9 @@ impl Manager {
         Ok(mgr)
     }
 
-    /// Update the local llama-server HTTP port (for inbound HTTP tunnel streams).
-    /// Set to 0 to disable (no llama-server running).
+    /// Update the local HTTP ingress port for inbound HTTP tunnel streams.
+    /// This should be the stable API proxy port, not a per-model llama-server port.
+    /// Set to 0 to disable.
     pub fn set_http_port(&self, port: u16) {
         self.http_port.store(port, Ordering::Relaxed);
         tracing::info!("Tunnel manager: http_port updated to {port}");
@@ -285,15 +287,15 @@ async fn handle_inbound_stream(
     Ok(())
 }
 
-/// Handle an inbound HTTP tunnel bi-stream: connect to local llama-server and relay.
-/// Plain byte relay — no protocol awareness needed (HTTP/SSE just flows through).
+/// Handle an inbound HTTP tunnel bi-stream: connect to the local API proxy and relay.
+/// Plain byte relay — the proxy handles model-aware routing behind this ingress.
 async fn handle_inbound_http_stream(
     node: Node,
     quic_send: iroh::endpoint::SendStream,
     quic_recv: iroh::endpoint::RecvStream,
     http_port: u16,
 ) -> Result<()> {
-    tracing::info!("Inbound HTTP tunnel stream → llama-server :{http_port}");
+    tracing::info!("Inbound HTTP tunnel stream → API proxy :{http_port}");
     let tcp_stream = TcpStream::connect(format!("127.0.0.1:{http_port}")).await?;
     tcp_stream.set_nodelay(true)?;
     let _inflight = node.begin_inflight_request();
