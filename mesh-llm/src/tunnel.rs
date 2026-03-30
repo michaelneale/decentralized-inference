@@ -410,8 +410,8 @@ where
     match first_read {
         Err(_) => {
             anyhow::bail!(
-                "QUIC→TCP: no response within {}s — host likely dead or still prefill-bound",
-                first_byte_timeout.as_secs()
+                "QUIC→TCP: no response within {:.3}s — host likely dead or still prefill-bound",
+                first_byte_timeout.as_secs_f64()
             );
         }
         Ok(Ok(0)) => {
