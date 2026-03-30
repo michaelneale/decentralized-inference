@@ -684,7 +684,9 @@ main() {
 
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    local tmp_dir_escaped
+    printf -v tmp_dir_escaped '%q' "$tmp_dir"
+    trap "rm -rf -- $tmp_dir_escaped" EXIT
 
     local archive="$tmp_dir/$asset"
     echo "Installing flavor: $flavor"
