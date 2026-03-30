@@ -249,7 +249,7 @@ test port="9337":
         -d '{"model":"test","messages":[{"role":"user","content":"Hello! Write a haiku about distributed computing."}],"max_tokens":50}' \
         | python3 -c "import sys,json; d=json.load(sys.stdin); t=d['timings']; print(d['choices'][0]['message'].get('content','')[:200]); print(f\"  prompt: {t['prompt_per_second']:.1f} tok/s  gen: {t['predicted_per_second']:.1f} tok/s ({t['predicted_n']} tok)\")"
 
-# Optional OpenAI SDK compatibility smoke: 2 mesh nodes + 1 lite client.
+# Optional SDK compatibility smoke: 2 mesh nodes + 1 lite client.
 compat-smoke model:
     scripts/ci-compat-smoke.sh "target/release/mesh-llm" "llama.cpp/build/bin" "{{ model }}"
 

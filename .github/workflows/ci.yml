@@ -39,8 +39,8 @@ jobs:
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
 
-      - name: Install official OpenAI Python SDK
-        run: python -m pip install --upgrade pip openai
+      - name: Install Python SDKs
+        run: python -m pip install --upgrade pip openai litellm
 
       # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
