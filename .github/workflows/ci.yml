@@ -101,6 +101,13 @@ jobs:
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
 
+      - name: Split-mode test (host/worker routing)
+        run: |
+          scripts/ci-split-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
       - name: CLI smoke test
         run: |
           target/release/mesh-llm --version
@@ -181,6 +188,13 @@ jobs:
       - name: Smoke test (real inference)
         run: |
           scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: Split-mode test (host/worker routing)
+        run: |
+          scripts/ci-split-test.sh \
             target/release/mesh-llm \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE

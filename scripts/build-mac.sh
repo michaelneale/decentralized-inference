@@ -29,7 +29,7 @@ configure_compiler_cache() {
     elif (( $+commands[ccache] )); then
         cache_bin="ccache"
     else
-        return
+        return 0
     fi
 
     echo "Using compiler cache: $cache_bin"

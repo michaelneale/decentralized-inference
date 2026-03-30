@@ -106,7 +106,11 @@ struct GpuEntry {
     bandwidth_gbps: Option<f64>,
 }
 
-fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Option<&str>) -> Vec<GpuEntry> {
+fn build_gpus(
+    gpu_name: Option<&str>,
+    gpu_vram: Option<&str>,
+    gpu_bandwidth: Option<&str>,
+) -> Vec<GpuEntry> {
     let names: Vec<&str> = gpu_name
         .map(|s| s.split(", ").collect())
         .unwrap_or_default();
@@ -114,11 +118,7 @@ fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Opt
         return vec![];
     }
     let vrams: Vec<Option<u64>> = gpu_vram
-        .map(|s| {
-            s.split(',')
-                .map(|v| v.trim().parse::<u64>().ok())
-                .collect()
-        })
+        .map(|s| s.split(',').map(|v| v.trim().parse::<u64>().ok()).collect())
         .unwrap_or_default();
     let bandwidths: Vec<Option<f64>> = gpu_bandwidth
         .map(|s| s.split(',').map(|v| v.trim().parse::<f64>().ok()).collect())
@@ -388,7 +388,11 @@ impl MeshApi {
                 rtt_ms: p.rtt_ms,
                 hostname: p.hostname.clone(),
                 is_soc: p.is_soc,
-                gpus: build_gpus(p.gpu_name.as_deref(), p.gpu_vram.as_deref(), p.gpu_bandwidth_gbps.as_deref()),
+                gpus: build_gpus(
+                    p.gpu_name.as_deref(),
+                    p.gpu_vram.as_deref(),
+                    p.gpu_bandwidth_gbps.as_deref(),
+                ),
             })
             .collect();
 
@@ -525,10 +529,17 @@ impl MeshApi {
             my_is_soc: node.is_soc,
             gpus: {
                 let bw = node.gpu_bandwidth_gbps.lock().await;
-                let bw_str = bw
-                    .as_ref()
-                    .map(|v| v.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
-                build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref(), bw_str.as_deref())
+                let bw_str = bw.as_ref().map(|v| {
+                    v.iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                });
+                build_gpus(
+                    node.gpu_name.as_deref(),
+                    node.gpu_vram.as_deref(),
+                    bw_str.as_deref(),
+                )
             },
             routing_affinity,
         }

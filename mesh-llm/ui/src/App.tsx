@@ -984,7 +984,7 @@ export function App() {
     if (status.node_id) {
       nodes.push({
         id: status.node_id,
-        vram: status.my_vram_gb || 0,
+        vram: overviewVramGb(status.is_client, status.my_vram_gb),
         self: true,
         host: status.is_host,
         client: status.is_client,
@@ -1003,7 +1003,7 @@ export function App() {
       const pModels = (p.serving_models && p.serving_models.length > 0) ? p.serving_models : (p.serving ? [p.serving] : []);
       nodes.push({
         id: p.id,
-        vram: p.vram_gb,
+        vram: overviewVramGb(p.role === 'Client', p.vram_gb),
         self: false,
         host: /^Host/.test(p.role),
         client: p.role === 'Client',
@@ -2233,7 +2233,11 @@ function DashboardPage({
   }, [status?.mesh_models, modelFilter]);
   const totalMeshVramGb = useMemo(() => meshGpuVram(status), [status]);
   const sortedPeers = useMemo(() => {
-    return [...(status?.peers ?? [])].sort((a, b) => (b.vram_gb - a.vram_gb) || a.id.localeCompare(b.id));
+    return [...(status?.peers ?? [])].sort((a, b) => {
+      const bOverviewVramGb = overviewVramGb(b.role === 'Client', b.vram_gb);
+      const aOverviewVramGb = overviewVramGb(a.role === 'Client', a.vram_gb);
+      return (bOverviewVramGb - aOverviewVramGb) || a.id.localeCompare(b.id);
+    });
   }, [status?.peers]);
   const peerRows = useMemo(() => {
     return sortedPeers.map((peer) => {
@@ -2242,15 +2246,17 @@ function DashboardPage({
         : peer.serving && peer.serving !== '(idle)'
           ? 'Serving'
           : peer.role === 'Host'
-            ? 'Host'
-            : 'Idle';
+          ? 'Host'
+          : 'Idle';
       const modelLabel = peer.serving && peer.serving !== '(idle)' ? shortName(peer.serving) : 'idle';
       const latencyLabel = formatLatency(peer.rtt_ms);
+      const displayVramGb = overviewVramGb(peer.role === 'Client', peer.vram_gb);
       const sharePct = peer.role !== 'Client' && totalMeshVramGb > 0
-        ? Math.round((Math.max(0, peer.vram_gb) / totalMeshVramGb) * 100)
+        ? Math.round((displayVramGb / totalMeshVramGb) * 100)
         : null;
       return {
         ...peer,
+        displayVramGb,
         statusLabel,
         modelLabel,
         latencyLabel,
@@ -2476,7 +2482,7 @@ function DashboardPage({
                         <TableCell>{peer.statusLabel}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{peer.modelLabel}</TableCell>
                         <TableCell className="text-right">{peer.latencyLabel}</TableCell>
-                        <TableCell className="text-right">{peer.vram_gb.toFixed(1)} GB</TableCell>
+                        <TableCell className="text-right">{peer.role === 'Client' ? 'n/a' : `${peer.displayVramGb.toFixed(1)} GB`}</TableCell>
                         <TableCell className="text-right whitespace-nowrap">{peer.shareLabel}</TableCell>
                       </TableRow>
                     ))}
@@ -3410,7 +3416,13 @@ function DashboardPanelEmpty({
 
 function meshGpuVram(status: StatusPayload | null) {
   if (!status) return 0;
-  return (status.is_client ? 0 : status.my_vram_gb || 0) + (status.peers || []).filter((p) => p.role !== 'Client').reduce((s, p) => s + p.vram_gb, 0);
+  return overviewVramGb(status.is_client, status.my_vram_gb)
+    + (status.peers || []).reduce((sum, peer) => sum + overviewVramGb(peer.role === 'Client', peer.vram_gb), 0);
+}
+
+function overviewVramGb(isClient: boolean, vramGb?: number | null) {
+  if (isClient) return 0;
+  return Math.max(0, vramGb || 0);
 }
 
 function shortName(name: string) {
@@ -3418,7 +3430,7 @@ function shortName(name: string) {
 }
 
 function formatLatency(value?: number | null) {
-  if (value == null || !Number.isFinite(Number(value))) return 'n/a';
+  if (value == null || !Number.isFinite(Number(value))) return '—';
   const ms = Math.round(Number(value));
   if (ms <= 0) return '<1 ms';
   return `${ms} ms`;
