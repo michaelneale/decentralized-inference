@@ -121,6 +121,7 @@ just ui-dev http://127.0.0.1:3131 5174
 ```bash
 just stop             # stop mesh/rpc/llama processes
 just test             # quick test against :9337
+just compat-smoke ~/.models/<model>.gguf   # optional 2-node + 1-client Python/Node/LiteLLM smoke
 just --list           # list all recipes
 ```
 

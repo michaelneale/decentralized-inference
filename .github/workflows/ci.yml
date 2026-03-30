@@ -1,10 +1,10 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -29,9 +29,18 @@ jobs:
           cache: npm
           cache-dependency-path: mesh-llm/ui/package-lock.json
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/ci.yml
+
       - name: Build UI
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
+
+      - name: Install Python SDKs
+        run: python -m pip install --upgrade pip openai litellm langchain-openai
 
       # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
@@ -97,6 +106,13 @@ jobs:
       - name: Smoke test (real inference)
         run: |
           scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: OpenAI Python compat smoke
+        run: |
+          scripts/ci-compat-smoke.sh \
             target/release/mesh-llm \
             llama.cpp/build/bin \
             ~/.models/$MODEL_FILE
