@@ -96,7 +96,7 @@ type Peer = {
   rtt_ms?: number | null;
   hostname?: string;
   is_soc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type StatusPayload = {
@@ -122,7 +122,7 @@ type StatusPayload = {
   nostr_discovery?: boolean;
   my_hostname?: string;
   my_is_soc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type ChatMessage = {
@@ -173,7 +173,7 @@ type TopologyNode = {
   latencyMs?: number | null;
   hostname?: string;
   isSoc?: boolean;
-  gpus?: { name: string; vram_bytes: number }[];
+  gpus?: { name: string; vram_bytes: number; bandwidth_gbps?: number }[];
 };
 
 type ThemeMode = 'auto' | 'light' | 'dark';
@@ -2454,33 +2454,35 @@ function DashboardPage({
         </CardHeader>
         <CardContent className="min-h-0 pt-0">
           {peerRows.length > 0 ? (
-            <ScrollArea horizontal className="max-h-[18rem] pr-3 md:max-h-[20rem]">
-              <Table className="min-w-[920px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Model</TableHead>
-                    <TableHead className="text-right">Latency</TableHead>
-                    <TableHead className="text-right">VRAM</TableHead>
-                    <TableHead className="text-right whitespace-nowrap">Share</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {peerRows.map((peer) => (
-                    <TableRow key={peer.id}>
-                      <TableCell className="font-mono text-xs">{peer.id}</TableCell>
-                      <TableCell>{peer.role}</TableCell>
-                      <TableCell>{peer.statusLabel}</TableCell>
-                      <TableCell className="max-w-[180px] truncate">{peer.modelLabel}</TableCell>
-                      <TableCell className="text-right">{peer.latencyLabel}</TableCell>
-                      <TableCell className="text-right">{peer.vram_gb.toFixed(1)} GB</TableCell>
-                      <TableCell className="text-right whitespace-nowrap">{peer.shareLabel}</TableCell>
+            <ScrollArea horizontal className="max-h-[18rem] md:max-h-[20rem]">
+              <div className="pr-3">
+                <Table className="min-w-[920px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ID</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Model</TableHead>
+                      <TableHead className="text-right">Latency</TableHead>
+                      <TableHead className="text-right">VRAM</TableHead>
+                      <TableHead className="text-right whitespace-nowrap">Share</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {peerRows.map((peer) => (
+                      <TableRow key={peer.id}>
+                        <TableCell className="font-mono text-xs">{peer.id}</TableCell>
+                        <TableCell>{peer.role}</TableCell>
+                        <TableCell>{peer.statusLabel}</TableCell>
+                        <TableCell className="max-w-[180px] truncate">{peer.modelLabel}</TableCell>
+                        <TableCell className="text-right">{peer.latencyLabel}</TableCell>
+                        <TableCell className="text-right">{peer.vram_gb.toFixed(1)} GB</TableCell>
+                        <TableCell className="text-right whitespace-nowrap">{peer.shareLabel}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             </ScrollArea>
           ) : (
             <DashboardPanelEmpty
@@ -2753,8 +2755,8 @@ function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeData>) {
                     <span className="group-hover/gpu:invisible">
                       {model}
                     </span>
-                    <span className="invisible absolute left-0 top-0 whitespace-nowrap group-hover/gpu:visible">
-                      {Math.round(vramGb)} GB
+                    <span className="absolute left-0 top-0 whitespace-nowrap opacity-0 transition-opacity duration-200 group-hover/gpu:opacity-100">
+                      {`${Math.round(vramGb)} GB`}
                     </span>
                   </span>
                 </div>

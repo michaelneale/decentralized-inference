@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -24,17 +27,19 @@ jobs:
             artifact_name: release-macos
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: taiki-e/install-action@just
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: mesh-llm/ui/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -48,11 +53,15 @@ jobs:
           just --shell bash --shell-arg -lc release-bundle "${GITHUB_REF_NAME}" dist
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_cuda:
     name: Build Linux CUDA
@@ -76,17 +85,19 @@ jobs:
             python3
           rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: mesh-llm/ui/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: taiki-e/install-action@just
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,11 +111,15 @@ jobs:
           just --shell bash --shell-arg -lc release-bundle-cuda "${GITHUB_REF_NAME}" dist
 
       - name: Upload CUDA release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-linux-cuda
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_amd:
     name: Build Linux AMD ROCm
@@ -128,17 +143,19 @@ jobs:
             python3
           rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: mesh-llm/ui/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: taiki-e/install-action@just
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -152,11 +169,15 @@ jobs:
           just --shell bash --shell-arg -lc release-bundle-amd "${GITHUB_REF_NAME}" dist
 
       - name: Upload AMD ROCm release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-linux-rocm
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_vulkan:
     name: Build Linux Vulkan
@@ -180,17 +201,19 @@ jobs:
             python3
           sudo rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: mesh-llm/ui/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: taiki-e/install-action@just
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -204,11 +227,15 @@ jobs:
           just --shell bash --shell-arg -lc release-bundle-vulkan "${GITHUB_REF_NAME}" dist
 
       - name: Upload Vulkan release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-linux-vulkan
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   publish:
     name: Publish GitHub release
@@ -221,7 +248,7 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: release-*
           path: dist

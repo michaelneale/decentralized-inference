@@ -146,10 +146,11 @@ mkdir -p "$bundle_dir"
 cp "$RELEASE_BIN_DIR/mesh-llm${BIN_EXT}" "$bundle_dir/$(bundle_bin_name mesh-llm)"
 cp "$BUILD_BIN_DIR/rpc-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name rpc-server)"
 cp "$BUILD_BIN_DIR/llama-server${BIN_EXT}" "$bundle_dir/$(bundle_bin_name llama-server)"
+cp "$BUILD_BIN_DIR/llama-moe-split${BIN_EXT}" "$bundle_dir/llama-moe-split"
 copy_runtime_libs "$bundle_dir"
 
 if [[ "$os_name" == "Darwin" ]]; then
-    for bin in "$bundle_dir/mesh-llm" "$bundle_dir/rpc-server" "$bundle_dir/llama-server"; do
+    for bin in "$bundle_dir/mesh-llm" "$bundle_dir/rpc-server" "$bundle_dir/llama-server" "$bundle_dir/llama-moe-split"; do
         [[ -f "$bin" ]] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done

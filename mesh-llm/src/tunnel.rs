@@ -307,8 +307,16 @@ pub async fn relay_tcp_streams(a: TcpStream, b: TcpStream) -> Result<()> {
         tokio::io::copy(&mut tokio::io::BufReader::new(b_read), &mut a_write).await
     });
     tokio::select! {
-        _ = &mut t1 => { t2.abort(); }
-        _ = &mut t2 => { t1.abort(); }
+        r1 = &mut t1 => {
+            r1??;
+            tracing::debug!("relay_tcp_streams: request side finished, waiting for response side");
+            t2.await??;
+        }
+        r2 = &mut t2 => {
+            r2??;
+            t1.abort();
+            let _ = t1.await;
+        }
     }
     Ok(())
 }
@@ -331,11 +339,20 @@ pub async fn relay_bidirectional(
 ) -> Result<()> {
     let mut t1 = tokio::spawn(async move { relay_tcp_to_quic(tcp_read, quic_send).await });
     let mut t2 = tokio::spawn(async move { relay_quic_to_tcp(quic_recv, tcp_write).await });
-    // When either direction finishes, abort the other so we don't leak
-    // tasks waiting on a half-open connection (rpc-server keeps TCP open).
+    // If the request side finishes first, keep draining the response side.
+    // This matters for HTTP where the client may finish sending the request
+    // before the server has produced the response.
     tokio::select! {
-        _ = &mut t1 => { t2.abort(); }
-        _ = &mut t2 => { t1.abort(); }
+        r1 = &mut t1 => {
+            r1??;
+            tracing::debug!("relay_bidirectional: request side finished, waiting for response side");
+            t2.await??;
+        }
+        r2 = &mut t2 => {
+            r2??;
+            t1.abort();
+            let _ = t1.await;
+        }
     }
     Ok(())
 }

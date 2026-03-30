@@ -667,6 +667,84 @@ pub async fn download_url(url: &str, dest: &Path) -> Result<()> {
     download_with_resume(dest, url).await
 }
 
+/// Download a HuggingFace GGUF URL, auto-detecting split files (-00001-of-NNNNN.gguf).
+/// If the filename matches the split pattern, discovers and downloads all parts in parallel.
+/// Returns the path to the first part (or the single file).
+pub async fn download_hf_split_gguf(url: &str, filename: &str) -> Result<PathBuf> {
+    let dir = models_dir();
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let re = regex_lite::Regex::new(r"-00001-of-(\d{5})\.gguf$").unwrap();
+    if let Some(caps) = re.captures(filename) {
+        let n: u32 = caps[1].parse()?;
+        eprintln!("📥 Detected split GGUF: {n} parts");
+
+        // Build list of (part_filename, part_url) for all parts
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 1..=n {
+            let part_filename = filename.replace("-00001-of-", &format!("-{i:05}-of-"));
+            let part_url = url.replace("-00001-of-", &format!("-{i:05}-of-"));
+            files.push((part_filename, part_url));
+        }
+
+        // Filter to parts that still need downloading
+        let mut needed: Vec<(String, String)> = Vec::new();
+        for (f, u) in &files {
+            let path = dir.join(f);
+            if path.exists() {
+                let size = tokio::fs::metadata(&path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if size > 1_000_000 {
+                    eprintln!("  ✅ {f} already exists ({:.1}GB)", size as f64 / 1e9);
+                    continue;
+                }
+            }
+            needed.push((f.clone(), u.clone()));
+        }
+
+        if !needed.is_empty() {
+            eprintln!("  ⚡ Downloading {} file(s) in parallel...", needed.len());
+            let total = needed.len();
+            let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut handles = Vec::new();
+            for (file, url) in needed {
+                let path = dir.join(&file);
+                let completed = completed.clone();
+                handles.push(tokio::spawn(async move {
+                    download_with_resume(&path, &url).await?;
+                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    eprintln!("  ✅ {file} [{done}/{total}]");
+                    Ok::<(), anyhow::Error>(())
+                }));
+            }
+            for handle in handles {
+                handle.await??;
+            }
+        }
+
+        return Ok(dir.join(filename));
+    }
+
+    // Not a split file — single download
+    let dest = dir.join(filename);
+    if dest.exists() {
+        let size = tokio::fs::metadata(&dest).await?.len();
+        if size > 1_000_000 {
+            eprintln!(
+                "✅ {} already exists ({:.1}GB)",
+                filename,
+                size as f64 / 1e9
+            );
+            return Ok(dest);
+        }
+    }
+    eprintln!("📥 Downloading {filename}...");
+    download_with_resume(&dest, url).await?;
+    Ok(dest)
+}
+
 /// Download with resume support and retries using reqwest.
 async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
     use tokio_stream::StreamExt;
@@ -897,7 +975,11 @@ mod tests {
 
         #[cfg(unix)]
         {
-            assert!(free.is_some(), "should get free space for {}", path.display());
+            assert!(
+                free.is_some(),
+                "should get free space for {}",
+                path.display()
+            );
             let bytes = free.unwrap();
             assert!(bytes > 1_000_000_000, "should have >1GB free, got {bytes}");
         }
@@ -906,5 +988,47 @@ mod tests {
         {
             assert!(free.is_none(), "non-unix builds should skip statvfs checks");
         }
+    }
+
+    #[test]
+    fn test_split_gguf_detection() {
+        let re = regex_lite::Regex::new(r"-00001-of-(\d{5})\.gguf$").unwrap();
+
+        // Should match split GGUFs
+        let caps = re.captures("Model-Q4_K_M-00001-of-00004.gguf");
+        assert!(caps.is_some());
+        assert_eq!(&caps.unwrap()[1], "00004");
+
+        let caps = re.captures("Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf");
+        assert!(caps.is_some());
+
+        let caps = re.captures("MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf");
+        assert!(caps.is_some());
+
+        // Should NOT match non-split or other parts
+        assert!(re.captures("Model-Q4_K_M.gguf").is_none());
+        assert!(re.captures("Model-Q4_K_M-00002-of-00004.gguf").is_none());
+        assert!(re.captures("Model-Q4_K_M-00001-of-00004.bin").is_none());
+    }
+
+    #[test]
+    fn test_split_url_generation() {
+        let filename = "Model-Q4_K_M-00001-of-00003.gguf";
+        let url = "https://huggingface.co/org/repo/resolve/main/Model-Q4_K_M-00001-of-00003.gguf";
+
+        let mut files = Vec::new();
+        for i in 1..=3u32 {
+            let part_filename = filename.replace("-00001-of-", &format!("-{i:05}-of-"));
+            let part_url = url.replace("-00001-of-", &format!("-{i:05}-of-"));
+            files.push((part_filename, part_url));
+        }
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].0, "Model-Q4_K_M-00001-of-00003.gguf");
+        assert_eq!(files[1].0, "Model-Q4_K_M-00002-of-00003.gguf");
+        assert_eq!(files[2].0, "Model-Q4_K_M-00003-of-00003.gguf");
+        assert!(files[0].1.contains("-00001-of-"));
+        assert!(files[1].1.contains("-00002-of-"));
+        assert!(files[2].1.contains("-00003-of-"));
     }
 }

@@ -351,6 +351,26 @@ pub fn split_path(model_path: &Path, n_nodes: usize, node_index: usize) -> PathB
         .join(format!("node-{node_index}.gguf"))
 }
 
+fn resolve_split_binary(bin_dir: &Path) -> anyhow::Result<PathBuf> {
+    let candidates = [
+        bin_dir.join("llama-moe-split"),
+        bin_dir.join("../llama.cpp/build/bin/llama-moe-split"),
+        bin_dir.join("../../llama.cpp/build/bin/llama-moe-split"),
+        bin_dir.join("../../../llama.cpp/build/bin/llama-moe-split"),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    anyhow::bail!(
+        "llama-moe-split not found in {} or nearby llama.cpp/build/bin directories",
+        bin_dir.display()
+    );
+}
+
 /// Run llama-moe-split to produce a split GGUF for one node.
 pub fn run_split(
     bin_dir: &Path,
@@ -363,7 +383,8 @@ pub fn run_split(
     }
 
     let expert_list = expert_list_arg(assignment);
-    let status = std::process::Command::new(bin_dir.join("llama-moe-split"))
+    let split_bin = resolve_split_binary(bin_dir)?;
+    let status = std::process::Command::new(&split_bin)
         .args([
             "-m",
             &model_path.to_string_lossy(),
@@ -373,7 +394,7 @@ pub fn run_split(
             &output_path.to_string_lossy(),
         ])
         .status()
-        .map_err(|e| anyhow::anyhow!("Failed to run llama-moe-split: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run {}: {e}", split_bin.display()))?;
 
     anyhow::ensure!(status.success(), "llama-moe-split exited with {status}");
     Ok(())

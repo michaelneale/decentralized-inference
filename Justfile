@@ -22,34 +22,7 @@ build backend="" cuda_arch="" rocm_arch="":
 
 # Build on macOS Apple Silicon (Metal + RPC)
 build-mac:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -d "{{ llama_dir }}" ]; then
-        echo "Cloning michaelneale/llama.cpp (rebase-upstream-master branch)..."
-        git clone -b rebase-upstream-master https://github.com/michaelneale/llama.cpp.git "{{ llama_dir }}"
-    else
-        cd "{{ llama_dir }}"
-        current_branch=$(git branch --show-current)
-        if [ "$current_branch" != "rebase-upstream-master" ]; then
-            echo "⚠️  llama.cpp is on branch '$current_branch', switching to rebase-upstream-master..."
-            git checkout rebase-upstream-master
-        fi
-        echo "Pulling latest rebase-upstream-master from origin..."
-        git pull --ff-only origin rebase-upstream-master
-        cd ..
-    fi
-    cmake -B "{{ build_dir }}" -S "{{ llama_dir }}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
-    cmake --build "{{ build_dir }}" --config Release -j$(sysctl -n hw.ncpu)
-    echo "Build complete: {{ build_dir }}/bin/"
-    if [ -d "{{ mesh_dir }}" ]; then
-        echo "Building mesh-llm..."
-        if [ -d "{{ ui_dir }}" ]; then
-            echo "Building mesh-llm UI..."
-            (cd "{{ ui_dir }}" && npm ci && npm run build)
-        fi
-        cargo build --release
-        echo "Mesh binary: target/release/mesh-llm"
-    fi
+    @scripts/build-mac.sh
 
 # Build on Linux with CUDA, ROCm, or Vulkan — delegates to scripts/build-linux.sh
 build-linux backend="" cuda_arch="" rocm_arch="":
@@ -180,14 +153,23 @@ bundle output="/tmp/mesh-bundle.tar.gz":
     cp {{ mesh_bin }} "$BUNDLE/"
     cp {{ build_dir }}/bin/rpc-server "$BUNDLE/$rpc_name"
     cp {{ build_dir }}/bin/llama-server "$BUNDLE/$llama_name"
+    cp {{ build_dir }}/bin/llama-moe-split "$BUNDLE/"
     for lib in {{ build_dir }}/bin/*.dylib; do
         cp "$lib" "$BUNDLE/" 2>/dev/null || true
     done
     # Fix rpaths for portability
-    for bin in "$BUNDLE/mesh-llm" "$BUNDLE/$rpc_name" "$BUNDLE/$llama_name"; do
+    for bin in "$BUNDLE/mesh-llm" "$BUNDLE/$rpc_name" "$BUNDLE/$llama_name" "$BUNDLE/llama-moe-split"; do
         [ -f "$bin" ] || continue
         install_name_tool -add_rpath @executable_path/ "$bin" 2>/dev/null || true
     done
+    # Include Apple Silicon benchmark binary if built
+    BENCH="{{ mesh_dir }}/target/release/membench-fingerprint"
+    if [ -f "$BENCH" ]; then
+        cp "$BENCH" "$BUNDLE/"
+        echo "Included: membench-fingerprint"
+    else
+        echo "Note: membench-fingerprint not found — run 'just benchmark-build-apple' to include it"
+    fi
     tar czf {{ output }} -C "$DIR" mesh-bundle/
     rm -rf "$DIR"
     echo "Bundle: {{ output }} ($(du -sh {{ output }} | cut -f1))"
@@ -209,6 +191,30 @@ release-bundle-amd version output="dist":
 # Create Linux Vulkan release archive(s).
 release-bundle-vulkan version output="dist":
     MESH_RELEASE_FLAVOR=vulkan scripts/package-release.sh "{{ version }}" "{{ output }}"
+
+# ── Benchmark Binaries ────────────────────────────────────────────────────────
+
+# Build Apple Silicon memory bandwidth benchmark (macOS only)
+[macos]
+benchmark-build-apple:
+    swiftc -O benchmarks/membench-fingerprint.swift -o {{mesh_dir}}/target/release/membench-fingerprint
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint"
+
+# Build NVIDIA CUDA memory bandwidth benchmark (requires CUDA toolkit)
+benchmark-build-cuda:
+    nvcc -O3 -o {{mesh_dir}}/target/release/membench-fingerprint-cuda benchmarks/membench-fingerprint.cu
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda"
+
+# Build AMD ROCm/HIP memory bandwidth benchmark (requires ROCm)
+benchmark-build-hip:
+    hipcc -O3 -std=c++17 -o {{mesh_dir}}/target/release/membench-fingerprint-hip benchmarks/membench-fingerprint.hip
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-hip"
+
+# Build Intel Arc SYCL memory bandwidth benchmark (requires Intel oneAPI) — UNVALIDATED
+benchmark-build-intel:
+    @echo "WARNING: Intel Arc benchmark is unvalidated — no Intel Arc hardware has been tested"
+    icpx -O3 -fsycl -o {{mesh_dir}}/target/release/membench-fingerprint-intel benchmarks/membench-fingerprint-intel.cpp
+    echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-intel"
 
 # Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
 ui-dev api="http://127.0.0.1:3131" port="5173":
@@ -242,6 +248,10 @@ test port="9337":
         -H 'Content-Type: application/json' \
         -d '{"model":"test","messages":[{"role":"user","content":"Hello! Write a haiku about distributed computing."}],"max_tokens":50}' \
         | python3 -c "import sys,json; d=json.load(sys.stdin); t=d['timings']; print(d['choices'][0]['message'].get('content','')[:200]); print(f\"  prompt: {t['prompt_per_second']:.1f} tok/s  gen: {t['predicted_per_second']:.1f} tok/s ({t['predicted_n']} tok)\")"
+
+# Benchmark sticky-only vs prefix-only affinity on a 3-node local mesh.
+bench-prefix-affinity:
+    @scripts/benchmark-prefix-affinity.sh
 
 # Show the diff from upstream llama.cpp
 diff:

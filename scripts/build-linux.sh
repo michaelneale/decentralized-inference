@@ -153,6 +153,35 @@ locate_vulkan_toolchain() {
     return 1
 }
 
+compiler_launcher_flags=()
+
+configure_compiler_cache() {
+    local backend="$1"
+    local cache_bin=""
+    if command -v sccache >/dev/null 2>&1; then
+        cache_bin="sccache"
+    elif command -v ccache >/dev/null 2>&1; then
+        cache_bin="ccache"
+    else
+        return
+    fi
+
+    echo "Using compiler cache: $cache_bin"
+    compiler_launcher_flags=(
+        -DCMAKE_C_COMPILER_LAUNCHER="$cache_bin"
+        -DCMAKE_CXX_COMPILER_LAUNCHER="$cache_bin"
+    )
+
+    case "$backend" in
+        cuda)
+            compiler_launcher_flags+=(-DCMAKE_CUDA_COMPILER_LAUNCHER="$cache_bin")
+            ;;
+        rocm)
+            compiler_launcher_flags+=(-DCMAKE_HIP_COMPILER_LAUNCHER="$cache_bin")
+            ;;
+    esac
+}
+
 if [[ -z "$BACKEND" ]]; then
     BACKEND="$(detect_backend)"
 fi
@@ -228,51 +257,56 @@ if [[ "$CLEAN" -eq 1 && -d "$BUILD_DIR" ]]; then
     rm -rf "$BUILD_DIR"
 fi
 
+configure_compiler_cache "$BACKEND"
+
+cmake_flags=(
+    -B "$BUILD_DIR"
+    -S "$LLAMA_DIR"
+    -DGGML_RPC=ON
+    -DBUILD_SHARED_LIBS=OFF
+    -DLLAMA_OPENSSL=OFF
+)
+
 if [[ "$BACKEND" == "cpu" ]]; then
-    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
-        -DGGML_CUDA=OFF \
-        -DGGML_HIP=OFF \
-        -DGGML_VULKAN=OFF \
-        -DGGML_METAL=OFF \
-        -DGGML_RPC=ON \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_OPENSSL=OFF
+    cmake_flags+=(
+        -DGGML_CUDA=OFF
+        -DGGML_HIP=OFF
+        -DGGML_VULKAN=OFF
+        -DGGML_METAL=OFF
+    )
 elif [[ "$BACKEND" == "cuda" ]]; then
-    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
-        -DGGML_CUDA=ON \
-        -DGGML_HIP=OFF \
-        -DGGML_VULKAN=OFF \
-        -DGGML_METAL=OFF \
-        -DGGML_RPC=ON \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_OPENSSL=OFF \
+    cmake_flags+=(
+        -DGGML_CUDA=ON
+        -DGGML_HIP=OFF
+        -DGGML_VULKAN=OFF
+        -DGGML_METAL=OFF
         -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH"
+    )
 elif [[ "$BACKEND" == "rocm" ]]; then
     if command -v hipconfig &>/dev/null; then
         export HIPCXX="$(hipconfig -l)/clang"
         export HIP_PATH="$(hipconfig -R)"
     fi
-    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
-        -DGGML_CUDA=OFF \
-        -DGGML_HIP=ON \
-        -DGGML_VULKAN=OFF \
-        -DGGML_METAL=OFF \
-        -DGGML_RPC=ON \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_OPENSSL=OFF \
+    cmake_flags+=(
+        -DGGML_CUDA=OFF
+        -DGGML_HIP=ON
+        -DGGML_VULKAN=OFF
+        -DGGML_METAL=OFF
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
         -DAMDGPU_TARGETS="$ROCM_ARCH"
+    )
 else
-    cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
-        -DGGML_CUDA=OFF \
-        -DGGML_HIP=OFF \
-        -DGGML_VULKAN=ON \
-        -DGGML_METAL=OFF \
-        -DGGML_RPC=ON \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DLLAMA_OPENSSL=OFF
+    cmake_flags+=(
+        -DGGML_CUDA=OFF
+        -DGGML_HIP=OFF
+        -DGGML_VULKAN=ON
+        -DGGML_METAL=OFF
+    )
 fi
 
+cmake_flags+=("${compiler_launcher_flags[@]}")
+
+cmake "${cmake_flags[@]}"
 cmake --build "$BUILD_DIR" --config Release -j"$(nproc)"
 echo "llama.cpp build complete: $BUILD_DIR/bin/"
 

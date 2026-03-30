@@ -31,6 +31,26 @@ if ! command -v hipconfig >/dev/null 2>&1; then
     exit 1
 fi
 
+compiler_launcher_flags=()
+
+configure_compiler_cache() {
+    local cache_bin=""
+    if command -v sccache >/dev/null 2>&1; then
+        cache_bin="sccache"
+    elif command -v ccache >/dev/null 2>&1; then
+        cache_bin="ccache"
+    else
+        return
+    fi
+
+    echo "Using compiler cache: $cache_bin"
+    compiler_launcher_flags=(
+        -DCMAKE_C_COMPILER_LAUNCHER="$cache_bin"
+        -DCMAKE_CXX_COMPILER_LAUNCHER="$cache_bin"
+        -DCMAKE_HIP_COMPILER_LAUNCHER="$cache_bin"
+    )
+}
+
 if [[ ! -d "$LLAMA_DIR" ]]; then
     echo "Cloning michaelneale/llama.cpp (rebase-upstream-master)..."
     git clone -b rebase-upstream-master \
@@ -50,6 +70,8 @@ fi
 echo "Using ROCm from $ROCM_PATH"
 echo "Building for AMDGPU targets: $AMDGPU_TARGETS"
 
+configure_compiler_cache
+
 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
 cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
     -DGGML_HIP=ON \
@@ -60,7 +82,8 @@ cmake -B "$BUILD_DIR" -S "$LLAMA_DIR" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_SHARED_LIBS=OFF \
     -DLLAMA_OPENSSL=OFF \
-    -DAMDGPU_TARGETS="$AMDGPU_TARGETS"
+    -DAMDGPU_TARGETS="$AMDGPU_TARGETS" \
+    "${compiler_launcher_flags[@]}"
 
 cmake --build "$BUILD_DIR" --config Release -j"$(nproc)"
 echo "llama.cpp ROCm build complete: $BUILD_DIR/bin/"

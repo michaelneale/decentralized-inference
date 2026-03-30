@@ -1,0 +1,17 @@
+@ARGS_METADATA@
+[Unit]
+Description=Mesh LLM user service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-@SERVICE_ENV_FILE@
+@ENV_LINES@
+@EXEC_LINE@
+WorkingDirectory=%h
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -33,6 +33,7 @@ pub fn total_model_bytes(model: &Path) -> u64 {
     std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -60,7 +61,7 @@ pub fn should_be_host_for_model(
 
 /// The current state of llama-server as managed by the election loop.
 /// The API proxy reads this to know where to forward requests.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InferenceTarget {
     /// No llama-server running anywhere (election in progress, mesh empty, etc.)
     None,
@@ -91,9 +92,9 @@ pub struct ModelTargets {
     /// MoE state — if set, this model uses MoE expert sharding.
     /// The proxy uses this for session-sticky routing across MoE nodes.
     pub moe: Option<MoeState>,
-    /// Round-robin counter for load balancing (not cloned — each clone starts fresh,
-    /// but that's fine since the proxy clones per-request anyway)
-    counter: u64,
+    /// Round-robin counter for load balancing, shared across clones via Arc<AtomicU64>
+    /// so that all ModelTargets clones (including per-request proxy clones) share a sequence.
+    counter: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,10 +109,23 @@ impl ModelTargets {
     pub fn get(&self, model: &str) -> InferenceTarget {
         match self.targets.get(model) {
             Some(targets) if !targets.is_empty() => {
-                // Simple round-robin using a hash of the model + counter
-                // (counter isn't shared across clones, but combined with
-                // request timing gives reasonable distribution)
-                let idx = (self.counter as usize) % targets.len();
+                let idx = self.counter.fetch_add(1, Ordering::Relaxed) as usize % targets.len();
+                targets[idx].clone()
+            }
+            _ => InferenceTarget::None,
+        }
+    }
+
+    /// All candidate targets for a model, preserving their current order.
+    pub fn candidates(&self, model: &str) -> Vec<InferenceTarget> {
+        self.targets.get(model).cloned().unwrap_or_default()
+    }
+
+    /// Get target for a model using a sticky key.
+    pub fn get_sticky(&self, model: &str, sticky_key: u64) -> InferenceTarget {
+        match self.targets.get(model) {
+            Some(targets) if !targets.is_empty() => {
+                let idx = sticky_key as usize % targets.len();
                 targets[idx].clone()
             }
             _ => InferenceTarget::None,
@@ -356,11 +370,20 @@ pub async fn election_loop(
                 .get(&model_name)
                 .map(|d| d.request_count)
                 .unwrap_or(0);
-            let should_dup = n_clients >= 2 || req_count >= 10;
+            let force_duplicate_host = std::env::var("MESH_LLM_FORCE_DUPLICATE_HOSTS")
+                .ok()
+                .as_deref()
+                == Some("1");
+            let should_dup = force_duplicate_host || n_clients >= 2 || req_count >= 10;
             if !should_dup {
                 eprintln!(
                     "💤 [{}] Peer already serving — standby (clients: {}, requests: {})",
                     model_name, n_clients, req_count
+                );
+            } else if force_duplicate_host {
+                eprintln!(
+                    "🧪 [{}] Forcing duplicate host for benchmark topology",
+                    model_name
                 );
             }
             should_dup
@@ -952,7 +975,7 @@ async fn update_targets(
     target_tx.send_replace(ModelTargets {
         targets,
         moe: None,
-        counter: 0,
+        counter: Default::default(),
     });
 }
 
@@ -1394,5 +1417,35 @@ mod tests {
         // Union should cover all 128
         let union: std::collections::HashSet<u32> = a_experts.union(&b_experts).cloned().collect();
         assert_eq!(union.len(), 128);
+    }
+
+    #[test]
+    fn test_get_sticky_consistent() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "qwen".to_string(),
+            vec![InferenceTarget::Remote(id_a), InferenceTarget::Remote(id_b)],
+        );
+
+        let first = targets.get_sticky("qwen", 42);
+        let second = targets.get_sticky("qwen", 42);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_get_round_robins_across_targets() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "qwen".to_string(),
+            vec![InferenceTarget::Remote(id_a), InferenceTarget::Remote(id_b)],
+        );
+
+        let first = targets.get("qwen");
+        let second = targets.get("qwen");
+        assert_ne!(first, second);
     }
 }

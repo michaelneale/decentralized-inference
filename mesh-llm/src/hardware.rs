@@ -263,7 +263,11 @@ impl Collector for DefaultCollector {
                         }
                         let s = String::from_utf8(out.stdout).ok()?;
                         let vrams = parse_rocm_gpu_vrams(&s);
-                        if vrams.is_empty() { None } else { Some(vrams) }
+                        if vrams.is_empty() {
+                            None
+                        } else {
+                            Some(vrams)
+                        }
                     })();
 
                     if let Some(per_gpu) = rocm_vram {
@@ -504,7 +508,10 @@ card0,25753026560,416378880";
 device,VRAM Total Memory (B),VRAM Total Used Memory (B)
 card0,25753026560,416378880
 card1,25753026560,512000000";
-        assert_eq!(parse_rocm_gpu_vrams(fixture), vec![25753026560, 25753026560]);
+        assert_eq!(
+            parse_rocm_gpu_vrams(fixture),
+            vec![25753026560, 25753026560]
+        );
     }
 
     #[test]

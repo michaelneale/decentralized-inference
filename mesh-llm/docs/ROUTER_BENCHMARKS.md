@@ -1,5 +1,7 @@
 # Model Router Benchmarks
 
+For the separate prefix-affinity routing benchmark, see [PREFIX_AFFINITY_BENCHMARKS.md](./PREFIX_AFFINITY_BENCHMARKS.md).
+
 ## Test Setup
 
 - **Machine**: M4 Max, 52GB VRAM

@@ -19,6 +19,25 @@ detect_jobs() {
     fi
 }
 
+compiler_launcher_flags=()
+
+configure_compiler_cache() {
+    local cache_bin=""
+    if command -v sccache >/dev/null 2>&1; then
+        cache_bin="sccache"
+    elif command -v ccache >/dev/null 2>&1; then
+        cache_bin="ccache"
+    else
+        return
+    fi
+
+    echo "Using compiler cache: $cache_bin"
+    compiler_launcher_flags=(
+        -DCMAKE_C_COMPILER_LAUNCHER="$cache_bin"
+        -DCMAKE_CXX_COMPILER_LAUNCHER="$cache_bin"
+    )
+}
+
 clone_or_update_llama() {
     if [[ ! -d "$LLAMA_DIR" ]]; then
         echo "Cloning michaelneale/llama.cpp (rebase-upstream-master)..."
@@ -69,6 +88,9 @@ esac
 if command -v ninja >/dev/null 2>&1; then
     cmake_flags=(-G Ninja "${cmake_flags[@]}")
 fi
+
+configure_compiler_cache
+cmake_flags+=("${compiler_launcher_flags[@]}")
 
 clone_or_update_llama
 

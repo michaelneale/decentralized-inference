@@ -14,7 +14,7 @@
 //! The dashboard is mostly read-only — shows status, topology, and models.
 //! Local runtime model load/unload is exposed for operator control.
 
-use crate::{download, election, mesh, nostr, plugin};
+use crate::{affinity, download, election, mesh, nostr, plugin};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
@@ -79,6 +79,7 @@ pub struct MeshApi {
 struct ApiInner {
     node: mesh::Node,
     plugin_manager: plugin::PluginManager,
+    affinity_router: affinity::AffinityRouter,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -101,28 +102,34 @@ struct ApiInner {
 struct GpuEntry {
     name: String,
     vram_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bandwidth_gbps: Option<f64>,
 }
 
-fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>) -> Vec<GpuEntry> {
+fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Option<&str>) -> Vec<GpuEntry> {
     let names: Vec<&str> = gpu_name
         .map(|s| s.split(", ").collect())
         .unwrap_or_default();
     if names.is_empty() {
         return vec![];
     }
-    let vrams: Vec<u64> = gpu_vram
+    let vrams: Vec<Option<u64>> = gpu_vram
         .map(|s| {
             s.split(',')
-                .filter_map(|v| v.trim().parse::<u64>().ok())
+                .map(|v| v.trim().parse::<u64>().ok())
                 .collect()
         })
+        .unwrap_or_default();
+    let bandwidths: Vec<Option<f64>> = gpu_bandwidth
+        .map(|s| s.split(',').map(|v| v.trim().parse::<f64>().ok()).collect())
         .unwrap_or_default();
     names
         .into_iter()
         .enumerate()
         .map(|(i, name)| GpuEntry {
             name: name.to_string(),
-            vram_bytes: vrams.get(i).copied().unwrap_or(0),
+            vram_bytes: vrams.get(i).copied().flatten().unwrap_or(0),
+            bandwidth_gbps: bandwidths.get(i).copied().flatten(),
         })
         .collect()
 }
@@ -159,6 +166,7 @@ struct StatusPayload {
     my_hostname: Option<String>,
     my_is_soc: Option<bool>,
     gpus: Vec<GpuEntry>,
+    routing_affinity: affinity::AffinityStatsSnapshot,
 }
 
 #[derive(Serialize)]
@@ -200,11 +208,13 @@ impl MeshApi {
         api_port: u16,
         model_size_bytes: u64,
         plugin_manager: plugin::PluginManager,
+        affinity_router: affinity::AffinityRouter,
     ) -> Self {
         MeshApi {
             inner: Arc::new(Mutex::new(ApiInner {
                 node,
                 plugin_manager,
+                affinity_router,
                 is_host: false,
                 is_client: false,
                 llama_ready: false,
@@ -326,6 +336,7 @@ impl MeshApi {
             token,
             my_vram_gb,
             inflight_requests,
+            routing_affinity,
             model_name,
             model_size_bytes,
             llama_ready,
@@ -344,6 +355,7 @@ impl MeshApi {
                 inner.node.invite_token(),
                 inner.node.vram_bytes() as f64 / 1e9,
                 inner.node.inflight_requests(),
+                inner.affinity_router.stats_snapshot(),
                 inner.model_name.clone(),
                 inner.model_size_bytes,
                 inner.llama_ready,
@@ -376,7 +388,7 @@ impl MeshApi {
                 rtt_ms: p.rtt_ms,
                 hostname: p.hostname.clone(),
                 is_soc: p.is_soc,
-                gpus: build_gpus(p.gpu_name.as_deref(), p.gpu_vram.as_deref()),
+                gpus: build_gpus(p.gpu_name.as_deref(), p.gpu_vram.as_deref(), p.gpu_bandwidth_gbps.as_deref()),
             })
             .collect();
 
@@ -511,7 +523,14 @@ impl MeshApi {
             nostr_discovery,
             my_hostname: node.hostname.clone(),
             my_is_soc: node.is_soc,
-            gpus: build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref()),
+            gpus: {
+                let bw = node.gpu_bandwidth_gbps.lock().await;
+                let bw_str = bw
+                    .as_ref()
+                    .map(|v| v.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
+                build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref(), bw_str.as_deref())
+            },
+            routing_affinity,
         }
     }
 
@@ -1383,13 +1402,13 @@ mod tests {
 
     #[test]
     fn test_build_gpus_both_none() {
-        let result = build_gpus(None, None);
+        let result = build_gpus(None, None, None);
         assert!(result.is_empty(), "expected empty vec when no gpu_name");
     }
 
     #[test]
     fn test_build_gpus_single_no_vram() {
-        let result = build_gpus(Some("NVIDIA RTX 5090"), None);
+        let result = build_gpus(Some("NVIDIA RTX 5090"), None, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "NVIDIA RTX 5090");
         assert_eq!(result[0].vram_bytes, 0);
@@ -1397,7 +1416,7 @@ mod tests {
 
     #[test]
     fn test_build_gpus_single_with_vram() {
-        let result = build_gpus(Some("NVIDIA RTX 5090"), Some("34359738368")); // 32 GiB in bytes
+        let result = build_gpus(Some("NVIDIA RTX 5090"), Some("34359738368"), None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "NVIDIA RTX 5090");
         assert_eq!(result[0].vram_bytes, 34_359_738_368);
@@ -1408,6 +1427,7 @@ mod tests {
         let result = build_gpus(
             Some("NVIDIA RTX 5090, NVIDIA RTX 3080"),
             Some("34359738368,10737418240"),
+            None,
         );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "NVIDIA RTX 5090");
@@ -1421,6 +1441,7 @@ mod tests {
         let result = build_gpus(
             Some("NVIDIA RTX 5090, NVIDIA RTX 3080"),
             Some("34359738368"),
+            None,
         );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].vram_bytes, 34_359_738_368);
@@ -1432,7 +1453,7 @@ mod tests {
 
     #[test]
     fn test_build_gpus_vram_no_gpu_name() {
-        let result = build_gpus(None, Some("34359738368"));
+        let result = build_gpus(None, Some("34359738368"), None);
         assert!(
             result.is_empty(),
             "no gpu_name means no entries even if vram present"
@@ -1441,9 +1462,49 @@ mod tests {
 
     #[test]
     fn test_build_gpus_vram_whitespace_trimmed() {
-        let result = build_gpus(Some("NVIDIA RTX 4090"), Some(" 25769803776 "));
+        let result = build_gpus(Some("NVIDIA RTX 4090"), Some(" 25769803776 "), None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].vram_bytes, 25_769_803_776);
+    }
+
+    #[test]
+    fn test_build_gpus_with_bandwidth() {
+        let result = build_gpus(
+            Some("NVIDIA A100, NVIDIA A6000"),
+            Some("85899345920,51539607552"),
+            Some("1948.70,780.10"),
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].bandwidth_gbps, Some(1948.70));
+        assert_eq!(result[1].bandwidth_gbps, Some(780.10));
+    }
+
+    #[test]
+    fn test_build_gpus_unparsable_vram_preserves_index() {
+        let result = build_gpus(Some("GPU0, GPU1, GPU2"), Some("100,foo,300"), None);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].vram_bytes, 100);
+        assert_eq!(
+            result[1].vram_bytes, 0,
+            "unparsable vram should default to 0, not shift indices"
+        );
+        assert_eq!(result[2].vram_bytes, 300);
+    }
+
+    #[test]
+    fn test_build_gpus_unparsable_bandwidth_preserves_index() {
+        let result = build_gpus(
+            Some("GPU0, GPU1, GPU2"),
+            Some("100,200,300"),
+            Some("1.0,bad,3.0"),
+        );
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].bandwidth_gbps, Some(1.0));
+        assert_eq!(
+            result[1].bandwidth_gbps, None,
+            "unparsable bandwidth should be None, not shift indices"
+        );
+        assert_eq!(result[2].bandwidth_gbps, Some(3.0));
     }
 
     #[test]

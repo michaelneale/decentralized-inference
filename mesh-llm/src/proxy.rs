@@ -3,7 +3,10 @@
 //! Used by the API proxy (port 9337), bootstrap proxy, and passive mode.
 //! All inference traffic flows through these functions.
 
-use crate::{election, mesh, router, tunnel};
+use crate::{
+    affinity::{self, prepare_remote_targets_for_request, AffinityRouter, PreparedTargets},
+    election, mesh, router, tunnel,
+};
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -38,21 +41,9 @@ pub fn extract_model_from_http(buf: &[u8]) -> Option<String> {
 /// Extract a session hint from an HTTP request for MoE sticky routing.
 /// Looks for "user" or "session_id" in the JSON body. Falls back to None.
 pub fn extract_session_hint(buf: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(buf).ok()?;
-    let body_start = s.find("\r\n\r\n")? + 4;
-    let body = &s[body_start..];
-    // Try "user" field first (standard OpenAI parameter)
-    for key in &["\"user\"", "\"session_id\""] {
-        if let Some(pos) = body.find(key) {
-            let after_key = &body[pos + key.len()..];
-            let after_colon = after_key.trim_start().strip_prefix(':')?;
-            let after_ws = after_colon.trim_start();
-            let after_quote = after_ws.strip_prefix('"')?;
-            let end = after_quote.find('"')?;
-            return Some(after_quote[..end].to_string());
-        }
-    }
-    None
+    extract_body_json(buf)
+        .as_ref()
+        .and_then(affinity::extract_session_hint_from_body)
 }
 
 /// Try to parse the JSON body from a peeked HTTP request buffer.
@@ -88,12 +79,18 @@ pub fn is_load_request(buf: &[u8]) -> bool {
 /// by model name (or falls back to any host), and tunnels the request via QUIC.
 ///
 /// Set `track_demand` to record requests for demand-based rebalancing.
-pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_demand: bool) {
+pub async fn handle_mesh_request(
+    node: mesh::Node,
+    tcp_stream: TcpStream,
+    track_demand: bool,
+    affinity: AffinityRouter,
+) {
     let mut buf = vec![0u8; 32768];
     let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
         Ok(v) => v,
         Err(_) => return,
     };
+    let body_json = extract_body_json(&buf[..n]);
 
     // Handle /v1/models
     if is_models_list_request(&buf[..n]) {
@@ -107,7 +104,7 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
 
     // Smart routing: if no model specified (or model="auto"), classify and pick
     let routed_model = if model_name.is_none() || model_name.as_deref() == Some("auto") {
-        if let Some(body_json) = extract_body_json(&buf[..n]) {
+        if let Some(body_json) = body_json.as_ref() {
             let cl = router::classify(&body_json);
             let served = node.models_being_served().await;
             let available: Vec<(&str, f64)> =
@@ -156,6 +153,28 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
     } else {
         target_hosts
     };
+    let prepared = effective_model
+        .as_ref()
+        .map(|name| {
+            prepare_remote_targets_for_request(name, &target_hosts, body_json.as_ref(), &affinity)
+        })
+        .unwrap_or(PreparedTargets {
+            ordered: target_hosts
+                .iter()
+                .copied()
+                .map(election::InferenceTarget::Remote)
+                .collect(),
+            learn_prefix_hash: None,
+            cached_target: None,
+        });
+    let target_hosts: Vec<iroh::EndpointId> = prepared
+        .ordered
+        .iter()
+        .filter_map(|target| match target {
+            election::InferenceTarget::Remote(host_id) => Some(*host_id),
+            _ => None,
+        })
+        .collect();
 
     // Try each host in order — if tunnel fails, retry with next.
     // On first failure, trigger background gossip refresh so future requests
@@ -165,12 +184,28 @@ pub async fn handle_mesh_request(node: mesh::Node, tcp_stream: TcpStream, track_
     for target_host in &target_hosts {
         match node.open_http_tunnel(*target_host).await {
             Ok((quic_send, quic_recv)) => {
+                if let (Some(name), Some(prefix_hash)) =
+                    (effective_model.as_ref(), prepared.learn_prefix_hash)
+                {
+                    let target = election::InferenceTarget::Remote(*target_host);
+                    affinity.learn_target(name, prefix_hash, &target);
+                }
                 if let Err(e) = tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await {
                     tracing::debug!("HTTP tunnel relay ended: {e}");
                 }
                 return;
             }
             Err(e) => {
+                if let (Some(name), Some(prefix_hash), Some(cached_target)) = (
+                    effective_model.as_ref(),
+                    prepared.learn_prefix_hash,
+                    prepared.cached_target.as_ref(),
+                ) {
+                    let failed = election::InferenceTarget::Remote(*target_host);
+                    if cached_target == &failed {
+                        affinity.forget_target(name, prefix_hash, &failed);
+                    }
+                }
                 tracing::warn!(
                     "Failed to tunnel to host {}: {e}, trying next",
                     target_host.fmt_short()
@@ -201,7 +236,8 @@ pub async fn route_to_target(
     node: mesh::Node,
     tcp_stream: TcpStream,
     target: election::InferenceTarget,
-) {
+) -> bool {
+    tracing::info!("API proxy: routing to target {target:?}");
     match target {
         election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
             match TcpStream::connect(format!("127.0.0.1:{port}")).await {
@@ -211,10 +247,12 @@ pub async fn route_to_target(
                     if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
                         tracing::debug!("API proxy (local) ended: {e}");
                     }
+                    true
                 }
                 Err(e) => {
                     tracing::warn!("API proxy: can't reach llama-server on {port}: {e}");
                     let _ = send_503(tcp_stream).await;
+                    false
                 }
             }
         }
@@ -227,6 +265,7 @@ pub async fn route_to_target(
                     {
                         tracing::debug!("API proxy (remote) ended: {e}");
                     }
+                    true
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -234,11 +273,13 @@ pub async fn route_to_target(
                         host_id.fmt_short()
                     );
                     let _ = send_503(tcp_stream).await;
+                    false
                 }
             }
         }
         election::InferenceTarget::None => {
             let _ = send_503(tcp_stream).await;
+            false
         }
     }
 }
@@ -512,6 +553,12 @@ mod tests {
     fn test_extract_session_hint_empty_value() {
         let req = b"POST / HTTP/1.1\r\n\r\n{\"user\":\"\"}";
         assert_eq!(extract_session_hint(req), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_hint_ignores_message_role_user() {
+        let req = b"POST / HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"user\":\"alice\"}";
+        assert_eq!(extract_session_hint(req), Some("alice".to_string()));
     }
 
     #[test]

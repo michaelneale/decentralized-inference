@@ -12,6 +12,7 @@ use mesh_llm_plugin::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -31,6 +32,25 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn next_item_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    let mut last = NEXT_ID.load(Ordering::Relaxed);
+    loop {
+        // Some platforms expose coarse wall-clock resolution; never reuse an ID in-process.
+        let candidate = now.max(last.saturating_add(1));
+        match NEXT_ID.compare_exchange_weak(last, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return candidate,
+            Err(current) => last = current,
+        }
+    }
 }
 
 /// A single blackboard item — just text from someone at a time.
@@ -91,15 +111,8 @@ fn default_post_peer_id() -> String {
 impl BlackboardItem {
     pub fn new(from: String, peer_id: String, text: String) -> Self {
         let ts = now_secs();
-        // ID = timestamp nanos for uniqueness, with random low bits
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let rand_bits: u16 = (nanos & 0xFFFF) as u16 ^ (std::process::id() as u16);
-        let id = (nanos & !0xFFFF) | rand_bits as u64;
         Self {
-            id,
+            id: next_item_id(),
             from,
             peer_id,
             timestamp: ts,
@@ -628,6 +641,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let b = BlackboardItem::new("bob".into(), "def".into(), "world".into());
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn test_blackboard_item_unique_ids_without_sleep() {
+        let mut ids = std::collections::HashSet::new();
+        for i in 0..1024 {
+            let item = BlackboardItem::new("alice".into(), "abc".into(), format!("hello {i}"));
+            assert!(ids.insert(item.id), "duplicate id generated: {}", item.id);
+        }
     }
 
     #[tokio::test]

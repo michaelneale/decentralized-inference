@@ -726,20 +726,6 @@ pub fn pick_model_classified<'a>(
     scored.first().map(|(name, _)| *name)
 }
 
-/// Convenience: pick model from just a category (no complexity/tools info).
-/// Used by tests and simple call sites.
-#[cfg(test)]
-pub fn pick_model<'a>(category: Category, available_models: &[(&'a str, f64)]) -> Option<&'a str> {
-    pick_model_classified(
-        &Classification {
-            category,
-            complexity: Complexity::Moderate,
-            needs_tools: false,
-        },
-        available_models,
-    )
-}
-
 /// Legacy wrapper for tests that have category + tools but no complexity.
 #[cfg(test)]
 pub fn pick_model_with_tools<'a>(

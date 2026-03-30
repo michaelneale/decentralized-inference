@@ -34,7 +34,7 @@ Each should only show the binary name — no `/opt/homebrew/` paths.
 just bundle
 ```
 
-Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm` plus flavor-specific llama.cpp binaries.
+Creates `/tmp/mesh-bundle.tar.gz` containing `mesh-llm`, flavor-specific llama.cpp runtime binaries, and `llama-moe-split` for MoE shard generation.
 
 Bundle naming now follows the same convention everywhere:
 
@@ -97,6 +97,6 @@ After the workflow finishes, verify:
 - The ROCm and Vulkan Linux release bundles are compile-tested in CI, but not runtime-tested against real GPUs during the workflow.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
   ```bash
-  codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server
-  xattr -cr /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server
+  codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server /usr/local/bin/llama-moe-split
+  xattr -cr /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server /usr/local/bin/llama-moe-split
   ```

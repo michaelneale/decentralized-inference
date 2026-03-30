@@ -186,6 +186,9 @@ struct PeerAnnouncement {
     is_soc: Option<bool>,
     #[serde(default)]
     gpu_vram: Option<String>,
+    /// Per-GPU p90 bandwidth in GB/s, comma-separated in device order (e.g. "1671.7,722.16")
+    #[serde(default)]
+    gpu_bandwidth_gbps: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +226,7 @@ pub struct PeerInfo {
     pub hostname: Option<String>,
     pub is_soc: Option<bool>,
     pub gpu_vram: Option<String>,
+    pub gpu_bandwidth_gbps: Option<String>,
 }
 
 impl PeerInfo {
@@ -523,6 +527,7 @@ pub struct Node {
     pub hostname: Option<String>,
     pub is_soc: Option<bool>,
     pub gpu_vram: Option<String>,
+    pub gpu_bandwidth_gbps: Arc<tokio::sync::Mutex<Option<Vec<f64>>>>,
 }
 
 struct MeshState {
@@ -742,6 +747,7 @@ impl Node {
             hostname,
             is_soc,
             gpu_vram,
+            gpu_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         // Accept loop starts but waits for start_accepting() before processing connections.
@@ -2860,8 +2866,14 @@ impl Node {
             existing.hostname = ann.hostname.clone();
             existing.is_soc = ann.is_soc;
             existing.gpu_vram = ann.gpu_vram.clone();
+            existing.gpu_bandwidth_gbps = ann.gpu_bandwidth_gbps.clone();
             let updated_peer = existing.clone();
-            let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
+            let changed = peer_meaningfully_changed(&old_peer, &updated_peer)
+                || old_peer.gpu_name != updated_peer.gpu_name
+                || old_peer.hostname != updated_peer.hostname
+                || old_peer.is_soc != updated_peer.is_soc
+                || old_peer.gpu_vram != updated_peer.gpu_vram
+                || old_peer.gpu_bandwidth_gbps != updated_peer.gpu_bandwidth_gbps;
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
@@ -2927,6 +2939,7 @@ impl Node {
             hostname: ann.hostname.clone(),
             is_soc: ann.is_soc,
             gpu_vram: ann.gpu_vram.clone(),
+            gpu_bandwidth_gbps: ann.gpu_bandwidth_gbps.clone(),
         };
         state.peers.insert(id, peer.clone());
         let count = state.peers.len();
@@ -3002,6 +3015,9 @@ impl Node {
             if ann.gpu_vram.is_some() {
                 existing.gpu_vram = ann.gpu_vram.clone();
             }
+            if ann.gpu_bandwidth_gbps.is_some() {
+                existing.gpu_bandwidth_gbps = ann.gpu_bandwidth_gbps.clone();
+            }
             let updated_peer = existing.clone();
             let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
             if serving_changed {
@@ -3061,6 +3077,7 @@ impl Node {
                 hostname: ann.hostname.clone(),
                 is_soc: ann.is_soc,
                 gpu_vram: ann.gpu_vram.clone(),
+                gpu_bandwidth_gbps: ann.gpu_bandwidth_gbps.clone(),
             };
             state.peers.insert(id, peer.clone());
             drop(state);
@@ -3112,6 +3129,7 @@ impl Node {
                     hostname: p.hostname.clone(),
                     is_soc: p.is_soc,
                     gpu_vram: p.gpu_vram.clone(),
+                    gpu_bandwidth_gbps: p.gpu_bandwidth_gbps.clone(),
                 })
                 .collect()
         };
@@ -3147,6 +3165,9 @@ impl Node {
             } else {
                 None
             },
+            gpu_bandwidth_gbps: self.gpu_bandwidth_gbps.lock().await
+                .as_ref()
+                .map(|v| v.iter().map(|f| format!("{:.2}", f)).collect::<Vec<_>>().join(",")),
         });
         announcements
     }
@@ -3564,6 +3585,38 @@ mod tests {
         let decoded_missing: TestAnnouncement = serde_json::from_str("{}").unwrap();
         assert_eq!(decoded_missing.assigned_models, None);
         assert_eq!(decoded_missing.hosted_models, None);
+    }
+
+    #[test]
+    fn test_peer_announcement_with_bandwidth_serde_roundtrip() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_bandwidth_gbps: Option<String>,
+        }
+
+        let test = TestAnnouncement {
+            gpu_bandwidth_gbps: Some("1671.7,722.2".to_string()),
+        };
+
+        let json = serde_json::to_string(&test).unwrap();
+        let decoded: TestAnnouncement = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.gpu_bandwidth_gbps, Some("1671.7,722.2".to_string()));
+    }
+
+    #[test]
+    fn test_peer_announcement_backward_compat_no_bandwidth_field() {
+        #[derive(Deserialize, Debug)]
+        struct TestAnnouncement {
+            #[serde(default)]
+            gpu_bandwidth_gbps: Option<String>,
+        }
+
+        let json = r#"{"other_field": "value"}"#;
+        let decoded: TestAnnouncement = serde_json::from_str(json).unwrap();
+
+        assert_eq!(decoded.gpu_bandwidth_gbps, None);
     }
 
     #[test]
