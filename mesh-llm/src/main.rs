@@ -2265,6 +2265,139 @@ fn detect_bin_dir() -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
+fn huggingface_source_identity(path: &Path) -> Option<(String, Option<String>)> {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        let name = dir.file_name()?.to_str()?;
+        if name == "snapshots" {
+            let revision = path
+                .strip_prefix(dir)
+                .ok()?
+                .components()
+                .next()
+                .and_then(|component| component.as_os_str().to_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let model_dir = dir.parent()?;
+            let model_dir_name = model_dir.file_name()?.to_str()?;
+            if let Some(repo) = model_dir_name.strip_prefix("models--") {
+                return Some((repo.replace("--", "/"), revision));
+            }
+        }
+        current = dir.parent();
+    }
+
+    for component in path.components() {
+        let component = component.as_os_str().to_str()?;
+        if let Some(repo) = component.strip_prefix("models--") {
+            return Some((repo.replace("--", "/"), None));
+        }
+    }
+    None
+}
+
+fn model_source_repo_from_config(path: &Path) -> Option<String> {
+    let config_path = path.join("config.json");
+    let text = std::fs::read_to_string(config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let raw_name = config.get("_name_or_path")?.as_str()?.trim();
+    normalize_hf_repo(raw_name)
+}
+
+fn normalize_hf_repo(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_end_matches('/');
+    if value.is_empty() || value == "." {
+        return None;
+    }
+    if value.starts_with('/') || value.starts_with('.') {
+        return None;
+    }
+
+    let parts: Vec<_> = value.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() == 2 {
+        return Some(format!("{}/{}", parts[0], parts[1]));
+    }
+
+    None
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProvenanceSidecar {
+    version: u32,
+    identity: ProvenanceSidecarIdentity,
+    source: ProvenanceSidecarSource,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProvenanceSidecarIdentity {
+    canonical_id: String,
+    display_name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProvenanceSidecarSource {
+    repo: Option<String>,
+    revision: Option<String>,
+}
+
+fn model_sidecar_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "model".to_string());
+    path.with_file_name(format!("{filename}.manifest.json"))
+}
+
+fn sidecar_model_name(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(model_sidecar_path(path)).ok()?;
+    let sidecar: ProvenanceSidecar = serde_json::from_str(&text).ok()?;
+    if sidecar.version != 1 {
+        return None;
+    }
+    match (&sidecar.source.repo, &sidecar.source.revision) {
+        (Some(repo), Some(revision)) => Some(format!("{repo}@{revision}")),
+        (Some(repo), None) => Some(repo.clone()),
+        (None, _) if !sidecar.identity.canonical_id.is_empty() => {
+            Some(sidecar.identity.canonical_id)
+        }
+        (None, _) => Some(sidecar.identity.display_name),
+    }
+}
+
+fn model_path_name(path: &Path) -> Option<String> {
+    if let Some(name) = sidecar_model_name(path) {
+        return Some(name);
+    }
+
+    if let Some((repo_id, revision)) = huggingface_source_identity(path) {
+        return Some(match revision {
+            Some(revision) => format!("{repo_id}@{revision}"),
+            None => repo_id,
+        });
+    }
+
+    if let Some(repo_id) = model_source_repo_from_config(path) {
+        return Some(repo_id);
+    }
+
+    if path.is_dir() {
+        return path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string());
+    }
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("gguf") => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.to_string()),
+        _ => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string()),
+    }
+}
 /// Update ~/.pi/agent/models.json to include a "mesh" provider.
 fn update_pi_models_json(model_id: &str, port: u16) {
     let Some(home) = dirs::home_dir() else { return };
@@ -3233,13 +3366,16 @@ fn build_serving_list(resolved_models: &[PathBuf], model_name: &str) -> Vec<Stri
     let mut all: Vec<String> = resolved_models
         .iter()
         .map(|m| {
-            let stem = m
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
+            let name = model_path_name(m).unwrap_or_else(|| {
+                let stem = m
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                stem
+            });
             // Strip split GGUF suffix: "Model-00001-of-00004" → "Model"
-            router::strip_split_suffix_owned(&stem)
+            router::strip_split_suffix_owned(&name)
         })
         .collect();
     if !all.contains(&clean_name) {
@@ -3938,5 +4074,36 @@ mod tests {
             .unwrap();
 
         proxy_handle.abort();
+    }
+
+    #[test]
+    fn test_model_path_name_prefers_sidecar_provenance() {
+        let dir = std::env::temp_dir().join("mesh-llm-pr79-sidecar-name");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("Qwen3-8B-Q4_K_M.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(
+            dir.join("Qwen3-8B-Q4_K_M.gguf.manifest.json"),
+            br#"{
+                "version": 1,
+                "identity": {
+                    "canonical_id": "huggingface:Qwen/Qwen3-8B-GGUF@abc123/Qwen3-8B-Q4_K_M.gguf",
+                    "display_name": "Qwen3-8B-Q4_K_M.gguf"
+                },
+                "source": {
+                    "repo": "Qwen/Qwen3-8B-GGUF",
+                    "revision": "abc123"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model_path_name(&model).as_deref(),
+            Some("Qwen/Qwen3-8B-GGUF@abc123")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
