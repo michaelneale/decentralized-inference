@@ -202,6 +202,153 @@ pub fn detect_moe(path: &Path) -> Option<GgufMoeInfo> {
     }
 }
 
+fn read_gguf_value_as_f32(f: &mut std::fs::File, typ: GgufType) -> std::io::Result<Option<f32>> {
+    match typ {
+        GgufType::Float32 => {
+            let mut buf = [0u8; 4];
+            f.read_exact(&mut buf)?;
+            Ok(Some(f32::from_le_bytes(buf)))
+        }
+        _ => {
+            skip_gguf_value(f, typ)?;
+            Ok(None)
+        }
+    }
+}
+
+fn read_gguf_value_as_string_opt(
+    f: &mut std::fs::File,
+    typ: GgufType,
+) -> std::io::Result<Option<String>> {
+    match typ {
+        GgufType::String => Ok(Some(read_gguf_string(f)?)),
+        _ => {
+            skip_gguf_value(f, typ)?;
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GgufCompactMeta {
+    pub architecture: String,
+    pub context_length: u32,
+    pub vocab_size: u32,
+    pub embedding_size: u32,
+    pub head_count: u32,
+    pub layer_count: u32,
+    pub feed_forward_length: u32,
+    pub key_length: u32,
+    pub value_length: u32,
+    pub tokenizer_model_name: String,
+    pub rope_scale: f32,
+    pub rope_freq_base: f32,
+    pub expert_count: u32,
+    pub expert_used_count: u32,
+}
+
+/// Scan a GGUF file header and return compact structural metadata.
+/// Reads only the KV section, never tensor data. Returns None on any parse failure.
+pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
+    let mut f = std::fs::File::open(path).ok()?;
+
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" {
+        return None;
+    }
+    let version = read_u32(&mut f).ok()?;
+    if version < 2 {
+        return None;
+    }
+    let _n_tensors = read_i64(&mut f).ok()?;
+    let n_kv = read_i64(&mut f).ok()?;
+
+    let mut meta = GgufCompactMeta::default();
+    let mut kv_head_count: u32 = 0;
+
+    for _ in 0..n_kv {
+        let key = read_gguf_string(&mut f).ok()?;
+        let vtype = GgufType::from_u32(read_u32(&mut f).ok()?)?;
+
+        if key == "general.architecture" {
+            meta.architecture = read_gguf_value_as_string_opt(&mut f, vtype).ok()??;
+        } else if key == "tokenizer.ggml.model" {
+            meta.tokenizer_model_name = read_gguf_value_as_string_opt(&mut f, vtype).ok()??;
+        } else if key.ends_with(".context_length") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.context_length = v;
+            }
+        } else if key.ends_with(".embedding_length") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.embedding_size = v;
+            }
+        } else if key.ends_with(".head_count") && !key.ends_with("_kv") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.head_count = v;
+            }
+        } else if key.ends_with(".attention.head_count_kv") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                kv_head_count = v;
+            }
+        } else if key.ends_with(".block_count") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.layer_count = v;
+            }
+        } else if key.ends_with(".feed_forward_length") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.feed_forward_length = v;
+            }
+        } else if key.ends_with(".attention.key_length") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.key_length = v;
+            }
+        } else if key.ends_with(".attention.value_length") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.value_length = v;
+            }
+        } else if key.ends_with(".rope.scale") {
+            if let Ok(Some(v)) = read_gguf_value_as_f32(&mut f, vtype) {
+                meta.rope_scale = v;
+            }
+        } else if key.ends_with(".rope.freq_base") {
+            if let Ok(Some(v)) = read_gguf_value_as_f32(&mut f, vtype) {
+                meta.rope_freq_base = v;
+            }
+        } else if key.ends_with(".vocab_size") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.vocab_size = v;
+            }
+        } else if key.ends_with(".expert_count") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.expert_count = v;
+            }
+        } else if key.ends_with(".expert_used_count") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.expert_used_count = v;
+            }
+        } else {
+            skip_gguf_value(&mut f, vtype).ok()?;
+        }
+    }
+
+    if meta.head_count > 0 {
+        if meta.key_length == 0 {
+            meta.key_length = meta.embedding_size / meta.head_count;
+        }
+        if meta.value_length == 0 {
+            let effective_kv = if kv_head_count > 0 {
+                kv_head_count
+            } else {
+                meta.head_count
+            };
+            meta.value_length = meta.embedding_size / effective_kv;
+        }
+    }
+
+    Some(meta)
+}
+
 // ── GGUF assembler: combine trunk + expert files into a shard ──
 
 // ── Ranking cache ──

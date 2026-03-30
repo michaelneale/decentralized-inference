@@ -1,0 +1,121 @@
+syntax = "proto3";
+package meshllm.node.v1;
+
+// Stream 0x01 — Gossip
+message GossipFrame {
+  uint32 gen = 1;
+  repeated PeerAnnouncement peers = 2;
+  bytes sender_id = 3;          // must be exactly 32 bytes; must match QUIC peer identity
+}
+
+message PeerAnnouncement {
+  bytes endpoint_id = 1;          // exactly 32 bytes
+  NodeRole role = 2;
+  optional uint32 http_port = 3;
+  optional string version = 4;
+  optional string gpu_name = 5;
+  optional string hostname = 6;
+  optional bool is_soc = 7;
+  optional string gpu_vram = 8;
+  repeated string available_models = 9;
+  repeated string serving_models = 10;
+  repeated string requested_models = 11;
+  repeated CompactModelMetadata available_model_metadata = 12;
+  optional ExpertsSummary experts_summary = 13;
+  optional uint32 rtt_ms = 14;
+  repeated string catalog_models = 15;              // GGUF model names (mesh catalog contribution; was JSON `models`)
+  uint64 vram_bytes = 16;                            // GPU VRAM in bytes
+  optional string model_source = 17;                 // how to obtain this node's model
+  optional string primary_serving = 18;              // primary serving model (backward compat; was JSON `serving`)
+  optional string mesh_id = 19;                      // stable mesh identity (self entry only)
+  repeated ModelDemandEntry demand = 20;             // demand map entries (self entry only)
+  map<string, uint64> available_model_sizes = 21;   // file sizes (bytes) per GGUF model name
+  bytes serialized_addr = 22;                        // JSON-serialized EndpointAddr (includes network addresses for peer discovery)
+}
+
+message CompactModelMetadata {
+  string model_key = 1;
+  uint32 context_length = 2;
+  uint32 vocab_size = 3;
+  uint32 embedding_size = 4;
+  uint32 head_count = 5;
+  uint32 layer_count = 6;
+  uint32 feed_forward_length = 7;
+  uint32 key_length = 8;
+  uint32 value_length = 9;
+  string architecture = 10;
+  string tokenizer_model_name = 11;
+  repeated SpecialToken special_tokens = 12;
+  float rope_scale = 13;
+  float rope_freq_base = 14;
+  bool is_moe = 15;
+  uint32 expert_count = 16;
+  uint32 used_expert_count = 17;
+  string quantization_type = 18;                     // GGUF quantization type string (e.g. "Q4_K_M")
+}
+
+message SpecialToken {
+  string name = 1;
+  uint32 token_id = 2;
+}
+
+message ExpertsSummary {
+  uint32 total_experts = 1;
+  uint32 expert_count_used = 2;
+  repeated uint32 top_expert_ids = 3;
+}
+
+message ModelDemandEntry {
+  string model_name = 1;
+  uint64 last_active = 2;
+  uint64 request_count = 3;
+}
+
+// Stream 0x03 — Tunnel Map
+message TunnelMap {
+  bytes owner_peer_id = 1;
+  repeated TunnelEntry entries = 2;
+}
+
+message TunnelEntry {
+  bytes target_peer_id = 1;
+  optional bytes relay_peer_id = 2;
+  uint32 tunnel_port = 3;
+}
+
+// Stream 0x05 — Route Table
+message RouteTableRequest {
+  bytes requester_id = 1;  // 0 or exactly 32 bytes (passive callers may omit)
+  uint32 gen = 2;          // must equal NODE_PROTOCOL_GENERATION; rejected otherwise
+}
+
+message RouteTable {
+  repeated RouteEntry entries = 1;
+  optional string mesh_id = 2;  // stable mesh identity — passive/client callers learn this here
+  uint32 gen = 3;               // must equal NODE_PROTOCOL_GENERATION; caller rejects mismatches
+}
+
+message RouteEntry {
+  bytes endpoint_id = 1;  // exactly 32 bytes (peer public key)
+  string model = 2;       // model being served (empty if node is not actively serving)
+}
+
+// Stream 0x06 — Peer Down
+message PeerDown {
+  bytes peer_id = 1;   // exactly 32 bytes; the peer being reported as unreachable
+  uint32 gen = 2;      // must equal NODE_PROTOCOL_GENERATION; rejected otherwise
+}
+
+// Stream 0x07 — Peer Leaving
+message PeerLeaving {
+  bytes peer_id = 1;   // exactly 32 bytes; must match the QUIC sender identity
+  uint32 gen = 2;      // must equal NODE_PROTOCOL_GENERATION; rejected otherwise
+}
+
+// Shared enum
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  WORKER = 1;
+  HOST = 2;
+  CLIENT = 3;
+}

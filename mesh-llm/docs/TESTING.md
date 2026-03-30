@@ -217,8 +217,12 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 ### 11. Dead peer cleanup
 
 - Kill a node with `kill -9`
-- Heartbeat detects it in ~120s (60s interval, 2 consecutive failures)
-- On-use detection is faster: tunnel failure → immediate death broadcast
+- Cleanup happens in ~41s via the reconnect-gossip-probe mechanism:
+  1. QUIC detects connection drop (~5-30s depending on idle timeout and relay state)
+  2. Reconnect attempt with 10s gossip probe timeout
+  3. Gossip probe fails → `remove_peer` called immediately
+- Heartbeat also detects dead peers (60s interval, 2 consecutive failures) as a fallback
+- On-use detection: tunnel failure → immediate death broadcast via stream 0x06
 - Dead model goes cold, peer removed from list, death broadcast to mesh
 - Dead peer won't be re-added by gossip (dead_peers set)
 - Console updates automatically
@@ -236,6 +240,35 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 - Log should show "still host, no restart needed" on re-check
 - llama-server starts exactly once per election (not 5-9 times)
 - Heartbeat gossip doesn't re-discover dead peers (discover_peers=false)
+
+## Control-Plane Protocol (Protobuf v1)
+
+The control plane runs on QUIC ALPN `mesh-llm/1` using the `meshllm.node.v1` protobuf schema. All five scoped control-plane streams use 4-byte LE framing followed by protobuf bytes. There is no JSON fallback for any of these streams.
+
+| Stream | Type | Format |
+|--------|------|--------|
+| 0x01 | GOSSIP | protobuf `GossipFrame` |
+| 0x03 | TUNNEL_MAP | protobuf `TunnelMap` |
+| 0x05 | ROUTE_REQUEST | protobuf `RouteTableRequest` / `RouteTable` |
+| 0x06 | PEER_DOWN | protobuf `PeerDown` |
+| 0x07 | PEER_LEAVING | protobuf `PeerLeaving` |
+
+Raw TCP relay streams (0x02 RPC, 0x04 HTTP) are unchanged.
+
+### Testing peer rejection (ALPN mismatch)
+
+To verify that `mesh-llm/0` nodes are rejected at admission, start a node built from the pre-cutover branch (or any build with `ALPN = b"mesh-llm/0"`) and attempt to join a `mesh-llm/1` mesh. The joining node's connection will be refused at the QUIC handshake. No gossip exchange occurs.
+
+### Verifying protobuf gossip in logs
+
+After two nodes connect, look for log lines indicating gossip was exchanged:
+
+```
+DEBUG mesh: gossip received from <peer_id>
+DEBUG mesh: admitted peer <peer_id>
+```
+
+Absence of JSON-related log lines for streams 0x01/0x03/0x05/0x06/0x07 confirms the protobuf path is active.
 
 ## Single-machine testing with ephemeral keys
 

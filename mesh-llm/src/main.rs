@@ -18,6 +18,12 @@ mod rewrite;
 mod router;
 mod tunnel;
 
+pub mod proto {
+    pub mod node {
+        include!(concat!(env!("OUT_DIR"), "/meshllm.node.v1.rs"));
+    }
+}
+
 pub(crate) use autoupdate::{latest_release_version, version_newer};
 pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;

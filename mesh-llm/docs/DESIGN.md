@@ -32,21 +32,33 @@ enum NodeRole {
 }
 ```
 
-Roles exchanged via gossip. A node transitions Worker → Host when elected.
+Roles exchanged via gossip (`meshllm.node.v1` protobuf on QUIC ALPN `mesh-llm/1`). A node transitions Worker → Host when elected.
+
+A newly connected peer is quarantined until it sends a valid `GossipFrame` with `gen = 1` (quarantine-until-gossip admission model). Only streams 0x01 (GOSSIP) and 0x05 (ROUTE_REQUEST) are accepted before admission. All other streams are rejected until the peer is admitted.
+
+## Control-Plane Protocol
+
+The control plane runs on QUIC ALPN `mesh-llm/1` using the `meshllm.node.v1` protobuf schema. All scoped control-plane streams use 4-byte LE framing followed by protobuf bytes. There is no JSON fallback for any control-plane stream.
+
+Peers connecting on the legacy ALPN `mesh-llm/0` are rejected at the QUIC handshake. Mixed meshes containing both `/0` and `/1` nodes are unsupported.
+
+See [message_protocol.md](../../message_protocol.md) for the full wire format specification.
 
 ## QUIC Stream Types
 
 Single QUIC connection per peer, multiplexed by 1-byte prefix:
 
-| Byte | Type | Purpose |
-|------|------|---------|
-| 0x01 | GOSSIP | Peer announcements (role, serving, VRAM, models, demand, mesh_id) |
-| 0x02 | TUNNEL_RPC | TCP relay to remote rpc-server |
-| 0x03 | TUNNEL_MAP | B2B tunnel port map exchange |
-| 0x04 | TUNNEL_HTTP | TCP relay to remote llama-server HTTP |
-| 0x05 | ROUTE_REQUEST | Routing table for passive nodes (hosts + models) |
-| 0x06 | PEER_DOWN | Death broadcast (immediate, from any node that detects a death) |
-| 0x07 | PEER_LEAVING | Clean shutdown broadcast (ctrl-c) |
+| Byte | Type | Purpose | Format |
+|------|------|---------|--------|
+| 0x01 | GOSSIP | Peer announcements (role, serving, VRAM, models, demand, mesh_id) | protobuf `GossipFrame` |
+| 0x02 | TUNNEL_RPC | TCP relay to remote rpc-server | raw TCP relay |
+| 0x03 | TUNNEL_MAP | B2B tunnel port map exchange | protobuf `TunnelMap` |
+| 0x04 | TUNNEL_HTTP | TCP relay to remote llama-server HTTP | raw TCP relay |
+| 0x05 | ROUTE_REQUEST | Routing table for passive nodes (hosts + models) | protobuf `RouteTableRequest` / `RouteTable` |
+| 0x06 | PEER_DOWN | Death broadcast (immediate, from any node that detects a death) | protobuf `PeerDown` |
+| 0x07 | PEER_LEAVING | Clean shutdown broadcast (ctrl-c) | protobuf `PeerLeaving` |
+
+Streams 0x02 and 0x04 are raw TCP relay tunnels and are not subject to protobuf framing or generation validation.
 
 ## Multi-Model
 
@@ -104,9 +116,10 @@ When a model requires splitting across nodes:
 
 ## Event-Driven Peer Management
 
-- **60s heartbeat** with 2-consecutive-failure threshold
-- **Death broadcasts** (`STREAM_PEER_DOWN`) for immediate notification
-- **Clean shutdown** (`STREAM_PEER_LEAVING`) on ctrl-c
+- **Reconnect-gossip-probe** — when a QUIC connection drops, the node reconnects and awaits gossip with a 10s timeout. If gossip fails, the peer is removed immediately. Dead peer cleanup typically completes in ~41s after `kill -9`.
+- **60s heartbeat** with 2-consecutive-failure threshold (fallback path)
+- **Death broadcasts** (`STREAM_PEER_DOWN`, protobuf) for immediate notification
+- **Clean shutdown** (`STREAM_PEER_LEAVING`, protobuf) on ctrl-c — only removes the sender, not other peers
 - **Dead peers set** prevents gossip from re-adding killed nodes
 - **Tunnel failure detection** triggers immediate death broadcast
 
@@ -173,7 +186,7 @@ trait Collector {
 
 ### Gossip Fields
 
-Four new `PeerAnnouncement` fields (all `#[serde(default)]` for backward compat):
+`PeerAnnouncement` fields carried in the `meshllm.node.v1` protobuf `GossipFrame`:
 
 | Field | Type | Description |
 |---|---|---|
@@ -181,6 +194,12 @@ Four new `PeerAnnouncement` fields (all `#[serde(default)]` for backward compat)
 | `hostname` | `Option<String>` | System hostname |
 | `is_soc` | `Option<bool>` | True for Tegra/Jetson (unified memory) |
 | `gpu_vram` | `Option<String>` | Comma-separated per-GPU VRAM in bytes |
+| `available_model_metadata` | `repeated CompactModelMetadata` | GGUF-derived metadata per available model |
+| `available_model_sizes` | `map<string, uint64>` | File sizes in bytes per model name |
+| `mesh_id` | `optional string` | Stable mesh identity (self entry only) |
+| `demand` | `repeated ModelDemandEntry` | Per-model demand entries (self entry only) |
+
+GGUF-derived metadata (architecture, quantization type, tokenizer, RoPE parameters, expert counts) is transported via `CompactModelMetadata` in the `available_model_metadata` field. This lets peers learn model capabilities without downloading the file. The `ScannedModel` type in the proto schema carries the same information for catalog-level model listings.
 
 ### `--enumerate-host` Flag
 
