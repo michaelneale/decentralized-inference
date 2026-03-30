@@ -61,7 +61,7 @@ rm -rf /tmp/test-bundle
 just release v0.X.0
 ```
 
-This bumps the version in source + Cargo manifests, updates `Cargo.lock`, commits, tags, and pushes — all in one step.
+Run this from a clean local `main` branch. It bumps the version in source + Cargo manifests, refreshes `Cargo.lock` without upgrading dependencies, commits as `v0.X.0: release`, pushes `main`, and then pushes only the new release tag.
 
 ### 6. Let GitHub Actions build and publish the release
 

@@ -55,11 +55,25 @@ release-version version:
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/release-version.sh "{{ version }}"
+    current_branch="$(git branch --show-current)"
+    if [[ "$current_branch" != "main" ]]; then
+        echo "Error: release must be run from the 'main' branch (current: ${current_branch:-detached HEAD})" >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree is not clean. Commit or stash changes before releasing." >&2
+        exit 1
+    fi
+    tag="{{ version }}"
+    if [[ "$tag" != v* ]]; then
+        tag="v$tag"
+    fi
+    scripts/release-version.sh "$tag"
     git add -A
-    git commit -m "{{ version }}: release"
-    git tag "{{ version }}"
-    git push origin main --tags
+    git commit -m "$tag: release"
+    git tag "$tag"
+    git push origin main
+    git push origin "$tag"
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:

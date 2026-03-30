@@ -129,10 +129,11 @@ Current release flow:
    just build
    just bundle
    ```
-2. Release (bumps version, updates Cargo.lock, commits, tags, pushes):
+2. Release from a clean local `main` branch:
    ```bash
    just release v0.X.Y
    ```
+   This bumps the version, refreshes `Cargo.lock` without upgrading dependencies, commits as `v0.X.Y: release`, pushes `main`, and then pushes only the new release tag.
 3. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the release artifacts on Linux CPU, Linux CUDA, and macOS and creates the GitHub release automatically.
 
 ## Credentials
