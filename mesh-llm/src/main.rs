@@ -2143,10 +2143,7 @@ async fn api_proxy(
                             .unwrap_or(first_available_target(&targets))
                     } else if let Some(ref name) = effective_model {
                         let selection = affinity::select_model_target_for_request(
-                            &targets,
-                            name,
-                            body_json.as_ref(),
-                            &affinity,
+                            &targets, name, body_json, &affinity,
                         );
                         let t = selection.target.clone();
                         if matches!(t, election::InferenceTarget::None) {

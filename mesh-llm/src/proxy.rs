@@ -83,8 +83,10 @@ pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpReq
             }
             read_more(stream, &mut raw).await?;
         }
+        raw.truncate(body_end);
         raw[header_end..body_end].to_vec()
     } else {
+        raw.truncate(header_end);
         Vec::new()
     };
 
@@ -95,6 +97,7 @@ pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpReq
     };
     let model_name = body_json.as_ref().and_then(extract_model_from_json);
     let session_hint = body_json.as_ref().and_then(extract_session_hint_from_json);
+    let raw = finalize_forwarded_request(raw, header_end, expects_continue)?;
 
     Ok(BufferedHttpRequest {
         raw,
@@ -104,6 +107,46 @@ pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpReq
         model_name,
         session_hint,
     })
+}
+
+fn finalize_forwarded_request(
+    mut raw: Vec<u8>,
+    header_end: usize,
+    strip_expect: bool,
+) -> Result<Vec<u8>> {
+    let body = raw.split_off(header_end);
+    let headers = std::str::from_utf8(&raw).context("invalid HTTP headers")?;
+    let mut lines = headers.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+
+    let mut rebuilt = String::new();
+    rebuilt.push_str(request_line);
+    rebuilt.push_str("\r\n");
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, _)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("connection") {
+            continue;
+        }
+        if strip_expect && name.trim().eq_ignore_ascii_case("expect") {
+            continue;
+        }
+        rebuilt.push_str(line);
+        rebuilt.push_str("\r\n");
+    }
+
+    // The proxy buffers exactly one request for routing, so force a single-request
+    // connection contract upstream instead of reusing the client connection blindly.
+    rebuilt.push_str("Connection: close\r\n\r\n");
+
+    let mut forwarded = rebuilt.into_bytes();
+    forwarded.extend_from_slice(&body);
+    Ok(forwarded)
 }
 
 async fn read_until_header_end(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<usize> {
@@ -944,5 +987,22 @@ mod tests {
         let request = server.await.unwrap();
         assert_eq!(request.model_name.as_deref(), Some("qwen"));
         assert_eq!(request.session_hint.as_deref(), Some("bob"));
+        let raw = String::from_utf8(request.raw).unwrap();
+        assert!(!raw.contains("Expect: 100-continue"));
+        assert!(raw.contains("Connection: close"));
+    }
+
+    #[tokio::test]
+    async fn test_read_http_request_truncates_pipelined_follow_up_bytes() {
+        let request = read_request_from_parts(vec![
+            b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mesh/drop HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                .to_vec(),
+        ])
+        .await;
+
+        let raw = String::from_utf8(request.raw).unwrap();
+        assert!(raw.starts_with("GET /v1/models HTTP/1.1\r\n"));
+        assert!(!raw.contains("/mesh/drop"));
+        assert!(raw.contains("Connection: close\r\n\r\n"));
     }
 }

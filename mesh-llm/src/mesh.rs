@@ -3051,9 +3051,12 @@ impl Node {
             } else {
                 None
             },
-            gpu_bandwidth_gbps: self.gpu_bandwidth_gbps.lock().await
-                .as_ref()
-                .map(|v| v.iter().map(|f| format!("{:.2}", f)).collect::<Vec<_>>().join(",")),
+            gpu_bandwidth_gbps: self.gpu_bandwidth_gbps.lock().await.as_ref().map(|v| {
+                v.iter()
+                    .map(|f| format!("{:.2}", f))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
         });
         announcements
     }

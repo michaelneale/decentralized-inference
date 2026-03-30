@@ -10,11 +10,11 @@
 //! The dashboard is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
-use crate::{affinity, download, election, mesh, nostr, plugin};
+use crate::{affinity, download, election, mesh, nostr, plugin, proxy};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex};
 
@@ -56,7 +56,11 @@ struct GpuEntry {
     bandwidth_gbps: Option<f64>,
 }
 
-fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Option<&str>) -> Vec<GpuEntry> {
+fn build_gpus(
+    gpu_name: Option<&str>,
+    gpu_vram: Option<&str>,
+    gpu_bandwidth: Option<&str>,
+) -> Vec<GpuEntry> {
     let names: Vec<&str> = gpu_name
         .map(|s| s.split(", ").collect())
         .unwrap_or_default();
@@ -64,11 +68,7 @@ fn build_gpus(gpu_name: Option<&str>, gpu_vram: Option<&str>, gpu_bandwidth: Opt
         return vec![];
     }
     let vrams: Vec<Option<u64>> = gpu_vram
-        .map(|s| {
-            s.split(',')
-                .map(|v| v.trim().parse::<u64>().ok())
-                .collect()
-        })
+        .map(|s| s.split(',').map(|v| v.trim().parse::<u64>().ok()).collect())
         .unwrap_or_default();
     let bandwidths: Vec<Option<f64>> = gpu_bandwidth
         .map(|s| s.split(',').map(|v| v.trim().parse::<f64>().ok()).collect())
@@ -274,7 +274,11 @@ impl MeshApi {
                 rtt_ms: p.rtt_ms,
                 hostname: p.hostname.clone(),
                 is_soc: p.is_soc,
-                gpus: build_gpus(p.gpu_name.as_deref(), p.gpu_vram.as_deref(), p.gpu_bandwidth_gbps.as_deref()),
+                gpus: build_gpus(
+                    p.gpu_name.as_deref(),
+                    p.gpu_vram.as_deref(),
+                    p.gpu_bandwidth_gbps.as_deref(),
+                ),
             })
             .collect();
 
@@ -416,10 +420,17 @@ impl MeshApi {
             my_is_soc: node.is_soc,
             gpus: {
                 let bw = node.gpu_bandwidth_gbps.lock().await;
-                let bw_str = bw
-                    .as_ref()
-                    .map(|v| v.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","));
-                build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref(), bw_str.as_deref())
+                let bw_str = bw.as_ref().map(|v| {
+                    v.iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                });
+                build_gpus(
+                    node.gpu_name.as_deref(),
+                    node.gpu_vram.as_deref(),
+                    bw_str.as_deref(),
+                )
             },
             routing_affinity,
         }
@@ -545,21 +556,21 @@ pub async fn start(
 // ── Request dispatch ──
 
 async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Result<()> {
-    let mut buf = vec![0u8; 8192];
-    let n = match tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
-        .await
+    let request = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        proxy::read_http_request(&mut stream),
+    )
+    .await
     {
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => return Err(e.into()),
+        Ok(Ok(request)) => request,
+        Ok(Err(e)) => return Err(e),
         Err(_) => return Ok(()), // read timeout — health check probe, just close
     };
-    if n == 0 {
-        return Ok(()); // empty read — closed before sending
-    }
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let method = req.split_whitespace().next().unwrap_or("GET");
-    let path = req.split_whitespace().nth(1).unwrap_or("/");
+    let req = String::from_utf8_lossy(&request.raw);
+    let method = request.method.as_str();
+    let path = request.path.as_str();
     let path_only = path.split('?').next().unwrap_or(path);
+    let body = http_body_text(&request.raw);
 
     match (method, path_only) {
         // ── Dashboard UI ──
@@ -705,7 +716,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         ("POST", p) if p.starts_with("/api/plugins/") && p.contains("/tools/") => {
             let rest = &p["/api/plugins/".len()..];
             if let Some((plugin_name, tool_name)) = rest.split_once("/tools/") {
-                let body = req.split("\r\n\r\n").nth(1).unwrap_or("{}");
                 let payload = if body.trim().is_empty() { "{}" } else { body };
                 let plugin_manager = state.inner.lock().await.plugin_manager.clone();
                 match plugin_manager
@@ -857,7 +867,6 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
             {
                 respond_error(&mut stream, 404, "Blackboard is disabled on this node").await?;
             } else {
-                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
                 let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
                 match parsed {
                     Ok(val) => {
@@ -942,6 +951,15 @@ async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+fn http_body_text(raw: &[u8]) -> &str {
+    let body_start = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| idx + 4)
+        .unwrap_or(raw.len());
+    std::str::from_utf8(&raw[body_start..]).unwrap_or("")
 }
 
 async fn respond_error(stream: &mut TcpStream, code: u16, msg: &str) -> anyhow::Result<()> {
@@ -1045,6 +1063,8 @@ async fn respond_bytes_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn test_build_gpus_both_none() {
@@ -1127,11 +1147,7 @@ mod tests {
 
     #[test]
     fn test_build_gpus_unparsable_vram_preserves_index() {
-        let result = build_gpus(
-            Some("GPU0, GPU1, GPU2"),
-            Some("100,foo,300"),
-            None,
-        );
+        let result = build_gpus(Some("GPU0, GPU1, GPU2"), Some("100,foo,300"), None);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].vram_bytes, 100);
         assert_eq!(
@@ -1155,5 +1171,49 @@ mod tests {
             "unparsable bandwidth should be None, not shift indices"
         );
         assert_eq!(result[2].bandwidth_gbps, Some(3.0));
+    }
+
+    #[test]
+    fn test_http_body_text_extracts_body() {
+        let raw = b"POST /api/plugins/x/tools/y HTTP/1.1\r\nHost: localhost\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
+        assert_eq!(http_body_text(raw), "{\"a\":1}");
+    }
+
+    #[tokio::test]
+    async fn test_management_request_parser_handles_fragmented_post_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = br#"{"text":"fragmented"}"#;
+        let headers = format!(
+            "POST /api/blackboard/post HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                proxy::read_http_request(&mut stream),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        });
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(&headers.as_bytes()[..45]).await.unwrap();
+            stream.write_all(&headers.as_bytes()[45..]).await.unwrap();
+            stream.write_all(&body[..8]).await.unwrap();
+            stream.write_all(&body[8..]).await.unwrap();
+            let mut sink = [0u8; 1];
+            let _ = stream.read(&mut sink).await;
+        });
+
+        client.await.unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/api/blackboard/post");
+        assert_eq!(http_body_text(&request.raw), "{\"text\":\"fragmented\"}");
     }
 }
