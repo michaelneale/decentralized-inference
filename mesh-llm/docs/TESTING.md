@@ -243,7 +243,7 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 
 ## Control-Plane Protocol (Protobuf v1)
 
-The control plane runs on QUIC ALPN `mesh-llm/1` using the `meshllm.node.v1` protobuf schema. All five scoped control-plane streams use 4-byte LE framing followed by protobuf bytes. There is no JSON fallback for any of these streams.
+The control plane prefers QUIC ALPN `mesh-llm/1` using the `meshllm.node.v1` protobuf schema. On `/1`, all five scoped control-plane streams use 4-byte LE framing followed by protobuf bytes. For backward compatibility, nodes may also negotiate `mesh-llm/0`, which keeps the legacy JSON/raw payloads on those same streams.
 
 | Stream | Type | Format |
 |--------|------|--------|
@@ -255,9 +255,9 @@ The control plane runs on QUIC ALPN `mesh-llm/1` using the `meshllm.node.v1` pro
 
 Raw TCP relay streams (0x02 RPC, 0x04 HTTP) are unchanged.
 
-### Testing peer rejection (ALPN mismatch)
+### Testing legacy fallback (`mesh-llm/0`)
 
-To verify that `mesh-llm/0` nodes are rejected at admission, start a node built from the pre-cutover branch (or any build with `ALPN = b"mesh-llm/0"`) and attempt to join a `mesh-llm/1` mesh. The joining node's connection will be refused at the QUIC handshake. No gossip exchange occurs.
+To verify backward compatibility, start a node built from the pre-cutover branch (or any build with `ALPN = b"mesh-llm/0"`) and attempt to join a `mesh-llm/1` mesh. The connection should negotiate `/0`, complete gossip, and exchange the legacy JSON/raw control-plane payloads without breaking peer discovery or route-table fetches.
 
 ### Verifying protobuf gossip in logs
 

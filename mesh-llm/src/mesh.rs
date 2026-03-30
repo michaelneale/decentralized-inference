@@ -1,11 +1,12 @@
 //! Mesh membership via iroh QUIC connections.
 //!
-//! Single ALPN, single connection per peer. Bi-streams multiplexed by
-//! first byte: 0x01 = gossip, 0x02 = tunnel (RPC), 0x03 = tunnel map, 0x04 = tunnel (HTTP).
+//! Multiple ALPNs are accepted for backward compatibility, but control traffic still uses
+//! one QUIC connection per peer. Bi-streams are multiplexed by first byte:
+//! 0x01 = gossip, 0x02 = tunnel (RPC), 0x03 = tunnel map, 0x04 = tunnel (HTTP).
 
 use anyhow::Result;
 use base64::Engine;
-use iroh::endpoint::Connection;
+use iroh::endpoint::{ConnectOptions, Connection};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -149,7 +150,9 @@ pub fn merge_demand(
     }
 }
 
-pub const ALPN: &[u8] = b"mesh-llm/1";
+pub const ALPN_V1: &[u8] = b"mesh-llm/1";
+pub const ALPN_V0: &[u8] = b"mesh-llm/0";
+pub const ALPN: &[u8] = ALPN_V1;
 pub(crate) const NODE_PROTOCOL_GENERATION: u32 = 1;
 pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
@@ -163,6 +166,121 @@ const STREAM_PEER_LEAVING: u8 = 0x07;
 const STREAM_BLACKBOARD: u8 = 0x08;
 const STREAM_PLUGIN_CHANNEL: u8 = 0x09;
 const STREAM_PLUGIN_BULK_TRANSFER: u8 = 0x0a;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlProtocol {
+    ProtoV1,
+    JsonV0,
+}
+
+fn protocol_from_alpn(alpn: &[u8]) -> ControlProtocol {
+    if alpn == ALPN_V0 {
+        ControlProtocol::JsonV0
+    } else {
+        ControlProtocol::ProtoV1
+    }
+}
+
+fn connection_protocol(conn: &Connection) -> ControlProtocol {
+    protocol_from_alpn(conn.alpn())
+}
+
+async fn connect_mesh(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
+    let opts = ConnectOptions::new().with_additional_alpns(vec![ALPN_V0.to_vec()]);
+    let connecting = endpoint.connect_with_opts(addr, ALPN_V1, opts).await?;
+    Ok(connecting.await?)
+}
+
+async fn write_len_prefixed(send: &mut iroh::endpoint::SendStream, body: &[u8]) -> Result<()> {
+    send.write_all(&(body.len() as u32).to_le_bytes()).await?;
+    send.write_all(body).await?;
+    Ok(())
+}
+
+async fn read_len_prefixed(recv: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_CONTROL_FRAME_BYTES {
+        anyhow::bail!("control frame too large: {} bytes", len);
+    }
+    let mut buf = vec![0u8; len];
+    recv.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+async fn write_gossip_payload(
+    send: &mut iroh::endpoint::SendStream,
+    protocol: ControlProtocol,
+    anns: &[PeerAnnouncement],
+    sender_id: EndpointId,
+) -> Result<()> {
+    match protocol {
+        ControlProtocol::ProtoV1 => {
+            let frame = build_gossip_frame(anns, sender_id);
+            write_len_prefixed(send, &frame.encode_to_vec()).await?;
+        }
+        ControlProtocol::JsonV0 => {
+            let json = serde_json::to_vec(anns)?;
+            write_len_prefixed(send, &json).await?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_gossip_payload(
+    protocol: ControlProtocol,
+    remote: EndpointId,
+    buf: &[u8],
+) -> Result<Vec<(EndpointAddr, PeerAnnouncement)>> {
+    match protocol {
+        ControlProtocol::ProtoV1 => {
+            let frame = crate::proto::node::GossipFrame::decode(buf)
+                .map_err(|e| anyhow::anyhow!("gossip decode from {}: {e}", remote.fmt_short()))?;
+            frame.validate_frame().map_err(|e| {
+                anyhow::anyhow!("invalid gossip frame from {}: {e}", remote.fmt_short())
+            })?;
+            if frame.sender_id.as_slice() != remote.as_bytes() {
+                anyhow::bail!(
+                    "gossip sender_id mismatch from {}: connection identity does not match frame sender_id",
+                    remote.fmt_short()
+                );
+            }
+            Ok(frame
+                .peers
+                .iter()
+                .filter_map(proto_ann_to_local)
+                .collect::<Vec<_>>())
+        }
+        ControlProtocol::JsonV0 => {
+            let anns: Vec<PeerAnnouncement> = serde_json::from_slice(buf)?;
+            Ok(anns
+                .into_iter()
+                .map(|ann| (ann.addr.clone(), ann))
+                .collect::<Vec<_>>())
+        }
+    }
+}
+
+fn decode_legacy_tunnel_map_frame(buf: &[u8]) -> Result<crate::proto::node::TunnelMap> {
+    let serialized: HashMap<String, u16> = serde_json::from_slice(buf)?;
+    let entries = serialized
+        .into_iter()
+        .filter_map(|(hex_id, port)| {
+            let bytes = hex::decode(&hex_id).ok()?;
+            let arr: [u8; 32] = bytes.try_into().ok()?;
+            Some(crate::proto::node::TunnelEntry {
+                target_peer_id: arr.to_vec(),
+                relay_peer_id: None,
+                tunnel_port: port as u32,
+            })
+        })
+        .collect();
+    Ok(crate::proto::node::TunnelMap {
+        owner_peer_id: Vec::new(),
+        entries,
+    })
+}
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum ControlFrameError {
@@ -1198,7 +1316,7 @@ impl Node {
             .build();
         let mut builder = Endpoint::builder()
             .secret_key(secret_key)
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![ALPN_V1.to_vec(), ALPN_V0.to_vec()])
             .transport_config(transport_config);
 
         {
@@ -1809,7 +1927,7 @@ impl Node {
                         if let Some(addr) = addr {
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(10),
-                                node.endpoint.connect(addr, ALPN),
+                                connect_mesh(&node.endpoint, addr),
                             )
                             .await
                             {
@@ -1958,18 +2076,23 @@ impl Node {
         let dead_bytes = dead_id.as_bytes().to_vec();
         for (peer_id, conn) in conns {
             let bytes = dead_bytes.clone();
+            let protocol = connection_protocol(&conn);
             tokio::spawn(async move {
                 let res = async {
-                    let proto_msg = crate::proto::node::PeerDown {
-                        peer_id: bytes,
-                        gen: NODE_PROTOCOL_GENERATION,
-                    };
-                    let proto_bytes = proto_msg.encode_to_vec();
-                    let len = proto_bytes.len() as u32;
                     let (mut send, _recv) = conn.open_bi().await?;
                     send.write_all(&[STREAM_PEER_DOWN]).await?;
-                    send.write_all(&len.to_le_bytes()).await?;
-                    send.write_all(&proto_bytes).await?;
+                    match protocol {
+                        ControlProtocol::ProtoV1 => {
+                            let proto_msg = crate::proto::node::PeerDown {
+                                peer_id: bytes,
+                                gen: NODE_PROTOCOL_GENERATION,
+                            };
+                            write_len_prefixed(&mut send, &proto_msg.encode_to_vec()).await?;
+                        }
+                        ControlProtocol::JsonV0 => {
+                            send.write_all(&bytes).await?;
+                        }
+                    }
                     send.finish()?;
                     Ok::<_, anyhow::Error>(())
                 }
@@ -1997,18 +2120,23 @@ impl Node {
         };
         for (peer_id, conn) in conns {
             let bytes = my_id_bytes.clone();
+            let protocol = connection_protocol(&conn);
             tokio::spawn(async move {
                 let res = async {
-                    let proto_msg = crate::proto::node::PeerLeaving {
-                        peer_id: bytes,
-                        gen: NODE_PROTOCOL_GENERATION,
-                    };
-                    let proto_bytes = proto_msg.encode_to_vec();
-                    let len = proto_bytes.len() as u32;
                     let (mut send, _recv) = conn.open_bi().await?;
                     send.write_all(&[STREAM_PEER_LEAVING]).await?;
-                    send.write_all(&len.to_le_bytes()).await?;
-                    send.write_all(&proto_bytes).await?;
+                    match protocol {
+                        ControlProtocol::ProtoV1 => {
+                            let proto_msg = crate::proto::node::PeerLeaving {
+                                peer_id: bytes,
+                                gen: NODE_PROTOCOL_GENERATION,
+                            };
+                            write_len_prefixed(&mut send, &proto_msg.encode_to_vec()).await?;
+                        }
+                        ControlProtocol::JsonV0 => {
+                            send.write_all(&bytes).await?;
+                        }
+                    }
                     send.finish()?;
                     Ok::<_, anyhow::Error>(())
                 }
@@ -2656,31 +2784,32 @@ impl Node {
 
     pub async fn request_route_table(&self, conn: &Connection) -> Result<RoutingTable> {
         use prost::Message as _;
+        let protocol = connection_protocol(conn);
         let (mut send, mut recv) = conn.open_bi().await?;
-        let req = crate::proto::node::RouteTableRequest {
-            requester_id: self.endpoint.id().as_bytes().to_vec(),
-            gen: NODE_PROTOCOL_GENERATION,
-        };
-        let req_bytes = req.encode_to_vec();
         send.write_all(&[STREAM_ROUTE_REQUEST]).await?;
-        send.write_all(&(req_bytes.len() as u32).to_le_bytes())
-            .await?;
-        send.write_all(&req_bytes).await?;
-        send.finish()?;
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > MAX_CONTROL_FRAME_BYTES {
-            anyhow::bail!("route table response too large: {len} bytes");
+        if protocol == ControlProtocol::ProtoV1 {
+            let req = crate::proto::node::RouteTableRequest {
+                requester_id: self.endpoint.id().as_bytes().to_vec(),
+                gen: NODE_PROTOCOL_GENERATION,
+            };
+            write_len_prefixed(&mut send, &req.encode_to_vec()).await?;
         }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let proto_table = crate::proto::node::RouteTable::decode(buf.as_slice())
-            .map_err(|e| anyhow::anyhow!("route table decode failed: {e}"))?;
-        proto_table
-            .validate_frame()
-            .map_err(|e| anyhow::anyhow!("invalid route table: {e}"))?;
-        Ok(proto_route_table_to_local(&proto_table))
+        send.finish()?;
+        match protocol {
+            ControlProtocol::ProtoV1 => {
+                let buf = read_len_prefixed(&mut recv).await?;
+                let proto_table = crate::proto::node::RouteTable::decode(buf.as_slice())
+                    .map_err(|e| anyhow::anyhow!("route table decode failed: {e}"))?;
+                proto_table
+                    .validate_frame()
+                    .map_err(|e| anyhow::anyhow!("invalid route table: {e}"))?;
+                Ok(proto_route_table_to_local(&proto_table))
+            }
+            ControlProtocol::JsonV0 => {
+                let buf = recv.read_to_end(MAX_CONTROL_FRAME_BYTES).await?;
+                Ok(serde_json::from_slice(&buf)?)
+            }
+        }
     }
 
     pub fn vram_bytes(&self) -> u64 {
@@ -2709,7 +2838,7 @@ impl Node {
                     if let Some(addr) = addr {
                         let c = tokio::time::timeout(
                             std::time::Duration::from_secs(10),
-                            self.endpoint.connect(addr, ALPN),
+                            connect_mesh(&self.endpoint, addr),
                         )
                         .await
                         .map_err(|_| {
@@ -2762,6 +2891,11 @@ impl Node {
     ) -> Result<()> {
         use prost::Message as _;
 
+        let legacy_json: HashMap<String, u16> = my_tunnel_map
+            .iter()
+            .map(|(id, port)| (hex::encode(id.as_bytes()), *port))
+            .collect();
+        let legacy_bytes = serde_json::to_vec(&legacy_json)?;
         let owner_peer_id = self.endpoint.id().as_bytes().to_vec();
         let entries: Vec<crate::proto::node::TunnelEntry> = my_tunnel_map
             .iter()
@@ -2789,17 +2923,19 @@ impl Node {
 
         for (peer_id, conn) in conns {
             let proto_bytes = proto_bytes.clone();
+            let legacy_bytes = legacy_bytes.clone();
+            let protocol = connection_protocol(&conn);
             tokio::spawn(async move {
                 match conn.open_bi().await {
                     Ok((mut send, _recv)) => {
                         if send.write_all(&[STREAM_TUNNEL_MAP]).await.is_err() {
                             return;
                         }
-                        let len = proto_bytes.len() as u32;
-                        if send.write_all(&len.to_le_bytes()).await.is_err() {
-                            return;
-                        }
-                        if send.write_all(&proto_bytes).await.is_err() {
+                        let body = match protocol {
+                            ControlProtocol::ProtoV1 => &proto_bytes,
+                            ControlProtocol::JsonV0 => &legacy_bytes,
+                        };
+                        if write_len_prefixed(&mut send, body).await.is_err() {
                             return;
                         }
                         let _ = send.finish();
@@ -2931,6 +3067,7 @@ impl Node {
     }
 
     async fn _dispatch_streams(&self, conn: Connection, remote: EndpointId) {
+        let protocol = connection_protocol(&conn);
         loop {
             let (send, mut recv) = match conn.accept_bi().await {
                 Ok(s) => s,
@@ -2950,7 +3087,7 @@ impl Node {
                         tracing::info!("Attempting reconnect to {}...", remote.fmt_short());
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(10),
-                            self.endpoint.connect(addr, ALPN),
+                            connect_mesh(&self.endpoint, addr),
                         )
                         .await
                         {
@@ -3027,8 +3164,12 @@ impl Node {
             match stream_type {
                 STREAM_GOSSIP => {
                     let node = self.clone();
+                    let protocol = protocol;
                     tokio::spawn(async move {
-                        if let Err(e) = node.handle_gossip_stream(remote, send, recv).await {
+                        if let Err(e) = node
+                            .handle_gossip_stream(remote, protocol, send, recv)
+                            .await
+                        {
                             tracing::warn!("Gossip stream error from {}: {e}", remote.fmt_short());
                         }
                     });
@@ -3041,8 +3182,10 @@ impl Node {
                 }
                 STREAM_TUNNEL_MAP => {
                     let node = self.clone();
+                    let protocol = protocol;
                     tokio::spawn(async move {
-                        if let Err(e) = node.handle_tunnel_map_stream(remote, recv).await {
+                        if let Err(e) = node.handle_tunnel_map_stream(remote, protocol, recv).await
+                        {
                             tracing::warn!(
                                 "Tunnel map stream error from {}: {e}",
                                 remote.fmt_short()
@@ -3058,86 +3201,105 @@ impl Node {
                 }
                 STREAM_ROUTE_REQUEST => {
                     let node = self.clone();
+                    let protocol = protocol;
                     tokio::spawn(async move {
-                        let mut len_buf = [0u8; 4];
-                        if recv.read_exact(&mut len_buf).await.is_err() {
-                            tracing::warn!("Route request: missing length prefix — rejecting");
-                            return;
-                        }
-                        let len = u32::from_le_bytes(len_buf) as usize;
-                        if len > MAX_CONTROL_FRAME_BYTES {
-                            tracing::warn!(
-                                "Route request: frame too large ({} bytes) — rejecting",
-                                len
-                            );
-                            return;
-                        }
-                        let mut proto_buf = vec![0u8; len];
-                        if recv.read_exact(&mut proto_buf).await.is_err() {
-                            tracing::warn!("Route request: failed to read proto body — rejecting");
-                            return;
-                        }
-                        let req = match crate::proto::node::RouteTableRequest::decode(
-                            proto_buf.as_slice(),
-                        ) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                tracing::warn!("Route request: invalid protobuf — rejecting: {e}");
+                        if protocol == ControlProtocol::ProtoV1 {
+                            let proto_buf = match read_len_prefixed(&mut recv).await {
+                                Ok(buf) => buf,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Route request: failed to read proto body — rejecting: {e}"
+                                    );
+                                    return;
+                                }
+                            };
+                            let req = match crate::proto::node::RouteTableRequest::decode(
+                                proto_buf.as_slice(),
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Route request: invalid protobuf — rejecting: {e}"
+                                    );
+                                    return;
+                                }
+                            };
+                            if let Err(e) = req.validate_frame() {
+                                tracing::warn!(
+                                    "Route request: frame validation failed — rejecting: {e}"
+                                );
                                 return;
                             }
-                        };
-                        if let Err(e) = req.validate_frame() {
-                            tracing::warn!(
-                                "Route request: frame validation failed — rejecting: {e}"
-                            );
-                            return;
                         }
                         use prost::Message as _;
                         let mut send = send;
                         let table = node.routing_table().await;
-                        let proto_table = routing_table_to_proto(&table);
-                        let proto_bytes = proto_table.encode_to_vec();
-                        let len = proto_bytes.len() as u32;
-                        let _ = send.write_all(&len.to_le_bytes()).await;
-                        let _ = send.write_all(&proto_bytes).await;
+                        match protocol {
+                            ControlProtocol::ProtoV1 => {
+                                let proto_table = routing_table_to_proto(&table);
+                                let _ = write_len_prefixed(&mut send, &proto_table.encode_to_vec())
+                                    .await;
+                            }
+                            ControlProtocol::JsonV0 => {
+                                if let Ok(json) = serde_json::to_vec(&table) {
+                                    let _ = send.write_all(&json).await;
+                                }
+                            }
+                        }
                         let _ = send.finish();
                     });
                 }
                 STREAM_PEER_DOWN => {
                     let node = self.clone();
+                    let protocol = protocol;
                     tokio::spawn(async move {
-                        let mut len_buf = [0u8; 4];
-                        if recv.read_exact(&mut len_buf).await.is_err() {
-                            tracing::warn!("PeerDown: missing length prefix — rejecting");
-                            return;
-                        }
-                        let len = u32::from_le_bytes(len_buf) as usize;
-                        if len > MAX_CONTROL_FRAME_BYTES {
-                            tracing::warn!("PeerDown: frame too large ({} bytes) — rejecting", len);
-                            return;
-                        }
-                        let mut proto_buf = vec![0u8; len];
-                        if recv.read_exact(&mut proto_buf).await.is_err() {
-                            tracing::warn!("PeerDown: failed to read proto body — rejecting");
-                            return;
-                        }
-                        let frame = match crate::proto::node::PeerDown::decode(proto_buf.as_slice())
-                        {
-                            Ok(f) => f,
-                            Err(e) => {
-                                tracing::warn!("PeerDown: invalid protobuf — rejecting: {e}");
-                                return;
+                        let peer_id_arr: [u8; 32] = match protocol {
+                            ControlProtocol::ProtoV1 => {
+                                let proto_buf = match read_len_prefixed(&mut recv).await {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PeerDown: failed to read proto body — rejecting: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                let frame = match crate::proto::node::PeerDown::decode(
+                                    proto_buf.as_slice(),
+                                ) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PeerDown: invalid protobuf — rejecting: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if let Err(e) = frame.validate_frame() {
+                                    tracing::warn!(
+                                        "PeerDown: frame validation failed — rejecting: {e}"
+                                    );
+                                    return;
+                                }
+                                match frame.peer_id.as_slice().try_into() {
+                                    Ok(b) => b,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "PeerDown: peer_id is not 32 bytes — rejecting"
+                                        );
+                                        return;
+                                    }
+                                }
                             }
-                        };
-                        if let Err(e) = frame.validate_frame() {
-                            tracing::warn!("PeerDown: frame validation failed — rejecting: {e}");
-                            return;
-                        }
-                        let peer_id_arr: [u8; 32] = match frame.peer_id.as_slice().try_into() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                tracing::warn!("PeerDown: peer_id is not 32 bytes — rejecting");
-                                return;
+                            ControlProtocol::JsonV0 => {
+                                let mut id_bytes = [0u8; 32];
+                                if recv.read_exact(&mut id_bytes).await.is_err() {
+                                    tracing::warn!(
+                                        "PeerDown: missing legacy endpoint id bytes — rejecting"
+                                    );
+                                    return;
+                                }
+                                id_bytes
                             }
                         };
                         let pk = match iroh::PublicKey::from_bytes(&peer_id_arr) {
@@ -3184,48 +3346,74 @@ impl Node {
                 }
                 STREAM_PEER_LEAVING => {
                     let node = self.clone();
+                    let protocol = protocol;
                     tokio::spawn(async move {
-                        let mut len_buf = [0u8; 4];
-                        if recv.read_exact(&mut len_buf).await.is_err() {
-                            tracing::warn!("PeerLeaving: missing length prefix — rejecting");
-                            return;
-                        }
-                        let len = u32::from_le_bytes(len_buf) as usize;
-                        if len > MAX_CONTROL_FRAME_BYTES {
-                            tracing::warn!(
-                                "PeerLeaving: frame too large ({} bytes) — rejecting",
-                                len
-                            );
-                            return;
-                        }
-                        let mut proto_buf = vec![0u8; len];
-                        if recv.read_exact(&mut proto_buf).await.is_err() {
-                            tracing::warn!("PeerLeaving: failed to read proto body — rejecting");
-                            return;
-                        }
-                        let frame =
-                            match crate::proto::node::PeerLeaving::decode(proto_buf.as_slice()) {
-                                Ok(f) => f,
-                                Err(e) => {
+                        let leaving_id = match protocol {
+                            ControlProtocol::ProtoV1 => {
+                                let proto_buf = match read_len_prefixed(&mut recv).await {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PeerLeaving: failed to read proto body — rejecting: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                let frame = match crate::proto::node::PeerLeaving::decode(
+                                    proto_buf.as_slice(),
+                                ) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PeerLeaving: invalid protobuf — rejecting: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if let Err(e) = frame.validate_frame() {
                                     tracing::warn!(
-                                        "PeerLeaving: invalid protobuf — rejecting: {e}"
+                                        "PeerLeaving: frame validation failed — rejecting: {e}"
                                     );
                                     return;
                                 }
-                            };
-                        if let Err(e) = frame.validate_frame() {
-                            tracing::warn!("PeerLeaving: frame validation failed — rejecting: {e}");
-                            return;
-                        }
-                        let leaving_id = match resolve_peer_leaving(remote, &frame) {
-                            Ok(id) => id,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "PeerLeaving from {}: rejected ({})",
-                                    remote.fmt_short(),
-                                    e
-                                );
-                                return;
+                                match resolve_peer_leaving(remote, &frame) {
+                                    Ok(id) => id,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PeerLeaving from {}: rejected ({})",
+                                            remote.fmt_short(),
+                                            e
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            ControlProtocol::JsonV0 => {
+                                let mut id_bytes = [0u8; 32];
+                                if recv.read_exact(&mut id_bytes).await.is_err() {
+                                    tracing::warn!(
+                                        "PeerLeaving: missing legacy endpoint id bytes — rejecting"
+                                    );
+                                    return;
+                                }
+                                let pk = match iroh::PublicKey::from_bytes(&id_bytes) {
+                                    Ok(k) => k,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "PeerLeaving: endpoint id is not a valid public key — rejecting"
+                                        );
+                                        return;
+                                    }
+                                };
+                                let leaving_id = EndpointId::from(pk);
+                                if leaving_id != remote {
+                                    tracing::warn!(
+                                        "PeerLeaving from {}: rejected (legacy sender mismatch)",
+                                        remote.fmt_short()
+                                    );
+                                    return;
+                                }
+                                leaving_id
                             }
                         };
                         eprintln!(
@@ -3304,7 +3492,7 @@ impl Node {
         tracing::info!("Connecting to peer {}...", peer_id.fmt_short());
         let conn = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            self.endpoint.connect(addr.clone(), ALPN),
+            connect_mesh(&self.endpoint, addr.clone()),
         )
         .await
         {
@@ -3346,77 +3534,50 @@ impl Node {
         remote: EndpointId,
         discover_peers: bool,
     ) -> Result<()> {
+        let protocol = connection_protocol(&conn);
         let t0 = std::time::Instant::now();
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_GOSSIP]).await?;
 
         let our_announcements = self.collect_announcements().await;
-        let our_frame = build_gossip_frame(&our_announcements, self.endpoint.id());
-        let body = our_frame.encode_to_vec();
-        send.write_all(&(body.len() as u32).to_le_bytes()).await?;
-        send.write_all(&body).await?;
+        write_gossip_payload(&mut send, protocol, &our_announcements, self.endpoint.id()).await?;
         send.finish()?;
 
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
         let rtt_ms = t0.elapsed().as_millis() as u32;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > MAX_CONTROL_FRAME_BYTES {
-            anyhow::bail!(
-                "gossip frame too large from {}: {} bytes",
-                remote.fmt_short(),
-                len
-            );
-        }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let their_frame = crate::proto::node::GossipFrame::decode(buf.as_slice())
-            .map_err(|e| anyhow::anyhow!("gossip decode from {}: {e}", remote.fmt_short()))?;
-        their_frame.validate_frame().map_err(|e| {
-            anyhow::anyhow!("invalid gossip frame from {}: {e}", remote.fmt_short())
-        })?;
-        if their_frame.sender_id.as_slice() != remote.as_bytes() {
-            anyhow::bail!(
-                "gossip sender_id mismatch from {}: connection identity does not match frame sender_id",
-                remote.fmt_short()
-            );
-        }
+        let buf = read_len_prefixed(&mut recv).await?;
+        let their_announcements = decode_gossip_payload(protocol, remote, &buf)?;
 
         let _ = recv.read_to_end(0).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        for pa in &their_frame.peers {
-            if let Some((addr, ann)) = proto_ann_to_local(pa) {
-                let peer_id = addr.id;
-                if peer_id == self.endpoint.id() {
-                    continue;
+        for (addr, ann) in &their_announcements {
+            let peer_id = addr.id;
+            if peer_id == self.endpoint.id() {
+                continue;
+            }
+            if peer_id == remote {
+                if let Some(ref their_id) = ann.mesh_id {
+                    self.set_mesh_id(their_id.clone()).await;
                 }
-                if peer_id == remote {
-                    if let Some(ref their_id) = ann.mesh_id {
-                        self.set_mesh_id(their_id.clone()).await;
-                    }
-                    self.merge_remote_demand(&ann.model_demand);
-                    self.add_peer(remote, addr, &ann).await;
-                    self.update_peer_rtt(remote, rtt_ms).await;
-                } else {
-                    self.update_transitive_peer(peer_id, &addr, &ann).await;
-                }
+                self.merge_remote_demand(&ann.model_demand);
+                self.add_peer(remote, addr.clone(), ann).await;
+                self.update_peer_rtt(remote, rtt_ms).await;
+            } else {
+                self.update_transitive_peer(peer_id, addr, ann).await;
             }
         }
 
         if discover_peers {
-            for pa in &their_frame.peers {
-                if let Some((addr, _)) = proto_ann_to_local(pa) {
-                    let peer_id = addr.id;
-                    if peer_id != self.endpoint.id() {
-                        let has_conn = self.state.lock().await.connections.contains_key(&peer_id);
-                        if !has_conn {
-                            if let Err(e) = Box::pin(self.connect_to_peer(addr.clone())).await {
-                                tracing::debug!(
-                                    "Could not connect to discovered peer {}: {e}",
-                                    peer_id.fmt_short()
-                                );
-                            }
+            for (addr, _) in &their_announcements {
+                let peer_id = addr.id;
+                if peer_id != self.endpoint.id() {
+                    let has_conn = self.state.lock().await.connections.contains_key(&peer_id);
+                    if !has_conn {
+                        if let Err(e) = Box::pin(self.connect_to_peer(addr.clone())).await {
+                            tracing::debug!(
+                                "Could not connect to discovered peer {}: {e}",
+                                peer_id.fmt_short()
+                            );
                         }
                     }
                 }
@@ -3436,6 +3597,7 @@ impl Node {
     async fn handle_gossip_stream(
         &self,
         remote: EndpointId,
+        protocol: ControlProtocol,
         mut send: iroh::endpoint::SendStream,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<()> {
@@ -3451,54 +3613,28 @@ impl Node {
             }
         }
 
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > MAX_CONTROL_FRAME_BYTES {
-            anyhow::bail!(
-                "gossip frame too large from {}: {} bytes",
-                remote.fmt_short(),
-                len
-            );
-        }
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-        let their_frame = crate::proto::node::GossipFrame::decode(buf.as_slice())
-            .map_err(|e| anyhow::anyhow!("gossip decode from {}: {e}", remote.fmt_short()))?;
-        their_frame.validate_frame().map_err(|e| {
-            anyhow::anyhow!("invalid gossip frame from {}: {e}", remote.fmt_short())
-        })?;
-        if their_frame.sender_id.as_slice() != remote.as_bytes() {
-            anyhow::bail!(
-                "gossip sender_id mismatch from {}: connection identity does not match frame sender_id",
-                remote.fmt_short()
-            );
-        }
+        let buf = read_len_prefixed(&mut recv).await?;
+        let their_announcements = decode_gossip_payload(protocol, remote, &buf)?;
 
         let our_announcements = self.collect_announcements().await;
-        let our_frame = build_gossip_frame(&our_announcements, self.endpoint.id());
-        let body = our_frame.encode_to_vec();
-        send.write_all(&(body.len() as u32).to_le_bytes()).await?;
-        send.write_all(&body).await?;
+        write_gossip_payload(&mut send, protocol, &our_announcements, self.endpoint.id()).await?;
         send.finish()?;
 
         let _ = recv.read_to_end(0).await;
 
-        for pa in &their_frame.peers {
-            if let Some((addr, ann)) = proto_ann_to_local(pa) {
-                let peer_id = addr.id;
-                if peer_id == self.endpoint.id() {
-                    continue;
+        for (addr, ann) in &their_announcements {
+            let peer_id = addr.id;
+            if peer_id == self.endpoint.id() {
+                continue;
+            }
+            if peer_id == remote {
+                if let Some(ref their_id) = ann.mesh_id {
+                    self.set_mesh_id(their_id.clone()).await;
                 }
-                if peer_id == remote {
-                    if let Some(ref their_id) = ann.mesh_id {
-                        self.set_mesh_id(their_id.clone()).await;
-                    }
-                    self.merge_remote_demand(&ann.model_demand);
-                    self.add_peer(remote, addr, &ann).await;
-                } else {
-                    self.update_transitive_peer(peer_id, &addr, &ann).await;
-                }
+                self.merge_remote_demand(&ann.model_demand);
+                self.add_peer(remote, addr.clone(), ann).await;
+            } else {
+                self.update_transitive_peer(peer_id, addr, ann).await;
             }
         }
 
@@ -3527,17 +3663,15 @@ impl Node {
             }
         }
 
-        for pa in their_frame.peers {
-            if let Some((addr, _)) = proto_ann_to_local(&pa) {
-                let peer_id = addr.id;
-                if peer_id == self.endpoint.id() {
-                    continue;
-                }
-                let already_known = self.state.lock().await.peers.contains_key(&peer_id);
-                if !already_known {
-                    if let Err(e) = Box::pin(self.connect_to_peer(addr)).await {
-                        tracing::warn!("Failed to discover peer: {e}");
-                    }
+        for (addr, _) in their_announcements {
+            let peer_id = addr.id;
+            if peer_id == self.endpoint.id() {
+                continue;
+            }
+            let already_known = self.state.lock().await.peers.contains_key(&peer_id);
+            if !already_known {
+                if let Err(e) = Box::pin(self.connect_to_peer(addr)).await {
+                    tracing::warn!("Failed to discover peer: {e}");
                 }
             }
         }
@@ -3548,27 +3682,21 @@ impl Node {
     async fn handle_tunnel_map_stream(
         &self,
         remote: EndpointId,
+        protocol: ControlProtocol,
         mut recv: iroh::endpoint::RecvStream,
     ) -> Result<()> {
         use prost::Message as _;
 
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        if len > MAX_CONTROL_FRAME_BYTES {
-            anyhow::bail!(
-                "TunnelMap frame too large: {} bytes (max {})",
-                len,
-                MAX_CONTROL_FRAME_BYTES
-            );
-        }
-
-        let mut buf = vec![0u8; len];
-        recv.read_exact(&mut buf).await?;
-
-        let frame = crate::proto::node::TunnelMap::decode(buf.as_slice())
-            .map_err(|e| anyhow::anyhow!("TunnelMap decode error: {e}"))?;
+        let buf = read_len_prefixed(&mut recv).await?;
+        let frame = match protocol {
+            ControlProtocol::ProtoV1 => crate::proto::node::TunnelMap::decode(buf.as_slice())
+                .map_err(|e| anyhow::anyhow!("TunnelMap decode error: {e}"))?,
+            ControlProtocol::JsonV0 => {
+                let mut frame = decode_legacy_tunnel_map_frame(&buf)?;
+                frame.owner_peer_id = remote.as_bytes().to_vec();
+                frame
+            }
+        };
 
         frame
             .validate_frame()
@@ -3901,9 +4029,12 @@ impl Node {
             } else {
                 None
             },
-            gpu_bandwidth_gbps: self.gpu_bandwidth_gbps.lock().await
-                .as_ref()
-                .map(|v| v.iter().map(|f| format!("{:.2}", f)).collect::<Vec<_>>().join(",")),
+            gpu_bandwidth_gbps: self.gpu_bandwidth_gbps.lock().await.as_ref().map(|v| {
+                v.iter()
+                    .map(|f| format!("{:.2}", f))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
             available_model_metadata: my_model_metadata,
             experts_summary: None,
             available_model_sizes: my_model_sizes,
@@ -3916,6 +4047,77 @@ impl Node {
 mod tests {
     use super::*;
     use crate::proto::node::{GossipFrame, NodeRole, PeerAnnouncement, RouteTableRequest};
+    use tokio::sync::watch;
+
+    async fn make_test_node(role: super::NodeRole) -> Result<Node> {
+        use iroh::endpoint::QuicTransportConfig;
+
+        let transport_config = QuicTransportConfig::builder()
+            .max_concurrent_bidi_streams(128u32.into())
+            .build();
+        let endpoint = Endpoint::builder()
+            .secret_key(SecretKey::generate(&mut rand::rng()))
+            .alpns(vec![ALPN_V1.to_vec(), ALPN_V0.to_vec()])
+            .transport_config(transport_config)
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))?
+            .bind()
+            .await?;
+
+        let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
+        let (inflight_change_tx, _) = watch::channel(0u64);
+        let (tunnel_tx, _tunnel_rx) = tokio::sync::mpsc::channel(8);
+        let (tunnel_http_tx, _tunnel_http_rx) = tokio::sync::mpsc::channel(8);
+
+        let node = Node {
+            endpoint,
+            public_addr: None,
+            state: Arc::new(Mutex::new(MeshState {
+                peers: HashMap::new(),
+                connections: HashMap::new(),
+                remote_tunnel_maps: HashMap::new(),
+                dead_peers: HashSet::new(),
+                seen_plugin_messages: HashSet::new(),
+                seen_plugin_message_order: VecDeque::new(),
+            })),
+            role: Arc::new(Mutex::new(role)),
+            models: Arc::new(Mutex::new(Vec::new())),
+            model_source: Arc::new(Mutex::new(None)),
+            serving: Arc::new(Mutex::new(None)),
+            serving_models: Arc::new(Mutex::new(Vec::new())),
+            llama_ready: Arc::new(Mutex::new(false)),
+            available_models: Arc::new(Mutex::new(Vec::new())),
+            requested_models: Arc::new(Mutex::new(Vec::new())),
+            model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            mesh_id: Arc::new(Mutex::new(None)),
+            accepting: Arc::new((
+                tokio::sync::Notify::new(),
+                std::sync::atomic::AtomicBool::new(false),
+            )),
+            vram_bytes: 64 * 1024 * 1024 * 1024,
+            peer_change_tx,
+            peer_change_rx,
+            inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight_change_tx,
+            tunnel_tx,
+            tunnel_http_tx,
+            plugin_manager: Arc::new(Mutex::new(None)),
+            blackboard: crate::blackboard::BlackboardStore::new(false),
+            blackboard_name: Arc::new(Mutex::new(None)),
+            enumerate_host: false,
+            gpu_name: None,
+            hostname: None,
+            is_soc: None,
+            gpu_vram: None,
+            gpu_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        let accept_node = node.clone();
+        tokio::spawn(async move {
+            accept_node.accept_loop().await;
+        });
+
+        Ok(node)
+    }
 
     #[test]
     fn test_merge_demand_takes_max() {
@@ -4338,6 +4540,301 @@ mod tests {
                 ..Default::default()
             }],
         }
+    }
+
+    #[test]
+    fn protocol_from_alpn_supports_v1_and_legacy_v0() {
+        assert_eq!(protocol_from_alpn(ALPN_V1), ControlProtocol::ProtoV1);
+        assert_eq!(protocol_from_alpn(ALPN_V0), ControlProtocol::JsonV0);
+        assert_eq!(
+            protocol_from_alpn(b"mesh-llm/999"),
+            ControlProtocol::ProtoV1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_v0_and_post_proto_nodes_interoperate_over_real_connection() -> Result<()> {
+        use iroh::endpoint::QuicTransportConfig;
+
+        let post_node = make_test_node(super::NodeRole::Host { http_port: 9337 }).await?;
+        let post_id = post_node.id();
+        post_node
+            .set_serving_models(vec!["post-model".to_string()])
+            .await;
+        post_node
+            .set_mesh_id("compat-mesh-01020304".to_string())
+            .await;
+        post_node.start_accepting();
+
+        let legacy_endpoint = Endpoint::builder()
+            .secret_key(SecretKey::generate(&mut rand::rng()))
+            .alpns(vec![ALPN_V0.to_vec()])
+            .transport_config(
+                QuicTransportConfig::builder()
+                    .max_concurrent_bidi_streams(128u32.into())
+                    .build(),
+            )
+            .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))?
+            .bind()
+            .await?;
+        let legacy_id = legacy_endpoint.id();
+        let legacy_addr = legacy_endpoint.addr();
+        let legacy_ann = super::PeerAnnouncement {
+            addr: legacy_addr.clone(),
+            role: super::NodeRole::Host { http_port: 9444 },
+            models: vec!["legacy-model".to_string()],
+            vram_bytes: 48 * 1024 * 1024 * 1024,
+            model_source: Some("legacy-model.gguf".to_string()),
+            serving: Some("legacy-model".to_string()),
+            serving_models: vec!["legacy-model".to_string()],
+            available_models: vec!["legacy-model".to_string()],
+            requested_models: Vec::new(),
+            version: Some("0.50.0".to_string()),
+            model_demand: HashMap::new(),
+            mesh_id: Some("compat-mesh-01020304".to_string()),
+            gpu_name: Some("Legacy GPU".to_string()),
+            hostname: Some("legacy-peer".to_string()),
+            is_soc: Some(false),
+            gpu_vram: Some((48_u64 * 1024 * 1024 * 1024).to_string()),
+            gpu_bandwidth_gbps: None,
+            available_model_metadata: vec![],
+            experts_summary: None,
+            available_model_sizes: HashMap::new(),
+        };
+        let legacy_route_table = RoutingTable {
+            hosts: vec![RouteEntry {
+                model: "legacy-model".to_string(),
+                node_id: legacy_id.fmt_short().to_string(),
+                endpoint_id: legacy_id,
+                vram_gb: 48.0,
+            }],
+            mesh_id: Some("compat-mesh-01020304".to_string()),
+        };
+
+        let server = tokio::spawn(async move {
+            let incoming =
+                tokio::time::timeout(std::time::Duration::from_secs(5), legacy_endpoint.accept())
+                    .await
+                    .expect("legacy endpoint should get an incoming connection")
+                    .expect("accept loop should yield one incoming connection");
+            let mut accepting = incoming.accept().expect("legacy accept should succeed");
+            let alpn = accepting.alpn().await.expect("ALPN should be available");
+            assert_eq!(alpn, ALPN_V0, "new node must fall back to legacy ALPN");
+            let conn = accepting
+                .await
+                .expect("legacy connection handshake should complete");
+            assert_eq!(conn.alpn(), ALPN_V0);
+
+            let (mut send_gossip, mut recv_gossip) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), conn.accept_bi())
+                    .await
+                    .expect("post node should open initial gossip stream")
+                    .expect("initial gossip stream should be accepted");
+            let mut stream_type = [0u8; 1];
+            recv_gossip
+                .read_exact(&mut stream_type)
+                .await
+                .expect("legacy server must read gossip stream type");
+            assert_eq!(stream_type[0], STREAM_GOSSIP);
+            let gossip_buf = read_len_prefixed(&mut recv_gossip)
+                .await
+                .expect("legacy server must read JSON gossip frame");
+            let received_anns: Vec<super::PeerAnnouncement> =
+                serde_json::from_slice(&gossip_buf).expect("legacy gossip must decode as JSON");
+            assert!(
+                received_anns
+                    .iter()
+                    .any(|ann| ann.addr.id == post_id
+                        && ann.serving.as_deref() == Some("post-model")),
+                "initial legacy gossip response should include the post-protobuf host announcement"
+            );
+            let legacy_gossip_body = serde_json::to_vec(&vec![legacy_ann.clone()])
+                .expect("legacy announcement must serialize");
+            write_len_prefixed(&mut send_gossip, &legacy_gossip_body)
+                .await
+                .expect("legacy server should reply with JSON gossip");
+            send_gossip
+                .finish()
+                .expect("legacy gossip reply should finish");
+            let _ = recv_gossip.read_to_end(0).await;
+
+            let (mut send_route_resp, mut recv_route_req) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), conn.accept_bi())
+                    .await
+                    .expect("post node should open legacy route request stream")
+                    .expect("legacy route request stream should be accepted");
+            recv_route_req
+                .read_exact(&mut stream_type)
+                .await
+                .expect("legacy server must read route stream type");
+            assert_eq!(stream_type[0], STREAM_ROUTE_REQUEST);
+            let legacy_route_body =
+                serde_json::to_vec(&legacy_route_table).expect("legacy route table must serialize");
+            send_route_resp
+                .write_all(&legacy_route_body)
+                .await
+                .expect("legacy server must send JSON route table");
+            send_route_resp
+                .finish()
+                .expect("legacy route response should finish");
+
+            let (mut send_gossip2, mut recv_gossip2) = conn
+                .open_bi()
+                .await
+                .expect("legacy server should initiate gossip back to post node");
+            send_gossip2
+                .write_all(&[STREAM_GOSSIP])
+                .await
+                .expect("legacy gossip stream type should be sent");
+            write_len_prefixed(&mut send_gossip2, &legacy_gossip_body)
+                .await
+                .expect("legacy server should send JSON gossip payload");
+            send_gossip2
+                .finish()
+                .expect("legacy initiated gossip should finish");
+            let response_buf = read_len_prefixed(&mut recv_gossip2)
+                .await
+                .expect("post node should answer legacy gossip");
+            let response_anns: Vec<super::PeerAnnouncement> = serde_json::from_slice(&response_buf)
+                .expect("post node must answer with JSON gossip");
+            assert!(
+                response_anns
+                    .iter()
+                    .any(|ann| ann.addr.id == post_id
+                        && ann.serving.as_deref() == Some("post-model")),
+                "post node should answer legacy gossip with its current state"
+            );
+            let _ = recv_gossip2.read_to_end(0).await;
+
+            let (mut send_route_req2, mut recv_route_resp2) = conn
+                .open_bi()
+                .await
+                .expect("legacy server should initiate route request to post node");
+            send_route_req2
+                .write_all(&[STREAM_ROUTE_REQUEST])
+                .await
+                .expect("legacy route request stream type should be sent");
+            send_route_req2
+                .finish()
+                .expect("legacy route request should finish");
+            let route_json = recv_route_resp2
+                .read_to_end(MAX_CONTROL_FRAME_BYTES)
+                .await
+                .expect("post node should reply with legacy JSON route table");
+            let route_table_from_post: RoutingTable =
+                serde_json::from_slice(&route_json).expect("post node route response must be JSON");
+            assert_eq!(
+                route_table_from_post.mesh_id.as_deref(),
+                Some("compat-mesh-01020304")
+            );
+            assert!(
+                route_table_from_post
+                    .hosts
+                    .iter()
+                    .any(|entry| entry.endpoint_id == post_id && entry.model == "post-model"),
+                "legacy peer should see the post node in route-table JSON response"
+            );
+        });
+
+        let invite_token = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&legacy_addr).expect("legacy address should serialize"));
+        post_node.join(&invite_token).await?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let peers = post_node.peers().await;
+                if peers.iter().any(|peer| {
+                    peer.id == legacy_id && peer.serving.as_deref() == Some("legacy-model")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("post node should admit the legacy peer after JSON gossip");
+
+        let legacy_conn = {
+            let state = post_node.state.lock().await;
+            state
+                .connections
+                .get(&legacy_id)
+                .cloned()
+                .expect("join should leave a connection to the legacy peer")
+        };
+        let route_table = post_node.request_route_table(&legacy_conn).await?;
+        assert_eq!(
+            route_table.mesh_id.as_deref(),
+            Some("compat-mesh-01020304"),
+            "post node must parse legacy JSON route-table replies"
+        );
+        assert!(
+            route_table
+                .hosts
+                .iter()
+                .any(|entry| entry.endpoint_id == legacy_id && entry.model == "legacy-model"),
+            "post node must preserve legacy route-table entries"
+        );
+
+        server.await.expect("legacy peer task should complete");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_json_gossip_payload_decodes() {
+        let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x42; 32]).public());
+        let ann = super::PeerAnnouncement {
+            addr: EndpointAddr {
+                id: peer_id,
+                addrs: Default::default(),
+            },
+            role: super::NodeRole::Host { http_port: 3131 },
+            models: vec!["Qwen".into()],
+            vram_bytes: 48_000_000_000,
+            model_source: Some("Qwen.gguf".into()),
+            serving: Some("Qwen".into()),
+            serving_models: vec!["Qwen".into()],
+            available_models: vec!["Qwen".into()],
+            requested_models: vec!["Qwen".into()],
+            version: Some("0.52.0".into()),
+            model_demand: HashMap::from([(
+                "Qwen".into(),
+                ModelDemand {
+                    last_active: 123,
+                    request_count: 7,
+                },
+            )]),
+            mesh_id: Some("mesh-compat".into()),
+            gpu_name: Some("NVIDIA A100".into()),
+            hostname: Some("worker-01".into()),
+            is_soc: Some(false),
+            gpu_vram: Some("51539607552".into()),
+            gpu_bandwidth_gbps: None,
+            available_model_metadata: vec![],
+            experts_summary: None,
+            available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
+        };
+        let json = serde_json::to_vec(&vec![ann.clone()]).unwrap();
+
+        let decoded = decode_gossip_payload(ControlProtocol::JsonV0, peer_id, &json).unwrap();
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0.id, peer_id);
+        assert_eq!(decoded[0].1.serving.as_deref(), Some("Qwen"));
+        assert_eq!(decoded[0].1.mesh_id.as_deref(), Some("mesh-compat"));
+    }
+
+    #[test]
+    fn legacy_json_tunnel_map_decodes() {
+        let target = EndpointId::from(SecretKey::from_bytes(&[0x24; 32]).public());
+        let json = serde_json::to_vec(&HashMap::from([(hex::encode(target.as_bytes()), 9337_u16)]))
+            .unwrap();
+
+        let frame = decode_legacy_tunnel_map_frame(&json).unwrap();
+
+        assert_eq!(frame.entries.len(), 1);
+        assert_eq!(frame.entries[0].target_peer_id, target.as_bytes().to_vec());
+        assert_eq!(frame.entries[0].tunnel_port, 9337);
     }
 
     #[test]
@@ -5212,7 +5709,7 @@ mod tests {
     }
 
     #[test]
-    fn route_table_rejects_bad_generation_or_legacy_payload() {
+    fn proto_v1_route_table_rejects_bad_generation_or_legacy_payload() {
         use crate::proto::node::RouteTable;
 
         let zero_gen_req = RouteTableRequest {
@@ -5437,11 +5934,10 @@ mod tests {
 
     // ── Task 9: End-to-end cut-over regression tests ──────────────────────────
 
-    /// Verifies that all migrated control-plane streams reject legacy JSON payloads AND
-    /// gen=0 / wrong-gen frames. This is the consolidated "legacy rejection" guard that
-    /// proves no JSON fallback slipped into any migrated stream.
+    /// Verifies that protobuf `/1` control frames still reject legacy JSON payloads AND
+    /// gen=0 / wrong-gen frames. Legacy JSON/raw compatibility is only carried on `/0`.
     #[test]
-    fn cutover_all_migrated_streams_reject_json_and_wrong_gen() {
+    fn proto_v1_control_frames_reject_legacy_json_and_wrong_gen() {
         use crate::proto::node::{PeerDown, PeerLeaving};
 
         // JSON bytes that look plausible for the old wire format on each stream
