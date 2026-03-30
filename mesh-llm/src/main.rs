@@ -3203,6 +3203,73 @@ mod tests {
         (port, request_rx, handle)
     }
 
+    async fn spawn_gated_streaming_upstream(
+        content_type: &str,
+        first_chunk: Vec<u8>,
+        second_chunk: Vec<u8>,
+    ) -> (
+        u16,
+        oneshot::Receiver<Vec<u8>>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let content_type = content_type.to_string();
+        let (request_tx, request_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let raw = read_raw_http_request(&mut stream).await;
+            let _ = request_tx.send(raw);
+
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            );
+            if stream.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+
+            let first_chunk_header = format!("{:x}\r\n", first_chunk.len());
+            if stream
+                .write_all(first_chunk_header.as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if stream.write_all(&first_chunk).await.is_err() {
+                return;
+            }
+            if stream.write_all(b"\r\n").await.is_err() {
+                return;
+            }
+
+            if release_rx.await.is_err() {
+                return;
+            }
+
+            let second_chunk_header = format!("{:x}\r\n", second_chunk.len());
+            if stream
+                .write_all(second_chunk_header.as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if stream.write_all(&second_chunk).await.is_err() {
+                return;
+            }
+            if stream.write_all(b"\r\n").await.is_err() {
+                return;
+            }
+
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+            let _ = stream.shutdown().await;
+        });
+        (port, request_rx, release_tx, handle)
+    }
+
     async fn read_raw_http_request(stream: &mut TcpStream) -> Vec<u8> {
         let mut raw = Vec::new();
         loop {
@@ -3500,15 +3567,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_proxy_integration_streaming_response_arrives_incrementally() {
-        let chunks = vec![
-            (Duration::ZERO, br#"data: {"delta":"one"}\n\n"#.to_vec()),
-            (
-                Duration::from_millis(150),
+        let (upstream_port, upstream_rx, release_tx, upstream_handle) =
+            spawn_gated_streaming_upstream(
+                "text/event-stream",
+                br#"data: {"delta":"one"}\n\n"#.to_vec(),
                 br#"data: {"delta":"two"}\n\n"#.to_vec(),
-            ),
-        ];
-        let (upstream_port, upstream_rx, upstream_handle) =
-            spawn_streaming_upstream("text/event-stream", chunks).await;
+            )
+            .await;
         let (proxy_addr, proxy_handle) =
             spawn_api_proxy_test_harness(local_targets(&[("test", upstream_port)])).await;
 
@@ -3538,12 +3603,14 @@ mod tests {
         assert!(first_text.contains("HTTP/1.1 200 OK"));
         assert!(first_text.contains("Content-Type: text/event-stream"));
         assert!(first_text.contains(r#"data: {"delta":"one"}\n\n"#));
-        assert!(tokio::time::timeout(Duration::from_millis(40), async {
+        assert!(!first_text.contains(r#"data: {"delta":"two"}\n\n"#));
+        assert!(tokio::time::timeout(Duration::from_millis(100), async {
             let mut probe = [0u8; 32];
             stream.read(&mut probe).await
         })
         .await
         .is_err());
+        release_tx.send(()).unwrap();
 
         let mut rest = Vec::new();
         stream.read_to_end(&mut rest).await.unwrap();
@@ -3640,18 +3707,10 @@ mod tests {
         );
         let (planner_port, planner_rx, planner_handle) =
             spawn_capturing_upstream(&planner_response).await;
-        let (strong_port, strong_rx, strong_handle) = spawn_streaming_upstream(
+        let (strong_port, strong_rx, release_tx, strong_handle) = spawn_gated_streaming_upstream(
             "text/event-stream",
-            vec![
-                (
-                    Duration::ZERO,
-                    br#"data: {"delta":"pipeline-one"}\n\n"#.to_vec(),
-                ),
-                (
-                    Duration::from_millis(150),
-                    br#"data: {"delta":"pipeline-two"}\n\n"#.to_vec(),
-                ),
-            ],
+            br#"data: {"delta":"pipeline-one"}\n\n"#.to_vec(),
+            br#"data: {"delta":"pipeline-two"}\n\n"#.to_vec(),
         )
         .await;
 
@@ -3682,12 +3741,14 @@ mod tests {
         assert!(first_text.contains("HTTP/1.1 200 OK"));
         assert!(first_text.contains("Transfer-Encoding: chunked"));
         assert!(first_text.contains(r#"data: {"delta":"pipeline-one"}\n\n"#));
-        assert!(tokio::time::timeout(Duration::from_millis(40), async {
+        assert!(!first_text.contains(r#"data: {"delta":"pipeline-two"}\n\n"#));
+        assert!(tokio::time::timeout(Duration::from_millis(100), async {
             let mut probe = [0u8; 32];
             stream.read(&mut probe).await
         })
         .await
         .is_err());
+        release_tx.send(()).unwrap();
 
         let mut rest = Vec::new();
         stream.read_to_end(&mut rest).await.unwrap();
