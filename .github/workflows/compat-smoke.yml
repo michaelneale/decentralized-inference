@@ -18,7 +18,6 @@ env:
 jobs:
   openai-python:
     name: OpenAI Python Compat Smoke
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'compat-smoke')
     runs-on: ubuntu-latest
 
     steps:
