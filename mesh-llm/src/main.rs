@@ -2142,35 +2142,41 @@ async fn api_proxy(
                             .get_moe_target(&session_hint)
                             .unwrap_or(first_available_target(&targets))
                     } else if let Some(ref name) = effective_model {
-                        let selection = affinity::select_model_target_for_request(
+                        let selection = match select_explicit_model_target(
                             &targets, name, body_json, &affinity,
-                        );
-                        let t = selection.target.clone();
-                        if matches!(t, election::InferenceTarget::None) {
-                            tracing::debug!("Model '{}' not found, trying first available", name);
-                            first_available_target(&targets)
-                        } else {
-                            let routed = proxy::route_to_target(
-                                node.clone(),
-                                tcp_stream,
-                                t.clone(),
-                                &request.raw,
-                            )
-                            .await;
-                            if routed {
-                                if let Some(prefix_hash) = selection.learn_prefix_hash {
-                                    affinity.learn_target(name, prefix_hash, &t);
-                                }
-                            } else if let (Some(prefix_hash), Some(cached_target)) = (
-                                selection.learn_prefix_hash,
-                                selection.cached_target.as_ref(),
-                            ) {
-                                if cached_target == &t {
-                                    affinity.forget_target(name, prefix_hash, &t);
-                                }
+                        ) {
+                            Ok(selection) => selection,
+                            Err(msg) => {
+                                tracing::warn!(
+                                    "Model '{}' not available in current target map",
+                                    name
+                                );
+                                let _ = proxy::send_400(tcp_stream, &msg).await;
+                                return;
                             }
-                            return;
+                        };
+                        let t = selection.target.clone();
+
+                        let routed = proxy::route_to_target(
+                            node.clone(),
+                            tcp_stream,
+                            t.clone(),
+                            &request.raw,
+                        )
+                        .await;
+                        if routed {
+                            if let Some(prefix_hash) = selection.learn_prefix_hash {
+                                affinity.learn_target(name, prefix_hash, &t);
+                            }
+                        } else if let (Some(prefix_hash), Some(cached_target)) = (
+                            selection.learn_prefix_hash,
+                            selection.cached_target.as_ref(),
+                        ) {
+                            if cached_target == &t {
+                                affinity.forget_target(name, prefix_hash, &t);
+                            }
                         }
+                        return;
                     } else {
                         first_available_target(&targets)
                     };
@@ -2236,6 +2242,20 @@ fn first_available_target(targets: &election::ModelTargets) -> election::Inferen
         }
     }
     election::InferenceTarget::None
+}
+
+fn select_explicit_model_target(
+    targets: &election::ModelTargets,
+    model: &str,
+    body_json: Option<&serde_json::Value>,
+    affinity: &affinity::AffinityRouter,
+) -> std::result::Result<affinity::TargetSelection, String> {
+    let selection = affinity::select_model_target_for_request(targets, model, body_json, affinity);
+    if matches!(selection.target, election::InferenceTarget::None) {
+        Err(format!("model not available: {model}"))
+    } else {
+        Ok(selection)
+    }
 }
 
 fn bundled_bin_names(name: &str) -> Vec<String> {
@@ -3794,5 +3814,54 @@ mod tests {
             .unwrap();
 
         proxy_handle.abort();
+    }
+
+    #[test]
+    fn test_select_explicit_model_target_rejects_missing_model_instead_of_fallback() {
+        let mut targets = election::ModelTargets::default();
+        targets.targets.insert(
+            "Llama-3.2-1B-Instruct-Q4_K_M".to_string(),
+            vec![election::InferenceTarget::Local(9337)],
+        );
+
+        let err = select_explicit_model_target(
+            &targets,
+            "Qwen3-8B-Q4_K_M",
+            Some(&json!({
+                "model": "Qwen3-8B-Q4_K_M",
+                "messages": [{ "role": "user", "content": "hi" }]
+            })),
+            &affinity::AffinityRouter::default(),
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(err, "model not available: Qwen3-8B-Q4_K_M");
+        assert_eq!(
+            first_available_target(&targets),
+            election::InferenceTarget::Local(9337)
+        );
+    }
+
+    #[test]
+    fn test_select_explicit_model_target_returns_selected_target_when_present() {
+        let mut targets = election::ModelTargets::default();
+        targets.targets.insert(
+            "Qwen3-8B-Q4_K_M".to_string(),
+            vec![election::InferenceTarget::Local(4242)],
+        );
+
+        let selection = select_explicit_model_target(
+            &targets,
+            "Qwen3-8B-Q4_K_M",
+            Some(&json!({
+                "model": "Qwen3-8B-Q4_K_M",
+                "messages": [{ "role": "user", "content": "hi" }]
+            })),
+            &affinity::AffinityRouter::default(),
+        )
+        .unwrap();
+
+        assert_eq!(selection.target, election::InferenceTarget::Local(4242));
     }
 }

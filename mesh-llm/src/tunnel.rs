@@ -109,6 +109,12 @@ impl Manager {
                 let port = http_port_ref.load(Ordering::Relaxed);
                 if port == 0 {
                     tracing::warn!("Inbound HTTP tunnel but no llama-server running, dropping");
+                    tokio::spawn(async move {
+                        if let Err(e) = send_http_unavailable(send, "LLM host not ready").await {
+                            tracing::warn!("Failed to send HTTP tunnel unavailable response: {e}");
+                        }
+                        drop(recv);
+                    });
                     continue;
                 }
                 let node = http_node.clone();
@@ -294,12 +300,32 @@ async fn handle_inbound_http_stream(
     http_port: u16,
 ) -> Result<()> {
     tracing::info!("Inbound HTTP tunnel stream → llama-server :{http_port}");
-    let tcp_stream = TcpStream::connect(format!("127.0.0.1:{http_port}")).await?;
+    let tcp_stream = match TcpStream::connect(format!("127.0.0.1:{http_port}")).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!("Inbound HTTP tunnel can't reach llama-server :{http_port}: {e}");
+            send_http_unavailable(quic_send, "LLM host unavailable").await?;
+            drop(quic_recv);
+            return Ok(());
+        }
+    };
     tcp_stream.set_nodelay(true)?;
     let _inflight = node.begin_inflight_request();
 
     let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
     relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+}
+
+async fn send_http_unavailable(mut quic_send: iroh::endpoint::SendStream, msg: &str) -> Result<()> {
+    let body = format!("{{\"error\":\"{msg}\"}}");
+    let resp = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    quic_send.write_all(resp.as_bytes()).await?;
+    quic_send.finish()?;
+    Ok(())
 }
 
 pub async fn relay_tcp_via_quic(
