@@ -58,6 +58,24 @@ the `model` field in POST bodies and routes to the correct host via QUIC tunnel.
 - **Per-model election groups** — nodes serving the same model elect a host independently
 - **Auto-assignment** — joiners without `--model` get assigned based on mesh needs and what's on disk
 
+### HTTP/1.1 Connection Contract
+
+For routed inference requests, the proxy buffers and routes exactly one HTTP
+request per client connection:
+
+- The full request is framed first (`Content-Length` or chunked) before routing.
+- The forwarded upstream request is rewritten to `Connection: close`.
+- After the buffered request is written upstream, the proxy only relays the
+  response back to the client.
+- Additional client bytes on the same connection are ignored and dropped when
+  the connection closes; they are not replayed to the already-selected
+  upstream.
+
+This is an intentional safety tradeoff. The proxy does not currently implement
+per-request routing for persistent HTTP/1.1 keep-alive or pipelined multi-
+request connections. Clients should open a fresh connection for each routed
+inference request.
+
 ## Mesh Identity
 
 Every mesh has a stable `mesh_id`:

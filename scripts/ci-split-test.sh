@@ -211,7 +211,7 @@ echo "Waiting for client to learn a routable host for ${MODEL_NAME}..."
 for i in $(seq 1 "$MAX_CLIENT_ROUTE_WAIT"); do
     STATUS=$(curl -sf "http://localhost:${C_CONSOLE_PORT}/api/status" 2>/dev/null || echo "")
     if [ -n "$STATUS" ]; then
-        ROUTABLE=$(echo "$STATUS" | python3 - "$MODEL_NAME" -c '
+        ROUTABLE=$(echo "$STATUS" | python3 -c '
 import json, sys
 model = sys.argv[1]
 status = json.load(sys.stdin)
@@ -222,7 +222,7 @@ for peer in status.get("peers", []):
         break
 else:
     print("0")
-' 2>/dev/null || echo "0")
+' "$MODEL_NAME" 2>/dev/null || echo "0")
         if [ "$ROUTABLE" = "1" ]; then
             echo "  ✅ Client sees a host for ${MODEL_NAME} in ${i}s"
             break

@@ -9,6 +9,9 @@ use crate::{backend, download, launch, mesh, moe, tunnel};
 use mesh::NodeRole;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// Calculate total model size, summing all split files if present.
 /// Split files follow the pattern: name-00001-of-00004.gguf
@@ -32,10 +35,6 @@ pub fn total_model_bytes(model: &Path) -> u64 {
     }
     std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
 }
-
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::sync::watch;
 
 /// Determine if this node should be host for its model group.
 /// Only considers peers serving the same model.
@@ -1388,6 +1387,39 @@ mod tests {
         assert_eq!(model_targets.len(), 2);
         assert!(matches!(model_targets[0], InferenceTarget::Remote(id) if id == host_a));
         assert!(matches!(model_targets[1], InferenceTarget::Remote(id) if id == host_b));
+    }
+
+    #[test]
+    fn test_model_targets_round_robin_multiple_hosts() {
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "m".to_string(),
+            vec![
+                InferenceTarget::Local(7001),
+                InferenceTarget::Local(7002),
+                InferenceTarget::Local(7003),
+            ],
+        );
+
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(7001)));
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(7002)));
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(7003)));
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(7001)));
+    }
+
+    #[test]
+    fn test_model_targets_round_robin_shared_across_clones() {
+        let mut targets = ModelTargets::default();
+        targets.targets.insert(
+            "m".to_string(),
+            vec![InferenceTarget::Local(8001), InferenceTarget::Local(8002)],
+        );
+
+        let clone = targets.clone();
+
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(8001)));
+        assert!(matches!(clone.get("m"), InferenceTarget::Local(8002)));
+        assert!(matches!(targets.get("m"), InferenceTarget::Local(8001)));
     }
 
     // ── Session hash routing ──

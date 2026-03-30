@@ -37,6 +37,11 @@ do
     perl -0pi -e 's/^version = "[^"]+"/version = "'"$version"'"/m' "$manifest"
 done
 
+echo "Refreshing Cargo.lock workspace package versions..."
+(cd "$REPO_ROOT" && cargo metadata --format-version 1 >/dev/null)
+
+files+=("$REPO_ROOT/Cargo.lock")
+
 echo "Updated release version to $version:"
 for file in "${files[@]}"; do
     echo "  $file"

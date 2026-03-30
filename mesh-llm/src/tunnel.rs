@@ -17,12 +17,22 @@ use iroh::EndpointId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 /// Global byte counter for tunnel traffic
 static BYTES_TRANSFERRED: AtomicU64 = AtomicU64::new(0);
+
+fn quic_response_first_byte_timeout() -> Duration {
+    std::env::var("MESH_LLM_TUNNEL_FIRST_BYTE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
 
 /// Get total bytes transferred through all tunnels
 pub fn bytes_transferred() -> u64 {
@@ -294,33 +304,6 @@ async fn handle_inbound_http_stream(
     relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
 }
 
-/// Relay a TCP stream through a QUIC bi-stream. Used by the lite client
-/// to tunnel local HTTP requests to the remote host's llama-server.
-/// Relay between two TCP streams (for local proxying).
-pub async fn relay_tcp_streams(a: TcpStream, b: TcpStream) -> Result<()> {
-    let (a_read, mut a_write) = tokio::io::split(a);
-    let (b_read, mut b_write) = tokio::io::split(b);
-    let mut t1 = tokio::spawn(async move {
-        tokio::io::copy(&mut tokio::io::BufReader::new(a_read), &mut b_write).await
-    });
-    let mut t2 = tokio::spawn(async move {
-        tokio::io::copy(&mut tokio::io::BufReader::new(b_read), &mut a_write).await
-    });
-    tokio::select! {
-        r1 = &mut t1 => {
-            r1??;
-            tracing::debug!("relay_tcp_streams: request side finished, waiting for response side");
-            t2.await??;
-        }
-        r2 = &mut t2 => {
-            r2??;
-            t1.abort();
-            let _ = t1.await;
-        }
-    }
-    Ok(())
-}
-
 pub async fn relay_tcp_via_quic(
     tcp_stream: TcpStream,
     quic_send: iroh::endpoint::SendStream,
@@ -328,6 +311,26 @@ pub async fn relay_tcp_via_quic(
 ) -> Result<()> {
     let (tcp_read, tcp_write) = tokio::io::split(tcp_stream);
     relay_bidirectional(tcp_read, tcp_write, quic_send, quic_recv).await
+}
+
+/// Relay only the QUIC response side back to a TCP client.
+///
+/// Used by the HTTP proxy after it has already buffered and forwarded exactly
+/// one request upstream. Any further bytes from the client connection are
+/// intentionally ignored so pipelined follow-up requests are not replayed to
+/// the selected upstream without a fresh routing decision.
+pub async fn relay_quic_response_to_tcp(
+    mut tcp_stream: TcpStream,
+    mut quic_recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    let result = relay_response_with_first_byte_timeout(
+        &mut quic_recv,
+        &mut tcp_stream,
+        quic_response_first_byte_timeout(),
+    )
+    .await;
+    let _ = tcp_stream.shutdown().await;
+    result
 }
 
 /// Bidirectional relay. When either direction finishes, abort the other.
@@ -382,27 +385,46 @@ async fn relay_quic_to_tcp(
     mut quic_recv: iroh::endpoint::RecvStream,
     mut tcp_write: tokio::io::WriteHalf<TcpStream>,
 ) -> Result<()> {
+    relay_response_with_first_byte_timeout(
+        &mut quic_recv,
+        &mut tcp_write,
+        quic_response_first_byte_timeout(),
+    )
+    .await
+}
+
+async fn relay_response_with_first_byte_timeout<R, W>(
+    mut reader: R,
+    mut writer: W,
+    first_byte_timeout: Duration,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
     tracing::debug!("QUIC→TCP: starting relay, about to first read");
 
-    // First-byte timeout: if remote doesn't respond within 10s, it's dead.
+    // First-byte timeout: allow enough time for remote prefill on real prompts.
     // After first byte arrives, no timeout (streaming responses can take minutes).
-    let first_read =
-        tokio::time::timeout(std::time::Duration::from_secs(10), quic_recv.read(&mut buf)).await;
+    let first_read = tokio::time::timeout(first_byte_timeout, reader.read(&mut buf)).await;
     match first_read {
         Err(_) => {
-            anyhow::bail!("QUIC→TCP: no response within 10s — host likely dead");
+            anyhow::bail!(
+                "QUIC→TCP: no response within {:.3}s — host likely dead or still prefill-bound",
+                first_byte_timeout.as_secs_f64()
+            );
         }
-        Ok(Ok(Some(n))) => {
-            tcp_write.write_all(&buf[..n]).await?;
+        Ok(Ok(0)) => {
+            tracing::info!("QUIC→TCP: stream end immediately (0 bytes)");
+            return Ok(());
+        }
+        Ok(Ok(n)) => {
+            writer.write_all(&buf[..n]).await?;
             total += n as u64;
             BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
             tracing::debug!("QUIC→TCP: first read {n} bytes");
-        }
-        Ok(Ok(None)) => {
-            tracing::info!("QUIC→TCP: stream end immediately (0 bytes)");
-            return Ok(());
         }
         Ok(Err(e)) => {
             tracing::warn!("QUIC→TCP: error on first read: {e}");
@@ -412,16 +434,16 @@ async fn relay_quic_to_tcp(
 
     // After first byte, relay without timeout
     loop {
-        match quic_recv.read(&mut buf).await {
-            Ok(Some(n)) => {
-                tcp_write.write_all(&buf[..n]).await?;
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                tracing::info!("QUIC→TCP: stream end after {total} bytes");
+                break;
+            }
+            Ok(n) => {
+                writer.write_all(&buf[..n]).await?;
                 total += n as u64;
                 BYTES_TRANSFERRED.fetch_add(n as u64, Ordering::Relaxed);
                 tracing::debug!("QUIC→TCP: wrote {n} bytes (total: {total})");
-            }
-            Ok(None) => {
-                tracing::info!("QUIC→TCP: stream end after {total} bytes");
-                break;
             }
             Err(e) => {
                 tracing::warn!("QUIC→TCP: error after {total} bytes: {e}");
@@ -430,4 +452,101 @@ async fn relay_quic_to_tcp(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relay_response_times_out_before_first_byte() {
+        let (mut upstream_write, upstream_read) = tokio::io::duplex(1024);
+        let (downstream_write, mut downstream_read) = tokio::io::duplex(1024);
+
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            let _ = upstream_write.write_all(b"late response").await;
+        });
+
+        let err = relay_response_with_first_byte_timeout(
+            upstream_read,
+            downstream_write,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("no response within"));
+        writer.await.unwrap();
+
+        let mut forwarded = Vec::new();
+        downstream_read.read_to_end(&mut forwarded).await.unwrap();
+        assert!(forwarded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_response_allows_slow_but_healthy_first_byte() {
+        let (mut upstream_write, upstream_read) = tokio::io::duplex(1024);
+        let (downstream_write, mut downstream_read) = tokio::io::duplex(1024);
+
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            upstream_write
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .await
+                .unwrap();
+        });
+
+        relay_response_with_first_byte_timeout(
+            upstream_read,
+            downstream_write,
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+
+        writer.await.unwrap();
+
+        let mut forwarded = Vec::new();
+        downstream_read.read_to_end(&mut forwarded).await.unwrap();
+        assert_eq!(
+            forwarded,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_response_allows_slow_follow_up_chunks_after_first_byte() {
+        let (mut upstream_write, upstream_read) = tokio::io::duplex(1024);
+        let (downstream_write, mut downstream_read) = tokio::io::duplex(1024);
+
+        let writer = tokio::spawn(async move {
+            upstream_write
+                .write_all(b"HTTP/1.1 200 OK\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            upstream_write
+                .write_all(b"Content-Length: 5\r\n\r\nhello")
+                .await
+                .unwrap();
+        });
+
+        relay_response_with_first_byte_timeout(
+            upstream_read,
+            downstream_write,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+
+        writer.await.unwrap();
+
+        let mut forwarded = Vec::new();
+        downstream_read.read_to_end(&mut forwarded).await.unwrap();
+        assert_eq!(
+            forwarded,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+        );
+    }
 }

@@ -62,14 +62,58 @@ pub(crate) struct ResolvedBinary {
     pub(crate) flavor: Option<BinaryFlavor>,
 }
 
+pub(crate) fn platform_bin_name(name: &str) -> String {
+    #[cfg(windows)]
+    {
+        if Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+        {
+            name.to_string()
+        } else {
+            format!("{name}.exe")
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        name.to_string()
+    }
+}
+
 fn flavored_bin_name(name: &str, flavor: BinaryFlavor) -> String {
-    format!("{name}-{}", flavor.suffix())
+    platform_bin_name(&format!("{name}-{}", flavor.suffix()))
+}
+
+fn bare_bin_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy();
+    #[cfg(windows)]
+    {
+        // On Windows, strip a `.exe` extension in a case-insensitive way.
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+        {
+            Some(path.file_stem()?.to_string_lossy().to_string())
+        } else {
+            Some(file_name.to_string())
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        Some(file_name.to_string())
+    }
 }
 
 fn infer_binary_flavor(name: &str, path: &Path) -> Option<BinaryFlavor> {
-    let file_name = path.file_name()?.to_string_lossy();
+    let file_name = bare_bin_name(path)?;
     for flavor in BinaryFlavor::ALL {
-        if file_name == flavored_bin_name(name, flavor) {
+        if file_name == format!("{name}-{}", flavor.suffix()) {
             return Some(flavor);
         }
     }
@@ -90,7 +134,7 @@ pub(crate) fn resolve_binary_path(
             });
         }
 
-        let generic = bin_dir.join(name);
+        let generic = bin_dir.join(platform_bin_name(name));
         if generic.exists() {
             return Ok(ResolvedBinary {
                 path: generic,
@@ -106,7 +150,7 @@ pub(crate) fn resolve_binary_path(
         );
     }
 
-    let generic = bin_dir.join(name);
+    let generic = bin_dir.join(platform_bin_name(name));
     if generic.exists() {
         let flavor = infer_binary_flavor(name, &generic);
         return Ok(ResolvedBinary {
@@ -128,7 +172,7 @@ pub(crate) fn resolve_binary_path(
         1 => Ok(matches.into_iter().next().unwrap()),
         0 => anyhow::bail!(
             "{} not found in {}",
-            bin_dir.join(name).display(),
+            bin_dir.join(platform_bin_name(name)).display(),
             bin_dir.display()
         ),
         _ => {
@@ -397,6 +441,12 @@ pub async fn start_rpc_server(
 /// Only kills rpc-servers with PPID 1 (parent died, adopted by init).
 /// Safe to call while a live mesh-llm has its own rpc-server child.
 pub async fn kill_orphan_rpc_servers() {
+    #[cfg(windows)]
+    {
+        return;
+    }
+
+    #[cfg(not(windows))]
     if let Ok(output) = std::process::Command::new("ps")
         .args(["-eo", "pid,ppid,comm"])
         .output()
@@ -449,6 +499,21 @@ async fn terminate_process(pid: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 }
 
+/// Kill all running llama-server processes.
+pub async fn kill_llama_server() {
+    let _ = terminate_process_by_name("llama-server");
+    // Wait for the process to actually exit and release the port
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if !is_process_running("llama-server") {
+            return;
+        }
+    }
+    // Force kill if still alive after 5s
+    let _ = force_kill_process_by_name("llama-server");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+}
+
 /// Start a backend server for a model. This dispatches to the concrete backend
 /// implementation so other runtimes can plug into the same control plane.
 pub async fn start_model_server(
@@ -481,6 +546,63 @@ async fn is_port_open(port: u16) -> bool {
         .is_ok()
 }
 
+pub fn terminate_process_by_name(name: &str) -> bool {
+    kill_process_by_name(name, false)
+}
+
+pub fn force_kill_process_by_name(name: &str) -> bool {
+    kill_process_by_name(name, true)
+}
+
+fn kill_process_by_name(name: &str, force: bool) -> bool {
+    #[cfg(windows)]
+    {
+        let image = platform_bin_name(name);
+        let mut cmd = std::process::Command::new("taskkill");
+        if force {
+            cmd.arg("/F");
+        }
+        cmd.args(["/IM", &image]);
+        cmd.status().is_ok_and(|status| status.success())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new("pkill");
+        if force {
+            cmd.arg("-9");
+        }
+        cmd.args(["-f", name]);
+        cmd.status().is_ok_and(|status| status.success())
+    }
+}
+
+fn is_process_running(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let image = platform_bin_name(name);
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {image}")])
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .to_ascii_lowercase()
+                        .contains(&image.to_ascii_lowercase())
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("pgrep")
+            .args(["-f", name])
+            .output()
+            .map(|output| output.status.success() && !output.stdout.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 /// Detect the best available compute device
 fn detect_device() -> String {
     if cfg!(target_os = "macos") {
@@ -505,23 +627,47 @@ fn detect_device() -> String {
         return "CUDA0".to_string();
     }
 
-    // Linux: check for AMD ROCm/HIP
-    if command_has_output("rocm-smi", &["--showproductname"]) || command_has_output("rocminfo", &[])
-    {
+    // ROCm/HIP
+    if has_rocm_backend() {
         return "HIP0".to_string();
     }
 
-    // Linux: check for Vulkan
-    if let Ok(output) = std::process::Command::new("vulkaninfo")
-        .args(["--summary"])
-        .output()
-    {
-        if output.status.success() {
-            return "Vulkan0".to_string();
-        }
+    // Vulkan
+    if command_succeeds("vulkaninfo", &["--summary"]) {
+        return "Vulkan0".to_string();
     }
 
     "CPU".to_string()
+}
+
+fn has_rocm_backend() -> bool {
+    #[cfg(windows)]
+    {
+        if std::env::var_os("ROCM_PATH").is_some() || std::env::var_os("HIP_PATH").is_some() {
+            return true;
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let base = PathBuf::from(program_files).join("AMD");
+            if base.join("ROCm").exists() || base.join("HIP").exists() {
+                return true;
+            }
+        }
+        command_has_output("hipInfo", &[]) || command_has_output("hipconfig", &[])
+    }
+
+    #[cfg(not(windows))]
+    {
+        command_has_output("rocm-smi", &["--showproductname"])
+            || command_has_output("rocminfo", &[])
+    }
+}
+
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    std::process::Command::new(command)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 /// Simple HTTP health check (avoid adding reqwest as a dep — just use TCP + raw HTTP)
@@ -584,9 +730,20 @@ No devices found
             super::infer_binary_flavor("rpc-server", Path::new("rpc-server-vulkan")),
             Some(BinaryFlavor::Vulkan)
         );
+        #[cfg(windows)]
+        assert_eq!(
+            super::infer_binary_flavor("rpc-server", Path::new("rpc-server-vulkan.exe")),
+            Some(BinaryFlavor::Vulkan)
+        );
         assert_eq!(
             super::infer_binary_flavor("rpc-server", Path::new("rpc-server")),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn platform_bin_name_preserves_existing_exe_suffix_case_insensitively() {
+        assert_eq!(super::platform_bin_name("rpc-server.EXE"), "rpc-server.EXE");
     }
 }

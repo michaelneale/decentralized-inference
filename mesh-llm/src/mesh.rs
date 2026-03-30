@@ -766,6 +766,75 @@ impl Node {
         ))
     }
 
+    #[cfg(test)]
+    pub async fn new_for_tests(role: NodeRole) -> Result<Self> {
+        use iroh::endpoint::QuicTransportConfig;
+
+        let transport_config = QuicTransportConfig::builder()
+            .max_concurrent_bidi_streams(1024u32.into())
+            .build();
+        let endpoint = Endpoint::builder()
+            .secret_key(SecretKey::generate(&mut rand::rng()))
+            .alpns(vec![ALPN.to_vec()])
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .transport_config(transport_config)
+            .bind()
+            .await?;
+
+        let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
+        let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
+        let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
+        let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
+
+        let _channels = TunnelChannels {
+            rpc: tunnel_rx,
+            http: tunnel_http_rx,
+        };
+
+        Ok(Node {
+            endpoint,
+            public_addr: None,
+            state: Arc::new(Mutex::new(MeshState {
+                peers: HashMap::new(),
+                connections: HashMap::new(),
+                remote_tunnel_maps: HashMap::new(),
+                dead_peers: std::collections::HashSet::new(),
+                seen_plugin_messages: HashSet::new(),
+                seen_plugin_message_order: VecDeque::new(),
+            })),
+            role: Arc::new(Mutex::new(role)),
+            models: Arc::new(Mutex::new(Vec::new())),
+            model_source: Arc::new(Mutex::new(None)),
+            serving: Arc::new(Mutex::new(None)),
+            serving_models: Arc::new(Mutex::new(Vec::new())),
+            llama_ready: Arc::new(Mutex::new(false)),
+            available_models: Arc::new(Mutex::new(Vec::new())),
+            requested_models: Arc::new(Mutex::new(Vec::new())),
+            model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            mesh_id: Arc::new(Mutex::new(None)),
+            accepting: Arc::new((
+                tokio::sync::Notify::new(),
+                std::sync::atomic::AtomicBool::new(false),
+            )),
+            vram_bytes: 0,
+            peer_change_tx,
+            peer_change_rx,
+            inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight_change_tx,
+            tunnel_tx,
+            tunnel_http_tx,
+            plugin_manager: Arc::new(Mutex::new(None)),
+            blackboard: crate::blackboard::BlackboardStore::new(false),
+            blackboard_name: Arc::new(Mutex::new(None)),
+            enumerate_host: false,
+            gpu_name: None,
+            hostname: None,
+            is_soc: Some(false),
+            gpu_vram: None,
+            gpu_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
+        })
+    }
+
     pub fn invite_token(&self) -> String {
         let mut addr = self.endpoint.addr();
         // Inject STUN-discovered public address if relay STUN didn't provide one.

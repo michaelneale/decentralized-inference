@@ -239,6 +239,14 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 - SSE events push every 2s and on topology changes
 - Discover results can be matched to current mesh by `mesh_id`
 
+### 24. HTTP proxy single-request connection contract
+
+- Send a routed inference request, then pipeline or reuse the same TCP
+  connection for a second request.
+- Verify only the first request reaches the selected upstream.
+- Verify the proxy closes the routed connection after the first response.
+- Verify the upstream-observed request includes `Connection: close`.
+
 ## Resilience
 
 ### 11. Dead peer cleanup

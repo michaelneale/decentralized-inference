@@ -225,6 +225,7 @@ pub async fn route_with_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::Client;
     use serde_json::json;
 
     #[test]
@@ -325,5 +326,36 @@ mod tests {
             needs_tools: false,
         };
         assert!(!should_pipeline(&cl));
+    }
+
+    #[tokio::test]
+    async fn test_route_with_pipeline_preplan_failure_falls_back_unmodified() {
+        use crate::router::{Category, Classification, Complexity};
+
+        let client = Client::new();
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "Inspect the codebase and call tools to fix the bug"}
+            ]
+        });
+        let classification = Classification {
+            category: Category::Code,
+            complexity: Complexity::Deep,
+            needs_tools: true,
+        };
+
+        let (out_body, model, plan) = route_with_pipeline(
+            &client,
+            "http://127.0.0.1:9",
+            "planner",
+            "strong",
+            body.clone(),
+            &classification,
+        )
+        .await;
+
+        assert_eq!(out_body, body);
+        assert_eq!(model, "strong");
+        assert!(plan.is_none());
     }
 }

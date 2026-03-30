@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use std::ffi::CString;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -8,21 +9,60 @@ use std::path::{Path, PathBuf};
 use crate::{download, launch, plugin, Cli, VERSION};
 
 const DEFAULT_RELEASE_REPO: &str = "michaelneale/mesh-llm";
+#[cfg(not(windows))]
 const INSTALL_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.sh";
+#[cfg_attr(not(windows), allow(dead_code))]
+const RELEASES_URL: &str = "https://github.com/michaelneale/mesh-llm/releases/latest";
 const SELF_UPDATE_ATTEMPTED_ENV: &str = "MESH_LLM_SELF_UPDATE_ATTEMPTED";
 const SELF_UPDATE_DISABLED_ENV: &str = "MESH_LLM_NO_SELF_UPDATE";
 const SELF_UPDATE_REPO_ENV: &str = "MESH_LLM_SELF_UPDATE_REPO";
 
+enum InstallOutcome {
+    #[cfg_attr(windows, allow(dead_code))]
+    RestartNow,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    HandoffAndExit,
+}
+
+struct ReleaseInfo {
+    version: String,
+    assets: Vec<String>,
+}
+
 pub(crate) async fn check_for_update() {
-    if let Some(latest) = latest_release_version().await {
-        if version_newer(&latest, VERSION) {
+    if !platform_has_release_assets() {
+        return;
+    }
+    if let Some(release) = latest_release_info().await {
+        if version_newer(&release.version, VERSION)
+            && release_has_any_platform_asset(
+                &release.assets,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            )
+        {
             eprintln!(
-                "💡 Update available: v{VERSION} → v{latest}  https://github.com/michaelneale/mesh-llm/releases"
+                "💡 Update available: v{VERSION} → v{}  https://github.com/michaelneale/mesh-llm/releases",
+                release.version
             );
+            #[cfg(windows)]
+            eprintln!("   Download the latest Windows ZIP from {RELEASES_URL}");
+            #[cfg(not(windows))]
             eprintln!("   curl -fsSL {INSTALL_SCRIPT_URL} | bash");
         }
     }
+}
+
+fn platform_has_release_assets() -> bool {
+    platform_has_release_assets_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_has_release_assets_for(os: &str, arch: &str) -> bool {
+    matches!(
+        (os, arch),
+        ("macos", "aarch64") | ("linux", "x86_64") | ("windows", "x86_64")
+    )
 }
 
 pub(crate) async fn maybe_self_update(cli: &Cli) -> Result<bool> {
@@ -41,11 +81,14 @@ pub(crate) async fn maybe_self_update(cli: &Cli) -> Result<bool> {
         return Ok(false);
     };
 
-    let Some(latest) = latest_release_version().await else {
+    let Some(release) = latest_release_info().await else {
         return Ok(true);
     };
-    if !version_newer(&latest, VERSION) {
+    if !version_newer(&release.version, VERSION) {
         return Ok(true);
+    }
+    if !release.assets.iter().any(|asset| asset == &asset_name) {
+        return Ok(false);
     }
     if !path_is_writable(&exe) {
         eprintln!(
@@ -56,14 +99,19 @@ pub(crate) async fn maybe_self_update(cli: &Cli) -> Result<bool> {
     }
 
     eprintln!(
-        "⬇️ Updating mesh-llm v{VERSION} → v{latest} ({})...",
+        "⬇️ Updating mesh-llm v{VERSION} → v{} ({})...",
+        release.version,
         bundle_flavor.suffix()
     );
-    match install_latest_bundle(&install_dir, &asset_name, bundle_flavor).await {
-        Ok(()) => {
-            eprintln!("✅ Updated to v{latest}; restarting");
+    match install_latest_bundle(&exe, &install_dir, &asset_name, bundle_flavor).await {
+        Ok(InstallOutcome::RestartNow) => {
+            eprintln!("✅ Updated to v{}; restarting", release.version);
             std::env::set_var(SELF_UPDATE_ATTEMPTED_ENV, "1");
             exec_current_binary(&exe)?;
+        }
+        Ok(InstallOutcome::HandoffAndExit) => {
+            eprintln!("✅ Updated to v{}; restarting", release.version);
+            std::process::exit(0);
         }
         Err(err) => {
             eprintln!("⚠️  Startup self-update failed: {err}");
@@ -87,6 +135,10 @@ pub(crate) fn startup_self_update_enabled(cli: &Cli) -> bool {
 }
 
 pub(crate) async fn latest_release_version() -> Option<String> {
+    latest_release_info().await.map(|release| release.version)
+}
+
+async fn latest_release_info() -> Option<ReleaseInfo> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -103,7 +155,19 @@ pub(crate) async fn latest_release_version() -> Option<String> {
     if latest.is_empty() {
         None
     } else {
-        Some(latest.to_string())
+        let assets = body["assets"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Some(ReleaseInfo {
+            version: latest.to_string(),
+            assets,
+        })
     }
 }
 
@@ -121,7 +185,15 @@ fn should_attempt_self_update(cli: &Cli) -> bool {
 }
 
 fn stable_release_asset_name(flavor: launch::BinaryFlavor) -> Option<String> {
-    match (std::env::consts::OS, std::env::consts::ARCH, flavor) {
+    stable_release_asset_name_for(std::env::consts::OS, std::env::consts::ARCH, flavor)
+}
+
+fn stable_release_asset_name_for(
+    os: &str,
+    arch: &str,
+    flavor: launch::BinaryFlavor,
+) -> Option<String> {
+    match (os, arch, flavor) {
         ("macos", "aarch64", launch::BinaryFlavor::Metal) => {
             Some("mesh-llm-aarch64-apple-darwin.tar.gz".to_string())
         }
@@ -137,12 +209,36 @@ fn stable_release_asset_name(flavor: launch::BinaryFlavor) -> Option<String> {
         ("linux", "x86_64", launch::BinaryFlavor::Vulkan) => {
             Some("mesh-llm-x86_64-unknown-linux-gnu-vulkan.tar.gz".to_string())
         }
+        ("windows", "x86_64", launch::BinaryFlavor::Cpu) => {
+            Some("mesh-llm-x86_64-pc-windows-msvc.zip".to_string())
+        }
+        ("windows", "x86_64", launch::BinaryFlavor::Cuda) => {
+            Some("mesh-llm-x86_64-pc-windows-msvc-cuda.zip".to_string())
+        }
+        ("windows", "x86_64", launch::BinaryFlavor::Rocm) => {
+            Some("mesh-llm-x86_64-pc-windows-msvc-rocm.zip".to_string())
+        }
+        ("windows", "x86_64", launch::BinaryFlavor::Vulkan) => {
+            Some("mesh-llm-x86_64-pc-windows-msvc-vulkan.zip".to_string())
+        }
         _ => None,
     }
 }
 
+fn release_has_any_platform_asset(assets: &[String], os: &str, arch: &str) -> bool {
+    launch::BinaryFlavor::ALL.into_iter().any(|flavor| {
+        stable_release_asset_name_for(os, arch, flavor)
+            .as_ref()
+            .is_some_and(|asset| assets.iter().any(|candidate| candidate == asset))
+    })
+}
+
+fn mesh_binary_name() -> String {
+    launch::platform_bin_name("mesh-llm")
+}
+
 fn bundled_server_flavor_name(name: &str, flavor: launch::BinaryFlavor) -> String {
-    format!("{name}-{}", flavor.suffix())
+    launch::platform_bin_name(&format!("{name}-{}", flavor.suffix()))
 }
 
 fn has_bundled_server_pair(dir: &Path, flavor: launch::BinaryFlavor) -> bool {
@@ -219,18 +315,29 @@ fn bundle_install_dir(
     requested_flavor: Option<launch::BinaryFlavor>,
 ) -> Option<(PathBuf, launch::BinaryFlavor)> {
     let dir = exe.parent()?;
-    if exe.file_name()?.to_str()? != "mesh-llm" {
-        return None;
+    let file_name = exe.file_name()?.to_str()?;
+    #[cfg(windows)]
+    {
+        if !file_name.eq_ignore_ascii_case(&mesh_binary_name()) {
+            return None;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if file_name != mesh_binary_name() {
+            return None;
+        }
     }
     let flavor = installed_bundle_flavor(dir, requested_flavor)?;
     Some((dir.to_path_buf(), flavor))
 }
 
 async fn install_latest_bundle(
+    exe: &Path,
     install_dir: &Path,
     asset_name: &str,
     expected_flavor: launch::BinaryFlavor,
-) -> Result<()> {
+) -> Result<InstallOutcome> {
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -251,16 +358,37 @@ async fn install_latest_bundle(
         download::download_url(&latest_release_asset_url(asset_name), &archive).await?;
         extract_bundle_archive(&archive, &extracted)?;
         let staged_files = collect_bundle_files(&extracted, expected_flavor)?;
-        replace_bundle_files(install_dir, &extracted, &backup, &staged_files)?;
-        Ok::<(), anyhow::Error>(())
+        finish_bundle_install(
+            exe,
+            install_dir,
+            &workspace,
+            &extracted,
+            &backup,
+            &staged_files,
+        )?;
+        Ok::<InstallOutcome, anyhow::Error>(install_outcome())
     }
     .await;
 
-    let _ = std::fs::remove_dir_all(&workspace);
+    if !matches!(result, Ok(InstallOutcome::HandoffAndExit)) {
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
     result
 }
 
 fn extract_bundle_archive(archive: &Path, extracted: &Path) -> Result<()> {
+    match archive
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("zip") => extract_zip_archive(archive, extracted),
+        _ => extract_tar_archive(archive, extracted),
+    }
+}
+
+fn extract_tar_archive(archive: &Path, extracted: &Path) -> Result<()> {
     let status = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(archive)
@@ -273,6 +401,110 @@ fn extract_bundle_archive(archive: &Path, extracted: &Path) -> Result<()> {
     Ok(())
 }
 
+fn extract_zip_archive(archive: &Path, extracted: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("Failed to open {}", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .with_context(|| format!("Failed to read ZIP archive {}", archive.display()))?;
+
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index)?;
+        let enclosed = entry
+            .enclosed_name()
+            .context("ZIP archive contained an invalid path")?;
+        let mut components = enclosed.components();
+        let _top_level = components.next();
+        let relative: PathBuf = components.collect();
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+
+        let output = extracted.join(&relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output)
+                .with_context(|| format!("Failed to create {}", output.display()))?;
+            continue;
+        }
+
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        let mut out = std::fs::File::create(&output)
+            .with_context(|| format!("Failed to create {}", output.display()))?;
+        io::copy(&mut entry, &mut out)
+            .with_context(|| format!("Failed to extract {}", output.display()))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use zip::write::SimpleFileOptions;
+    use zip::CompressionMethod;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}", prefix, nanos));
+        // Best-effort cleanup in case something is left behind from a previous run.
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("failed to create temporary directory");
+        dir
+    }
+
+    #[test]
+    fn extract_zip_archive_strips_top_level_directory() -> Result<()> {
+        let base_dir = unique_temp_dir("mesh_llm_extract_zip_test");
+        let archive_path = base_dir.join("bundle.zip");
+        let extracted_dir = base_dir.join("extracted");
+        fs::create_dir_all(&extracted_dir)?;
+
+        // Create a ZIP with a single top-level directory, similar to the release packager.
+        let file = std::fs::File::create(&archive_path)
+            .with_context(|| format!("Failed to create test archive {}", archive_path.display()))?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+
+        // Top-level directory.
+        writer.add_directory("bundle-1.0.0/", options)?;
+        // Nested directory and file under the top-level directory.
+        writer.add_directory("bundle-1.0.0/bin/", options)?;
+        writer.start_file("bundle-1.0.0/bin/server", options)?;
+        writer.write_all(b"dummy-server")?;
+
+        writer
+            .finish()
+            .with_context(|| "Failed to finalize test ZIP archive")?;
+
+        // Now extract and verify that the top-level directory is stripped.
+        extract_zip_archive(&archive_path, &extracted_dir)?;
+
+        let server_path = extracted_dir.join("bin").join("server");
+        anyhow::ensure!(
+            server_path.is_file(),
+            "Expected extracted server file at {}",
+            server_path.display()
+        );
+
+        let top_level = extracted_dir.join("bundle-1.0.0");
+        anyhow::ensure!(
+            !top_level.exists(),
+            "Top-level directory should have been stripped, but {} exists",
+            top_level.display()
+        );
+
+        Ok(())
+    }
+}
 fn collect_bundle_files(
     extracted: &Path,
     expected_flavor: launch::BinaryFlavor,
@@ -307,13 +539,15 @@ fn collect_bundle_files(
 
     anyhow::ensure!(!files.is_empty(), "Downloaded bundle was empty");
     anyhow::ensure!(
-        files.iter().any(|name| name == "mesh-llm"),
-        "Downloaded bundle missing mesh-llm"
+        files.iter().any(|name| name == &mesh_binary_name()),
+        "Downloaded bundle missing {}",
+        mesh_binary_name()
     );
-    files.sort_by_key(|name| (name == "mesh-llm", name.clone()));
+    files.sort_by_key(|name| (name == &mesh_binary_name(), name.clone()));
     Ok(files)
 }
 
+#[cfg(not(windows))]
 fn backup_existing_file(
     install_dir: &Path,
     backup: &Path,
@@ -341,6 +575,7 @@ fn backup_existing_file(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn replace_bundle_files(
     install_dir: &Path,
     extracted: &Path,
@@ -353,7 +588,7 @@ fn replace_bundle_files(
         .with_context(|| format!("Failed to create backup dir {}", backup.display()))?;
 
     let staged_names: BTreeSet<&str> = staged_files.iter().map(String::as_str).collect();
-    let mut managed_names: BTreeSet<String> = BTreeSet::from(["mesh-llm".to_string()]);
+    let mut managed_names: BTreeSet<String> = BTreeSet::from([mesh_binary_name()]);
     managed_names.extend(super::bundled_bin_names("rpc-server"));
     managed_names.extend(super::bundled_bin_names("llama-server"));
 
@@ -388,6 +623,178 @@ fn replace_bundle_files(
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn install_outcome() -> InstallOutcome {
+    InstallOutcome::RestartNow
+}
+
+#[cfg(windows)]
+fn install_outcome() -> InstallOutcome {
+    InstallOutcome::HandoffAndExit
+}
+
+#[cfg(not(windows))]
+fn finish_bundle_install(
+    _exe: &Path,
+    install_dir: &Path,
+    _workspace: &Path,
+    extracted: &Path,
+    backup: &Path,
+    staged_files: &[String],
+) -> Result<()> {
+    replace_bundle_files(install_dir, extracted, backup, staged_files)
+}
+
+#[cfg(windows)]
+fn finish_bundle_install(
+    exe: &Path,
+    install_dir: &Path,
+    workspace: &Path,
+    extracted: &Path,
+    backup: &Path,
+    staged_files: &[String],
+) -> Result<()> {
+    use std::process::Command;
+
+    let script = workspace.join("apply-update.ps1");
+    let script_body =
+        windows_update_script(exe, install_dir, workspace, extracted, backup, staged_files)?;
+    std::fs::write(&script, script_body)
+        .with_context(|| format!("Failed to write {}", script.display()))?;
+
+    Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .spawn()
+        .with_context(|| format!("Failed to launch Windows updater {}", script.display()))?;
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_update_script(
+    exe: &Path,
+    install_dir: &Path,
+    workspace: &Path,
+    extracted: &Path,
+    backup: &Path,
+    staged_files: &[String],
+) -> Result<String> {
+    use std::collections::BTreeSet;
+
+    let staged_json = serde_json::to_string(staged_files)?;
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    let args_json = serde_json::to_string(&args)?;
+
+    let mut managed_names: BTreeSet<String> = BTreeSet::from([mesh_binary_name()]);
+    managed_names.extend(super::bundled_bin_names("rpc-server"));
+    managed_names.extend(super::bundled_bin_names("llama-server"));
+    let managed_json = serde_json::to_string(&managed_names.into_iter().collect::<Vec<_>>())?;
+
+    let quote = |path: &Path| path.to_string_lossy().replace('\'', "''");
+
+    let args_json_ps = args_json.replace('\'', "''");
+    let managed_json_ps = managed_json.replace('\'', "''");
+    let staged_json_ps = staged_json.replace('\'', "''");
+
+    Ok(format!(
+        r#"$ErrorActionPreference = 'Stop'
+$installDir = '{install_dir}'
+$workspace = '{workspace}'
+$stagingDir = '{staging_dir}'
+$backupDir = '{backup_dir}'
+$exePath = '{exe_path}'
+$waitPid = {wait_pid}
+$managedNames = @((ConvertFrom-Json '{managed_json_ps}'))
+$stagedNames = @((ConvertFrom-Json '{staged_json_ps}'))
+$args = @((ConvertFrom-Json '{args_json_ps}'))
+
+function Restore-Backups([string[]]$BackedUpNames, [string[]]$InstalledNames) {{
+    foreach ($name in $InstalledNames) {{
+        $dest = Join-Path $installDir $name
+        Remove-Item $dest -Force -ErrorAction SilentlyContinue
+    }}
+    foreach ($name in $BackedUpNames) {{
+        $backupPath = Join-Path $backupDir $name
+        $dest = Join-Path $installDir $name
+        if (Test-Path $backupPath) {{
+            Move-Item -Force $backupPath $dest
+        }}
+    }}
+}}
+
+while (Get-Process -Id $waitPid -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 200
+}}
+
+$backedUp = New-Object System.Collections.Generic.List[string]
+$installed = New-Object System.Collections.Generic.List[string]
+
+try {{
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+    foreach ($name in $managedNames) {{
+        if ($stagedNames -contains $name) {{
+            continue
+        }}
+        $dest = Join-Path $installDir $name
+        if (-not (Test-Path $dest)) {{
+            continue
+        }}
+        $backupPath = Join-Path $backupDir $name
+        Move-Item -Force $dest $backupPath
+        $backedUp.Add($name) | Out-Null
+    }}
+
+    foreach ($name in $stagedNames) {{
+        $dest = Join-Path $installDir $name
+        if (-not (Test-Path $dest)) {{
+            continue
+        }}
+        if ($backedUp.Contains($name)) {{
+            continue
+        }}
+        $backupPath = Join-Path $backupDir $name
+        Move-Item -Force $dest $backupPath
+        $backedUp.Add($name) | Out-Null
+    }}
+
+    foreach ($name in $stagedNames) {{
+        $source = Join-Path $stagingDir $name
+        $dest = Join-Path $installDir $name
+        Move-Item -Force $source $dest
+        $installed.Add($name) | Out-Null
+    }}
+
+    $env:MESH_LLM_SELF_UPDATE_ATTEMPTED = '1'
+    & $exePath @args
+    exit $LASTEXITCODE
+}} catch {{
+    Restore-Backups $backedUp.ToArray() $installed.ToArray()
+    throw
+}} finally {{
+    Remove-Item $workspace -Recurse -Force -ErrorAction SilentlyContinue
+}}
+"#,
+        install_dir = quote(install_dir),
+        workspace = quote(workspace),
+        staging_dir = quote(extracted),
+        backup_dir = quote(backup),
+        exe_path = quote(exe),
+        wait_pid = std::process::id(),
+        managed_json_ps = managed_json_ps,
+        staged_json_ps = staged_json_ps,
+        args_json_ps = args_json_ps
+    ))
+}
+
+#[cfg(not(windows))]
 fn rollback_bundle_replace(
     install_dir: &Path,
     backup: &Path,
@@ -514,6 +921,33 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_release_asset_names() {
+        assert!(platform_has_release_assets_for("windows", "x86_64"));
+        assert_eq!(
+            stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Cpu),
+            Some("mesh-llm-x86_64-pc-windows-msvc.zip".to_string())
+        );
+        assert_eq!(
+            stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Cuda),
+            Some("mesh-llm-x86_64-pc-windows-msvc-cuda.zip".to_string())
+        );
+        assert_eq!(
+            stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Rocm),
+            Some("mesh-llm-x86_64-pc-windows-msvc-rocm.zip".to_string())
+        );
+        assert_eq!(
+            stable_release_asset_name_for("windows", "x86_64", launch::BinaryFlavor::Vulkan),
+            Some("mesh-llm-x86_64-pc-windows-msvc-vulkan.zip".to_string())
+        );
+        assert!(release_has_any_platform_asset(
+            &["mesh-llm-x86_64-pc-windows-msvc.zip".to_string()],
+            "windows",
+            "x86_64"
+        ));
+        assert!(!release_has_any_platform_asset(&[], "windows", "x86_64"));
+    }
+
+    #[test]
     fn test_path_is_writable_for_temp_file() {
         let dir = temp_dir("self-update-writable");
         let path = dir.join("mesh-llm");
@@ -571,10 +1005,24 @@ mod tests {
     #[test]
     fn test_bundle_install_dir_requires_matching_flavor_pair() {
         let dir = temp_dir("bundle-install");
-        let exe = dir.join("mesh-llm");
+        let exe = dir.join(mesh_binary_name());
         std::fs::write(&exe, b"binary").unwrap();
-        std::fs::write(dir.join("rpc-server-cpu"), b"rpc").unwrap();
-        std::fs::write(dir.join("llama-server-cpu"), b"llama").unwrap();
+        std::fs::write(
+            dir.join(bundled_server_flavor_name(
+                "rpc-server",
+                launch::BinaryFlavor::Cpu,
+            )),
+            b"rpc",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(bundled_server_flavor_name(
+                "llama-server",
+                launch::BinaryFlavor::Cpu,
+            )),
+            b"llama",
+        )
+        .unwrap();
 
         assert_eq!(
             bundle_install_dir(&exe, None),
@@ -590,7 +1038,7 @@ mod tests {
         );
 
         let missing = temp_dir("bundle-missing");
-        let missing_exe = missing.join("mesh-llm");
+        let missing_exe = missing.join(mesh_binary_name());
         std::fs::write(&missing_exe, b"binary").unwrap();
         assert_eq!(bundle_install_dir(&missing_exe, None), None);
 

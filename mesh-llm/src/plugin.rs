@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 pub use mesh_llm_plugin::proto;
 use mesh_llm_plugin::{MeshVisibility, STARTUP_DISABLED_ERROR_CODE};
 use prost::Message;
+use rand::Rng;
 use rmcp::model::{
     CallToolResult as McpCallToolResult, ErrorCode, InitializeRequestParams, ListToolsResult,
     PaginatedRequestParams, ServerInfo,
@@ -147,6 +148,7 @@ struct PluginManagerInner {
 
 struct ExternalPlugin {
     spec: ExternalPluginSpec,
+    instance_id: String,
     host_mode: PluginHostMode,
     summary: Arc<Mutex<PluginSummary>>,
     server_info: Arc<Mutex<Option<ServerInfo>>>,
@@ -279,6 +281,7 @@ impl PluginManager {
         }
 
         let rpc_bridge = Arc::new(Mutex::new(None));
+        let instance_id = make_instance_id();
         let mut plugins = BTreeMap::new();
         for spec in &specs.externals {
             tracing::info!(
@@ -287,20 +290,25 @@ impl PluginManager {
                 args = %format_args_for_log(&spec.args),
                 "Loading plugin"
             );
-            let plugin =
-                match ExternalPlugin::spawn(spec, host_mode, mesh_tx.clone(), rpc_bridge.clone())
-                    .await
-                {
-                    Ok(plugin) => plugin,
-                    Err(err) => {
-                        tracing::error!(
-                            plugin = %spec.name,
-                            error = %err,
-                            "Plugin failed to load"
-                        );
-                        return Err(err);
-                    }
-                };
+            let plugin = match ExternalPlugin::spawn(
+                spec,
+                instance_id.clone(),
+                host_mode,
+                mesh_tx.clone(),
+                rpc_bridge.clone(),
+            )
+            .await
+            {
+                Ok(plugin) => plugin,
+                Err(err) => {
+                    tracing::error!(
+                        plugin = %spec.name,
+                        error = %err,
+                        "Plugin failed to load"
+                    );
+                    return Err(err);
+                }
+            };
             let summary = plugin.summary.lock().await.clone();
             tracing::info!(
                 plugin = %summary.name,
@@ -496,12 +504,14 @@ impl PluginManager {
 impl ExternalPlugin {
     async fn spawn(
         spec: &ExternalPluginSpec,
+        instance_id: String,
         host_mode: PluginHostMode,
         mesh_tx: mpsc::Sender<PluginMeshEvent>,
         rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
     ) -> Result<Self> {
         let plugin = Self {
             spec: spec.clone(),
+            instance_id,
             host_mode,
             summary: Arc::new(Mutex::new(PluginSummary {
                 name: spec.name.clone(),
@@ -589,7 +599,7 @@ impl ExternalPlugin {
             summary.error = None;
         }
 
-        let listener = bind_local_listener(&self.spec.name).await?;
+        let listener = bind_local_listener(&self.instance_id, &self.spec.name).await?;
         let endpoint = listener.endpoint();
         let transport = listener.transport_name();
         tracing::debug!(
@@ -1309,13 +1319,15 @@ impl LocalStream {
     }
 }
 
-async fn bind_local_listener(name: &str) -> Result<LocalListener> {
+async fn bind_local_listener(instance_id: &str, name: &str) -> Result<LocalListener> {
     #[cfg(unix)]
     {
-        let dir = runtime_dir()?;
-        std::fs::create_dir_all(&dir)
+        let path = unix_socket_path(instance_id, name)?;
+        let dir = path
+            .parent()
+            .context("Plugin socket path is missing a parent directory")?;
+        std::fs::create_dir_all(dir)
             .with_context(|| format!("Failed to create plugin runtime dir {}", dir.display()))?;
-        let path = dir.join(format!("{name}.sock"));
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
@@ -1325,7 +1337,7 @@ async fn bind_local_listener(name: &str) -> Result<LocalListener> {
     }
     #[cfg(windows)]
     {
-        let endpoint = format!(r"\\.\pipe\mesh-llm-{name}");
+        let endpoint = windows_pipe_name(instance_id, name);
         let server = tokio::net::windows::named_pipe::ServerOptions::new()
             .create(&endpoint)
             .with_context(|| format!("Failed to create plugin pipe {endpoint}"))?;
@@ -1333,9 +1345,26 @@ async fn bind_local_listener(name: &str) -> Result<LocalListener> {
     }
 }
 
+#[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     Ok(home.join(".mesh-llm").join("run").join("plugins"))
+}
+
+fn make_instance_id() -> String {
+    let pid = std::process::id();
+    let random = rand::rng().random::<u32>();
+    format!("p{pid}-{random:08x}")
+}
+
+#[cfg(unix)]
+fn unix_socket_path(instance_id: &str, name: &str) -> Result<PathBuf> {
+    Ok(runtime_dir()?.join(format!("{instance_id}-{name}.sock")))
+}
+
+#[cfg(windows)]
+fn windows_pipe_name(instance_id: &str, name: &str) -> String {
+    format!(r"\\.\pipe\mesh-llm-{instance_id}-{name}")
 }
 
 pub async fn run_plugin_process(name: String) -> Result<()> {
@@ -1535,5 +1564,35 @@ mod tests {
         assert!(MeshConfig::default().self_update_enabled());
         let config: MeshConfig = toml::from_str("self_update = false").unwrap();
         assert!(!config.self_update_enabled());
+    }
+
+    #[test]
+    fn instance_ids_include_pid_and_random_suffix() {
+        let instance_id = make_instance_id();
+        let prefix = format!("p{}-", std::process::id());
+        assert!(instance_id.starts_with(&prefix));
+        assert_eq!(instance_id.len(), prefix.len() + 8);
+        assert!(instance_id[prefix.len()..]
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_path_is_namespaced_by_instance_id() {
+        let path = unix_socket_path("p1234-deadbeef", "Pipes").unwrap();
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("p1234-deadbeef-Pipes.sock")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_name_is_namespaced_by_instance_id() {
+        assert_eq!(
+            windows_pipe_name("p1234-deadbeef", "Pipes"),
+            r"\\.\pipe\mesh-llm-p1234-deadbeef-Pipes"
+        );
     }
 }

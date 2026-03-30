@@ -19,6 +19,8 @@ This file covers local build and development workflows for this repository.
 
 **Linux Vulkan**: Vulkan is supported when the Vulkan development files and `glslc` are installed. On Ubuntu/Debian, install `libvulkan-dev glslc`. On Arch Linux, install `vulkan-headers shaderc`.
 
+**Windows**: `just build` auto-detects `cuda`, `hip`/`rocm`, `vulkan`, or `cpu`. You can override with `just build backend=cuda` (or `rocm`, `vulkan`, `cpu`). Metal is not supported on Windows.
+
 ## Build from source
 
 Build everything (llama.cpp fork, mesh binary, and UI production build):
@@ -66,6 +68,23 @@ For CPU-only builds (no GPU acceleration):
 ```bash
 just build backend=cpu
 ```
+
+On Windows, you can override the detected backend if needed:
+
+```powershell
+just build backend=vulkan
+just build backend=cpu
+just build backend=cuda cuda_arch=90
+```
+
+Windows release bundles use dedicated Windows release recipes:
+
+```powershell
+just release-build-cuda-windows
+just release-bundle-cuda-windows v0.X.0
+```
+
+GitHub Actions uses hosted `windows-2022` runners for compile-only Windows CI and release packaging. The workflow installs CUDA, HIP SDK, and Vulkan SDK on demand before invoking the same `just` recipes.
 
 Create a portable bundle:
 
@@ -137,6 +156,16 @@ just benchmark-build-hip      # AMD GPU — requires ROCm (hipcc)
 just benchmark-build-intel    # Intel Arc GPU — requires Intel oneAPI (icpx) — UNVALIDATED
 ```
 
+On Windows, use the dedicated recipes:
+
+```powershell
+just benchmark-build-cuda-windows
+just benchmark-build-hip-windows
+just benchmark-build-intel-windows
+```
+
+These produce `.exe` binaries next to `mesh-llm.exe`.
+
 > **AMD note:** The AMD benchmark (`benchmarks/membench-fingerprint.hip`) has not been tested on real AMD hardware. The recipe is provided for reference only.
 
 > **Intel Arc note:** The Intel Arc benchmark (`benchmarks/membench-fingerprint-intel.cpp`) has not been tested on real Intel Arc hardware. The recipe is provided for reference only.
@@ -155,4 +184,5 @@ just benchmark-build-apple && just bundle
 
 If the binary is not present, `just bundle` prints a note and continues without it — the bundle is still valid.
 
-CUDA, HIP, and Intel binaries are **not** included in the bundle; they must be compiled on the target platform.
+CUDA, HIP, and Intel binaries are **not** included in the Unix tarball bundle; they must be compiled on the target platform.
+On Windows release packaging, any `membench-fingerprint*.exe` binaries present in `mesh-llm/target/release/` are included automatically in the generated `.zip`.

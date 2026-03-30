@@ -4,66 +4,332 @@
 //! All inference traffic flows through these functions.
 
 use crate::{
-    affinity::{self, prepare_remote_targets_for_request, AffinityRouter, PreparedTargets},
+    affinity::{prepare_remote_targets_for_request, AffinityRouter, PreparedTargets},
     election, mesh, router, tunnel,
 };
-use anyhow::Result;
-use tokio::io::AsyncWriteExt;
+use anyhow::{anyhow, bail, Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
+const MAX_HEADERS: usize = 64;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpReadLimits {
+    max_header_bytes: usize,
+    max_body_bytes: usize,
+    max_chunked_wire_bytes: usize,
+}
+
+const HTTP_READ_LIMITS: HttpReadLimits = HttpReadLimits {
+    max_header_bytes: MAX_HEADER_BYTES,
+    max_body_bytes: MAX_BODY_BYTES,
+    max_chunked_wire_bytes: MAX_CHUNKED_WIRE_BYTES,
+};
+
+/// Parsed header metadata extracted via httparse.
+struct ParsedHeaders {
+    header_end: usize,
+    method: String,
+    path: String,
+    content_length: Option<usize>,
+    is_chunked: bool,
+    expects_continue: bool,
+}
+
+#[derive(Debug)]
+pub struct BufferedHttpRequest {
+    pub raw: Vec<u8>,
+    pub method: String,
+    pub path: String,
+    pub body_json: Option<serde_json::Value>,
+    pub model_name: Option<String>,
+    pub session_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineProxyResult {
+    Handled,
+    FallbackToDirect,
+}
 
 // ── Request parsing ──
 
-/// Peek at an HTTP request without consuming it. Returns bytes peeked and optional model name.
-pub async fn peek_request(stream: &TcpStream, buf: &mut [u8]) -> Result<(usize, Option<String>)> {
-    let n = stream.peek(buf).await?;
-    if n == 0 {
-        anyhow::bail!("Empty request");
+/// Read and buffer one HTTP request for routing decisions.
+///
+/// This reads complete headers plus the full request body when body framing is
+/// known via `Content-Length` or `Transfer-Encoding: chunked`. The raw request
+/// bytes are preserved so the chosen upstream sees the original payload.
+pub async fn read_http_request(stream: &mut TcpStream) -> Result<BufferedHttpRequest> {
+    read_http_request_with_limits(stream, HTTP_READ_LIMITS).await
+}
+
+async fn read_http_request_with_limits(
+    stream: &mut TcpStream,
+    limits: HttpReadLimits,
+) -> Result<BufferedHttpRequest> {
+    let mut raw = Vec::with_capacity(8192);
+    let parsed = read_until_headers_parsed(stream, &mut raw, limits.max_header_bytes).await?;
+
+    let header_end = parsed.header_end;
+
+    let body = if parsed.is_chunked {
+        let mut sent_continue = false;
+        loop {
+            if let Some((consumed, decoded)) =
+                try_decode_chunked_body(&raw[header_end..], limits.max_body_bytes)?
+            {
+                raw.truncate(header_end + consumed);
+                break decoded;
+            }
+            if !sent_continue && parsed.expects_continue {
+                stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+                sent_continue = true;
+            }
+            read_more(stream, &mut raw).await?;
+            if raw.len().saturating_sub(header_end) > limits.max_chunked_wire_bytes {
+                bail!(
+                    "HTTP chunked wire body exceeds {} bytes",
+                    limits.max_chunked_wire_bytes
+                );
+            }
+        }
+    } else if let Some(content_length) = parsed.content_length {
+        if content_length > limits.max_body_bytes {
+            bail!("HTTP body exceeds {} bytes", limits.max_body_bytes);
+        }
+        let body_end = header_end + content_length;
+        let mut sent_continue = false;
+        while raw.len() < body_end {
+            if !sent_continue && parsed.expects_continue && content_length > 0 {
+                stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+                sent_continue = true;
+            }
+            read_more(stream, &mut raw).await?;
+        }
+        raw.truncate(body_end);
+        raw[header_end..body_end].to_vec()
+    } else {
+        raw.truncate(header_end);
+        Vec::new()
+    };
+
+    let body_json = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice(&body).ok()
+    };
+    let model_name = body_json.as_ref().and_then(extract_model_from_json);
+    let session_hint = body_json.as_ref().and_then(extract_session_hint_from_json);
+    let raw = finalize_forwarded_request(raw, header_end, parsed.expects_continue)?;
+
+    Ok(BufferedHttpRequest {
+        raw,
+        method: parsed.method,
+        path: parsed.path,
+        body_json,
+        model_name,
+        session_hint,
+    })
+}
+
+fn finalize_forwarded_request(
+    mut raw: Vec<u8>,
+    header_end: usize,
+    strip_expect: bool,
+) -> Result<Vec<u8>> {
+    let body = raw.split_off(header_end);
+    // Re-parse with httparse so we iterate over validated header structs.
+    let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut headers_buf);
+    let _ = req.parse(&raw).context("re-parse headers for forwarding")?;
+
+    let method = req.method.unwrap_or("GET");
+    let path = req.path.unwrap_or("/");
+    let version = req.version.unwrap_or(1);
+
+    let mut rebuilt = format!("{method} {path} HTTP/1.{version}\r\n");
+
+    for header in req.headers.iter() {
+        let name = header.name;
+        if name.eq_ignore_ascii_case("connection") {
+            continue;
+        }
+        if strip_expect && name.eq_ignore_ascii_case("expect") {
+            continue;
+        }
+        let value = std::str::from_utf8(header.value).unwrap_or("");
+        rebuilt.push_str(&format!("{name}: {value}\r\n"));
     }
-    let model = extract_model_from_http(&buf[..n]);
-    Ok((n, model))
+
+    // The proxy buffers exactly one request for routing, so force a single-request
+    // connection contract upstream instead of reusing the client connection blindly.
+    rebuilt.push_str("Connection: close\r\n\r\n");
+
+    let mut forwarded = rebuilt.into_bytes();
+    forwarded.extend_from_slice(&body);
+    Ok(forwarded)
 }
 
-/// Extract `"model"` field from a JSON POST body in an HTTP request.
-pub fn extract_model_from_http(buf: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(buf).ok()?;
-    let body_start = s.find("\r\n\r\n")? + 4;
-    let body = &s[body_start..];
-    let model_key = "\"model\"";
-    let pos = body.find(model_key)?;
-    let after_key = &body[pos + model_key.len()..];
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_ws = after_colon.trim_start();
-    let after_quote = after_ws.strip_prefix('"')?;
-    let end = after_quote.find('"')?;
-    Some(after_quote[..end].to_string())
+/// Read from the stream until httparse can fully parse the request headers.
+/// Returns parsed metadata; `buf` contains all bytes read so far (headers +
+/// any trailing body bytes that arrived in the same read).
+async fn read_until_headers_parsed(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    max_header_bytes: usize,
+) -> Result<ParsedHeaders> {
+    loop {
+        let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
+        let mut req = httparse::Request::new(&mut headers_buf);
+        match req.parse(buf) {
+            Ok(httparse::Status::Complete(header_end)) => {
+                let method = req.method.unwrap_or("GET").to_string();
+                let path = req.path.unwrap_or("/").to_string();
+
+                let mut content_length = None;
+                let mut is_chunked = false;
+                let mut expects_continue = false;
+
+                for header in req.headers.iter() {
+                    if header.name.eq_ignore_ascii_case("content-length") {
+                        let val = std::str::from_utf8(header.value)
+                            .context("invalid Content-Length encoding")?;
+                        content_length = Some(
+                            val.trim()
+                                .parse::<usize>()
+                                .with_context(|| format!("invalid Content-Length: {val}"))?,
+                        );
+                    } else if header.name.eq_ignore_ascii_case("transfer-encoding") {
+                        let val = std::str::from_utf8(header.value).unwrap_or("");
+                        is_chunked = val
+                            .split(',')
+                            .any(|part| part.trim().eq_ignore_ascii_case("chunked"));
+                    } else if header.name.eq_ignore_ascii_case("expect") {
+                        let val = std::str::from_utf8(header.value).unwrap_or("");
+                        expects_continue = val
+                            .split(',')
+                            .any(|part| part.trim().eq_ignore_ascii_case("100-continue"));
+                    }
+                }
+
+                // RFC 7230 §3.3.3: if both Transfer-Encoding and Content-Length
+                // are present, Transfer-Encoding wins and Content-Length is ignored.
+                if is_chunked {
+                    content_length = None;
+                }
+
+                return Ok(ParsedHeaders {
+                    header_end,
+                    method,
+                    path,
+                    content_length,
+                    is_chunked,
+                    expects_continue,
+                });
+            }
+            Ok(httparse::Status::Partial) => {
+                if buf.len() >= max_header_bytes {
+                    bail!("HTTP headers exceed {max_header_bytes} bytes");
+                }
+                read_more(stream, buf).await?;
+            }
+            Err(e) => bail!("HTTP parse error: {e}"),
+        }
+    }
 }
 
-/// Extract a session hint from an HTTP request for MoE sticky routing.
-/// Looks for "user" or "session_id" in the JSON body. Falls back to None.
-pub fn extract_session_hint(buf: &[u8]) -> Option<String> {
-    extract_body_json(buf)
-        .as_ref()
-        .and_then(affinity::extract_session_hint_from_body)
+async fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<()> {
+    let mut chunk = [0u8; 8192];
+    let n = stream.read(&mut chunk).await?;
+    if n == 0 {
+        bail!("unexpected EOF while reading HTTP request");
+    }
+    buf.extend_from_slice(&chunk[..n]);
+    Ok(())
 }
 
-/// Try to parse the JSON body from a peeked HTTP request buffer.
-pub fn extract_body_json(buf: &[u8]) -> Option<serde_json::Value> {
-    let s = std::str::from_utf8(buf).ok()?;
-    let body_start = s.find("\r\n\r\n")? + 4;
-    let body = &s[body_start..];
-    serde_json::from_str(body).ok()
+fn try_decode_chunked_body(buf: &[u8], max_body_bytes: usize) -> Result<Option<(usize, Vec<u8>)>> {
+    let mut pos = 0usize;
+    let mut decoded = Vec::new();
+
+    loop {
+        let Some(line_end_rel) = buf[pos..].windows(2).position(|window| window == b"\r\n") else {
+            return Ok(None);
+        };
+        let line_end = pos + line_end_rel;
+        let size_line = std::str::from_utf8(&buf[pos..line_end]).context("invalid chunk header")?;
+        let size_text = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .with_context(|| format!("invalid chunk size: {size_text}"))?;
+        pos = line_end + 2;
+
+        if size == 0 {
+            if buf.len() < pos + 2 {
+                return Ok(None);
+            }
+            if &buf[pos..pos + 2] == b"\r\n" {
+                return Ok(Some((pos + 2, decoded)));
+            }
+            let Some(trailer_end_rel) = buf[pos..]
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            else {
+                return Ok(None);
+            };
+            return Ok(Some((pos + trailer_end_rel + 4, decoded)));
+        }
+
+        if buf.len() < pos + size + 2 {
+            return Ok(None);
+        }
+        decoded.extend_from_slice(&buf[pos..pos + size]);
+        pos += size;
+
+        if &buf[pos..pos + 2] != b"\r\n" {
+            return Err(anyhow!("invalid chunk terminator"));
+        }
+        pos += 2;
+
+        if decoded.len() > max_body_bytes {
+            bail!("HTTP chunked body exceeds {max_body_bytes} bytes");
+        }
+    }
 }
 
-pub fn is_models_list_request(buf: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(buf);
-    s.starts_with("GET ")
-        && (s.contains("/v1/models") || s.contains("/models"))
-        && !s.contains("/v1/models/")
+fn extract_model_from_json(body: &serde_json::Value) -> Option<String> {
+    body.get("model")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
 }
 
-pub fn is_drop_request(buf: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(buf);
-    s.starts_with("POST ") && s.contains("/mesh/drop")
+fn extract_session_hint_from_json(body: &serde_json::Value) -> Option<String> {
+    ["user", "session_id"].into_iter().find_map(|key| {
+        body.get(key)
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+    })
+}
+
+pub fn is_models_list_request(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    method == "GET" && (path == "/v1/models" || path == "/models")
+}
+
+pub fn is_drop_request(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    method == "POST" && path == "/mesh/drop"
+}
+
+pub fn pipeline_request_supported(path: &str, body: &serde_json::Value) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path == "/v1/chat/completions"
+        && body
+            .get("messages")
+            .map(|messages| messages.is_array())
+            .unwrap_or(false)
 }
 
 pub fn is_load_request(buf: &[u8]) -> bool {
@@ -85,15 +351,15 @@ pub async fn handle_mesh_request(
     track_demand: bool,
     affinity: AffinityRouter,
 ) {
-    let mut buf = vec![0u8; 32768];
-    let (n, model_name) = match peek_request(&tcp_stream, &mut buf).await {
+    let mut tcp_stream = tcp_stream;
+    let request = match read_http_request(&mut tcp_stream).await {
         Ok(v) => v,
         Err(_) => return,
     };
-    let body_json = extract_body_json(&buf[..n]);
+    let body_json = request.body_json.as_ref();
 
     // Handle /v1/models
-    if is_models_list_request(&buf[..n]) {
+    if is_models_list_request(&request.method, &request.path) {
         let served = node.models_being_served().await;
         let _ = send_models_list(tcp_stream, &served).await;
         return;
@@ -103,31 +369,32 @@ pub async fn handle_mesh_request(
     // We'll track below after routing resolves the effective model
 
     // Smart routing: if no model specified (or model="auto"), classify and pick
-    let routed_model = if model_name.is_none() || model_name.as_deref() == Some("auto") {
-        if let Some(body_json) = body_json.as_ref() {
-            let cl = router::classify(&body_json);
-            let served = node.models_being_served().await;
-            let available: Vec<(&str, f64)> =
-                served.iter().map(|name| (name.as_str(), 0.0)).collect();
-            let picked = router::pick_model_classified(&cl, &available);
-            if let Some(name) = picked {
-                tracing::info!(
-                    "router: {:?}/{:?} tools={} → {name}",
-                    cl.category,
-                    cl.complexity,
-                    cl.needs_tools
-                );
-                Some(name.to_string())
+    let routed_model =
+        if request.model_name.is_none() || request.model_name.as_deref() == Some("auto") {
+            if let Some(body_json) = request.body_json.as_ref() {
+                let cl = router::classify(&body_json);
+                let served = node.models_being_served().await;
+                let available: Vec<(&str, f64)> =
+                    served.iter().map(|name| (name.as_str(), 0.0)).collect();
+                let picked = router::pick_model_classified(&cl, &available);
+                if let Some(name) = picked {
+                    tracing::info!(
+                        "router: {:?}/{:?} tools={} → {name}",
+                        cl.category,
+                        cl.complexity,
+                        cl.needs_tools
+                    );
+                    Some(name.to_string())
+                } else {
+                    None
+                }
             } else {
                 None
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
-    let effective_model = routed_model.or(model_name);
+        };
+    let effective_model = routed_model.or(request.model_name.clone());
 
     // Demand tracking for rebalancing
     if track_demand {
@@ -155,9 +422,7 @@ pub async fn handle_mesh_request(
     };
     let prepared = effective_model
         .as_ref()
-        .map(|name| {
-            prepare_remote_targets_for_request(name, &target_hosts, body_json.as_ref(), &affinity)
-        })
+        .map(|name| prepare_remote_targets_for_request(name, &target_hosts, body_json, &affinity))
         .unwrap_or(PreparedTargets {
             ordered: target_hosts
                 .iter()
@@ -183,7 +448,15 @@ pub async fn handle_mesh_request(
     let mut refreshed = false;
     for target_host in &target_hosts {
         match node.open_http_tunnel(*target_host).await {
-            Ok((quic_send, quic_recv)) => {
+            Ok((mut quic_send, quic_recv)) => {
+                if let Err(e) = quic_send.write_all(&request.raw).await {
+                    tracing::warn!(
+                        "Failed to send buffered request to host {}: {e}",
+                        target_host.fmt_short()
+                    );
+                    last_err = Some(e.into());
+                    continue;
+                }
                 if let (Some(name), Some(prefix_hash)) =
                     (effective_model.as_ref(), prepared.learn_prefix_hash)
                 {
@@ -236,17 +509,28 @@ pub async fn route_to_target(
     node: mesh::Node,
     tcp_stream: TcpStream,
     target: election::InferenceTarget,
+    prefetched: &[u8],
 ) -> bool {
+    let mut tcp_stream = tcp_stream;
     tracing::info!("API proxy: routing to target {target:?}");
     match target {
         election::InferenceTarget::Local(port) | election::InferenceTarget::MoeLocal(port) => {
             match TcpStream::connect(format!("127.0.0.1:{port}")).await {
-                Ok(upstream) => {
+                Ok(mut upstream) => {
                     let _inflight = node.begin_inflight_request();
                     let _ = upstream.set_nodelay(true);
-                    if let Err(e) = tunnel::relay_tcp_streams(tcp_stream, upstream).await {
+                    if let Err(e) = upstream.write_all(prefetched).await {
+                        tracing::warn!("API proxy: failed to forward buffered request to local llama-server on {port}: {e}");
+                        let _ = send_503(tcp_stream).await;
+                        return false;
+                    }
+                    // Don't half-close the write side — llama-server interprets
+                    // a TCP FIN as a client disconnect and stops streaming.
+                    // The Connection: close header already signals one-shot.
+                    if let Err(e) = tokio::io::copy(&mut upstream, &mut tcp_stream).await {
                         tracing::debug!("API proxy (local) ended: {e}");
                     }
+                    let _ = tcp_stream.shutdown().await;
                     true
                 }
                 Err(e) => {
@@ -259,9 +543,24 @@ pub async fn route_to_target(
         election::InferenceTarget::Remote(host_id)
         | election::InferenceTarget::MoeRemote(host_id) => {
             match node.open_http_tunnel(host_id).await {
-                Ok((quic_send, quic_recv)) => {
-                    if let Err(e) =
-                        tunnel::relay_tcp_via_quic(tcp_stream, quic_send, quic_recv).await
+                Ok((mut quic_send, quic_recv)) => {
+                    if let Err(e) = quic_send.write_all(prefetched).await {
+                        tracing::warn!(
+                            "API proxy: failed to forward buffered request to host {}: {e}",
+                            host_id.fmt_short()
+                        );
+                        let _ = send_503(tcp_stream).await;
+                        return false;
+                    }
+                    if let Err(e) = quic_send.finish() {
+                        tracing::warn!(
+                            "API proxy: failed to finish buffered request to host {}: {e}",
+                            host_id.fmt_short()
+                        );
+                        let _ = send_503(tcp_stream).await;
+                        return false;
+                    }
+                    if let Err(e) = tunnel::relay_quic_response_to_tcp(tcp_stream, quic_recv).await
                     {
                         tracing::debug!("API proxy (remote) ended: {e}");
                     }
@@ -363,22 +662,18 @@ pub async fn send_503(mut stream: TcpStream) -> std::io::Result<()> {
 /// 4. Forwards to the strong model via HTTP
 /// 5. Streams the response back to the client
 pub async fn pipeline_proxy_local(
-    mut client_stream: TcpStream,
-    buf: &[u8],
-    n: usize,
+    client_stream: &mut TcpStream,
+    request_path: &str,
+    mut body: serde_json::Value,
     planner_port: u16,
     planner_model: &str,
     strong_port: u16,
     node: &mesh::Node,
-) {
-    // Parse request body
-    let mut body = match extract_body_json(&buf[..n]) {
-        Some(b) => b,
-        None => {
-            let _ = send_400(client_stream, "invalid JSON body").await;
-            return;
-        }
-    };
+) -> PipelineProxyResult {
+    if !pipeline_request_supported(request_path, &body) {
+        tracing::debug!("pipeline: request path/body not eligible, falling back to direct proxy");
+        return PipelineProxyResult::FallbackToDirect;
+    }
 
     // Extract whether this is a streaming request
     let is_streaming = body
@@ -406,7 +701,8 @@ pub async fn pipeline_proxy_local(
             crate::pipeline::inject_plan(&mut body, &plan);
         }
         Err(e) => {
-            tracing::warn!("pipeline: pre-plan failed ({e}), proceeding without plan");
+            tracing::warn!("pipeline: pre-plan failed ({e}), falling back to direct proxy");
+            return PipelineProxyResult::FallbackToDirect;
         }
     }
 
@@ -432,7 +728,7 @@ pub async fn pipeline_proxy_local(
                     "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-cache\r\n\r\n",
                 );
                 if client_stream.write_all(header.as_bytes()).await.is_err() {
-                    return;
+                    return PipelineProxyResult::Handled;
                 }
 
                 // Stream body chunks
@@ -466,10 +762,13 @@ pub async fn pipeline_proxy_local(
                 // Terminal chunk
                 let _ = client_stream.write_all(b"0\r\n\r\n").await;
                 let _ = client_stream.shutdown().await;
+                PipelineProxyResult::Handled
             }
             Err(e) => {
-                tracing::warn!("pipeline: strong model request failed: {e}");
-                let _ = send_503(client_stream).await;
+                tracing::warn!(
+                    "pipeline: strong model request failed: {e}, falling back to direct proxy"
+                );
+                PipelineProxyResult::FallbackToDirect
             }
         }
     } else {
@@ -486,16 +785,21 @@ pub async fn pipeline_proxy_local(
                         let _ = client_stream.write_all(header.as_bytes()).await;
                         let _ = client_stream.write_all(&resp_bytes).await;
                         let _ = client_stream.shutdown().await;
+                        PipelineProxyResult::Handled
                     }
                     Err(e) => {
-                        tracing::warn!("pipeline: response read failed: {e}");
-                        let _ = send_503(client_stream).await;
+                        tracing::warn!(
+                            "pipeline: response read failed: {e}, falling back to direct proxy"
+                        );
+                        PipelineProxyResult::FallbackToDirect
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("pipeline: strong model request failed: {e}");
-                let _ = send_503(client_stream).await;
+                tracing::warn!(
+                    "pipeline: strong model request failed: {e}, falling back to direct proxy"
+                );
+                PipelineProxyResult::FallbackToDirect
             }
         }
     }
@@ -504,66 +808,223 @@ pub async fn pipeline_proxy_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
-    #[test]
-    fn test_extract_session_hint_user_field() {
-        let req = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"qwen\",\"user\":\"alice\",\"messages\":[]}";
-        assert_eq!(extract_session_hint(req), Some("alice".to_string()));
+    async fn read_request_from_parts_with_limits(
+        parts: Vec<Vec<u8>>,
+        limits: HttpReadLimits,
+    ) -> BufferedHttpRequest {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request_with_limits(&mut stream, limits)
+                .await
+                .unwrap()
+        });
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            for part in parts {
+                stream.write_all(&part).await.unwrap();
+            }
+        });
+
+        client.await.unwrap();
+        server.await.unwrap()
+    }
+
+    async fn read_request_from_parts(parts: Vec<Vec<u8>>) -> BufferedHttpRequest {
+        read_request_from_parts_with_limits(parts, HTTP_READ_LIMITS).await
+    }
+
+    fn build_chunked_request(body: &[u8], chunks: &[usize]) -> Vec<u8> {
+        let mut out = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let mut pos = 0usize;
+        for &chunk_len in chunks {
+            let end = pos + chunk_len;
+            out.extend_from_slice(format!("{chunk_len:x}\r\n").as_bytes());
+            out.extend_from_slice(&body[pos..end]);
+            out.extend_from_slice(b"\r\n");
+            pos = end;
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    fn build_chunked_request_one_byte_chunks(body: &[u8], extension_len: usize) -> Vec<u8> {
+        let mut out = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        let extension = "x".repeat(extension_len);
+        for byte in body {
+            out.extend_from_slice(b"1");
+            if !extension.is_empty() {
+                out.extend_from_slice(b";");
+                out.extend_from_slice(extension.as_bytes());
+            }
+            out.extend_from_slice(b"\r\n");
+            out.push(*byte);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
     }
 
     #[test]
-    fn test_extract_session_hint_session_id() {
-        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"session_id\":\"sess-42\"}";
-        assert_eq!(extract_session_hint(req), Some("sess-42".to_string()));
+    fn test_pipeline_request_supported_chat_completions() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
+        assert!(pipeline_request_supported(
+            "/v1/chat/completions?stream=1",
+            &body
+        ));
     }
 
     #[test]
-    fn test_extract_session_hint_user_preferred_over_session_id() {
-        // "user" appears before "session_id" in our search order
-        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"user\":\"bob\",\"session_id\":\"sess-1\"}";
-        assert_eq!(extract_session_hint(req), Some("bob".to_string()));
+    fn test_pipeline_request_supported_rejects_other_endpoint() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
+        assert!(!pipeline_request_supported("/v1/responses", &body));
     }
 
     #[test]
-    fn test_extract_session_hint_none() {
-        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"qwen\",\"messages\":[]}";
-        assert_eq!(extract_session_hint(req), None);
+    fn test_pipeline_request_supported_rejects_missing_messages() {
+        let body = serde_json::json!({"input":"hi"});
+        assert!(!pipeline_request_supported("/v1/chat/completions", &body));
     }
 
-    #[test]
-    fn test_extract_session_hint_no_body() {
-        let req = b"GET /v1/models HTTP/1.1\r\n\r\n";
-        assert_eq!(extract_session_hint(req), None);
+    #[tokio::test]
+    async fn test_read_http_request_fragmented_post_body() {
+        let body =
+            br#"{"model":"qwen","user":"alice","messages":[{"role":"user","content":"hi"}]}"#;
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+
+        let request = read_request_from_parts(vec![
+            headers.as_bytes()[..40].to_vec(),
+            headers.as_bytes()[40..].to_vec(),
+            body[..12].to_vec(),
+            body[12..].to_vec(),
+        ])
+        .await;
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/v1/chat/completions");
+        assert_eq!(request.model_name.as_deref(), Some("qwen"));
+        assert_eq!(request.session_hint.as_deref(), Some("alice"));
+        assert_eq!(request.body_json.unwrap()["messages"][0]["content"], "hi");
     }
 
-    #[test]
-    fn test_extract_session_hint_no_headers_end() {
-        let req = b"POST /v1/chat body without proper headers";
-        assert_eq!(extract_session_hint(req), None);
+    #[tokio::test]
+    async fn test_read_http_request_large_body_over_32k() {
+        let large = "x".repeat(40_000);
+        let body = serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": large}],
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let request = read_request_from_parts(vec![request.into_bytes()]).await;
+
+        assert_eq!(request.model_name.as_deref(), Some("qwen"));
+        let body_json = request.body_json.unwrap();
+        let content = body_json["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(content.len(), 40_000);
     }
 
-    #[test]
-    fn test_extract_session_hint_whitespace_variants() {
-        // Extra whitespace around colon and value
-        let req = b"POST / HTTP/1.1\r\n\r\n{\"user\" : \"charlie\" }";
-        assert_eq!(extract_session_hint(req), Some("charlie".to_string()));
+    #[tokio::test]
+    async fn test_read_http_request_chunked_body() {
+        let body = br#"{"model":"auto","session_id":"sess-42","messages":[{"role":"user","content":"hello"}]}"#;
+        let request = build_chunked_request(body, &[18, 17, body.len() - 35]);
+
+        let request = read_request_from_parts(vec![request]).await;
+
+        assert_eq!(request.model_name.as_deref(), Some("auto"));
+        assert_eq!(request.session_hint.as_deref(), Some("sess-42"));
+        assert_eq!(
+            request.body_json.unwrap()["messages"][0]["content"],
+            "hello"
+        );
     }
 
-    #[test]
-    fn test_extract_session_hint_empty_value() {
-        let req = b"POST / HTTP/1.1\r\n\r\n{\"user\":\"\"}";
-        assert_eq!(extract_session_hint(req), Some("".to_string()));
+    #[tokio::test]
+    async fn test_read_http_request_chunked_body_allows_wire_overhead() {
+        let limits = HttpReadLimits {
+            max_header_bytes: MAX_HEADER_BYTES,
+            max_body_bytes: 256,
+            max_chunked_wire_bytes: 4 * 1024,
+        };
+        let large = "x".repeat(48);
+        let body = serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": large}],
+        })
+        .to_string();
+        let request = build_chunked_request_one_byte_chunks(body.as_bytes(), 16);
+
+        let request = read_request_from_parts_with_limits(vec![request], limits).await;
+
+        assert_eq!(request.model_name.as_deref(), Some("qwen"));
+        assert!(request.raw.len() > limits.max_body_bytes);
+        let body_json = request.body_json.unwrap();
+        let content = body_json["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(content.len(), 48);
     }
 
-    #[test]
-    fn test_extract_session_hint_ignores_message_role_user() {
-        let req = b"POST / HTTP/1.1\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"user\":\"alice\"}";
-        assert_eq!(extract_session_hint(req), Some("alice".to_string()));
+    #[tokio::test]
+    async fn test_read_http_request_expect_100_continue() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = br#"{"model":"qwen","user":"bob","messages":[]}"#.to_vec();
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+            body.len()
+        );
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await.unwrap()
+        });
+
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(headers.as_bytes()).await.unwrap();
+
+            let mut interim = [0u8; 64];
+            let n = stream.read(&mut interim).await.unwrap();
+            assert_eq!(
+                std::str::from_utf8(&interim[..n]).unwrap(),
+                "HTTP/1.1 100 Continue\r\n\r\n"
+            );
+
+            stream.write_all(&body).await.unwrap();
+        });
+
+        client.await.unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(request.model_name.as_deref(), Some("qwen"));
+        assert_eq!(request.session_hint.as_deref(), Some("bob"));
+        let raw = String::from_utf8(request.raw).unwrap();
+        assert!(!raw.contains("Expect: 100-continue"));
+        assert!(raw.contains("Connection: close"));
     }
 
-    #[test]
-    fn test_extract_model_from_http_basic() {
-        let req = b"POST /v1/chat/completions HTTP/1.1\r\n\r\n{\"model\":\"Qwen3-30B\"}";
-        assert_eq!(extract_model_from_http(req), Some("Qwen3-30B".to_string()));
+    #[tokio::test]
+    async fn test_read_http_request_truncates_pipelined_follow_up_bytes() {
+        let request = read_request_from_parts(vec![
+            b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mesh/drop HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                .to_vec(),
+        ])
+        .await;
+
+        let raw = String::from_utf8(request.raw).unwrap();
+        assert!(raw.starts_with("GET /v1/models HTTP/1.1\r\n"));
+        assert!(!raw.contains("/mesh/drop"));
+        assert!(raw.contains("Connection: close\r\n\r\n"));
     }
 }

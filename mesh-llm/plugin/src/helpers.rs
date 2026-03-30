@@ -319,6 +319,7 @@ pub fn json_reply_channel_message<T: Serialize>(
     Ok(reply)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn bulk_transfer_message(
     kind: i32,
     channel: impl Into<String>,
@@ -369,6 +370,7 @@ pub struct BulkTransferSequence {
     pub messages: Vec<proto::BulkTransferMessage>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn bulk_transfer_sequence(
     channel: impl Into<String>,
     target_peer_id: impl Into<String>,

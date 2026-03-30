@@ -1,6 +1,6 @@
 [package]
 name = "mesh-llm"
-version = "0.51.0"
+version = "0.52.0"
 edition = "2021"
 
 [dependencies]
@@ -22,6 +22,7 @@ include_dir = "0.7"
 nostr-sdk = { version = "0.44.1", default-features = false }
 rustls = "0.23.36"
 reqwest = { version = "0.12", features = ["stream", "json"] }
+httparse = "1"
 tokio-stream = "0.1"
 libc = "0.2.183"
 regex-lite = "0.1"
@@ -29,6 +30,7 @@ rmcp = { version = "1.2", features = ["server", "transport-io"] }
 schemars = "1"
 prost = "0.14"
 toml = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serial_test = "3"

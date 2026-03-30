@@ -4,10 +4,11 @@ llama_dir := "llama.cpp"
 build_dir := llama_dir / "build"
 mesh_dir := "mesh-llm"
 ui_dir := mesh_dir / "ui"
-models_dir := env("HOME") / ".models"
+home_dir := if os_family() == "windows" { env("USERPROFILE") } else { env("HOME") }
+models_dir := home_dir / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
-# Build for the current platform (macOS→Metal, Linux→CUDA/ROCm/Vulkan auto-detected)
+# Build for the current platform (macOS→Metal, Linux/Windows→auto backend)
 [macos]
 build: build-mac
 
@@ -20,6 +21,15 @@ build: build-mac
 build backend="" cuda_arch="" rocm_arch="":
     @scripts/build-linux.sh --backend "{{ backend }}" --cuda-arch "{{ cuda_arch }}" --rocm-arch "{{ rocm_arch }}"
 
+# Windows overrides:
+#   just build backend=cpu
+#   just build backend=cuda cuda_arch='120;86'
+#   just build backend=rocm rocm_arch='gfx942;gfx90a'
+#   just build backend=vulkan
+[windows]
+build backend="" cuda_arch="" rocm_arch="":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend "{{backend}}" -CudaArch "{{cuda_arch}}" -RocmArch "{{rocm_arch}}"
+
 # Build on macOS Apple Silicon (Metal + RPC)
 build-mac:
     @scripts/build-mac.sh
@@ -30,25 +40,62 @@ build-linux backend="" cuda_arch="" rocm_arch="":
 
 # Build release artifacts for the current platform.
 
-# GitHub release builds use CPU backends on Linux and Metal on macOS.
+# GitHub release builds use CPU backends on Linux and Windows, and Metal on macOS.
 release-build:
     @scripts/build-release.sh
+
+release-build-windows:
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend cpu
 
 # Build a Linux CUDA release artifact with an explicit architecture list.
 release-build-cuda cuda_arch="75;80;86;89;90;120":
     @scripts/build-linux.sh --backend cuda --cuda-arch "{{ cuda_arch }}"
 
+release-build-cuda-windows cuda_arch="75;80;86;89;90;120":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend cuda -CudaArch "{{cuda_arch}}"
+
 # Build a Linux AMD ROCm release artifact with an explicit architecture list.
 release-build-amd amd_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201":
     @scripts/build-linux-amd.sh "{{ amd_arch }}"
+
+release-build-amd-windows amd_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend rocm -RocmArch "{{amd_arch}}"
 
 # Build a Linux Vulkan release artifact.
 release-build-vulkan:
     @scripts/build-linux.sh --backend vulkan
 
+release-build-vulkan-windows:
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend vulkan
+
 # Bump release version consistently across source and Cargo manifests.
 release-version version:
     @scripts/release-version.sh "{{ version }}"
+
+# Tag and push a release. Bumps version, updates Cargo.lock, commits, tags, pushes.
+# CI builds and publishes the GitHub release automatically.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current_branch="$(git branch --show-current)"
+    if [[ "$current_branch" != "main" ]]; then
+        echo "Error: release must be run from the 'main' branch (current: ${current_branch:-detached HEAD})" >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree is not clean. Commit or stash changes before releasing." >&2
+        exit 1
+    fi
+    tag="{{ version }}"
+    if [[ "$tag" != v* ]]; then
+        tag="v$tag"
+    fi
+    scripts/release-version.sh "$tag"
+    git add -A
+    git commit -m "$tag: release"
+    git tag "$tag"
+    git push origin main
+    git push origin "$tag"
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
@@ -180,17 +227,29 @@ bundle output="/tmp/mesh-bundle.tar.gz":
 release-bundle version output="dist":
     @scripts/package-release.sh "{{ version }}" "{{ output }}"
 
+release-bundle-windows version output="dist":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -Version "{{version}}" -OutputDir "{{output}}"
+
 # Create Linux CUDA release archive(s).
 release-bundle-cuda version output="dist":
     MESH_RELEASE_FLAVOR=cuda scripts/package-release.sh "{{ version }}" "{{ output }}"
+
+release-bundle-cuda-windows version output="dist":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -Version "{{version}}" -OutputDir "{{output}}" -Flavor cuda
 
 # Create Linux AMD ROCm release archive(s).
 release-bundle-amd version output="dist":
     MESH_RELEASE_FLAVOR=rocm scripts/package-release.sh "{{ version }}" "{{ output }}"
 
+release-bundle-amd-windows version output="dist":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -Version "{{version}}" -OutputDir "{{output}}" -Flavor rocm
+
 # Create Linux Vulkan release archive(s).
 release-bundle-vulkan version output="dist":
     MESH_RELEASE_FLAVOR=vulkan scripts/package-release.sh "{{ version }}" "{{ output }}"
+
+release-bundle-vulkan-windows version output="dist":
+    @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -Version "{{version}}" -OutputDir "{{output}}" -Flavor vulkan
 
 # ── Benchmark Binaries ────────────────────────────────────────────────────────
 
@@ -205,16 +264,29 @@ benchmark-build-cuda:
     nvcc -O3 -o {{mesh_dir}}/target/release/membench-fingerprint-cuda benchmarks/membench-fingerprint.cu
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda"
 
+[windows]
+benchmark-build-cuda-windows:
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "nvcc -O3 -o '{{mesh_dir}}/target/release/membench-fingerprint-cuda.exe' 'benchmarks/membench-fingerprint.cu'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda.exe'"
+
 # Build AMD ROCm/HIP memory bandwidth benchmark (requires ROCm)
 benchmark-build-hip:
     hipcc -O3 -std=c++17 -o {{mesh_dir}}/target/release/membench-fingerprint-hip benchmarks/membench-fingerprint.hip
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-hip"
+
+[windows]
+benchmark-build-hip-windows:
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "hipcc -O3 -std=c++17 -o '{{mesh_dir}}/target/release/membench-fingerprint-hip.exe' 'benchmarks/membench-fingerprint.hip'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-hip.exe'"
 
 # Build Intel Arc SYCL memory bandwidth benchmark (requires Intel oneAPI) — UNVALIDATED
 benchmark-build-intel:
     @echo "WARNING: Intel Arc benchmark is unvalidated — no Intel Arc hardware has been tested"
     icpx -O3 -fsycl -o {{mesh_dir}}/target/release/membench-fingerprint-intel benchmarks/membench-fingerprint-intel.cpp
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-intel"
+
+[windows]
+benchmark-build-intel-windows:
+    @echo "WARNING: Intel Arc benchmark is unvalidated — no Intel Arc hardware has been tested"
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "icpx -O3 -fsycl -o '{{mesh_dir}}/target/release/membench-fingerprint-intel.exe' 'benchmarks/membench-fingerprint-intel.cpp'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-intel.exe'"
 
 # Run the UI with Vite HMR and proxy /api to mesh-llm (default: http://127.0.0.1:3131)
 ui-dev api="http://127.0.0.1:3131" port="5173":
