@@ -15,7 +15,6 @@ pub(super) fn next_connection_session_id() -> u64 {
     BINARY_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-
 /// Reads upstream messages on a dedicated thread so the executor can run a
 /// buffered message while later ones are already parsed. This is what lets a
 /// `DiscardStaleWindows` control message take effect before the buffered

@@ -81,8 +81,6 @@ impl NgramProposerKind {
 /// Longest suffix match window, and upper bound for a suffix proposer's `max_ngram`.
 pub const SUFFIX_NGRAM_MAX_WINDOW: usize = 64;
 
-
-
 /// N-gram proposer kind and its match-length and draft-length bounds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

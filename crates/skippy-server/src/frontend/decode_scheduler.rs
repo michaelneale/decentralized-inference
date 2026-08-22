@@ -647,8 +647,14 @@ mod tests {
         // The token budget is nowhere near spent, but the native checkpoint
         // retention bound still caps the number of in-flight windows.
         assert!(!scheduler.has_capacity());
-        assert!(scheduler
-            .open(10 + skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH, 64, 1)
-            .is_err());
+        assert!(
+            scheduler
+                .open(
+                    10 + skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH,
+                    64,
+                    1
+                )
+                .is_err()
+        );
     }
 }

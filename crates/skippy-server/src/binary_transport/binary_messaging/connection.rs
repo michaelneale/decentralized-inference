@@ -5,7 +5,6 @@ use super::control_messages::{
     handle_verify_retirement,
 };
 use super::message_receive::{next_connection_session_id, spawn_message_reader};
-use super::stale_discard::StaleDiscardRegistry;
 use super::reply::reply_window_for_message;
 use super::reply::send_stage_reply;
 use super::session_lifecycle::{align_session_to_target, record_session_auto_align};
@@ -13,6 +12,7 @@ use super::session_tracker::{
     ConnectionSessionOwnership, ConnectionSessionTracker, combine_connection_and_cleanup_results,
     release_tracked_connection_sessions,
 };
+use super::stale_discard::StaleDiscardRegistry;
 use super::summary::BinaryMessageObservation;
 use super::summary::BinaryRequestSummary;
 use super::telemetry::UpstreamReplyWriteSpan;

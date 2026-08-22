@@ -38,8 +38,8 @@ use lifecycle::{
     DirectPredictionReturnPath, EmbeddedDecodeSummary, PipelinedCompositeWindow, can_seed_pipeline,
     compose_target_predictions, decode_uses_context_sideband, direct_prediction_return_path,
     mark_epoch_stale, open_upstream_prediction_return, pipelined_window_layout,
-    stale_window_id_range,
     queued_active_tokens, refill_pipeline_ngram_candidates, speculation_after_prefix_restore,
+    stale_window_id_range,
 };
 use openai_frontend::{OpenAiError, OpenAiResult};
 use prefix_restore::EmbeddedPrefixRestore;
