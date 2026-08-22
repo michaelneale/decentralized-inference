@@ -4,7 +4,7 @@ use openai_frontend::OpenAiResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::json;
-use skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH;
+use skippy_protocol::{MAX_VERIFY_WINDOW_PIPELINE_DEPTH, MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -81,6 +81,8 @@ impl NgramProposerKind {
 /// Longest suffix match window, and upper bound for a suffix proposer's `max_ngram`.
 pub const SUFFIX_NGRAM_MAX_WINDOW: usize = 64;
 
+
+
 /// N-gram proposer kind and its match-length and draft-length bounds.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +110,12 @@ pub struct VerifyWindowConfig {
     pub min_tokens: usize,
     pub max_tokens: usize,
     pub pipeline_depth: usize,
+    /// Run-ahead speculative-token budget. Zero keeps the fixed
+    /// `pipeline_depth` window-count admission; a positive value switches the
+    /// scheduler to token-budget admission (windows stay capped at the native
+    /// checkpoint-retention bound).
+    #[serde(default)]
+    pub runahead_max_tokens: usize,
 }
 
 impl Default for SpeculativeDecodeConfig {
@@ -129,6 +137,7 @@ impl Default for SpeculativeDecodeConfig {
                 min_tokens: 1,
                 max_tokens: 4,
                 pipeline_depth: 1,
+                runahead_max_tokens: 0,
             },
             draft_acceptance_threshold: 0.0,
             draft_split_probability: 0.0,
@@ -202,6 +211,11 @@ impl SpeculativeDecodeConfig {
         }
         skippy_runtime::parse_cache_type(&self.draft_cache_type_k)?;
         skippy_runtime::parse_cache_type(&self.draft_cache_type_v)?;
+        if self.verify_window.runahead_max_tokens > MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS {
+            bail!(
+                "verify window runahead_max_tokens must not exceed {MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS}"
+            );
+        }
         Ok(())
     }
 

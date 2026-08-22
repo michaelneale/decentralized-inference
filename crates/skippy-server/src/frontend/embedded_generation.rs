@@ -820,7 +820,15 @@ impl StageOpenAiBackend {
                 _ => None,
             };
             let mut verify_window_scheduler = VerifyWindowScheduler::new(
-                VerifyWindowPipelineConfig::new(effective_speculative.verify_window.pipeline_depth),
+                if effective_speculative.verify_window.runahead_max_tokens > 0 {
+                    VerifyWindowPipelineConfig::with_runahead(
+                        effective_speculative.verify_window.runahead_max_tokens,
+                    )
+                } else {
+                    VerifyWindowPipelineConfig::new(
+                        effective_speculative.verify_window.pipeline_depth,
+                    )
+                },
             );
             let composite_sidecar_enabled =
                 native_mtp_options.ngram_hybrid && draft_guard.is_none();
@@ -1056,8 +1064,11 @@ impl StageOpenAiBackend {
                                 current,
                                 &proposal_tokens,
                             );
-                            let window = verify_window_scheduler
-                                .open(layout.pos_start, layout.decode_step)?;
+                            let window = verify_window_scheduler.open(
+                                layout.pos_start,
+                                layout.decode_step,
+                                layout.input_tokens.len(),
+                            )?;
                             let input_tokens = layout.input_tokens;
                             let message =
                                 embedded_verify_window_message(VerifyWindowMessageArgs {

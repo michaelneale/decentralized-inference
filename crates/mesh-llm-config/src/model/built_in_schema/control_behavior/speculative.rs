@@ -73,7 +73,8 @@ pub(super) fn apply_speculative_behavior(
         | "native_mtp_suppress_cooldown_draft_limit"
         | "verify_window_min_tokens"
         | "verify_window_max_tokens"
-        | "verify_window_pipeline_depth" => {}
+        | "verify_window_pipeline_depth"
+        | "verify_window_runahead_tokens" => {}
         _ => {}
     }
 }

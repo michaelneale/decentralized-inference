@@ -22,6 +22,10 @@ pub const STAGE_STREAM_ARTIFACT_TRANSFER: u8 = 0x03;
 pub const MAX_STAGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum number of unresolved verify windows covered by native checkpoints.
 pub const MAX_VERIFY_WINDOW_PIPELINE_DEPTH: usize = 64;
+/// Sanity bound on the run-ahead speculative-token budget. Every in-flight
+/// speculative token holds restorable recovery state downstream, so the budget
+/// caps how much KV checkpoint memory one request can pin.
+pub const MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageFrameError {

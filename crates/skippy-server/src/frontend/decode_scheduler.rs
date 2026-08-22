@@ -7,23 +7,46 @@ use skippy_metrics::attr as attr_key;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VerifyWindowPipelineConfig {
     depth: usize,
+    runahead_max_tokens: usize,
 }
 
 impl VerifyWindowPipelineConfig {
     pub(super) fn new(depth: usize) -> Self {
         Self {
             depth: depth.max(1),
+            runahead_max_tokens: 0,
+        }
+    }
+
+    /// Run-ahead mode: admission is bounded by a speculative-token budget
+    /// instead of a fixed window count. The window count stays capped at the
+    /// native checkpoint-retention bound so downstream recovery state cannot
+    /// outgrow what the runtime can restore.
+    pub(super) fn with_runahead(max_tokens: usize) -> Self {
+        Self {
+            depth: skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH,
+            runahead_max_tokens: max_tokens.max(1),
         }
     }
 
     pub(super) fn depth(self) -> usize {
         self.depth
     }
+
+    pub(super) fn runahead_max_tokens(self) -> usize {
+        self.runahead_max_tokens
+    }
+
+    pub(super) fn is_runahead(self) -> bool {
+        self.runahead_max_tokens > 0
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct VerifyWindowPipelineStats {
     depth: usize,
+    runahead_max_tokens: usize,
+    max_in_flight_tokens: usize,
     direct_prediction_return: bool,
     direct_prediction_return_upstream_opened: bool,
     direct_prediction_return_reverse_fallback: bool,
@@ -156,6 +179,14 @@ impl VerifyWindowPipelineStats {
             "verify_window_occupancy_average_in_flight".to_string(),
             serde_json::json!(self.occupancy_average_in_flight),
         );
+        timings.insert(
+            "verify_window_runahead_max_tokens".to_string(),
+            serde_json::json!(self.runahead_max_tokens),
+        );
+        timings.insert(
+            "verify_window_max_in_flight_tokens".to_string(),
+            serde_json::json!(self.max_in_flight_tokens),
+        );
     }
 }
 
@@ -172,6 +203,7 @@ pub(super) struct VerifyWindow {
     pub(super) id: i32,
     pub(super) base_position: usize,
     pub(super) decode_step: usize,
+    pub(super) token_count: usize,
 }
 
 #[derive(Debug)]
@@ -179,6 +211,7 @@ pub(super) struct VerifyWindowScheduler {
     config: VerifyWindowPipelineConfig,
     next_id: i32,
     in_flight: VecDeque<VerifyWindow>,
+    in_flight_tokens: usize,
     stats: VerifyWindowPipelineStats,
     occupancy_ms_by_depth: Vec<f64>,
     occupancy_changed: Instant,
@@ -190,8 +223,10 @@ impl VerifyWindowScheduler {
             config,
             next_id: 1,
             in_flight: VecDeque::new(),
+            in_flight_tokens: 0,
             stats: VerifyWindowPipelineStats {
                 depth: config.depth(),
+                runahead_max_tokens: config.runahead_max_tokens(),
                 ..VerifyWindowPipelineStats::default()
             },
             occupancy_ms_by_depth: vec![0.0; config.depth().saturating_add(1)],
@@ -200,7 +235,13 @@ impl VerifyWindowScheduler {
     }
 
     pub(super) fn has_capacity(&self) -> bool {
-        self.in_flight.len() < self.config.depth()
+        if self.in_flight.len() >= self.config.depth() {
+            return false;
+        }
+        if self.config.is_runahead() {
+            return self.in_flight_tokens < self.config.runahead_max_tokens();
+        }
+        true
     }
 
     pub(super) fn depth(&self) -> usize {
@@ -264,6 +305,7 @@ impl VerifyWindowScheduler {
         &mut self,
         base_position: usize,
         decode_step: usize,
+        token_count: usize,
     ) -> OpenAiResult<VerifyWindow> {
         if !self.has_capacity() {
             return Err(OpenAiError::backend(
@@ -279,11 +321,15 @@ impl VerifyWindowScheduler {
             id,
             base_position,
             decode_step,
+            token_count,
         };
         self.record_occupancy();
         self.in_flight.push_back(window.clone());
+        self.in_flight_tokens = self.in_flight_tokens.saturating_add(token_count);
         self.stats.opened_windows = self.stats.opened_windows.saturating_add(1);
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.in_flight.len());
+        self.stats.max_in_flight_tokens =
+            self.stats.max_in_flight_tokens.max(self.in_flight_tokens);
         Ok(window)
     }
 
@@ -300,7 +346,9 @@ impl VerifyWindowScheduler {
             )));
         }
         self.record_occupancy();
-        Ok(self.in_flight.pop_front().expect("checked non-empty queue"))
+        let completed = self.in_flight.pop_front().expect("checked non-empty queue");
+        self.in_flight_tokens = self.in_flight_tokens.saturating_sub(completed.token_count);
+        Ok(completed)
     }
 
     #[cfg(test)]
@@ -308,6 +356,7 @@ impl VerifyWindowScheduler {
         let discarded = self.in_flight.len();
         self.record_occupancy();
         self.in_flight.clear();
+        self.in_flight_tokens = 0;
         self.stats.stale_discarded = self.stats.stale_discarded.saturating_add(discarded);
         discarded
     }
@@ -390,13 +439,13 @@ mod tests {
 
     #[test]
     fn records_preferred_and_reverse_direct_return_paths() {
-        let mut preferred = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 2 });
+        let mut preferred = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(2));
         preferred.mark_direct_prediction_return(true);
         assert!(preferred.stats().direct_prediction_return);
         assert!(preferred.stats().direct_prediction_return_upstream_opened);
         assert!(!preferred.stats().direct_prediction_return_reverse_fallback);
 
-        let mut reverse = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 2 });
+        let mut reverse = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(2));
         reverse.mark_direct_prediction_return(false);
         let mut timings = BTreeMap::new();
         reverse.stats().insert_response_timings(&mut timings);
@@ -412,12 +461,12 @@ mod tests {
 
     #[test]
     fn bounds_depth_and_requires_fifo_reply_ids() {
-        let config = VerifyWindowPipelineConfig { depth: 2 };
+        let config = VerifyWindowPipelineConfig::new(2);
         let mut scheduler = VerifyWindowScheduler::new(config);
-        let first = scheduler.open(10, 0).unwrap();
-        let second = scheduler.open(11, 1).unwrap();
+        let first = scheduler.open(10, 0, 1).unwrap();
+        let second = scheduler.open(11, 1, 1).unwrap();
 
-        assert!(scheduler.open(12, 2).is_err());
+        assert!(scheduler.open(12, 2, 1).is_err());
         assert!(scheduler.complete_next(second.id).is_err());
         assert_eq!(scheduler.in_flight_len(), 2);
         assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
@@ -431,13 +480,13 @@ mod tests {
 
     #[test]
     fn depth_nine_keeps_the_first_window_restorable() {
-        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 9 });
+        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(9));
         let windows: Vec<_> = (0..9)
-            .map(|step| scheduler.open(10 + step, step).unwrap())
+            .map(|step| scheduler.open(10 + step, step, 1).unwrap())
             .collect();
 
         assert_eq!(scheduler.in_flight_len(), 9);
-        assert!(scheduler.open(19, 9).is_err());
+        assert!(scheduler.open(19, 9, 1).is_err());
         assert_eq!(scheduler.stats().max_in_flight, 9);
 
         // The first window must still be completable after the ninth opens.
@@ -451,11 +500,11 @@ mod tests {
 
     #[test]
     fn discards_stale_windows_after_divergence() {
-        let config = VerifyWindowPipelineConfig { depth: 3 };
+        let config = VerifyWindowPipelineConfig::new(3);
         let mut scheduler = VerifyWindowScheduler::new(config);
-        scheduler.open(10, 0).unwrap();
-        scheduler.open(11, 1).unwrap();
-        scheduler.open(12, 2).unwrap();
+        scheduler.open(10, 0, 1).unwrap();
+        scheduler.open(11, 1, 1).unwrap();
+        scheduler.open(12, 2, 1).unwrap();
 
         assert_eq!(scheduler.discard_stale(), 3);
         assert_eq!(scheduler.stale_discard_count(), 3);
@@ -465,10 +514,10 @@ mod tests {
 
     #[test]
     fn stale_recovery_tracks_marked_and_completed_work_separately() {
-        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 3 });
-        let first = scheduler.open(10, 0).unwrap();
-        let second = scheduler.open(11, 1).unwrap();
-        let third = scheduler.open(12, 2).unwrap();
+        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(3));
+        let first = scheduler.open(10, 0, 1).unwrap();
+        let second = scheduler.open(11, 1, 1).unwrap();
+        let third = scheduler.open(12, 2, 1).unwrap();
 
         scheduler.complete_next(first.id).unwrap();
         scheduler.mark_recovery_epoch(2);
@@ -490,28 +539,28 @@ mod tests {
 
     #[test]
     fn configured_depth_is_the_fill_target() {
-        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 8 });
+        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(8));
 
         assert!(scheduler.supports_pipelining(4));
         assert_eq!(scheduler.depth(), 8);
 
         for position in 0..8 {
-            scheduler.open(100 + position, position).unwrap();
+            scheduler.open(100 + position, position, 1).unwrap();
         }
         assert!(!scheduler.has_capacity());
-        assert!(scheduler.open(108, 8).is_err());
+        assert!(scheduler.open(108, 8, 1).is_err());
     }
 
     #[test]
     fn pipeline_depth_one_never_admits_dependent_work() {
-        let scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 1 });
+        let scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(1));
 
         assert!(!scheduler.supports_pipelining(2));
     }
 
     #[test]
     fn fixed_fill_counters_are_exposed_in_response_timings() {
-        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 2 });
+        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(2));
         assert!(scheduler.supports_pipelining(2));
         scheduler.record_horizon_refill(7);
         scheduler.record_horizon_refill(0);
@@ -538,11 +587,11 @@ mod tests {
 
     #[test]
     fn occupancy_timings_measure_parallel_and_full_depth_time() {
-        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig { depth: 2 });
+        let mut scheduler = VerifyWindowScheduler::new(VerifyWindowPipelineConfig::new(2));
         scheduler.occupancy_changed = Instant::now() - std::time::Duration::from_millis(2);
-        let first = scheduler.open(10, 0).unwrap();
+        let first = scheduler.open(10, 0, 1).unwrap();
         scheduler.occupancy_changed = Instant::now() - std::time::Duration::from_millis(3);
-        let second = scheduler.open(11, 1).unwrap();
+        let second = scheduler.open(11, 1, 1).unwrap();
         scheduler.occupancy_changed = Instant::now() - std::time::Duration::from_millis(4);
 
         let stats = scheduler.stats();
@@ -556,5 +605,46 @@ mod tests {
 
         assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
         assert_eq!(scheduler.complete_next(second.id).unwrap(), second);
+    }
+
+    #[test]
+    fn runahead_budget_bounds_admission_by_tokens() {
+        let mut scheduler =
+            VerifyWindowScheduler::new(VerifyWindowPipelineConfig::with_runahead(100));
+        assert!(scheduler.supports_pipelining(4));
+        assert_eq!(
+            scheduler.depth(),
+            skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH
+        );
+
+        let first = scheduler.open(10, 0, 48).unwrap();
+        assert!(scheduler.has_capacity());
+        let _second = scheduler.open(58, 1, 48).unwrap();
+        // 96 tokens in flight, budget 100: one more window may still open.
+        assert!(scheduler.has_capacity());
+        let _third = scheduler.open(106, 2, 48).unwrap();
+        assert!(!scheduler.has_capacity());
+        assert!(scheduler.open(154, 3, 1).is_err());
+
+        // Completing the head window frees its share of the budget.
+        assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
+        assert!(scheduler.has_capacity());
+        assert_eq!(scheduler.stats().max_in_flight_tokens, 144);
+        assert_eq!(scheduler.stats().runahead_max_tokens, 100);
+    }
+
+    #[test]
+    fn runahead_window_count_stays_within_native_retention() {
+        let mut scheduler =
+            VerifyWindowScheduler::new(VerifyWindowPipelineConfig::with_runahead(1_000_000));
+        for step in 0..skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH {
+            scheduler.open(10 + step, step, 1).unwrap();
+        }
+        // The token budget is nowhere near spent, but the native checkpoint
+        // retention bound still caps the number of in-flight windows.
+        assert!(!scheduler.has_capacity());
+        assert!(scheduler
+            .open(10 + skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH, 64, 1)
+            .is_err());
     }
 }

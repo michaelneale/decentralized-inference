@@ -463,6 +463,17 @@ fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<Speculative
             .and_then(|config| config.verify_window_pipeline_depth),
     )
     .map_or(config.verify_window.pipeline_depth, |value| value as usize);
+    config.verify_window.runahead_max_tokens = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.verify_window_runahead_tokens),
+        input
+            .global_config
+            .and_then(|config| config.verify_window_runahead_tokens),
+    )
+    .map_or(config.verify_window.runahead_max_tokens, |value| {
+        value as usize
+    });
     if config.verify_window.min_tokens > config.verify_window.max_tokens {
         bail!("skippy speculative verify window requires min_tokens <= max_tokens");
     }
@@ -545,6 +556,7 @@ fn package_decode_config(
             min_tokens: 1,
             max_tokens: 4,
             pipeline_depth: 1,
+            runahead_max_tokens: 0,
         });
     let effective_strategy = match (native_mtp.enabled, ngram.as_ref().map(|value| value.kind)) {
         (true, Some(NgramProposerKind::Cache)) => "native-mtp+ngram-cache",
@@ -631,6 +643,7 @@ fn verify_window_config(policy: &PackageWindowPolicyInfo) -> VerifyWindowConfig 
         min_tokens: policy.min_window as usize,
         max_tokens: policy.max_window as usize,
         pipeline_depth: policy.pipeline_depth.unwrap_or(1) as usize,
+        runahead_max_tokens: 0,
     }
 }
 
