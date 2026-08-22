@@ -716,6 +716,7 @@ pub(crate) fn run_binary_stage_message(
         | WireMessageKind::ConfigureGeneration
         | WireMessageKind::TrimSession
         | WireMessageKind::RetireVerifyWindow
+        | WireMessageKind::DiscardStaleWindows
         | WireMessageKind::ProbePrefill
         | WireMessageKind::RestorePrefill
         | WireMessageKind::TryRestorePrefill

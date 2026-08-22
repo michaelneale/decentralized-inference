@@ -248,6 +248,10 @@ impl VerifyWindowScheduler {
         self.config.depth()
     }
 
+    pub(super) fn is_runahead(&self) -> bool {
+        self.config.is_runahead()
+    }
+
     pub(super) fn mark_direct_prediction_return(&mut self, upstream_opened: bool) {
         self.stats.direct_prediction_return = true;
         self.stats.direct_prediction_return_upstream_opened = upstream_opened;

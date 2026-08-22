@@ -194,6 +194,24 @@ pub(super) fn can_seed_pipeline(windows: &VecDeque<PipelinedCompositeWindow>) ->
     windows.iter().all(|window| window.stale)
 }
 
+/// Inclusive window-id range of the stale windows of `epoch`, if any.
+pub(super) fn stale_window_id_range(
+    windows: &VecDeque<PipelinedCompositeWindow>,
+    epoch: u64,
+) -> Option<(i32, i32)> {
+    let mut range: Option<(i32, i32)> = None;
+    for window in windows {
+        if window.epoch == epoch && window.stale {
+            let id = window.window.id;
+            range = Some(match range {
+                Some((min, max)) => (min.min(id), max.max(id)),
+                None => (id, id),
+            });
+        }
+    }
+    range
+}
+
 pub(super) fn mark_epoch_stale(
     windows: &mut VecDeque<PipelinedCompositeWindow>,
     epoch: u64,

@@ -16,7 +16,9 @@ use crate::frontend::generation::stage_reply_timeout;
 use crate::frontend::util::ms_to_us;
 use crate::frontend::util::openai_backend_error;
 use crate::frontend::util::openai_io_error;
-use crate::frontend::wire_messages::retire_verify_window_message;
+use crate::frontend::wire_messages::{
+    discard_stale_windows_message, retire_verify_window_message,
+};
 use crate::telemetry::now_unix_nanos;
 use openai_frontend::OpenAiError;
 use openai_frontend::OpenAiResult;
@@ -95,6 +97,45 @@ impl StageOpenAiBackend {
             write_stage_message_conditioned(
                 downstream,
                 &message,
+                request.downstream_wire_condition,
+            )
+            .map_err(openai_io_error)?;
+        }
+        Ok(())
+    }
+
+    /// Sends a stale-window discard downstream without waiting for the
+    /// write receipt: the message queues behind the already-dispatched stale
+    /// windows, and blocking here would stall recovery for the whole stale
+    /// tail's wire time.
+    pub(super) fn discard_stale_windows(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        async_forwarder: Option<&mut AsyncForwarder>,
+        discard: StaleWindowDiscard,
+    ) -> OpenAiResult<()> {
+        let message = discard_stale_windows_message(
+            request.wire_dtype,
+            discard.request_id,
+            discard.session_id,
+            discard.min_window_id,
+            discard.max_window_id,
+        )?;
+        if let Some(forwarder) = async_forwarder {
+            forwarder
+                .send(
+                    message,
+                    request.wire_dtype,
+                    request.downstream_wire_condition,
+                    self.openai_attrs(request.ids),
+                )
+                .map_err(openai_backend_error)?;
+        } else {
+            write_stage_message_conditioned(
+                downstream,
+                &message,
+                request.wire_dtype,
                 request.downstream_wire_condition,
             )
             .map_err(openai_io_error)?;
@@ -876,4 +917,12 @@ mod tests {
         assert_eq!(downstream.read_timeout().unwrap(), None);
         writer.join().unwrap();
     }
+}
+
+/// Identifies a contiguous stale verify-window range for one request.
+pub(super) struct StaleWindowDiscard {
+    pub(super) request_id: u64,
+    pub(super) session_id: u64,
+    pub(super) min_window_id: i32,
+    pub(super) max_window_id: i32,
 }

@@ -10,7 +10,7 @@ use crate::binary_transport::{
     AsyncForwarder, BinaryStageExecutionOptions, forwarded_stage_message,
     forwarded_stage_message_timed, run_binary_stage_message, write_stage_message_conditioned,
 };
-use crate::frontend::embedded_execution::VerifyRetirement;
+use crate::frontend::embedded_execution::{StaleWindowDiscard, VerifyRetirement};
 use crate::frontend::request::wire_sampling_config;
 use crate::frontend::speculative::{
     OpenAiSpeculativeStats, classify_verify_window_with_threshold, propose_configured_ngram_tokens,
@@ -38,6 +38,7 @@ use lifecycle::{
     DirectPredictionReturnPath, EmbeddedDecodeSummary, PipelinedCompositeWindow, can_seed_pipeline,
     compose_target_predictions, decode_uses_context_sideband, direct_prediction_return_path,
     mark_epoch_stale, open_upstream_prediction_return, pipelined_window_layout,
+    stale_window_id_range,
     queued_active_tokens, refill_pipeline_ngram_candidates, speculation_after_prefix_restore,
 };
 use openai_frontend::{OpenAiError, OpenAiResult};
@@ -1313,6 +1314,22 @@ impl StageOpenAiBackend {
                             let stale_count =
                                 mark_epoch_stale(&mut pipelined_windows, pipeline_epoch);
                             verify_window_scheduler.mark_recovery_epoch(stale_count);
+                            if verify_window_scheduler.is_runahead()
+                                && let Some((min_id, max_id)) =
+                                    stale_window_id_range(&pipelined_windows, pipeline_epoch)
+                            {
+                                self.discard_stale_windows(
+                                    &request,
+                                    downstream,
+                                    verify_window_forwarder.as_mut(),
+                                    StaleWindowDiscard {
+                                        request_id,
+                                        session_id,
+                                        min_window_id: min_id,
+                                        max_window_id: max_id,
+                                    },
+                                )?;
+                            }
                             let pipeline = pipelined.take().expect("pipeline retained");
                             if ngram_sidecar_controller.observe_tail_outcome(
                                 pipeline.proposal(),
@@ -1877,6 +1894,22 @@ impl StageOpenAiBackend {
             if !pipelined_windows.is_empty() {
                 let stale_count = mark_epoch_stale(&mut pipelined_windows, pipeline_epoch);
                 verify_window_scheduler.mark_stale(stale_count);
+                if verify_window_scheduler.is_runahead()
+                    && let Some((min_id, max_id)) =
+                        stale_window_id_range(&pipelined_windows, pipeline_epoch)
+                {
+                    self.discard_stale_windows(
+                        &request,
+                        downstream,
+                        verify_window_forwarder.as_mut(),
+                        StaleWindowDiscard {
+                            request_id,
+                            session_id,
+                            min_window_id: min_id,
+                            max_window_id: max_id,
+                        },
+                    )?;
+                }
                 while let Some(stale) = pipelined_windows.pop_front() {
                     let stale_drain_timer = PhaseTimer::start();
                     let stale_reply = self.complete_dispatched_stage_message_direct(

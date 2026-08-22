@@ -36,6 +36,7 @@ pub enum WireMessageKind {
     DecodeLightCtx = 9,
     VerifyWindow = 21,
     RetireVerifyWindow = 22,
+    DiscardStaleWindows = 23,
     StateExport = 13,
     ConfigureGeneration = 14,
     ProbePrefill = 15,
@@ -77,6 +78,14 @@ impl WireMessageKind {
 
     pub fn is_verify_retirement(self) -> bool {
         matches!(self, Self::RetireVerifyWindow)
+    }
+
+    /// Control message invalidating a contiguous range of not-yet-executed
+    /// verify windows after the driver detected divergence. Recorded at
+    /// message-receive time so buffered stale windows are skipped instead of
+    /// executed.
+    pub fn is_stale_window_discard(self) -> bool {
+        matches!(self, Self::DiscardStaleWindows)
     }
 
     pub fn is_generation_control(self) -> bool {
@@ -125,6 +134,7 @@ impl TryFrom<i32> for WireMessageKind {
             20 => Ok(Self::PredictionReturnOpen),
             21 => Ok(Self::VerifyWindow),
             22 => Ok(Self::RetireVerifyWindow),
+            23 => Ok(Self::DiscardStaleWindows),
             _ => Err(invalid_data("unknown stage message kind")),
         }
     }
@@ -348,6 +358,7 @@ impl StageStateHeader {
             WireMessageKind::StateImport | WireMessageKind::StateExport
         ) || kind.is_session_control()
             || kind.is_verify_retirement()
+            || kind.is_stale_window_discard()
             || kind.is_generation_control()
         {
             return true;

@@ -4,7 +4,8 @@ use super::control_messages::{
     handle_generation_control, handle_prefix_cache_control, handle_session_control, handle_stop,
     handle_verify_retirement,
 };
-use super::message_receive::{next_connection_session_id, receive_next_message};
+use super::message_receive::{next_connection_session_id, spawn_message_reader};
+use super::stale_discard::StaleDiscardRegistry;
 use super::reply::reply_window_for_message;
 use super::reply::send_stage_reply;
 use super::session_lifecycle::{align_session_to_target, record_session_auto_align};
@@ -156,6 +157,13 @@ fn handle_binary_connection_messages(
     let mut request_summary = BinaryRequestSummary::default();
     let mut prediction_return_streams: BTreeMap<(u64, u64), TcpStream> = BTreeMap::new();
     let mut next_message = Some(first_message);
+    let discard_registry = Arc::new(StaleDiscardRegistry::default());
+    let inbound_reader = spawn_message_reader(
+        upstream,
+        input_activation_width,
+        max_inflight.max(1),
+        discard_registry.clone(),
+    )?;
     let mut async_forwarder = if async_prefill_forward || max_inflight > 1 {
         downstream
             .as_ref()
@@ -171,10 +179,7 @@ fn handle_binary_connection_messages(
     loop {
         let recv_start_unix_nanos = now_unix_nanos() as u64;
         let recv_started = Instant::now();
-        let Some(mut message) = receive_next_message(
-            upstream,
-            worker_control,
-            input_activation_width,
+        let Some(mut message) = inbound_reader.next(
             next_message.take(),
             pending_prefill_replies,
             request_summary.message_count,
@@ -219,6 +224,33 @@ fn handle_binary_connection_messages(
                 &mut prediction_return_streams,
                 prediction_return_sinks,
             )?;
+            continue;
+        }
+
+        if message.kind.is_stale_window_discard() {
+            // The reader thread already recorded the range; middle stages
+            // forward it so downstream stages can skip their buffered stale
+            // windows too. No reply is expected.
+            if let Some(downstream) = downstream.as_mut() {
+                if let Some(forwarder) = async_forwarder.as_mut() {
+                    forwarder
+                        .send(
+                            message,
+                            wire_dtype,
+                            downstream_wire_condition,
+                            BTreeMap::new(),
+                        )
+                        .context("forward stale window discard downstream")?;
+                } else {
+                    write_stage_message_conditioned(
+                        &mut *downstream,
+                        &message,
+                        wire_dtype,
+                        downstream_wire_condition,
+                    )
+                    .context("forward stale window discard downstream")?;
+                }
+            }
             continue;
         }
 
@@ -304,6 +336,38 @@ fn handle_binary_connection_messages(
 
         if !message.state.matches_kind(message.kind) {
             bail!("binary stage state does not match message kind");
+        }
+
+        if message.kind == WireMessageKind::VerifyWindow
+            && downstream.is_none()
+            && discard_registry.is_discarded(
+                message.request_id,
+                message.session_id,
+                message.state.seq_id,
+            )
+        {
+            // A discard raced ahead of this buffered stale window: answer with
+            // an empty prediction set instead of executing it. The driver's
+            // stale drain only uses the window id for FIFO bookkeeping.
+            let reply = StageReply {
+                kind: WireReplyKind::PredictedTokens,
+                predicted: message.state.current_token,
+                predicted_tokens: Vec::new(),
+                native_mtp_draft: None,
+                window: reply_window_for_message(&message),
+                stats: StageReplyStats::default(),
+            };
+            if let Some(return_stream) =
+                prediction_return_streams.get_mut(&(message.request_id, message.session_id))
+            {
+                direct_return::send_direct_prediction_return(return_stream, reply)
+                    .context("send discarded verify window reply")?;
+            } else {
+                send_stage_reply(&mut *upstream, reply)
+                    .context("send discarded verify window reply")?;
+            }
+            request_summary.message_count += 1;
+            continue;
         }
 
         let requires_predicted = message.kind.requires_predicted_reply();

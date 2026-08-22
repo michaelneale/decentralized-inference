@@ -40,6 +40,7 @@ mod message_receive;
 mod prefill_recording;
 pub(in crate::binary_transport) mod reply;
 mod session_lifecycle;
+mod stale_discard;
 mod session_tracker;
 mod summary;
 mod telemetry;
