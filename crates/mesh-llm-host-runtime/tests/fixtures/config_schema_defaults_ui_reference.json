@@ -792,6 +792,13 @@
       }
     },
     {
+      "canonical_path": "defaults.speculative.verify_window_runahead_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
       "canonical_path": "defaults.throughput.continuous_batching",
       "support": "supported",
       "source": {
