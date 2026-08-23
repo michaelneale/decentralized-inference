@@ -695,7 +695,9 @@ fn validate_verify_window_controls(
     validate_optional_u32_range(
         config.verify_window_runahead_tokens,
         &format!("{base_path}.verify_window_runahead_tokens"),
-        1,
+        // Zero is the documented fixed-depth sentinel, so a model-level block
+        // can switch run-ahead back off when the global defaults enable it.
+        0,
         u32::try_from(MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS).expect("runahead limit fits u32"),
     )
 }
