@@ -24,6 +24,11 @@ pub struct WireCondition {
     stall_p: f64,
 }
 
+/// Upper bound for each simulated delay component. An hour-long simulated
+/// stall is already far beyond any useful wire model, and bounding the inputs
+/// keeps the combined delay inside `Duration::from_secs_f64`'s domain.
+const MAX_SIMULATED_DELAY_MS: f64 = 3_600_000.0;
+
 impl WireCondition {
     pub fn new(delay_ms: f64, mbps: Option<f64>) -> Result<Self> {
         Self::with_jitter(delay_ms, mbps, 0.0, 0.0, 0.0)
@@ -46,6 +51,15 @@ impl WireCondition {
         stall_ms: f64,
         stall_p: f64,
     ) -> Result<Self> {
+        for (value, name) in [
+            (delay_ms, "delay"),
+            (jitter_ms, "jitter"),
+            (stall_ms, "stall"),
+        ] {
+            if value > MAX_SIMULATED_DELAY_MS {
+                bail!("downstream wire {name} must not exceed {MAX_SIMULATED_DELAY_MS} ms");
+            }
+        }
         if !delay_ms.is_finite() || delay_ms < 0.0 {
             bail!("downstream wire delay must be finite and non-negative");
         }
@@ -86,7 +100,9 @@ impl WireCondition {
         if self.stall_p > 0.0 && next_uniform_sample() < self.stall_p {
             delay_ms += self.stall_ms;
         }
-        Duration::from_secs_f64(delay_ms / 1000.0)
+        // The exponential jitter tail is unbounded, so clamp the combined
+        // delay: `Duration::from_secs_f64` panics on overflow.
+        Duration::from_secs_f64(delay_ms.min(MAX_SIMULATED_DELAY_MS) / 1000.0)
     }
 
     fn sleep_for(&self, message: &StageWireMessage) {

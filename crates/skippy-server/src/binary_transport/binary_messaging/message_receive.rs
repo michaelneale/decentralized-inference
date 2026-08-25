@@ -33,13 +33,16 @@ pub(super) const INBOUND_LOOKAHEAD_MESSAGES: usize =
 /// handler that exits on a local error while the peer keeps its side open
 /// does not leak a blocked thread and its cloned descriptor.
 pub(super) struct InboundMessageReader {
-    receiver: mpsc::Receiver<io::Result<StageWireMessage>>,
+    receiver: Option<mpsc::Receiver<io::Result<StageWireMessage>>>,
     stream: TcpStream,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for InboundMessageReader {
     fn drop(&mut self) {
+        // Disconnect the channel first: a reader blocked in `send` on a full
+        // lookahead queue is not woken by the socket shutdown.
+        drop(self.receiver.take());
         // Unblock a pending `read_stage_message`; errors here only mean the
         // socket is already closed.
         let _ = self.stream.shutdown(Shutdown::Both);
@@ -81,7 +84,7 @@ pub(super) fn spawn_message_reader(
         }
     });
     Ok(InboundMessageReader {
-        receiver,
+        receiver: Some(receiver),
         stream,
         thread: Some(thread),
     })
@@ -99,7 +102,11 @@ impl InboundMessageReader {
         if first_message.is_some() {
             return Ok(first_message);
         }
-        match self.receiver.recv() {
+        let receiver = self
+            .receiver
+            .as_ref()
+            .expect("inbound receiver present until drop");
+        match receiver.recv() {
             Ok(Ok(message)) => Ok(Some(message)),
             Ok(Err(error))
                 if error.kind() == io::ErrorKind::UnexpectedEof
@@ -174,6 +181,30 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         drop(reader);
+    }
+
+    #[test]
+    fn dropping_the_reader_completes_while_the_lookahead_channel_is_full() {
+        let (mut peer, upstream) = connected_pair();
+        let registry = Arc::new(StaleDiscardRegistry::default());
+        let reader = spawn_message_reader(&upstream, 4, 1, registry).expect("spawn");
+
+        // Fill the lookahead queue and leave the reader blocked in `send`.
+        for _ in 0..(INBOUND_LOOKAHEAD_MESSAGES + 4) {
+            let message = control_message(WireMessageKind::Stop, Vec::new());
+            write_stage_message(&mut peer, &message, WireActivationDType::F32).expect("write");
+        }
+        thread::sleep(Duration::from_millis(100));
+
+        let (done, dropped) = mpsc::channel();
+        thread::spawn(move || {
+            drop(reader);
+            let _ = done.send(());
+        });
+        dropped
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dropping the receiver must unblock the queued send before the join");
+        drop(peer);
     }
 
     #[test]

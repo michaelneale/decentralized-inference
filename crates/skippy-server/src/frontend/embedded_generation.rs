@@ -1029,6 +1029,12 @@ impl StageOpenAiBackend {
                             && verify_window_scheduler.in_flight_len() < pipeline_in_flight_limit
                             && decoded_tokens + queued_active_tokens(&pipelined_windows)
                                 < request.max_tokens as usize
+                            // A window may need one budget token for its
+                            // epoch-start boundary on top of the proposals,
+                            // so wait for a retirement rather than plan a
+                            // chunk the budget cannot fit.
+                            && (verify_window_scheduler.in_flight_len() == 0
+                                || verify_window_scheduler.admissible_window_tokens() > 1)
                         {
                             let refill_threshold = chunk_width;
                             if pipeline.candidate_len() < refill_threshold {
@@ -1050,7 +1056,14 @@ impl StageOpenAiBackend {
                             if !pipeline.has_remaining_candidates() {
                                 break;
                             }
-                            let Some(planned) = pipeline.next_chunk(chunk_width) else {
+                            let budget_chunk_width = chunk_width
+                                .min(
+                                    verify_window_scheduler
+                                        .admissible_window_tokens()
+                                        .saturating_sub(1),
+                                )
+                                .max(1);
+                            let Some(planned) = pipeline.next_chunk(budget_chunk_width) else {
                                 break;
                             };
                             let proposal_tokens = planned.proposal_tokens().to_vec();

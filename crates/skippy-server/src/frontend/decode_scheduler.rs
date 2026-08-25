@@ -248,6 +248,20 @@ impl VerifyWindowScheduler {
         self.config.depth()
     }
 
+    /// Widest window (in input tokens, including an epoch-start boundary
+    /// token) that still fits the remaining run-ahead budget. Unbounded in
+    /// fixed-depth mode, and unbounded when idle so a budget narrower than
+    /// one window cannot stall a request: the hard bound applies from the
+    /// second in-flight window on.
+    pub(super) fn admissible_window_tokens(&self) -> usize {
+        if !self.config.is_runahead() || self.in_flight.is_empty() {
+            return usize::MAX;
+        }
+        self.config
+            .runahead_max_tokens()
+            .saturating_sub(self.in_flight_tokens)
+    }
+
     pub(super) fn is_runahead(&self) -> bool {
         self.config.is_runahead()
     }
@@ -314,6 +328,11 @@ impl VerifyWindowScheduler {
         if !self.has_capacity() {
             return Err(OpenAiError::backend(
                 "verify window pipeline depth exceeded",
+            ));
+        }
+        if token_count > self.admissible_window_tokens() {
+            return Err(OpenAiError::backend(
+                "verify window run-ahead token budget exceeded",
             ));
         }
         let id = self.next_id;
@@ -624,16 +643,18 @@ mod tests {
         let first = scheduler.open(10, 0, 48).unwrap();
         assert!(scheduler.has_capacity());
         let _second = scheduler.open(58, 1, 48).unwrap();
-        // 96 tokens in flight, budget 100: one more window may still open.
+        // 96 tokens in flight, budget 100: only 4 more tokens fit.
         assert!(scheduler.has_capacity());
-        let _third = scheduler.open(106, 2, 48).unwrap();
+        assert_eq!(scheduler.admissible_window_tokens(), 4);
+        assert!(scheduler.open(106, 2, 48).is_err());
+        let _third = scheduler.open(106, 2, 4).unwrap();
         assert!(!scheduler.has_capacity());
-        assert!(scheduler.open(154, 3, 1).is_err());
+        assert!(scheduler.open(110, 3, 1).is_err());
 
         // Completing the head window frees its share of the budget.
         assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
         assert!(scheduler.has_capacity());
-        assert_eq!(scheduler.stats().max_in_flight_tokens, 144);
+        assert_eq!(scheduler.stats().max_in_flight_tokens, 100);
         assert_eq!(scheduler.stats().runahead_max_tokens, 100);
     }
 
@@ -656,5 +677,19 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_first_window_wider_than_the_whole_budget_still_opens_when_idle() {
+        let mut scheduler =
+            VerifyWindowScheduler::new(VerifyWindowPipelineConfig::with_runahead(8));
+        assert_eq!(scheduler.admissible_window_tokens(), usize::MAX);
+        let first = scheduler.open(10, 0, 32).unwrap();
+        // Over budget: nothing else may open until the head retires.
+        assert!(!scheduler.has_capacity());
+        assert_eq!(scheduler.admissible_window_tokens(), 0);
+        assert!(scheduler.open(42, 1, 1).is_err());
+        assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
+        assert!(scheduler.has_capacity());
     }
 }
