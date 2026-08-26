@@ -3,7 +3,7 @@ use skippy_protocol::binary::{StageWireMessage, read_stage_message};
 use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -46,12 +46,17 @@ pub(super) struct InboundMessageReader {
     stream: TcpStream,
     thread: Option<thread::JoinHandle<()>>,
     queued_bytes: Arc<AtomicUsize>,
+    stopped: Arc<AtomicBool>,
 }
 
 impl Drop for InboundMessageReader {
     fn drop(&mut self) {
         // Disconnect the channel first: a reader blocked in `send` on a full
         // lookahead queue is not woken by the socket shutdown.
+        // Release a reader parked on the byte ceiling: it is waiting on the
+        // executor, which is not coming back, and neither the receiver drop
+        // nor the socket shutdown would wake it.
+        self.stopped.store(true, Ordering::Release);
         drop(self.receiver.take());
         // Unblock a pending `read_stage_message`; errors here only mean the
         // socket is already closed.
@@ -77,11 +82,16 @@ pub(super) fn spawn_message_reader(
     let (sender, receiver) = mpsc::sync_channel(capacity.max(INBOUND_LOOKAHEAD_MESSAGES));
     let queued_bytes = Arc::new(AtomicUsize::new(0));
     let reader_queued_bytes = queued_bytes.clone();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let reader_stopped = stopped.clone();
     let thread = thread::spawn(move || {
         loop {
             // Back off while the parsed backlog is over the byte ceiling; the
             // executor decrements as it takes messages off the queue.
             while reader_queued_bytes.load(Ordering::Acquire) >= INBOUND_LOOKAHEAD_BYTES {
+                if reader_stopped.load(Ordering::Acquire) {
+                    return;
+                }
                 thread::sleep(Duration::from_millis(1));
             }
             match read_stage_message(&mut reader, activation_width) {
@@ -107,6 +117,7 @@ pub(super) fn spawn_message_reader(
         stream,
         thread: Some(thread),
         queued_bytes,
+        stopped,
     })
 }
 
@@ -128,12 +139,14 @@ impl InboundMessageReader {
             .expect("inbound receiver present until drop");
         match receiver.recv() {
             Ok(Ok(message)) => {
-                self.queued_bytes.fetch_sub(
-                    message
-                        .estimated_wire_bytes()
-                        .min(self.queued_bytes.load(Ordering::Acquire)),
-                    Ordering::AcqRel,
-                );
+                // Saturating, not a load-then-subtract: the counter must
+                // never wrap, or the reader parks on the ceiling forever.
+                let bytes = message.estimated_wire_bytes();
+                self.queued_bytes
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                        Some(queued.saturating_sub(bytes))
+                    })
+                    .ok();
                 Ok(Some(message))
             }
             Ok(Err(error))
@@ -209,6 +222,36 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         drop(reader);
+    }
+
+    #[test]
+    fn dropping_the_reader_completes_while_it_is_parked_on_the_byte_ceiling() {
+        let (mut peer, upstream) = connected_pair();
+        let registry = Arc::new(StaleDiscardRegistry::default());
+        let reader = spawn_message_reader(&upstream, 4, 1, registry).expect("spawn");
+
+        // Park the reader: pretend the executor is holding the whole byte
+        // budget, so the backoff loop is the only thing running.
+        reader
+            .queued_bytes
+            .store(INBOUND_LOOKAHEAD_BYTES, Ordering::Release);
+        write_stage_message(
+            &mut peer,
+            &control_message(WireMessageKind::Stop, Vec::new()),
+            WireActivationDType::F32,
+        )
+        .expect("write");
+        thread::sleep(Duration::from_millis(50));
+
+        let (done, dropped) = mpsc::channel();
+        thread::spawn(move || {
+            drop(reader);
+            let _ = done.send(());
+        });
+        dropped
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a reader parked on the byte ceiling must still be released on drop");
+        drop(peer);
     }
 
     #[test]
