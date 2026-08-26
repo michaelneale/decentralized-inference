@@ -1,17 +1,7 @@
-use std::{
-    io,
-    sync::atomic::{AtomicU64, Ordering},
-    thread,
-    time::Duration,
-};
+use std::{cell::Cell, io, thread, time::Duration};
 
 use anyhow::{Result, bail};
 use skippy_protocol::binary::{StageWireMessage, write_stage_message};
-
-/// Process-wide sample counter so conditioned writes draw a deterministic
-/// pseudo-random sequence per process without threading RNG state through the
-/// `Copy` condition value.
-static WIRE_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const WIRE_SAMPLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -110,22 +100,47 @@ impl WireCondition {
         self.sleep_for_bandwidth(message);
     }
 
+    /// Serialization delay for `bytes` on this link. A near-zero `mbps`
+    /// makes the quotient arbitrarily large, so it is clamped to the same
+    /// bound as the propagation delay: `Duration::from_secs_f64` panics on an
+    /// out-of-domain value.
+    pub(crate) fn bandwidth_delay(&self, bytes: usize) -> Duration {
+        let Some(mbps) = self.mbps else {
+            return Duration::ZERO;
+        };
+        let seconds = bytes as f64 / (mbps * 125_000.0);
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64((seconds * 1000.0).min(MAX_SIMULATED_DELAY_MS) / 1000.0)
+    }
+
     fn sleep_for_bandwidth(&self, message: &StageWireMessage) {
-        let bandwidth_seconds = self
-            .mbps
-            .map(|mbps| message.estimated_wire_bytes() as f64 / (mbps * 125_000.0))
-            .unwrap_or(0.0);
-        if bandwidth_seconds > 0.0 {
-            thread::sleep(Duration::from_secs_f64(bandwidth_seconds));
+        let delay = self.bandwidth_delay(message.estimated_wire_bytes());
+        if !delay.is_zero() {
+            thread::sleep(delay);
         }
     }
 }
 
-/// Deterministic uniform sample in [0, 1) via splitmix64 over a process-wide
+thread_local! {
+    /// Per-thread draw index. A process-global counter makes each thread's
+    /// sequence depend on how the scheduler interleaves the others, which
+    /// leaves parallel tests and per-lane conditioning irreproducible; each
+    /// thread drawing its own sequence keeps a single conditioned stream
+    /// deterministic.
+    static WIRE_SAMPLE_INDEX: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Deterministic uniform sample in [0, 1) via splitmix64 over a per-thread
 /// counter. Not cryptographic; just reproducible-enough conditioning for
 /// benches and tests.
 fn next_uniform_sample() -> f64 {
-    let index = WIRE_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let index = WIRE_SAMPLE_INDEX.with(|counter| {
+        let index = counter.get();
+        counter.set(index.wrapping_add(1));
+        index
+    });
     let mut state = index.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ WIRE_SAMPLE_SEED;
     state ^= state >> 30;
     state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -195,9 +210,44 @@ mod tests {
     #[test]
     fn constant_condition_never_draws_samples() {
         let condition = WireCondition::new(3.0, None).unwrap();
-        let before = WIRE_SAMPLE_COUNTER.load(Ordering::Relaxed);
+        let before = WIRE_SAMPLE_INDEX.with(Cell::get);
         let _ = condition.propagation_delay();
-        assert_eq!(WIRE_SAMPLE_COUNTER.load(Ordering::Relaxed), before);
+        assert_eq!(WIRE_SAMPLE_INDEX.with(Cell::get), before);
+    }
+
+    #[test]
+    fn each_thread_draws_its_own_deterministic_sequence() {
+        let condition = WireCondition::with_jitter(0.0, None, 5.0, 0.0, 0.0).unwrap();
+        let sample_three = move || {
+            (0..3)
+                .map(|_| condition.propagation_delay())
+                .collect::<Vec<_>>()
+        };
+        // Two threads that each draw from index 0 see the same sequence, so a
+        // conditioned stream no longer depends on how other threads interleave.
+        let first = thread::spawn(sample_three).join().expect("first thread");
+        let second = thread::spawn(sample_three).join().expect("second thread");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_near_zero_rate_link_yields_a_bounded_bandwidth_delay() {
+        let condition = WireCondition::with_jitter(0.0, Some(f64::MIN_POSITIVE), 0.0, 0.0, 0.0)
+            .expect("a positive rate is accepted");
+
+        // Unclamped this overflows `Duration::from_secs_f64` and panics.
+        let delay = condition.bandwidth_delay(64 * 1024);
+
+        assert_eq!(
+            delay,
+            Duration::from_secs_f64(MAX_SIMULATED_DELAY_MS / 1000.0)
+        );
+        assert_eq!(condition.bandwidth_delay(0), Duration::ZERO);
+        assert_eq!(
+            WireCondition::new(1.0, None).unwrap().bandwidth_delay(4096),
+            Duration::ZERO
+        );
     }
 
     #[test]

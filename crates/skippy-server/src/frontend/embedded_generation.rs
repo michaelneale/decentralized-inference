@@ -1922,6 +1922,15 @@ impl StageOpenAiBackend {
                             max_window_id: max_id,
                         },
                     )?;
+                    // Teardown discard: the request is ending and the lane
+                    // goes back for reuse, so the discard must be fully on
+                    // the wire before anything else writes to this socket.
+                    // The mid-generation discard above deliberately does not
+                    // wait, because everything behind it is queued on the
+                    // same forwarder and stays ordered.
+                    if let Some(forwarder) = verify_window_forwarder.as_mut() {
+                        forwarder.flush().map_err(openai_backend_error)?;
+                    }
                 }
                 while let Some(stale) = pipelined_windows.pop_front() {
                     let stale_drain_timer = PhaseTimer::start();

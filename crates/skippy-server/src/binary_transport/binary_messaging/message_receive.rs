@@ -3,9 +3,10 @@ use skippy_protocol::binary::{StageWireMessage, read_stage_message};
 use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use super::stale_discard::StaleDiscardRegistry;
 
@@ -23,6 +24,14 @@ pub(super) fn next_connection_session_id() -> u64 {
 pub(super) const INBOUND_LOOKAHEAD_MESSAGES: usize =
     2 * skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH;
 
+/// Byte ceiling for the same queue. The message count alone bounds nothing
+/// useful for memory: a full queue of wide activation frames would retain
+/// many gigabytes. When the parsed backlog reaches this many bytes the reader
+/// stops reading ahead until the executor drains it; control messages are
+/// small, so a discard still overtakes an activation backlog well before the
+/// ceiling matters.
+pub(super) const INBOUND_LOOKAHEAD_BYTES: usize = 256 * 1024 * 1024;
+
 /// Reads upstream messages on a dedicated thread so the executor can run a
 /// buffered message while later ones are already parsed. This is what lets a
 /// `DiscardStaleWindows` control message take effect before the buffered
@@ -36,6 +45,7 @@ pub(super) struct InboundMessageReader {
     receiver: Option<mpsc::Receiver<io::Result<StageWireMessage>>>,
     stream: TcpStream,
     thread: Option<thread::JoinHandle<()>>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 impl Drop for InboundMessageReader {
@@ -65,13 +75,22 @@ pub(super) fn spawn_message_reader(
         .try_clone()
         .context("clone upstream stream for inbound reader shutdown")?;
     let (sender, receiver) = mpsc::sync_channel(capacity.max(INBOUND_LOOKAHEAD_MESSAGES));
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    let reader_queued_bytes = queued_bytes.clone();
     let thread = thread::spawn(move || {
         loop {
+            // Back off while the parsed backlog is over the byte ceiling; the
+            // executor decrements as it takes messages off the queue.
+            while reader_queued_bytes.load(Ordering::Acquire) >= INBOUND_LOOKAHEAD_BYTES {
+                thread::sleep(Duration::from_millis(1));
+            }
             match read_stage_message(&mut reader, activation_width) {
                 Ok(message) => {
                     if message.kind.is_stale_window_discard() {
                         registry.record_message(&message);
                     }
+                    let message_bytes = message.estimated_wire_bytes();
+                    reader_queued_bytes.fetch_add(message_bytes, Ordering::AcqRel);
                     if sender.send(Ok(message)).is_err() {
                         return;
                     }
@@ -87,6 +106,7 @@ pub(super) fn spawn_message_reader(
         receiver: Some(receiver),
         stream,
         thread: Some(thread),
+        queued_bytes,
     })
 }
 
@@ -107,7 +127,15 @@ impl InboundMessageReader {
             .as_ref()
             .expect("inbound receiver present until drop");
         match receiver.recv() {
-            Ok(Ok(message)) => Ok(Some(message)),
+            Ok(Ok(message)) => {
+                self.queued_bytes.fetch_sub(
+                    message
+                        .estimated_wire_bytes()
+                        .min(self.queued_bytes.load(Ordering::Acquire)),
+                    Ordering::AcqRel,
+                );
+                Ok(Some(message))
+            }
             Ok(Err(error))
                 if error.kind() == io::ErrorKind::UnexpectedEof
                     && pending_prefill_replies == 0
