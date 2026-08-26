@@ -133,6 +133,13 @@ deadline handling.
   older peers are rejected during split planning instead of being mixed into a
   generation-7 topology. Generation 6 is historical and is not accepted by the
   current serve binary.
+- That rejection happens in mesh split planning. A manually wired
+  `serve-binary --downstream host:port` pair performs no generation
+  handshake, so **the contract for the standalone path is that all stages are
+  upgraded together**. Pointing a run-ahead coordinator at an older stage
+  binary is not degraded gracefully: the older peer rejects the
+  `DiscardStaleWindows` frame as an unknown message kind and drops the
+  request connection.
 - `serve-binary` accepts upstream protocol connections concurrently. Model
   execution remains serialized by the per-process runtime lock, but readiness,
   abandoned, or broken connections do not monopolize the listener and block the

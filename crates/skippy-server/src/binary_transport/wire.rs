@@ -1,4 +1,10 @@
-use std::{cell::Cell, io, thread, time::Duration};
+use std::{
+    cell::Cell,
+    io,
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use skippy_protocol::binary::{StageWireMessage, write_stage_message};
@@ -41,15 +47,6 @@ impl WireCondition {
         stall_ms: f64,
         stall_p: f64,
     ) -> Result<Self> {
-        for (value, name) in [
-            (delay_ms, "delay"),
-            (jitter_ms, "jitter"),
-            (stall_ms, "stall"),
-        ] {
-            if value > MAX_SIMULATED_DELAY_MS {
-                bail!("downstream wire {name} must not exceed {MAX_SIMULATED_DELAY_MS} ms");
-            }
-        }
         if !delay_ms.is_finite() || delay_ms < 0.0 {
             bail!("downstream wire delay must be finite and non-negative");
         }
@@ -67,6 +64,17 @@ impl WireCondition {
         }
         if stall_p > 0.0 && stall_ms == 0.0 {
             bail!("downstream wire stall probability requires a stall duration");
+        }
+        // After the finiteness checks, so an infinite input reports what is
+        // actually wrong with it rather than the magnitude bound.
+        for (value, name) in [
+            (delay_ms, "delay"),
+            (jitter_ms, "jitter"),
+            (stall_ms, "stall"),
+        ] {
+            if value > MAX_SIMULATED_DELAY_MS {
+                bail!("downstream wire {name} must not exceed {MAX_SIMULATED_DELAY_MS} ms");
+            }
         }
         Ok(Self {
             delay_ms,
@@ -123,31 +131,54 @@ impl WireCondition {
     }
 }
 
+/// Hands each conditioned thread a distinct stream ordinal. A process-global
+/// *draw* counter would make every stream depend on how the scheduler
+/// interleaves the others; a per-thread draw index alone would hand every
+/// thread the identical stream, which models synchronized loss rather than a
+/// contended link. Salting the per-thread index with a per-thread ordinal
+/// gives streams that are both reproducible and independent.
+static WIRE_STREAM_ORDINALS: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
-    /// Per-thread draw index. A process-global counter makes each thread's
-    /// sequence depend on how the scheduler interleaves the others, which
-    /// leaves parallel tests and per-lane conditioning irreproducible; each
-    /// thread drawing its own sequence keeps a single conditioned stream
-    /// deterministic.
+    /// This thread's stream ordinal, claimed on first draw.
+    static WIRE_STREAM_ORDINAL: Cell<Option<u64>> = const { Cell::new(None) };
+    /// This thread's draw index within its stream.
     static WIRE_SAMPLE_INDEX: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Deterministic uniform sample in [0, 1) via splitmix64 over a per-thread
-/// counter. Not cryptographic; just reproducible-enough conditioning for
-/// benches and tests.
-fn next_uniform_sample() -> f64 {
-    let index = WIRE_SAMPLE_INDEX.with(|counter| {
-        let index = counter.get();
-        counter.set(index.wrapping_add(1));
-        index
-    });
-    let mut state = index.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ WIRE_SAMPLE_SEED;
+/// Deterministic uniform sample in [0, 1) via splitmix64 over one stream's
+/// draw index. Not cryptographic; just reproducible-enough conditioning for
+/// benches and tests. Pure in `(stream, index)` so both properties the model
+/// depends on — reproducibility within a lane, independence across lanes —
+/// are directly testable.
+fn uniform_sample(stream: u64, index: u64) -> f64 {
+    let mut state = index
+        .wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .wrapping_add(stream.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        ^ WIRE_SAMPLE_SEED;
     state ^= state >> 30;
     state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     state ^= state >> 27;
     state = state.wrapping_mul(0x94D0_49BB_1331_11EB);
     state ^= state >> 31;
     (state >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn next_uniform_sample() -> f64 {
+    let stream = WIRE_STREAM_ORDINAL.with(|ordinal| match ordinal.get() {
+        Some(stream) => stream,
+        None => {
+            let stream = WIRE_STREAM_ORDINALS.fetch_add(1, Ordering::Relaxed);
+            ordinal.set(Some(stream));
+            stream
+        }
+    });
+    let index = WIRE_SAMPLE_INDEX.with(|counter| {
+        let index = counter.get();
+        counter.set(index.wrapping_add(1));
+        index
+    });
+    uniform_sample(stream, index)
 }
 
 pub(crate) fn write_stage_message_conditioned(
@@ -216,19 +247,51 @@ mod tests {
     }
 
     #[test]
-    fn each_thread_draws_its_own_deterministic_sequence() {
+    fn a_stream_is_reproducible_from_its_ordinal_and_index() {
+        // Reproducibility: a lane replaying the same draws sees the same
+        // sequence, with no dependence on other threads' interleaving.
+        let first = (0..4)
+            .map(|index| uniform_sample(7, index))
+            .collect::<Vec<_>>();
+        let second = (0..4)
+            .map(|index| uniform_sample(7, index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn separate_streams_are_independent_not_identical() {
+        // Independence: two lanes must not take their burst stalls on the
+        // same message index, which is a synchronized-loss model rather than
+        // the contended link the flag documents.
+        let lanes = (0..4)
+            .map(|stream| {
+                (0..8)
+                    .map(|index| uniform_sample(stream, index))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        for (left_index, left) in lanes.iter().enumerate() {
+            for right in lanes.iter().skip(left_index + 1) {
+                assert_ne!(left, right, "distinct streams must not share a sequence");
+            }
+        }
+    }
+
+    #[test]
+    fn each_thread_claims_its_own_stream() {
         let condition = WireCondition::with_jitter(0.0, None, 5.0, 0.0, 0.0).unwrap();
         let sample_three = move || {
             (0..3)
                 .map(|_| condition.propagation_delay())
                 .collect::<Vec<_>>()
         };
-        // Two threads that each draw from index 0 see the same sequence, so a
-        // conditioned stream no longer depends on how other threads interleave.
         let first = thread::spawn(sample_three).join().expect("first thread");
         let second = thread::spawn(sample_three).join().expect("second thread");
 
-        assert_eq!(first, second);
+        assert_ne!(first, second, "per-lane writer threads must decorrelate");
     }
 
     #[test]

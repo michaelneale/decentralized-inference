@@ -19,18 +19,25 @@ pub(super) fn next_connection_session_id() -> u64 {
 /// Messages the reader may hold parsed ahead of execution. The coordinator
 /// admits at most `MAX_VERIFY_WINDOW_PIPELINE_DEPTH` verify windows per
 /// request and retires each one with a control message, so this covers the
-/// whole admitted backlog: the reader never blocks on a stale window while a
-/// `DiscardStaleWindows` for it is still unread in the socket.
+/// whole admitted backlog by count.
+///
+/// A discard therefore usually overtakes the stale windows queued ahead of
+/// it. It is not guaranteed to: `INBOUND_LOOKAHEAD_BYTES` binds first for
+/// wide frames (a full 64-window backlog of `MAX_STAGE_FRAME_BYTES` frames is
+/// far past the byte ceiling), and the reader then parks with the discard
+/// still unread. That degrades to executing the stale tail — today's cost
+/// without this path — rather than deadlocking, because the executor keeps
+/// draining the queue.
 pub(super) const INBOUND_LOOKAHEAD_MESSAGES: usize =
     2 * skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH;
 
-/// Byte ceiling for the same queue. The message count alone bounds nothing
-/// useful for memory: a full queue of wide activation frames would retain
-/// many gigabytes. When the parsed backlog reaches this many bytes the reader
-/// stops reading ahead until the executor drains it; control messages are
-/// small, so a discard still overtakes an activation backlog well before the
-/// ceiling matters.
-pub(super) const INBOUND_LOOKAHEAD_BYTES: usize = 256 * 1024 * 1024;
+/// Byte ceiling for the same queue, and the per-connection bound on what a
+/// misbehaving peer can make this process buffer: reading ahead moves frames
+/// out of the kernel socket buffer into userspace, so the message count alone
+/// bounds nothing useful for memory. A `DiscardStaleWindows` frame is ~100
+/// bytes and overtakes a 32 MiB backlog exactly as reliably as a larger one,
+/// so this is sized for the smallest backlog that preserves the property.
+pub(super) const INBOUND_LOOKAHEAD_BYTES: usize = 32 * 1024 * 1024;
 
 /// Reads upstream messages on a dedicated thread so the executor can run a
 /// buffered message while later ones are already parsed. This is what lets a
@@ -122,8 +129,8 @@ pub(super) fn spawn_message_reader(
 }
 
 impl InboundMessageReader {
-    /// Mirrors `receive_next_message`'s EOF classification: a clean EOF before
-    /// any traffic is a normal connection close, anything else is an error.
+    /// EOF classification: a clean EOF before any traffic is a normal
+    /// connection close, anything else is an error.
     pub(super) fn next(
         &self,
         first_message: Option<StageWireMessage>,
