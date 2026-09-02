@@ -117,16 +117,13 @@ mod tests {
 
     #[test]
     fn malformed_discard_messages_are_ignored() {
-        use skippy_protocol::binary::{StageStateHeader, WireActivationDType, WireMessageKind};
+        use skippy_protocol::binary::{StageStateHeader, WireMessageKind};
         let registry = StaleDiscardRegistry::default();
         let mut message = StageWireMessage {
             kind: WireMessageKind::DiscardStaleWindows,
             pos_start: 0,
             token_count: 0,
-            state: StageStateHeader::new(
-                WireMessageKind::DiscardStaleWindows,
-                WireActivationDType::F32,
-            ),
+            state: StageStateHeader::new(WireMessageKind::DiscardStaleWindows),
             request_id: 1,
             session_id: 1,
             sampling: None,

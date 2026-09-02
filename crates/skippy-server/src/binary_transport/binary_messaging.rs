@@ -506,7 +506,7 @@ fn run_binary_stage(
                         native_mtp_enabled,
                         &prediction_return_sinks,
                         session_ownership,
-                        &task_control,
+                        task_control.clone(),
                         first_message,
                     )
                 })()

@@ -484,7 +484,7 @@ cached and a worker does not:
 - Current/current mesh: the worker may use mesh `STREAM_SUBPROTOCOL` (0x0d)
   to open `skippy-stage/2`, then Skippy artifact-transfer stream 0x03, to
   fetch only its assigned package files before the normal HF fallback path.
-- Mixed-generation mesh: peers missing any required generation-7 capability
+- Mixed-generation mesh: peers missing any required generation-8 capability
   are not stage-compatible. Control and artifact streams on the dedicated
   `skippy-stage/2` ALPN are rejected rather than falling back to a legacy path.
 - Opt-out: when artifact transfer is disabled, the node must advertise no

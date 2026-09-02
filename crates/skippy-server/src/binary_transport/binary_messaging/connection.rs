@@ -91,7 +91,7 @@ pub(super) fn handle_binary_connection(
     native_mtp_enabled: bool,
     prediction_return_sinks: &PredictionReturnSinks,
     session_ownership: Arc<ConnectionSessionOwnership>,
-    worker_control: &ConnectionWorkerControl,
+    worker_control: Arc<ConnectionWorkerControl>,
     first_message: StageWireMessage,
 ) -> Result<()> {
     let mut session_tracker =
@@ -145,7 +145,7 @@ fn handle_binary_connection_messages(
     downstream_connect_timeout_secs: u64,
     native_mtp_enabled: bool,
     prediction_return_sinks: &PredictionReturnSinks,
-    worker_control: &ConnectionWorkerControl,
+    worker_control: Arc<ConnectionWorkerControl>,
     first_message: StageWireMessage,
     session_tracker: &mut ConnectionSessionTracker,
 ) -> Result<()> {
@@ -163,6 +163,7 @@ fn handle_binary_connection_messages(
         input_activation_width,
         max_inflight.max(1),
         discard_registry.clone(),
+        worker_control,
     )?;
     let mut async_forwarder = if async_prefill_forward || max_inflight > 1 {
         downstream
@@ -234,18 +235,12 @@ fn handle_binary_connection_messages(
             if let Some(downstream) = downstream.as_mut() {
                 if let Some(forwarder) = async_forwarder.as_mut() {
                     forwarder
-                        .send(
-                            message,
-                            wire_dtype,
-                            downstream_wire_condition,
-                            BTreeMap::new(),
-                        )
+                        .send(message, downstream_wire_condition, BTreeMap::new())
                         .context("forward stale window discard downstream")?;
                 } else {
                     write_stage_message_conditioned(
                         &mut *downstream,
                         &message,
-                        wire_dtype,
                         downstream_wire_condition,
                     )
                     .context("forward stale window discard downstream")?;

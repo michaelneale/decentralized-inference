@@ -168,7 +168,6 @@ pub(super) fn embedded_verify_window_message(
 /// buffered stale windows are answered with an empty reply instead of being
 /// executed. The window-id range rides in `tokens`.
 pub(super) fn discard_stale_windows_message(
-    wire_dtype: WireActivationDType,
     request_id: u64,
     session_id: u64,
     min_window_id: i32,
@@ -184,7 +183,7 @@ pub(super) fn discard_stale_windows_message(
         kind,
         pos_start: 0,
         token_count: 0,
-        state: StageStateHeader::new(kind, wire_dtype),
+        state: StageStateHeader::new(kind),
         request_id,
         session_id,
         sampling: None,

@@ -122,7 +122,6 @@ impl StageOpenAiBackend {
         discard: StaleWindowDiscard,
     ) -> OpenAiResult<()> {
         let message = discard_stale_windows_message(
-            request.wire_dtype,
             discard.request_id,
             discard.session_id,
             discard.min_window_id,
@@ -132,7 +131,6 @@ impl StageOpenAiBackend {
             forwarder
                 .send(
                     message,
-                    request.wire_dtype,
                     request.downstream_wire_condition,
                     self.openai_attrs(request.ids),
                 )
@@ -141,7 +139,6 @@ impl StageOpenAiBackend {
             write_stage_message_conditioned(
                 downstream,
                 &message,
-                request.wire_dtype,
                 request.downstream_wire_condition,
             )
             .map_err(openai_io_error)?;

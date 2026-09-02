@@ -108,19 +108,27 @@ impl WireCondition {
         self.sleep_for_bandwidth(message);
     }
 
-    /// Serialization delay for `bytes` on this link. A near-zero `mbps`
-    /// makes the quotient arbitrarily large, so it is clamped to the same
-    /// bound as the propagation delay: `Duration::from_secs_f64` panics on an
-    /// out-of-domain value.
+    /// Serialization delay for `bytes` on this link. A near-zero `mbps` makes
+    /// the quotient arbitrarily large — large enough to overflow to positive
+    /// infinity — so the delay is clamped to the same bound as the propagation
+    /// delay: `Duration::from_secs_f64` panics on an out-of-domain value.
+    ///
+    /// Only `NaN` and non-positive quotients yield no delay. An infinite
+    /// quotient is an arbitrarily slow link, not a free one, so it takes the
+    /// `MAX_SIMULATED_DELAY_MS` cap like any other oversized delay; returning
+    /// zero there would turn the slowest configurable link into the fastest.
     pub(crate) fn bandwidth_delay(&self, bytes: usize) -> Duration {
         let Some(mbps) = self.mbps else {
             return Duration::ZERO;
         };
         let seconds = bytes as f64 / (mbps * 125_000.0);
-        if !seconds.is_finite() || seconds <= 0.0 {
+        if seconds.is_nan() || seconds <= 0.0 {
             return Duration::ZERO;
         }
-        Duration::from_secs_f64((seconds * 1000.0).min(MAX_SIMULATED_DELAY_MS) / 1000.0)
+        let millis = seconds * 1000.0;
+        // `min` propagates the bound for an infinite left-hand side, so the
+        // cap covers the overflow case without a separate branch.
+        Duration::from_secs_f64(millis.min(MAX_SIMULATED_DELAY_MS) / 1000.0)
     }
 
     fn sleep_for_bandwidth(&self, message: &StageWireMessage) {
@@ -311,6 +319,28 @@ mod tests {
             WireCondition::new(1.0, None).unwrap().bandwidth_delay(4096),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn an_infinite_bandwidth_quotient_takes_the_cap_not_zero() {
+        // The smallest positive f64 rate makes the quotient overflow to
+        // positive infinity. That is the slowest link the flag can express,
+        // so it must take the cap; returning `Duration::ZERO` there would
+        // silently serve it as an unmetered link.
+        let rate = f64::from_bits(1);
+        let condition = WireCondition::with_jitter(0.0, Some(rate), 0.0, 0.0, 0.0)
+            .expect("a positive rate is accepted");
+        assert!(
+            (1024_f64 / (rate * 125_000.0)).is_infinite(),
+            "this rate must produce an infinite quotient for the test to bite"
+        );
+
+        assert_eq!(
+            condition.bandwidth_delay(1024),
+            Duration::from_secs_f64(MAX_SIMULATED_DELAY_MS / 1000.0)
+        );
+        // A zero-length frame still costs nothing: 0/inf is not a delay.
+        assert_eq!(condition.bandwidth_delay(0), Duration::ZERO);
     }
 
     #[test]

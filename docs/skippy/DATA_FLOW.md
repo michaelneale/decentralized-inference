@@ -40,11 +40,11 @@ activation links and then crossed three reply links before stage 0 could emit
 the token. On a topology with a fixed 10 ms delay per inter-stage hop, the reply
 chain alone makes the hot path six hops, or about 60 ms before compute.
 
-## Generation 7 Direct Prediction Return and Verify Retirement
+## Generation 8 Direct Prediction Return and Verify Retirement
 
-Stage protocol generation 7 is a compatibility-breaking change. A peer is stage
+Stage protocol generation 8 is a compatibility-breaking change. A peer is stage
 compatible only when it advertises both `skippy-stage/2` and
-the complete `stage-generation-7` control/status/content-identity bundle.
+the complete `stage-generation-8` control/status/content-identity bundle.
 Prediction-bearing messages return directly from the final/readout stage to the
 driver-facing stage. Intermediate stages
 continue to forward activations and may handle cold-path control acknowledgments,
@@ -82,10 +82,9 @@ compute. That removes two serialized reply hops from every generated token.
 
 ## Stale Verify-Window Discard
 
-Generation 5 also adds the `DiscardStaleWindows` control frame (wire kind
-23), which is what made the generation compatibility-breaking: a
-generation-4 peer rejects the kind outright and drops the request
-connection.
+Generation 8 adds the `DiscardStaleWindows` control frame (wire kind 23),
+which is what makes this generation compatibility-breaking: a pre-generation-8
+peer rejects the kind outright and drops the request connection.
 
 Run-ahead admission dispatches verify windows before their predecessors are
 verified, so a rejection strands every window queued behind the divergence.

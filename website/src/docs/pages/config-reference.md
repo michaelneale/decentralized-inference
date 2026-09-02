@@ -261,6 +261,7 @@ configuration should use typed per-model `topology`; explicit `--model` and
 | `speculative.extension_max_tokens` | integer | N-gram output budget | both | model reload | wired (requires native MTP plus an N-gram proposer) | none |
 | `speculative.native_mtp_reject_cooldown_tokens`<br>`speculative.native_mtp_suppress_cooldown_drafts`<br>`speculative.native_mtp_suppress_cooldown_draft_limit` | integer / boolean | runtime defaults | both | model reload | wired | none |
 | `speculative.verify_window_min_tokens`<br>`speculative.verify_window_max_tokens`<br>`speculative.verify_window_pipeline_depth` | integer | package policy or runtime defaults; `min <= max` | both | model reload | wired | none |
+| `speculative.verify_window_runahead_tokens` | integer | `0` (fixed-depth admission); `0..=4096`, where a positive budget admits verify windows by speculative-token budget instead of a fixed window count | both | model reload | wired (capped by the native checkpoint-retention bound of 64 windows) | none |
 | `speculative.spec_default` | bool-or-`auto` | `auto` | both | model reload | wired (`false` disables automatic speculation; `true`, `auto`, and omission enable supported automatic defaults) | none |
 
 ## Group 8: sampling, chat templates, reasoning, and request defaults

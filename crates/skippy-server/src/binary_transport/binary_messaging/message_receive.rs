@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use super::ConnectionWorkerControl;
 use super::stale_discard::StaleDiscardRegistry;
 
 static BINARY_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +80,7 @@ pub(super) fn spawn_message_reader(
     activation_width: i32,
     capacity: usize,
     registry: Arc<StaleDiscardRegistry>,
+    worker_control: Arc<ConnectionWorkerControl>,
 ) -> Result<InboundMessageReader> {
     let mut reader = upstream
         .try_clone()
@@ -96,10 +98,23 @@ pub(super) fn spawn_message_reader(
             // Back off while the parsed backlog is over the byte ceiling; the
             // executor decrements as it takes messages off the queue.
             while reader_queued_bytes.load(Ordering::Acquire) >= INBOUND_LOOKAHEAD_BYTES {
-                if reader_stopped.load(Ordering::Acquire) {
+                if reader_stopped.load(Ordering::Acquire) || worker_control.is_shutting_down() {
                     return;
                 }
                 thread::sleep(Duration::from_millis(1));
+            }
+            // Reads stay interruptible by shutdown. `TcpStream::shutdown` on a
+            // tracked clone does not unblock an in-flight `read` on Windows
+            // (#1538), and moving the read onto this thread must not lose
+            // that: peek under a short timeout and end the reader when the
+            // worker is shutting down.
+            match worker_control.wait_for_readable(&reader) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
             }
             match read_stage_message(&mut reader, activation_width) {
                 Ok(message) => {
@@ -174,18 +189,22 @@ impl InboundMessageReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skippy_protocol::binary::{
-        StageStateHeader, WireActivationDType, WireMessageKind, write_stage_message,
-    };
+    use skippy_protocol::binary::{StageStateHeader, WireMessageKind, write_stage_message};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
+
+    /// A live worker control: reads stay interruptible by shutdown, and these
+    /// tests never request one.
+    fn test_worker_control() -> Arc<ConnectionWorkerControl> {
+        Arc::new(ConnectionWorkerControl::default())
+    }
 
     fn control_message(kind: WireMessageKind, tokens: Vec<i32>) -> StageWireMessage {
         StageWireMessage {
             kind,
             pos_start: 0,
             token_count: 0,
-            state: StageStateHeader::new(kind, WireActivationDType::F32),
+            state: StageStateHeader::new(kind),
             request_id: 7,
             session_id: 9,
             sampling: None,
@@ -211,14 +230,15 @@ mod tests {
         let registry = Arc::new(StaleDiscardRegistry::default());
         // Execution queue of one; the reader must still look past a full
         // admitted backlog without anything being dequeued.
-        let reader = spawn_message_reader(&upstream, 4, 1, registry.clone()).expect("spawn");
+        let reader = spawn_message_reader(&upstream, 4, 1, registry.clone(), test_worker_control())
+            .expect("spawn");
 
         for _ in 0..skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH {
             let stale = control_message(WireMessageKind::Stop, Vec::new());
-            write_stage_message(&mut peer, &stale, WireActivationDType::F32).expect("write");
+            write_stage_message(&mut peer, &stale).expect("write");
         }
         let discard = control_message(WireMessageKind::DiscardStaleWindows, vec![3, 9]);
-        write_stage_message(&mut peer, &discard, WireActivationDType::F32).expect("write");
+        write_stage_message(&mut peer, &discard).expect("write");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !registry.is_discarded(7, 9, 5) {
@@ -235,7 +255,8 @@ mod tests {
     fn dropping_the_reader_completes_while_it_is_parked_on_the_byte_ceiling() {
         let (mut peer, upstream) = connected_pair();
         let registry = Arc::new(StaleDiscardRegistry::default());
-        let reader = spawn_message_reader(&upstream, 4, 1, registry).expect("spawn");
+        let reader =
+            spawn_message_reader(&upstream, 4, 1, registry, test_worker_control()).expect("spawn");
 
         // Park the reader: pretend the executor is holding the whole byte
         // budget, so the backoff loop is the only thing running.
@@ -245,7 +266,6 @@ mod tests {
         write_stage_message(
             &mut peer,
             &control_message(WireMessageKind::Stop, Vec::new()),
-            WireActivationDType::F32,
         )
         .expect("write");
         thread::sleep(Duration::from_millis(50));
@@ -265,12 +285,13 @@ mod tests {
     fn dropping_the_reader_completes_while_the_lookahead_channel_is_full() {
         let (mut peer, upstream) = connected_pair();
         let registry = Arc::new(StaleDiscardRegistry::default());
-        let reader = spawn_message_reader(&upstream, 4, 1, registry).expect("spawn");
+        let reader =
+            spawn_message_reader(&upstream, 4, 1, registry, test_worker_control()).expect("spawn");
 
         // Fill the lookahead queue and leave the reader blocked in `send`.
         for _ in 0..(INBOUND_LOOKAHEAD_MESSAGES + 4) {
             let message = control_message(WireMessageKind::Stop, Vec::new());
-            write_stage_message(&mut peer, &message, WireActivationDType::F32).expect("write");
+            write_stage_message(&mut peer, &message).expect("write");
         }
         thread::sleep(Duration::from_millis(100));
 
@@ -289,7 +310,8 @@ mod tests {
     fn dropping_the_reader_joins_the_thread_while_the_peer_stays_open() {
         let (peer, upstream) = connected_pair();
         let registry = Arc::new(StaleDiscardRegistry::default());
-        let reader = spawn_message_reader(&upstream, 4, 1, registry).expect("spawn");
+        let reader =
+            spawn_message_reader(&upstream, 4, 1, registry, test_worker_control()).expect("spawn");
 
         let (done, dropped) = mpsc::channel();
         thread::spawn(move || {

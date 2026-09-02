@@ -254,7 +254,6 @@ mod tests {
         forwarder
             .send(
                 message(WireMessageKind::DiscardStaleWindows, 11),
-                WireActivationDType::F32,
                 condition,
                 BTreeMap::new(),
             )
@@ -264,7 +263,6 @@ mod tests {
         write_stage_message_after_propagation(
             &mut client,
             &message(WireMessageKind::Stop, 22),
-            WireActivationDType::F32,
             WireCondition::new(0.0, None).unwrap(),
         )
         .unwrap();
@@ -276,6 +274,66 @@ mod tests {
         assert_eq!(first.pos_start, 11);
         assert_eq!(second.kind, WireMessageKind::Stop);
         assert_eq!(second.pos_start, 22);
+    }
+
+    /// The lane-reuse half of the same property: after a delayed discard and
+    /// the teardown `Stop`, the socket must be clean enough to serve the next
+    /// request. A frame left half-written by the torn-down forwarder would be
+    /// read as the next request's header, so this asserts both frames arrive
+    /// whole and in order and that the next request's traffic follows them
+    /// undisturbed on the same socket.
+    #[test]
+    fn a_reused_lane_carries_the_next_request_after_a_delayed_teardown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut lane = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let telemetry = Telemetry::new(None, 1, prefix_cache_test_config(), TelemetryLevel::Off);
+        let mut forwarder = AsyncForwarder::new(&lane, telemetry, 8).unwrap();
+        let delayed = WireCondition::new(250.0, None).unwrap();
+        let immediate = WireCondition::new(0.0, None).unwrap();
+
+        // First request: a discard still in flight when the request ends.
+        forwarder
+            .send(
+                message(WireMessageKind::DiscardStaleWindows, 31),
+                delayed,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        drop(forwarder);
+        write_stage_message_after_propagation(
+            &mut lane,
+            &message(WireMessageKind::Stop, 32),
+            immediate,
+        )
+        .unwrap();
+
+        // The pool hands the same socket to the next request.
+        write_stage_message_after_propagation(
+            &mut lane,
+            &message(WireMessageKind::VerifyWindow, 41),
+            immediate,
+        )
+        .unwrap();
+
+        let frames = (0..3)
+            .map(|_| read_stage_message(&mut server, 4).unwrap())
+            .collect::<Vec<_>>();
+        let observed = frames
+            .iter()
+            .map(|frame| (frame.kind, frame.pos_start))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                (WireMessageKind::DiscardStaleWindows, 31),
+                (WireMessageKind::Stop, 32),
+                (WireMessageKind::VerifyWindow, 41),
+            ],
+            "a lane returned to the pool must carry the next request intact"
+        );
     }
 
     #[test]
