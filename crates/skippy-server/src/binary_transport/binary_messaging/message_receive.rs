@@ -49,9 +49,17 @@ pub(super) const INBOUND_LOOKAHEAD_BYTES: usize = 32 * 1024 * 1024;
 /// Dropping the reader shuts the socket down and joins the thread, so a
 /// handler that exits on a local error while the peer keeps its side open
 /// does not leak a blocked thread and its cloned descriptor.
+///
+/// The reader thread and this handle share one `TcpStream` rather than
+/// holding separate clones. Shutdown has to interrupt the read that is
+/// actually in flight: a peer can send a frame prefix and then stall, which
+/// leaves the reader inside `read_exact` past the readable check, and on
+/// Windows shutting down a *cloned* handle does not interrupt a read pending
+/// on a different one (#1538). Since `Drop` joins the thread, that would hang
+/// the dropping handler rather than merely leak a thread.
 pub(super) struct InboundMessageReader {
     receiver: Option<mpsc::Receiver<io::Result<StageWireMessage>>>,
-    stream: TcpStream,
+    stream: Arc<TcpStream>,
     thread: Option<thread::JoinHandle<()>>,
     queued_bytes: Arc<AtomicUsize>,
     stopped: Arc<AtomicBool>,
@@ -66,8 +74,10 @@ impl Drop for InboundMessageReader {
         // nor the socket shutdown would wake it.
         self.stopped.store(true, Ordering::Release);
         drop(self.receiver.take());
-        // Unblock a pending `read_stage_message`; errors here only mean the
-        // socket is already closed.
+        // Unblock a pending `read_stage_message` — including one stalled
+        // part-way through a frame — by shutting down the exact handle the
+        // reader thread is blocked on. Errors here only mean the socket is
+        // already closed.
         let _ = self.stream.shutdown(Shutdown::Both);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -82,12 +92,12 @@ pub(super) fn spawn_message_reader(
     registry: Arc<StaleDiscardRegistry>,
     worker_control: Arc<ConnectionWorkerControl>,
 ) -> Result<InboundMessageReader> {
-    let mut reader = upstream
-        .try_clone()
-        .context("clone upstream stream for inbound message reader")?;
-    let stream = upstream
-        .try_clone()
-        .context("clone upstream stream for inbound reader shutdown")?;
+    let stream = Arc::new(
+        upstream
+            .try_clone()
+            .context("clone upstream stream for inbound message reader")?,
+    );
+    let reader = stream.clone();
     let (sender, receiver) = mpsc::sync_channel(capacity.max(INBOUND_LOOKAHEAD_MESSAGES));
     let queued_bytes = Arc::new(AtomicUsize::new(0));
     let reader_queued_bytes = queued_bytes.clone();
@@ -103,11 +113,12 @@ pub(super) fn spawn_message_reader(
                 }
                 thread::sleep(Duration::from_millis(1));
             }
-            // Reads stay interruptible by shutdown. `TcpStream::shutdown` on a
-            // tracked clone does not unblock an in-flight `read` on Windows
-            // (#1538), and moving the read onto this thread must not lose
-            // that: peek under a short timeout and end the reader when the
-            // worker is shutting down.
+            // Wait for readability under a short timeout so an idle reader
+            // observes shutdown instead of parking in a read that a socket
+            // shutdown cannot interrupt on Windows (#1538). This only covers
+            // an idle socket; a peer that sends a frame prefix and stalls
+            // leaves the read below blocked mid-frame, which is why `Drop`
+            // shuts down this exact handle.
             match worker_control.wait_for_readable(&reader) {
                 Ok(true) => {}
                 Ok(false) => return,
@@ -116,7 +127,9 @@ pub(super) fn spawn_message_reader(
                     return;
                 }
             }
-            match read_stage_message(&mut reader, activation_width) {
+            // `&TcpStream` implements `Read`, so the framed read runs on the
+            // shared handle that `Drop` can shut down.
+            match read_stage_message(&mut &*reader, activation_width) {
                 Ok(message) => {
                     if message.kind.is_stale_window_discard() {
                         registry.record_message(&message);
@@ -190,6 +203,7 @@ impl InboundMessageReader {
 mod tests {
     use super::*;
     use skippy_protocol::binary::{StageStateHeader, WireMessageKind, write_stage_message};
+    use std::io::Write;
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
@@ -303,6 +317,46 @@ mod tests {
         dropped
             .recv_timeout(Duration::from_secs(5))
             .expect("dropping the receiver must unblock the queued send before the join");
+        drop(peer);
+    }
+
+    /// The peer-stays-open case only exercises the readable wait: with no
+    /// bytes sent, the reader is parked in `wait_for_readable`, which polls
+    /// the shutdown flag. This is the harder case — a peer sends a frame
+    /// prefix and then stalls, so the reader is past the readable check and
+    /// blocked inside `read_exact` waiting for the rest of the frame. Only a
+    /// shutdown of the handle the read is pending on releases it, which is
+    /// why the reader thread and `Drop` share one `TcpStream` (#1538).
+    #[test]
+    fn dropping_the_reader_completes_while_a_read_is_stalled_mid_frame() {
+        let (mut peer, upstream) = connected_pair();
+        let registry = Arc::new(StaleDiscardRegistry::default());
+        let reader =
+            spawn_message_reader(&upstream, 4, 1, registry, test_worker_control()).expect("spawn");
+
+        // A frame prefix with no body behind it: enough to make the socket
+        // readable and commit the reader to the framed read, never enough to
+        // complete it.
+        let mut frame = Vec::new();
+        write_stage_message(
+            &mut frame,
+            &control_message(WireMessageKind::Stop, Vec::new()),
+        )
+        .expect("encode");
+        peer.write_all(&frame[..4]).expect("write frame prefix");
+        peer.flush().expect("flush");
+        // Let the reader clear the readable check and block inside the frame.
+        thread::sleep(Duration::from_millis(100));
+
+        let (done, dropped) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(reader);
+            let _ = done.send(());
+        });
+        dropped
+            .recv_timeout(Duration::from_secs(5))
+            .expect("drop must interrupt a read stalled mid-frame, not block in join");
+        dropper.join().expect("dropper thread");
         drop(peer);
     }
 
