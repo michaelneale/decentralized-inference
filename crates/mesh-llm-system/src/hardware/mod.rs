@@ -303,6 +303,54 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
     }
 }
 
+/// Queries the real GPU identifier via `MTLDevice.name` (e.g. "Apple M4 Max"
+/// or "AMD Radeon Pro 5500M") — never the CPU brand string.
+#[cfg(target_os = "macos")]
+fn query_metal_device_name() -> Option<String> {
+    use std::ffi::{CStr, c_char, c_void};
+
+    // `objc_msgSend` is declared to return `usize` here (matching the other
+    // FFI declaration of the same linked symbol above) and the pointer
+    // results below are recovered with `as *mut/*const _` casts, to avoid a
+    // `clashing_extern_declarations` warning from two conflicting return
+    // types for one symbol.
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> usize;
+    }
+
+    unsafe {
+        let metal =
+            libloading::Library::new("/System/Library/Frameworks/Metal.framework/Versions/A/Metal")
+                .ok()?;
+        let create_device = metal
+            .get::<unsafe extern "C" fn() -> *mut c_void>(b"MTLCreateSystemDefaultDevice")
+            .ok()?;
+        let device = create_device();
+        if device.is_null() {
+            return None;
+        }
+        let name_sel = sel_registerName(c"name".as_ptr());
+        if name_sel.is_null() {
+            return None;
+        }
+        let name_obj = objc_msgSend(device, name_sel) as *mut c_void;
+        if name_obj.is_null() {
+            return None;
+        }
+        let utf8_sel = sel_registerName(c"UTF8String".as_ptr());
+        if utf8_sel.is_null() {
+            return None;
+        }
+        let utf8_ptr = objc_msgSend(name_obj, utf8_sel) as *const c_char;
+        if utf8_ptr.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(utf8_ptr).to_string_lossy().into_owned())
+    }
+}
+
 #[cfg(feature = "skippy-devices")]
 fn apply_skippy_backend_devices_to_survey(survey: &mut HardwareSurvey, metrics: &[Metric]) -> bool {
     let wants_gpu_data = metrics.contains(&Metric::GpuName)
@@ -434,17 +482,8 @@ impl Collector for DefaultCollector {
                 survey.gpu_vram = vec![vram_bytes];
                 survey.gpu_reserved = vec![reserved_bytes];
             }
-            let macos_gpu_name = if metrics.contains(&Metric::GpuName) {
-                std::process::Command::new("sysctl")
-                    .args(["-n", "machdep.cpu.brand_string"])
-                    .output()
-                    .ok()
-                    .and_then(|out| String::from_utf8(out.stdout).ok())
-            } else {
-                None
-            };
-            if let Some(gpu_name) = macos_gpu_name {
-                survey.gpu_name = parse_macos_cpu_brand(&gpu_name);
+            if metrics.contains(&Metric::GpuName) {
+                survey.gpu_name = sanitize_macos_gpu_name(query_metal_device_name());
             }
             if metrics.contains(&Metric::GpuCount) {
                 survey.gpu_count = 1;
