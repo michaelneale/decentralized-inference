@@ -109,7 +109,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     let prefix_hash = crate::network::affinity::cache_prefix_hash(request.body_json.as_ref());
     let cache_target =
         cache_target_for_request(&node, affinity, model, prefix_hash, &ordered_candidates).await;
-    let selection = crate::network::affinity::select_model_target_from_candidates(
+    let mut selection = crate::network::affinity::select_model_target_from_candidates(
         targets,
         &ordered_candidates,
         model,
@@ -120,6 +120,15 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     if matches!(selection.target, election::InferenceTarget::None) {
         return send_route_model_none_target(&node, tcp_stream, model, route_observer).await;
     }
+    let (reserved_target, mut reservation) = affinity
+        .reserve_route(
+            model,
+            &ordered_candidates,
+            &selection.target,
+            selection.affinity_applied,
+        )
+        .expect("non-empty eligible candidates must produce a route reservation");
+    selection.target = reserved_target;
     let mut ordered = ordered_candidates;
     move_target_first(&mut ordered, &selection.target);
     let total_targets = ordered.len();
@@ -134,6 +143,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     // the identical nonce instead of letting each target's frontend mint its own.
     let forwarding_raw = request.raw.as_slice();
     for (idx, target) in ordered.into_iter().enumerate() {
+        reservation.transfer_to(&target);
         state.attempts += 1;
         let attempt_started = Instant::now();
         let retry_policy = ResponseRetryPolicy::next_target_available(idx + 1 < total_targets);
@@ -519,6 +529,7 @@ mod tests {
             target: target.clone(),
             prefix_hash: Some(prefix_hash),
             cache_target: Some(target.clone()),
+            affinity_applied: true,
         };
         let state = RouteModelState {
             route_started: Instant::now(),

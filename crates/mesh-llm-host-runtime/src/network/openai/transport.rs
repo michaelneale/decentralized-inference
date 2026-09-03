@@ -197,6 +197,7 @@ struct MeshRequestPlan {
     effective_model: Option<String>,
     auto_session_key: Option<u64>,
     target_hosts: Vec<iroh::EndpointId>,
+    affinity_applied: bool,
 }
 
 enum MeshRequestFailure {
@@ -533,6 +534,7 @@ async fn build_mesh_request_plan(
         effective_model,
         auto_session_key,
         target_hosts,
+        affinity_applied: prepared.affinity_applied,
     })
 }
 
@@ -570,6 +572,7 @@ fn prepare_mesh_targets(
                 .collect(),
             prefix_hash: None,
             cache_target: None,
+            affinity_applied: false,
         })
 }
 
@@ -614,6 +617,7 @@ async fn order_mesh_target_hosts(
                 selected
             }
         };
+        prepared.affinity_applied |= prepared.cache_target.is_some();
         affinity.record_cache_probe(prepared.cache_target.is_some());
         if let Some(election::InferenceTarget::Remote(cache_host)) = prepared.cache_target.as_ref()
         {
@@ -686,7 +690,7 @@ async fn route_mesh_request_attempts(
 ) -> MeshRouteResult {
     let effective_model = plan.effective_model.as_deref();
     let auto_session_key = plan.auto_session_key;
-    let target_hosts = &plan.target_hosts;
+    let (target_hosts, mut reservation) = reserve_mesh_request_target(plan, affinity);
     let total_targets = target_hosts.len();
     let mut state = MeshAttemptState {
         route_started: Instant::now(),
@@ -695,6 +699,7 @@ async fn route_mesh_request_attempts(
         refreshed: false,
     };
     for (idx, target_host) in target_hosts.iter().enumerate() {
+        transfer_mesh_reservation(reservation.as_mut(), *target_host);
         state.attempts += 1;
         let attempt_started = Instant::now();
         let attempt_result = route_remote_attempt_with_retry(
@@ -753,6 +758,40 @@ async fn route_mesh_request_attempts(
         crate::network::metrics::RequestOutcome::Unavailable,
     );
     MeshRouteResult::Exhausted(tcp_stream)
+}
+
+fn reserve_mesh_request_target(
+    plan: &MeshRequestPlan,
+    affinity: &AffinityRouter,
+) -> (
+    Vec<iroh::EndpointId>,
+    Option<crate::network::reservations::RoutingReservation>,
+) {
+    let mut target_hosts = plan.target_hosts.clone();
+    let reservation = plan.effective_model.as_deref().and_then(|model| {
+        let candidates = target_hosts
+            .iter()
+            .copied()
+            .map(election::InferenceTarget::Remote)
+            .collect::<Vec<_>>();
+        let preferred = candidates.first()?;
+        let (selected, reservation) =
+            affinity.reserve_route(model, &candidates, preferred, plan.affinity_applied)?;
+        if let election::InferenceTarget::Remote(selected_host) = selected {
+            move_target_first(&mut target_hosts, &selected_host);
+        }
+        Some(reservation)
+    });
+    (target_hosts, reservation)
+}
+
+fn transfer_mesh_reservation(
+    reservation: Option<&mut crate::network::reservations::RoutingReservation>,
+    target_host: iroh::EndpointId,
+) {
+    if let Some(reservation) = reservation {
+        reservation.transfer_to(&election::InferenceTarget::Remote(target_host));
+    }
 }
 
 fn finish_route_attempt(

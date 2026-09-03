@@ -1,6 +1,7 @@
 //! Prefix affinity and sticky routing helpers for inference target selection.
 
 use crate::inference::election;
+use crate::network::reservations::{RoutingReservation, RoutingReservations};
 use crate::network::target_health::{TargetHealth, TargetHealthOutcome, TargetReputationStats};
 use iroh::EndpointId;
 use mesh_llm_routing::affinity as shared_affinity;
@@ -38,10 +39,26 @@ pub struct AffinityStatsSnapshot {
     /// Legacy status compatibility paired with `learned`; permanently zero.
     pub evicted: u64,
     pub target_reputation: TargetReputationStats,
+    pub reservation_active: usize,
+    pub reservation_active_models: usize,
+    pub reservation_created: u64,
+    pub reservation_spread_selections: u64,
+    pub reservation_transferred: u64,
+    pub reservation_released: u64,
+    pub reservation_expired: u64,
+    pub reservation_capacity_evictions: u64,
 }
 
 mesh_llm_routing::impl_affinity_stats_snapshot!(AffinityStatsSnapshot {
     target_reputation: TargetReputationStats::default(),
+    reservation_active: 0,
+    reservation_active_models: 0,
+    reservation_created: 0,
+    reservation_spread_selections: 0,
+    reservation_transferred: 0,
+    reservation_released: 0,
+    reservation_expired: 0,
+    reservation_capacity_evictions: 0,
 });
 
 #[derive(Clone, Debug)]
@@ -76,6 +93,7 @@ pub struct AffinityRouter {
     inner: Arc<Mutex<AffinityState>>,
     prefix: Arc<shared_affinity::AffinityRouter>,
     target_health: TargetHealth,
+    reservations: RoutingReservations,
 }
 
 impl AffinityRouter {
@@ -84,6 +102,7 @@ impl AffinityRouter {
             inner: Arc::new(Mutex::new(AffinityState::default())),
             prefix: Arc::new(shared_affinity::AffinityRouter::new()),
             target_health: TargetHealth::default(),
+            reservations: RoutingReservations::default(),
         }
     }
 
@@ -96,6 +115,7 @@ impl AffinityRouter {
                 sticky_enabled,
             )),
             target_health: TargetHealth::default(),
+            reservations: RoutingReservations::default(),
         }
     }
 
@@ -106,6 +126,15 @@ impl AffinityRouter {
             self.prefix.sticky_enabled(),
         );
         stats.target_reputation = self.target_health.reputation_stats();
+        let reservations = self.reservations.stats_snapshot();
+        stats.reservation_active = reservations.active;
+        stats.reservation_active_models = reservations.active_models;
+        stats.reservation_created = reservations.created;
+        stats.reservation_spread_selections = reservations.spread_selections;
+        stats.reservation_transferred = reservations.transferred;
+        stats.reservation_released = reservations.released;
+        stats.reservation_expired = reservations.expired;
+        stats.reservation_capacity_evictions = reservations.capacity_evictions;
         stats
     }
 
@@ -137,6 +166,17 @@ impl AffinityRouter {
         outcome: TargetHealthOutcome,
     ) {
         self.target_health.record_outcome(model, target, outcome);
+    }
+
+    pub(crate) fn reserve_route(
+        &self,
+        model: &str,
+        candidates: &[election::InferenceTarget],
+        preferred: &election::InferenceTarget,
+        affinity_applied: bool,
+    ) -> Option<(election::InferenceTarget, RoutingReservation)> {
+        self.reservations
+            .reserve(model, candidates, preferred, affinity_applied)
     }
 
     /// Look up a previously-classified model name for an auto-routed session.
@@ -600,11 +640,13 @@ mod tests {
             target: target.clone(),
             prefix_hash: None,
             cache_target: None,
+            affinity_applied: false,
         };
         let prepared: PreparedTargets = PreparedTargets {
             ordered: vec![target],
             prefix_hash: selection.prefix_hash,
             cache_target: selection.cache_target,
+            affinity_applied: selection.affinity_applied,
         };
         assert_eq!(prepared.ordered.len(), 1);
     }

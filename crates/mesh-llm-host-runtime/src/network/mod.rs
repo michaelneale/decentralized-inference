@@ -7,6 +7,7 @@ pub(crate) mod metrics;
 pub(crate) mod nostr;
 pub(crate) mod openai;
 pub(crate) mod proxy;
+pub(crate) mod reservations;
 pub(crate) mod router;
 pub(crate) mod target_health;
 pub(crate) mod tunnel;
