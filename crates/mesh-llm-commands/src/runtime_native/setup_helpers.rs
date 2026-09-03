@@ -338,6 +338,7 @@ mod tests {
                 },
                 evaluated: Vec::new(),
             },
+            sources: Default::default(),
         }
     }
 }

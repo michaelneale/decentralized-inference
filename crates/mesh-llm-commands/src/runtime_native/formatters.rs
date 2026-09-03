@@ -93,7 +93,17 @@ impl RuntimeNativeFormatter for HumanFormatter {
 
     fn render_install_error(&self, error: &Error) -> Result<()> {
         eprintln!("❌ Native runtime install failed");
-        eprintln!("   Reason: {error}");
+        // Resolution failures carry a multi-line explanation (catalogs
+        // consulted, rejected candidates); keep every line aligned.
+        let mut lines = error.to_string();
+        lines.truncate(lines.trim_end().len());
+        let mut lines = lines.lines();
+        if let Some(first) = lines.next() {
+            eprintln!("   Reason: {first}");
+        }
+        for line in lines {
+            eprintln!("           {line}");
+        }
         eprintln!("   Try: mesh-llm runtime list --available");
         Ok(())
     }
@@ -153,6 +163,7 @@ impl RuntimeNativeFormatter for JsonFormatter {
             "status": install_status_label(outcome.status.clone()),
             "runtime": outcome.runtime,
             "resolution": outcome.resolution,
+            "catalogs": outcome.sources,
         }))
     }
 
@@ -268,6 +279,9 @@ fn print_install_human(outcome: &NativeRuntimeInstallOutcome) {
             eprintln!("   path: {}", outcome.runtime.path.display());
         }
     }
+    for line in outcome.sources.describe() {
+        eprintln!("   catalog: {line}");
+    }
 }
 
 fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
@@ -335,76 +349,7 @@ fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
 }
 
 fn format_rejection(reason: &CandidateRejection) -> String {
-    match reason {
-        CandidateRejection::MeshVersionMismatch { expected, actual } => {
-            format!("MeshLLM version mismatch: expected {expected}, found {actual}")
-        }
-        CandidateRejection::SkippyAbiMismatch { expected, actual } => {
-            format!("Skippy ABI mismatch: expected {expected}, found {actual}")
-        }
-        CandidateRejection::OsMismatch { expected, actual } => {
-            format!("OS mismatch: expected {expected}, artifact is for {actual}")
-        }
-        CandidateRejection::ArchMismatch { expected, actual } => {
-            format!("CPU architecture mismatch: expected {expected}, artifact is for {actual}")
-        }
-        CandidateRejection::TargetTripleMismatch { expected, actual } => {
-            format!("target triple mismatch: expected {expected}, host is {actual}")
-        }
-        CandidateRejection::BackendNotSupported { backend } => {
-            format!("backend {backend} is not supported on this host")
-        }
-        CandidateRejection::CudaProfileMissing => {
-            "CUDA runtime requires CUDA, but no CUDA profile was detected".to_string()
-        }
-        CandidateRejection::CudaToolkitMajorMismatch {
-            required,
-            installed,
-        } => {
-            let installed = installed
-                .iter()
-                .map(|major| major.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "CUDA toolkit mismatch: runtime requires CUDA {required}, host has CUDA {installed} installed"
-            )
-        }
-        CandidateRejection::CudaToolkitMajorAboveDriver {
-            required,
-            driver_max,
-        } => {
-            format!(
-                "CUDA driver too old: runtime requires CUDA {required}, driver supports up to CUDA {driver_max}"
-            )
-        }
-        CandidateRejection::CudaToolkitNotDetected { required } => {
-            format!(
-                "no CUDA toolkit detected: runtime requires CUDA {required} libraries \
-                 (libcudart, libcublas, libcublasLt) on the loader path; \
-                 set MESH_LLM_CUDA_TOOLKIT_MAJORS if the toolkit is installed elsewhere"
-            )
-        }
-        CandidateRejection::CudaGpuArchUnsupported { supported } => {
-            format!(
-                "CUDA GPU architecture unsupported: runtime supports {}",
-                supported.join(", ")
-            )
-        }
-        CandidateRejection::RocmProfileMissing => {
-            "ROCm runtime requires ROCm, but no ROCm profile was detected".to_string()
-        }
-        CandidateRejection::RocmGpuArchUnsupported { supported } => {
-            format!(
-                "ROCm GPU architecture unsupported: runtime supports {}",
-                supported.join(", ")
-            )
-        }
-        CandidateRejection::VulkanProfileMissing => {
-            "Vulkan runtime requires Vulkan, but no Vulkan profile was detected".to_string()
-        }
-        CandidateRejection::SelectionMismatch { selection } => {
-            format!("selection mismatch: requested {selection}")
-        }
-    }
+    // The wording lives on `CandidateRejection` itself so the install
+    // diagnostics and this listing describe a rejection the same way.
+    reason.to_string()
 }

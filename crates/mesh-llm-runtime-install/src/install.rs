@@ -1,13 +1,16 @@
 //! Native runtime resolution, download, and installation.
 
 use crate::cache::{host_runtime_profile, native_runtime_cache};
-use crate::manifest::{load_release_manifest_with_bundle_dirs, normalize_sha256};
+use crate::manifest::{
+    NativeRuntimeCatalogSources, load_release_manifest_with_sources, normalize_sha256,
+};
 use crate::types::*;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use mesh_llm_native_runtime::{
-    InstalledNativeRuntime, NativeRuntimeArtifact, NativeRuntimeCache, NativeRuntimeManifest,
-    NativeRuntimeResolver, NativeRuntimeSource,
+    CandidateEvaluation, CandidateRejection, InstalledNativeRuntime, NativeRuntimeArtifact,
+    NativeRuntimeCache, NativeRuntimeManifest, NativeRuntimeResolver, NativeRuntimeSource,
+    RuntimeSelection,
 };
 use sha2::Digest;
 use std::fs;
@@ -21,36 +24,109 @@ use tokio::io::AsyncWriteExt;
 pub async fn install_native_runtime(
     options: NativeRuntimeInstallOptions,
 ) -> Result<NativeRuntimeInstallOutcome> {
-    let (manifest, bundle_dirs) =
-        load_release_manifest_with_bundle_dirs(NativeRuntimeManifestOptions {
-            mesh_version: options.mesh_version.clone(),
-            manifest_path: options.manifest_path.clone(),
-            manifest_url: options.manifest_url.clone(),
-            bundle_dirs: options.bundle_dirs.clone(),
-            // Offline installs (`allow_download: false`) must not reach out
-            // for the default catalog either; bundles and the cache are the
-            // only sources then. Explicit manifest URLs are still honoured.
-            allow_default_manifest_url: options.allow_download,
-        })
-        .await?;
+    let (manifest, sources) = load_release_manifest_with_sources(NativeRuntimeManifestOptions {
+        mesh_version: options.mesh_version.clone(),
+        manifest_path: options.manifest_path.clone(),
+        manifest_url: options.manifest_url.clone(),
+        bundle_dirs: options.bundle_dirs.clone(),
+        // Offline installs (`allow_download: false`) must not reach out
+        // for the default catalog either; bundles and the cache are the
+        // only sources then. Explicit manifest URLs are still honoured.
+        allow_default_manifest_url: options.allow_download,
+    })
+    .await?;
     if manifest.artifacts.is_empty() {
-        bail!("no native runtime manifest entries found");
+        bail!(
+            "no native runtime manifest entries found\n{}",
+            describe_catalogs(&sources)
+        );
     }
     let skippy_abi_version = options
         .skippy_abi_version
         .clone()
         .unwrap_or_else(|| manifest.skippy_abi.clone());
     let cache = native_runtime_cache(options.cache_dir.as_deref())?;
-    let resolution = NativeRuntimeResolver::new(
+    let resolver = NativeRuntimeResolver::new(
         &options.mesh_version,
         host_runtime_profile(),
         manifest,
         cache.clone(),
     )
     .with_skippy_abi_version(skippy_abi_version)
-    .with_bundle_dirs(bundle_dirs)
-    .resolve(&options.selection)?;
-    install_resolved_runtime(&cache, resolution, &options).await
+    .with_bundle_dirs(sources.bundle_dirs.clone());
+    let resolution = match resolver.resolve(&options.selection) {
+        Ok(resolution) => resolution,
+        Err(err) => {
+            let evaluated = resolver.evaluate(&options.selection).unwrap_or_default();
+            bail!(
+                "{err}\n{}",
+                describe_resolution_failure(&sources, &options.selection, &evaluated)
+            );
+        }
+    };
+    let mut outcome = install_resolved_runtime(&cache, resolution, &options).await?;
+    outcome.sources = sources;
+    Ok(outcome)
+}
+
+fn describe_catalogs(sources: &NativeRuntimeCatalogSources) -> String {
+    sources
+        .describe()
+        .into_iter()
+        .map(|line| format!("catalog: {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Explains a failed selection: which catalogs were consulted, and why each
+/// candidate that matched the requested selection was rejected. Candidates
+/// that never matched the selection (another backend, another id) are
+/// summarised as a count so the explanation stays focused on what the user
+/// asked for.
+pub(crate) fn describe_resolution_failure(
+    sources: &NativeRuntimeCatalogSources,
+    selection: &RuntimeSelection,
+    evaluated: &[CandidateEvaluation],
+) -> String {
+    let mut lines = vec![describe_catalogs(sources)];
+    let (matching, others): (Vec<_>, Vec<_>) = evaluated.iter().partition(|candidate| {
+        !candidate
+            .rejection_reasons
+            .iter()
+            .any(|reason| matches!(reason, CandidateRejection::SelectionMismatch { .. }))
+    });
+    if matching.is_empty() {
+        lines.push(format!(
+            "no catalog entry matches the requested selection ({} other candidates were not considered)",
+            others.len()
+        ));
+    } else {
+        for candidate in matching {
+            let reasons = if candidate.rejection_reasons.is_empty() {
+                "compatible".to_string()
+            } else {
+                candidate
+                    .rejection_reasons
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            lines.push(format!("candidate {}: {reasons}", candidate.artifact.id));
+        }
+        if !others.is_empty() {
+            lines.push(format!(
+                "{} other candidates did not match the requested selection",
+                others.len()
+            ));
+        }
+    }
+    if let RuntimeSelection::Backend { kind, .. } = selection {
+        lines.push(format!(
+            "the {kind} runtime was requested explicitly; it was not replaced by another backend"
+        ));
+    }
+    lines.join("\n")
 }
 
 pub(crate) async fn install_resolved_runtime(
@@ -67,6 +143,7 @@ pub(crate) async fn install_resolved_runtime(
                     status: NativeRuntimeInstallStatus::Installed,
                     runtime,
                     resolution,
+                    sources: crate::manifest::NativeRuntimeCatalogSources::default(),
                 });
             }
             in_place_bundle_outcome(&path, resolution)
@@ -78,6 +155,7 @@ pub(crate) async fn install_resolved_runtime(
                 status: NativeRuntimeInstallStatus::Installed,
                 runtime,
                 resolution,
+                sources: crate::manifest::NativeRuntimeCatalogSources::default(),
             })
         }
         NativeRuntimeSource::Download { url: _ } => {
@@ -148,6 +226,7 @@ pub(crate) fn in_place_bundle_outcome(
         status: NativeRuntimeInstallStatus::AlreadyInstalled,
         runtime,
         resolution,
+        sources: crate::manifest::NativeRuntimeCatalogSources::default(),
     })
 }
 
@@ -165,6 +244,7 @@ pub(crate) fn installed_outcome(
         status: NativeRuntimeInstallStatus::AlreadyInstalled,
         runtime,
         resolution,
+        sources: crate::manifest::NativeRuntimeCatalogSources::default(),
     })
 }
 

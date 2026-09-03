@@ -46,19 +46,75 @@ pub async fn load_release_manifest(
 
 /// Which catalogs a merged manifest load consulted, so callers can explain a
 /// selection (or a rejection) in terms of where the candidates came from.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NativeRuntimeCatalogSources {
     /// Explicit `--manifest` file that was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<PathBuf>,
     /// Remote manifest URL that was consulted (explicit, environment, or the
-    /// default release URL).
+    /// default release URL), with any query string removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_url: Option<String>,
+    /// Artifacts contributed by the manifest file or URL.
+    #[serde(default)]
+    pub manifest_artifacts: usize,
     /// Why the remote manifest could not be used, when bundled artifacts
     /// carried the load instead. `None` when the fetch succeeded or was not
     /// attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_error: Option<String>,
     /// Bundle directories whose artifacts were merged in.
+    #[serde(default)]
     pub bundle_dirs: Vec<PathBuf>,
+    /// Artifacts contributed by the bundle directories (after deduplication
+    /// against the manifest).
+    #[serde(default)]
+    pub bundle_artifacts: usize,
+}
+
+impl NativeRuntimeCatalogSources {
+    /// Human-readable lines stating which catalogs were consulted, suitable
+    /// for CLI output and for explaining a failed selection.
+    pub fn describe(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(path) = &self.manifest_path {
+            lines.push(format!(
+                "manifest file {} ({} artifacts)",
+                path.display(),
+                self.manifest_artifacts
+            ));
+        } else if let Some(url) = &self.manifest_url {
+            match &self.remote_error {
+                Some(error) => lines.push(format!(
+                    "release catalog {url} unavailable, using bundles only: {error}"
+                )),
+                None => lines.push(format!(
+                    "release catalog {url} ({} artifacts)",
+                    self.manifest_artifacts
+                )),
+            }
+        } else {
+            lines.push("no release catalog consulted (downloads disabled)".to_string());
+        }
+        if self.bundle_dirs.is_empty() {
+            lines.push("no native runtime bundle directories".to_string());
+        } else {
+            let dirs = self
+                .bundle_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Every bundle directory carries exactly one runtime manifest;
+            // say how many of them were not already listed by the catalog.
+            lines.push(format!(
+                "bundle directories ({} runtimes, {} not already in the catalog): {dirs}",
+                self.bundle_dirs.len(),
+                self.bundle_artifacts
+            ));
+        }
+        lines
+    }
 }
 
 /// Like `load_release_manifest_with_sources`, returning only the bundle
@@ -89,7 +145,7 @@ pub(crate) async fn load_release_manifest_with_bundle_dirs(
 /// Candidates with the same identity coming from several sources are
 /// deduplicated downstream by the resolver, which also prefers a bundled copy
 /// over a download for the same artifact.
-pub(crate) async fn load_release_manifest_with_sources(
+pub async fn load_release_manifest_with_sources(
     mut options: NativeRuntimeManifestOptions,
 ) -> Result<(NativeRuntimeReleaseManifest, NativeRuntimeCatalogSources)> {
     options.bundle_dirs = discover_native_runtime_bundle_dirs(&options.bundle_dirs)?;
@@ -123,7 +179,8 @@ pub(crate) async fn load_release_manifest_with_sources(
             Err(err) => return Err(err),
         }
     }
-    append_bundle_artifacts(
+    sources.manifest_artifacts = artifacts.len();
+    sources.bundle_artifacts = append_bundle_artifacts(
         &mut artifacts,
         &mut mesh_version,
         &mut skippy_abi,
@@ -276,7 +333,8 @@ pub(crate) fn append_bundle_artifacts(
     skippy_abi: &mut String,
     bundle_dirs: &[PathBuf],
     manifest_loaded: bool,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut appended = 0;
     for dir in bundle_dirs {
         let manifest = NativeRuntimeManifest::read_from_dir(dir)
             .with_context(|| format!("read bundled native runtime {}", dir.display()))?;
@@ -296,9 +354,10 @@ pub(crate) fn append_bundle_artifacts(
             .any(|existing| same_artifact_identity(existing, &manifest.runtime));
         if !duplicate {
             artifacts.push(manifest.runtime);
+            appended += 1;
         }
     }
-    Ok(())
+    Ok(appended)
 }
 
 /// Two catalog entries describe the same runtime when their id and release

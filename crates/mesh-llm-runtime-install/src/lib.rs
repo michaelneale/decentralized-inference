@@ -24,7 +24,7 @@ pub use cache::{
 pub use install::install_native_runtime;
 pub use manifest::{
     NativeRuntimeCatalogSources, default_manifest_url, default_release_manifest_url,
-    load_release_manifest,
+    load_release_manifest, load_release_manifest_with_sources,
 };
 pub use types::{
     CURRENT_MESH_VERSION, NATIVE_RUNTIME_CACHE_DIR_ENV, NATIVE_RUNTIME_MANIFEST_URL_ENV,
@@ -38,13 +38,13 @@ pub use types::{
 pub(crate) use cache::resolve_cache_root;
 #[cfg(test)]
 pub(crate) use install::{
-    bundle_path_matches_explicit_root, emit_download_progress, install_resolved_runtime,
-    verify_download_policy_before_fetch,
+    bundle_path_matches_explicit_root, describe_resolution_failure, emit_download_progress,
+    install_resolved_runtime, verify_download_policy_before_fetch,
 };
 #[cfg(test)]
 pub(crate) use manifest::{
-    load_release_manifest_with_sources, manifest_url, release_manifest_checksum_url,
-    url_without_query, verify_release_manifest_checksum,
+    manifest_url, release_manifest_checksum_url, url_without_query,
+    verify_release_manifest_checksum,
 };
 
 #[cfg(test)]
@@ -1019,6 +1019,129 @@ mod tests {
             matches!(resolution.source, NativeRuntimeSource::Bundle { ref path } if path == &bundle.canonicalize().unwrap()),
             "the bundled copy must win over the download: {:?}",
             resolution.source
+        );
+    }
+
+    #[test]
+    fn catalog_sources_describe_every_consulted_source() {
+        let sources = NativeRuntimeCatalogSources {
+            manifest_url: Some("https://example.invalid/native-runtimes.json".to_string()),
+            manifest_artifacts: 12,
+            bundle_dirs: vec![PathBuf::from("C:/app/native-runtimes/cpu")],
+            bundle_artifacts: 1,
+            ..Default::default()
+        };
+        let lines = sources.describe();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains(
+                "release catalog https://example.invalid/native-runtimes.json (12 artifacts)"
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("bundle directories (1 runtimes, 1 not already in the catalog)"),
+            "{lines:?}"
+        );
+
+        let offline = NativeRuntimeCatalogSources {
+            manifest_url: Some("https://example.invalid/native-runtimes.json".to_string()),
+            remote_error: Some("connection refused".to_string()),
+            bundle_dirs: vec![PathBuf::from("C:/app/native-runtimes/cpu")],
+            bundle_artifacts: 1,
+            ..Default::default()
+        };
+        let lines = offline.describe();
+        assert!(
+            lines[0].contains("unavailable, using bundles only: connection refused"),
+            "{lines:?}"
+        );
+
+        let no_network = NativeRuntimeCatalogSources::default();
+        let lines = no_network.describe();
+        assert!(
+            lines[0].contains("no release catalog consulted"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("no native runtime bundle directories"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_gpu_selection_failure_names_the_catalogs_and_the_rejected_candidates() {
+        let _guard = MANIFEST_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(NATIVE_RUNTIME_MANIFEST_URL_ENV);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("native-runtimes/cpu");
+        write_bundle(&bundle, &windows_cpu_bundle_artifact());
+        // The only cuda candidate needs CUDA 12 on a host whose driver stops
+        // at CUDA 11, so an explicit cuda request must fail loudly instead of
+        // resolving against the bundled cpu runtime.
+        let manifest_path =
+            release_manifest_file(temp.path(), vec![windows_cuda_release_artifact()]);
+        let (manifest, sources) = block_on_load(NativeRuntimeManifestOptions {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            manifest_path: Some(manifest_path),
+            bundle_dirs: vec![bundle],
+            allow_default_manifest_url: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let profile = HostRuntimeProfile {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+            target_triple: Some("x86_64-pc-windows-msvc".to_string()),
+            available_flavors: std::collections::BTreeSet::from([
+                NativeRuntimeBackendKind::Cpu,
+                NativeRuntimeBackendKind::Cuda,
+            ]),
+            gpus: Vec::new(),
+            cuda: Some(HostCudaProfile {
+                toolkit_majors: std::collections::BTreeSet::new(),
+                driver_max_major: Some(11),
+                driver_version: None,
+                gpu_arches: std::collections::BTreeSet::from(["89".to_string()]),
+            }),
+            rocm: None,
+            vulkan: None,
+        };
+        let cache = native_runtime_cache(Some(&temp.path().join("cache"))).unwrap();
+        let selection = RuntimeSelection::Backend {
+            kind: NativeRuntimeBackendKind::Cuda,
+            cuda_toolkit_major: None,
+        };
+        let resolver = NativeRuntimeResolver::new(CURRENT_MESH_VERSION, profile, manifest, cache)
+            .with_skippy_abi_version(current_skippy_abi_version())
+            .with_bundle_dirs(sources.bundle_dirs.clone());
+        assert!(resolver.resolve(&selection).is_err());
+        let evaluated = resolver.evaluate(&selection).unwrap();
+
+        let explanation = describe_resolution_failure(&sources, &selection, &evaluated);
+
+        assert!(
+            explanation.contains("catalog: manifest file"),
+            "{explanation}"
+        );
+        assert!(
+            explanation
+                .contains("catalog: bundle directories (1 runtimes, 1 not already in the catalog)"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("candidate meshllm-native-runtime-windows-x86_64-cuda12: CUDA driver too old: runtime requires CUDA 12, driver supports up to CUDA 11"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("1 other candidates did not match the requested selection"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("the cuda runtime was requested explicitly"),
+            "{explanation}"
         );
     }
 }
