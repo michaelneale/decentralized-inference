@@ -540,15 +540,18 @@ def validate_warmup_capacity(
 
 
 def validate_measured_cohort_capacity(
-    cohorts: dict[str, list[dict[str, Any]]], concurrency_values: Sequence[int]
+    cohorts: dict[str, list[dict[str, Any]]],
+    concurrency_values: Sequence[int],
+    minimum_worker_waves: int = 2,
 ) -> None:
     for concurrency in concurrency_values:
         trajectories = len(cohorts[str(concurrency)])
-        required = 2 * concurrency
+        required = minimum_worker_waves * concurrency
         if trajectories < required:
             raise ValueError(
                 f"concurrency {concurrency} cohort has {trajectories} trajectories; "
-                f"{required} required for at least two worker waves"
+                f"{required} required for at least {minimum_worker_waves} worker "
+                f"wave{'s' if minimum_worker_waves != 1 else ''}"
             )
 
 
@@ -2068,6 +2071,7 @@ def benchmark_plan(
         "workload": {
             "concurrency": args.concurrency,
             "passes": args.passes,
+            "minimum_worker_waves": getattr(args, "minimum_worker_waves", 2),
             "replay_mode": args.replay_mode,
             "ordered_recorded_prefix_replay": True,
             "measured_requests_per_arm_pass": (
@@ -2139,7 +2143,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     expected_cohorts = ["warmup", *(str(value) for value in args.concurrency)]
     cohorts = load_trajectory_cohorts(Path(inputs["manifest"]), expected_cohorts)
     validate_warmup_capacity(cohorts["warmup"], args.warmup_turns)
-    validate_measured_cohort_capacity(cohorts, args.concurrency)
+    validate_measured_cohort_capacity(
+        cohorts, args.concurrency, args.minimum_worker_waves
+    )
     validate_required_frameworks(
         cohorts, args.concurrency, args.require_framework
     )
@@ -2166,6 +2172,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             "backend": args.backend,
             "concurrency": args.concurrency,
             "passes": args.passes,
+            "minimum_worker_waves": args.minimum_worker_waves,
             "replay_mode": args.replay_mode,
             "max_output_tokens": args.max_output_tokens,
             "warmup_turns": args.warmup_turns,
@@ -2273,6 +2280,15 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--concurrency", type=int, action="append", default=[])
     parser.add_argument(
+        "--minimum-worker-waves",
+        type=int,
+        default=2,
+        help=(
+            "minimum complete request waves required in each measured cohort; "
+            "set to 1 only for an exact captured single-wave workload"
+        ),
+    )
+    parser.add_argument(
         "--trajectories-per-framework",
         type=int,
         help="whole trajectories from each framework in each concurrency cohort",
@@ -2343,6 +2359,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         args.warmup_turns,
         args.min_isl,
         args.min_turns,
+        args.minimum_worker_waves,
     )
     if any(value <= 0 for value in positive):
         parser.error("passes and workload sizes must be positive")
@@ -2387,11 +2404,11 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         if args.trajectories_per_framework is not None
         else None
     )
-    minimum_trajectories = 2 * max(args.concurrency)
+    minimum_trajectories = args.minimum_worker_waves * max(args.concurrency)
     if trajectories_per_cohort is not None and trajectories_per_cohort < minimum_trajectories:
         parser.error(
-            "each concurrency cohort must contain at least twice the maximum "
-            f"offered concurrency ({minimum_trajectories} trajectories required)"
+            "each concurrency cohort must contain the configured minimum worker "
+            f"waves ({minimum_trajectories} trajectories required)"
         )
 
 

@@ -516,6 +516,7 @@ class AgenticReplayTest(unittest.TestCase):
         )
 
         self.assertEqual(args.concurrency, [1, 2, 4])
+        self.assertEqual(args.minimum_worker_waves, 2)
         self.assertEqual(args.passes, 1)
         self.assertEqual(args.replay_mode, "checkpoints")
         self.assertEqual(args.trajectories_per_framework, 4)
@@ -670,6 +671,13 @@ class AgenticReplayTest(unittest.TestCase):
             BENCH.validate_measured_cohort_capacity(
                 {"4": [{"session_id": str(index)} for index in range(7)]}, [4]
             )
+
+    def test_measured_cohort_can_explicitly_allow_one_worker_wave(self) -> None:
+        BENCH.validate_measured_cohort_capacity(
+            {"8": [{"session_id": str(index)} for index in range(8)]},
+            [8],
+            minimum_worker_waves=1,
+        )
 
     def test_required_frameworks_are_checked_in_every_measured_cohort(self) -> None:
         cohorts = {
