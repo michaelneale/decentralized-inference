@@ -114,6 +114,8 @@ fn test_parse_nvidia_gpu_memory_and_reserved() {
     );
 }
 
+/// `sanitize_macos_gpu_name` passes through real GPU names untouched (modulo
+/// trimming), for both Apple Silicon and AMD/Intel discrete/integrated parts.
 #[test]
 fn test_sanitize_macos_gpu_name_accepts_real_gpu_names() {
     assert_eq!(
@@ -130,12 +132,16 @@ fn test_sanitize_macos_gpu_name_accepts_real_gpu_names() {
     );
 }
 
+/// Empty or missing input degrades to labeled-absent (`None`), not an empty
+/// string masquerading as a GPU name.
 #[test]
 fn test_sanitize_macos_gpu_name_empty_is_labeled_absent() {
     assert_eq!(sanitize_macos_gpu_name(Some(String::new())), None);
     assert_eq!(sanitize_macos_gpu_name(None), None);
 }
 
+/// Guards against the regression this fix removed: a CPU brand string routed
+/// into the GPU-name path must degrade to `None`, never surface mislabeled.
 #[test]
 fn test_sanitize_macos_gpu_name_flags_cpu_brand_string_mislabel() {
     // The exact `sysctl -n machdep.cpu.brand_string` shape this fix removed —

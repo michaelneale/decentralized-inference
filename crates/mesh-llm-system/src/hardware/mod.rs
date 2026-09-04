@@ -272,6 +272,27 @@ fn read_windows_video_controllers() -> Vec<(String, u64)> {
     parse_windows_video_controller_json(&output)
 }
 
+/// Owns an Objective-C object retained via the "create rule" (e.g.
+/// `MTLCreateSystemDefaultDevice`, `NS_RETURNS_RETAINED`) and releases it on
+/// drop, so every return path -- including early `?`/null-check returns --
+/// balances the retain instead of leaking the object.
+#[cfg(target_os = "macos")]
+struct RetainedObjcObject(*mut std::ffi::c_void);
+
+#[cfg(target_os = "macos")]
+impl Drop for RetainedObjcObject {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn objc_release(obj: *mut std::ffi::c_void);
+        }
+        unsafe { objc_release(self.0) };
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn query_metal_recommended_working_set_bytes() -> Option<u64> {
     use std::ffi::{c_char, c_void};
@@ -293,6 +314,7 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
         if device.is_null() {
             return None;
         }
+        let _device = RetainedObjcObject(device);
         let selector = c"recommendedMaxWorkingSetSize";
         let selector = sel_registerName(selector.as_ptr());
         if selector.is_null() {
@@ -331,6 +353,7 @@ fn query_metal_device_name() -> Option<String> {
         if device.is_null() {
             return None;
         }
+        let _device = RetainedObjcObject(device);
         let name_sel = sel_registerName(c"name".as_ptr());
         if name_sel.is_null() {
             return None;
