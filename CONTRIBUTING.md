@@ -162,6 +162,39 @@ not report, lock, or clean a second artifact tree.
 
 On native Windows, `just check-release` runs the host-safe Rust/doc invariant subset and skips the Bash-only `install.sh` / `package-release.sh` parity checks. Run it on macOS or Linux when you need full shell parity coverage.
 
+### Testing crates on native Windows
+
+A bare Windows checkout cannot build the test targets of crates that pull in
+`skippy-ffi`'s static link mode — `mesh-llm-system` does, through
+`mesh-llm-runtime-install`, which depends on `skippy-ffi` with
+`default-features = false` — because `skippy-ffi/build.rs` then requires
+prepared llama.cpp ABI archives
+(`automatic native preparation is not supported for Windows from build.rs yet`).
+`just test-all` needs the same native preparation, through its Bash pipeline.
+
+For crate suites that do not exercise the native runtime, enable
+`dynamic-native-runtime`: feature unification turns on `skippy-ffi`'s
+`dynamic-runtime`, whose build script returns early. The `mesh-llm-system`
+gates then run on a machine without a prepared native build:
+
+```powershell
+cargo test --locked -p mesh-llm-system --lib --features dynamic-native-runtime
+cargo clippy --no-deps -p mesh-llm-system --all-targets --features dynamic-native-runtime -- -D warnings
+cargo fmt --check -p mesh-llm-system
+cargo run -p xtask -- repo-consistency no-console-print
+```
+
+`--no-deps` keeps Clippy scoped to the package you are changing. Some
+`cfg`-gated code is dead only on Windows and currently fails `-D warnings`
+there (`download_optional_url` in `autoupdate/release_fetch.rs`, two
+`SignalOutcome` variants in `backend.rs`, the lock file field in
+`skippy-runtime`'s `materialized_cache.rs`), so compare your run against the
+same command on `main` before attributing an error to your change. Running the
+native-runtime suites still needs a prepared build (`LLAMA_STAGE_BUILD_DIR`
+or `SKIPPY_LLAMA_BUILD_DIR` pointing at one), which this section does not cover.
+The Rust MSVC toolchain needs the Visual Studio Build Tools with the
+"Desktop development with C++" workload installed.
+
 ## CI / GitHub Actions
 
 For the current PR and main topology, read [`ci/ci.md`](ci/ci.md), the
