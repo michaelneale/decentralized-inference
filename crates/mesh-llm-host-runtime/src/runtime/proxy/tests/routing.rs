@@ -31,9 +31,6 @@ async fn test_api_proxy_retries_context_overflow_bad_request_to_next_target() {
     assert!(second_raw.contains("overflow then retry"));
     let stats = affinity.stats_snapshot();
     assert_eq!(stats.reservation_active, 0);
-    assert_eq!(stats.reservation_created, 1);
-    assert_eq!(stats.reservation_transferred, 1);
-    assert_eq!(stats.reservation_released, 1);
 
     proxy_handle.abort();
     let _ = small_handle.await;
@@ -107,10 +104,7 @@ async fn real_proxy_avoids_the_round_robin_target_that_is_still_in_flight() {
 
     assert_eq!(first_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(second_count.load(std::sync::atomic::Ordering::SeqCst), 2);
-    let active = affinity.stats_snapshot();
-    assert_eq!(active.reservation_active, 2);
-    assert_eq!(active.reservation_created, 3);
-    assert_eq!(active.reservation_spread_selections, 1);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 2);
 
     first_release.add_permits(1);
     second_release.add_permits(1);
@@ -118,9 +112,7 @@ async fn real_proxy_avoids_the_round_robin_target_that_is_still_in_flight() {
         let response = request.await.expect("request task");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
     }
-    let released = affinity.stats_snapshot();
-    assert_eq!(released.reservation_active, 0);
-    assert_eq!(released.reservation_released, 3);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
 
     proxy_handle.abort();
     first_handle.abort();

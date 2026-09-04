@@ -39,26 +39,13 @@ pub struct AffinityStatsSnapshot {
     /// Legacy status compatibility paired with `learned`; permanently zero.
     pub evicted: u64,
     pub target_reputation: TargetReputationStats,
+    /// Requests currently holding an in-flight route reservation.
     pub reservation_active: usize,
-    pub reservation_active_models: usize,
-    pub reservation_created: u64,
-    pub reservation_spread_selections: u64,
-    pub reservation_transferred: u64,
-    pub reservation_released: u64,
-    pub reservation_expired: u64,
-    pub reservation_capacity_evictions: u64,
 }
 
 mesh_llm_routing::impl_affinity_stats_snapshot!(AffinityStatsSnapshot {
     target_reputation: TargetReputationStats::default(),
     reservation_active: 0,
-    reservation_active_models: 0,
-    reservation_created: 0,
-    reservation_spread_selections: 0,
-    reservation_transferred: 0,
-    reservation_released: 0,
-    reservation_expired: 0,
-    reservation_capacity_evictions: 0,
 });
 
 #[derive(Clone, Debug)]
@@ -126,15 +113,7 @@ impl AffinityRouter {
             self.prefix.sticky_enabled(),
         );
         stats.target_reputation = self.target_health.reputation_stats();
-        let reservations = self.reservations.stats_snapshot();
-        stats.reservation_active = reservations.active;
-        stats.reservation_active_models = reservations.active_models;
-        stats.reservation_created = reservations.created;
-        stats.reservation_spread_selections = reservations.spread_selections;
-        stats.reservation_transferred = reservations.transferred;
-        stats.reservation_released = reservations.released;
-        stats.reservation_expired = reservations.expired;
-        stats.reservation_capacity_evictions = reservations.capacity_evictions;
+        stats.reservation_active = self.reservations.active_total();
         stats
     }
 
