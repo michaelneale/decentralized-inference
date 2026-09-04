@@ -1223,6 +1223,55 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(plan["workload"]["measured_requests_per_arm_pass"], 36)
         self.assertEqual(plan["workload"]["measured_requests_total"], 144)
 
+    def test_plan_appends_external_arms_to_the_same_abba_order(self) -> None:
+        args = SimpleNamespace(
+            repo=REPO,
+            backend="metal",
+            model="model-uri",
+            passes=2,
+            source_dataset=["swe-smith-claude-3-7-sonnet"],
+            framework=["swe-agent", "mini-swe-agent", "openhands"],
+            trajectories_per_framework=4,
+            min_isl=8192,
+            max_isl=65536,
+            min_turns=5,
+            concurrency=[1, 2, 4],
+            max_output_tokens=2048,
+            warmup_turns=4,
+            replay_mode="checkpoints",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 65536,
+                                "max_concurrency": 4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            engine_config = BENCH.load_engine_config(path)
+
+            plan = BENCH.benchmark_plan(args, self.specs(), engine_config)
+
+        self.assertEqual(
+            [item["label"] for item in plan["order"]],
+            ["rc8", "main", "vllm", "vllm", "main", "rc8"],
+        )
+        self.assertEqual(plan["workload"]["measured_requests_total"], 216)
+        self.assertIn("--max-num-seqs", plan["external_server_commands"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
