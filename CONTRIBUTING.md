@@ -165,9 +165,9 @@ On native Windows, `just check-release` runs the host-safe Rust/doc invariant su
 ### Testing crates on native Windows
 
 A bare Windows checkout cannot build the test targets of crates that pull in
-`skippy-ffi`'s static link mode — `mesh-llm-system` does, through
+`skippy-ffi`'s static link mode (`mesh-llm-system` does, through
 `mesh-llm-runtime-install`, which depends on `skippy-ffi` with
-`default-features = false` — because `skippy-ffi/build.rs` then requires
+`default-features = false`), because `skippy-ffi/build.rs` then requires
 the llama.cpp ABI archives to be prepared
 (`automatic native preparation is not supported for Windows from build.rs yet`).
 `just test-all` needs the same native preparation, through its Bash pipeline.
