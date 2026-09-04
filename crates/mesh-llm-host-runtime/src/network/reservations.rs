@@ -370,6 +370,22 @@ mod tests {
     }
 
     #[test]
+    fn reservation_pressure_is_isolated_per_model() {
+        let reservations = RoutingReservations::default();
+        let targets = vec![local(1), local(2)];
+        let (_, _model_a) = reservations
+            .reserve("model-a", &targets, &targets[0], false)
+            .expect("model-a reservation");
+        let (selected, _model_b) = reservations
+            .reserve("model-b", &targets, &targets[0], false)
+            .expect("model-b reservation");
+
+        assert_eq!(selected, targets[0]);
+        assert_eq!(reservations.active_count("model-a", &targets[0]), 1);
+        assert_eq!(reservations.active_count("model-b", &targets[0]), 1);
+    }
+
+    #[test]
     fn failover_transfers_and_drop_releases_reservation() {
         let reservations = RoutingReservations::default();
         let targets = vec![local(1), local(2)];
@@ -385,6 +401,41 @@ mod tests {
         let stats = reservations.stats_snapshot();
         assert_eq!(stats.active, 0);
         assert_eq!(stats.transferred, 1);
+        assert_eq!(stats.released, 1);
+    }
+
+    #[tokio::test]
+    async fn task_cancellation_releases_reservation() {
+        let reservations = RoutingReservations::default();
+        let target = local(1);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task_reservations = reservations.clone();
+        let task_target = target.clone();
+        let task = tokio::spawn(async move {
+            let (_, reservation) = task_reservations
+                .reserve(
+                    "model",
+                    std::slice::from_ref(&task_target),
+                    &task_target,
+                    false,
+                )
+                .expect("reservation");
+            ready_tx.send(()).expect("signal active reservation");
+            std::future::pending::<()>().await;
+            drop(reservation);
+        });
+
+        ready_rx.await.expect("reservation became active");
+        assert_eq!(reservations.active_count("model", &target), 1);
+        task.abort();
+        assert!(
+            task.await
+                .expect_err("task must be cancelled")
+                .is_cancelled()
+        );
+
+        let stats = reservations.stats_snapshot();
+        assert_eq!(stats.active, 0);
         assert_eq!(stats.released, 1);
     }
 

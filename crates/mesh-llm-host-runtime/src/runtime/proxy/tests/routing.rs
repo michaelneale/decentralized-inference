@@ -5,8 +5,10 @@ async fn test_api_proxy_retries_context_overflow_bad_request_to_next_target() {
     let (small_port, small_rx, small_handle) =
         spawn_status_upstream("400 Bad Request", overflow_body).await;
     let (large_port, large_rx, large_handle) = spawn_capturing_upstream(r#"{"ok":true}"#).await;
-    let (proxy_addr, proxy_handle) =
-        spawn_api_proxy_test_harness(single_model_targets("test", &[small_port, large_port])).await;
+    let (proxy_addr, proxy_handle, affinity) = spawn_api_proxy_test_harness_with_affinity(
+        single_model_targets("test", &[small_port, large_port]),
+    )
+    .await;
 
     let body = json!({
         "model": "test",
@@ -27,10 +29,102 @@ async fn test_api_proxy_retries_context_overflow_bad_request_to_next_target() {
     assert!(response.contains(r#"{"ok":true}"#));
     assert!(first_raw.contains("overflow then retry"));
     assert!(second_raw.contains("overflow then retry"));
+    let stats = affinity.stats_snapshot();
+    assert_eq!(stats.reservation_active, 0);
+    assert_eq!(stats.reservation_created, 1);
+    assert_eq!(stats.reservation_transferred, 1);
+    assert_eq!(stats.reservation_released, 1);
 
     proxy_handle.abort();
     let _ = small_handle.await;
     let _ = large_handle.await;
+}
+
+#[tokio::test]
+async fn real_proxy_avoids_the_round_robin_target_that_is_still_in_flight() {
+    let (first_port, first_count, first_release, first_handle) =
+        spawn_held_upstream(r#"{"ok":"first"}"#).await;
+    let (second_port, second_count, second_release, second_handle) =
+        spawn_held_upstream(r#"{"ok":"second"}"#).await;
+    let (proxy_addr, proxy_handle, affinity) = spawn_api_proxy_test_harness_with_affinity(
+        single_model_targets("test", &[first_port, second_port]),
+    )
+    .await;
+
+    let request = |index| {
+        let body = json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": format!("burst {index}")}],
+        })
+        .to_string();
+        format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    };
+
+    let first_request = tokio::spawn(send_request_and_read_response(
+        proxy_addr,
+        vec![request(0).into_bytes()],
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while first_count.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first request reached the first round-robin target");
+
+    let second_request = tokio::spawn(send_request_and_read_response(
+        proxy_addr,
+        vec![request(1).into_bytes()],
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while second_count.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second request reached the second round-robin target");
+
+    second_release.add_permits(1);
+    let response = second_request.await.expect("second request task");
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(affinity.stats_snapshot().reservation_active, 1);
+
+    let third_request = tokio::spawn(send_request_and_read_response(
+        proxy_addr,
+        vec![request(2).into_bytes()],
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while second_count.load(std::sync::atomic::Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reservation pressure redirected the third request");
+
+    assert_eq!(first_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(second_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let active = affinity.stats_snapshot();
+    assert_eq!(active.reservation_active, 2);
+    assert_eq!(active.reservation_created, 3);
+    assert_eq!(active.reservation_spread_selections, 1);
+
+    first_release.add_permits(1);
+    second_release.add_permits(1);
+    for request in [first_request, third_request] {
+        let response = request.await.expect("request task");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+    let released = affinity.stats_snapshot();
+    assert_eq!(released.reservation_active, 0);
+    assert_eq!(released.reservation_released, 3);
+
+    proxy_handle.abort();
+    first_handle.abort();
+    second_handle.abort();
 }
 
 #[tokio::test]
