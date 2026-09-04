@@ -342,16 +342,20 @@ mod tests {
 
     #[test]
     fn read_only_filesystem_warning_includes_os_error_and_recovery_path() {
+        // Raw OS error 30 is EROFS on POSIX but ERROR_READ_FAULT on Windows, so
+        // assert the contract (the OS error text is surfaced verbatim) rather
+        // than the POSIX wording.
+        let os_error = std::io::Error::from_raw_os_error(30).to_string();
         let warning = DownloadDirectoryFallback {
             kind: DownloadDirectoryKind::HuggingFaceXet,
             requested: PathBuf::from("/"),
             selected: PathBuf::from("/writable/data/huggingface/xet"),
-            error: std::io::Error::from_raw_os_error(30).to_string(),
+            error: os_error.clone(),
             raw_os_error: Some(30),
         };
 
         let message = warning.to_string();
-        assert!(message.contains("Read-only file system"));
+        assert!(message.contains(&os_error));
         assert!(message.contains("/writable/data/huggingface/xet"));
         assert!(message.contains("HF_XET_CACHE"));
         assert!(message.contains("MESH_LLM_DATA_DIR"));
