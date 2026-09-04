@@ -29,6 +29,12 @@ pub enum OpenAiExchangeDispatchPath {
     /// The raw-proxy ingress (`network/openai/ingress.rs`), used for
     /// plugin-served models; never sees a typed `ChatCompletionRequest`.
     RawProxy,
+    /// The raw-proxy ingress routes this exchange to a peer on the mesh
+    /// rather than serving it locally (`route_missing_local_model`'s
+    /// remote-mesh branch). This node is the requester/router, not the
+    /// server, for the exchange this envelope describes — a downstream
+    /// plugin must not treat it as the served-side event.
+    RemoteMesh,
 }
 
 /// Which moment in an exchange's lifecycle an [`OpenAiExchangeEnvelope`]
@@ -122,6 +128,59 @@ impl OpenAiExchangeEnvelope {
             status,
             capsule_id: marker.as_ref().map(|marker| marker.capsule_id.clone()),
             nonce: marker.as_ref().map(|marker| marker.nonce.clone()),
+            nonce_source,
+        }
+    }
+
+    /// Effective-request envelope for the `RemoteMesh` dispatch path,
+    /// carrying the nonce this node is about to forward to the peer
+    /// unchanged — so a plugin observing only the effective event already
+    /// knows what a later client ack must sign over, rather than having to
+    /// wait for the terminal event. `capsule_id` stays absent: this node
+    /// mints nothing on this path.
+    pub fn effective_remote_mesh(
+        exchange_id: impl Into<String>,
+        model: impl Into<String>,
+        nonce: Option<String>,
+        nonce_source: Option<ClientNonceSource>,
+    ) -> Self {
+        Self {
+            exchange_id: exchange_id.into(),
+            dispatch_path: OpenAiExchangeDispatchPath::RemoteMesh,
+            phase: OpenAiExchangePhase::EffectiveRequest,
+            model: model.into(),
+            status: None,
+            capsule_id: None,
+            nonce,
+            nonce_source,
+        }
+    }
+
+    /// Terminal envelope for the `RemoteMesh` dispatch path — a routing node
+    /// observing (not serving) an exchange it forwarded to a peer.
+    ///
+    /// Unlike [`Self::terminal`]'s `marker`, which bundles a capsule_id this
+    /// node minted together with the nonce that capsule is correlated
+    /// against, a routing node mints nothing here: `nonce` is the same
+    /// client-contributed value forwarded to the peer unchanged (present
+    /// only when the request already carries a stabilized nonce). No peer
+    /// response header is read back on this path, so `capsule_id` stays
+    /// absent, same as the plugin-served terminal event.
+    pub fn terminal_remote_mesh(
+        exchange_id: impl Into<String>,
+        model: impl Into<String>,
+        status: Option<u16>,
+        nonce: Option<String>,
+        nonce_source: Option<ClientNonceSource>,
+    ) -> Self {
+        Self {
+            exchange_id: exchange_id.into(),
+            dispatch_path: OpenAiExchangeDispatchPath::RemoteMesh,
+            phase: OpenAiExchangePhase::Terminal,
+            model: model.into(),
+            status,
+            capsule_id: None,
+            nonce,
             nonce_source,
         }
     }
@@ -563,5 +622,114 @@ mod tests {
             events[3].exchange_id, events[0].exchange_id,
             "slow exchange's terminal event pairs with its own effective event"
         );
+    }
+
+    // --- #1668 review round: RemoteMesh / RawProxy publish pairs ---
+    //
+    // Neither `route_missing_local_model`'s remote-mesh branch nor
+    // `try_route_plugin_model` (see `network::openai::ingress`) is economical
+    // to invoke directly in a unit test -- both need a live TCP stream and a
+    // real `mesh::Node`/`PluginManager` (see `ingress_tests`'s own comment
+    // on `plugin_route_status`). These test the pure envelope pair each call
+    // site publishes instead.
+
+    /// `route_missing_local_model`'s remote-mesh branch publishes the same
+    /// effective/terminal pair `try_route_plugin_model` does for its own
+    /// dispatch, with `RemoteMesh` in place of `RawProxy` -- and, unlike that
+    /// path, carrying the nonce forwarded to the peer unchanged on BOTH
+    /// envelopes, not just the terminal one, so a plugin observing only the
+    /// effective event already knows what a later client ack must sign over.
+    /// `capsule_id` stays absent on both: this node mints nothing here.
+    #[tokio::test]
+    async fn remote_mesh_branch_publishes_effective_and_terminal_with_the_forwarded_nonce() {
+        let channel = RecordingChannel::default();
+        let nonce = Some("6d7d8d2e-3f4a-4b5c-8d9e-0a1b2c3d4e5f".to_string());
+        let nonce_source = Some(ClientNonceSource::ClientSupplied);
+
+        channel
+            .publish(&OpenAiExchangeEnvelope::effective_remote_mesh(
+                "exch-rm-1",
+                "hermes-2-pro-mistral-7b",
+                nonce.clone(),
+                nonce_source,
+            ))
+            .await;
+        channel
+            .publish(&OpenAiExchangeEnvelope::terminal_remote_mesh(
+                "exch-rm-1",
+                "hermes-2-pro-mistral-7b",
+                Some(200),
+                nonce.clone(),
+                nonce_source,
+            ))
+            .await;
+
+        let events = channel.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one effective-request, one terminal");
+
+        assert_eq!(
+            events[0].dispatch_path,
+            OpenAiExchangeDispatchPath::RemoteMesh
+        );
+        assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+        assert_eq!(events[0].nonce, nonce);
+        assert_eq!(events[0].nonce_source, nonce_source);
+        assert!(events[0].capsule_id.is_none());
+
+        assert_eq!(
+            events[1].dispatch_path,
+            OpenAiExchangeDispatchPath::RemoteMesh
+        );
+        assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+        assert_eq!(events[1].exchange_id, events[0].exchange_id);
+        assert_eq!(events[1].status, Some(200));
+        assert_eq!(events[1].nonce, nonce);
+        assert_eq!(events[1].nonce_source, nonce_source);
+        assert!(events[1].capsule_id.is_none());
+    }
+
+    /// The sibling of the test above for `try_route_plugin_model`'s own
+    /// effective/terminal pair (`RawProxy`) -- the pattern the remote-mesh
+    /// branch mirrors, previously uncovered at this level for the same
+    /// "not economical to invoke directly" reason. No marker exists on this
+    /// path (it never runs through `openai-frontend`'s `OpenAiHookPolicy`),
+    /// so nonce/nonce_source/capsule_id all stay absent on both envelopes.
+    #[tokio::test]
+    async fn raw_proxy_plugin_route_publishes_effective_and_terminal_without_a_marker() {
+        let channel = RecordingChannel::default();
+
+        channel
+            .publish(&OpenAiExchangeEnvelope::effective(
+                "exch-rp-1",
+                OpenAiExchangeDispatchPath::RawProxy,
+                "acme/plugin-model",
+            ))
+            .await;
+        channel
+            .publish(&OpenAiExchangeEnvelope::terminal(
+                "exch-rp-1",
+                OpenAiExchangeDispatchPath::RawProxy,
+                "acme/plugin-model",
+                Some(200),
+                None,
+                None,
+            ))
+            .await;
+
+        let events = channel.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one effective-request, one terminal");
+
+        assert_eq!(events[0].dispatch_path, OpenAiExchangeDispatchPath::RawProxy);
+        assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+        assert!(events[0].nonce.is_none());
+        assert!(events[0].capsule_id.is_none());
+
+        assert_eq!(events[1].dispatch_path, OpenAiExchangeDispatchPath::RawProxy);
+        assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+        assert_eq!(events[1].exchange_id, events[0].exchange_id);
+        assert_eq!(events[1].status, Some(200));
+        assert!(events[1].nonce.is_none());
+        assert!(events[1].nonce_source.is_none());
+        assert!(events[1].capsule_id.is_none());
     }
 }
