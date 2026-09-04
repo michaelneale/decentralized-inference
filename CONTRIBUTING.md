@@ -184,12 +184,10 @@ cargo fmt --check -p mesh-llm-system
 cargo run -p xtask -- repo-consistency no-console-print
 ```
 
-`--no-deps` keeps Clippy scoped to the package you are changing. Some
-`cfg`-gated code is dead only on Windows and currently fails `-D warnings`
-there (`download_optional_url` in `autoupdate/release_fetch.rs`, two
-`SignalOutcome` variants in `backend.rs`, the lock file field in
-`skippy-runtime`'s `materialized_cache.rs`), so compare your run against the
-same command on `main` before attributing an error to your change. Running the
+`--no-deps` keeps Clippy scoped to the package you are changing. `cfg`-gated
+code can be dead on one platform only, so if a platform-specific warning
+appears that your diff does not touch, compare the run against the same
+command on `main` before attributing it to your change. Running the
 native-runtime suites still needs a prepared build (`LLAMA_STAGE_BUILD_DIR`
 or `SKIPPY_LLAMA_BUILD_DIR` pointing at one), which this section does not cover.
 The Rust MSVC toolchain needs the Visual Studio Build Tools with the
