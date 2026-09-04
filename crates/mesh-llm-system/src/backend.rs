@@ -172,7 +172,10 @@ enum ProcessSignal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SignalOutcome {
     Sent,
+    // Only the non-Windows pid/name verification path constructs these.
+    #[cfg_attr(windows, allow(dead_code))]
     AlreadyDead,
+    #[cfg_attr(windows, allow(dead_code))]
     Skipped,
     Failed,
 }
