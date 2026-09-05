@@ -1,0 +1,363 @@
+From c81375f3ad4fcc9ec5063e1dfefcd88999aa9c15 Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 19:25:08 +1000
+Subject: [PATCH] feat(skippy): aggregate guarded graph profiles
+
+Assisted-by: scama
+---
+ src/skippy/stage_slice_plan.cpp       | 142 ++++++++++++++++++++++++++
+ src/skippy/stage_slice_plan.h         |  45 ++++++++
+ src/skippy/tests/stage_slice_plan.cpp | 111 +++++++++++++++++++-
+ 3 files changed, 296 insertions(+), 2 deletions(-)
+
+diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
+index 37eaadfd2..0509ce9c0 100644
+--- a/src/skippy/stage_slice_plan.cpp
++++ b/src/skippy/stage_slice_plan.cpp
+@@ -441,3 +441,145 @@ bool skippy_select_stage_slice(
+     }
+     return state.select();
+ }
++
++bool skippy_build_guarded_stage_slice_plan(
++        const std::vector<skippy_stage_profile_input> & profiles,
++        int32_t layer_start,
++        int32_t layer_end,
++        skippy_guarded_stage_slice_plan & plan,
++        std::string & error) {
++    plan = {};
++    error.clear();
++    if (profiles.empty()) {
++        error = "guarded stage plan requires at least one execution profile";
++        return false;
++    }
++
++    std::vector<const skippy_stage_profile_input *> ordered;
++    ordered.reserve(profiles.size());
++    for (const auto & profile : profiles) {
++        ordered.push_back(&profile);
++    }
++    std::sort(ordered.begin(), ordered.end(), [](const auto * left, const auto * right) {
++        return left->profile_id < right->profile_id;
++    });
++
++    std::set<std::string> resident_parameters;
++    std::string previous_profile_id;
++    for (const auto * profile : ordered) {
++        if (profile->profile_id.empty()) {
++            error = "execution profile identity is empty";
++            return false;
++        }
++        if (profile->profile_id == previous_profile_id) {
++            error = "duplicate execution profile identity";
++            return false;
++        }
++        previous_profile_id = profile->profile_id;
++        if (profile->graph == nullptr || profile->boundaries == nullptr ||
++                profile->state_effects == nullptr || profile->parameters == nullptr) {
++            error = "execution profile graph contract is incomplete";
++            return false;
++        }
++        if (profile->layer_count <= 0 ||
++                (plan.layer_count != 0 && plan.layer_count != profile->layer_count)) {
++            error = "execution profiles disagree on model layer count";
++            return false;
++        }
++        if (profile->guard.n_tokens == 0 || profile->guard.n_sequences == 0 ||
++                profile->guard.n_outputs == 0 ||
++                profile->guard.n_tokens % profile->guard.n_sequences != 0 ||
++                profile->guard.n_outputs > profile->guard.n_tokens ||
++                profile->guard.graph_configuration_id.empty() ||
++                profile->guard.backend_id.empty()) {
++            error = "execution profile guard is invalid";
++            return false;
++        }
++
++        skippy_stage_profile_plan profile_plan;
++        profile_plan.profile_id = profile->profile_id;
++        profile_plan.graph = profile->graph;
++        profile_plan.guard = profile->guard;
++        if (!skippy_select_stage_slice(
++                    profile->graph,
++                    *profile->boundaries,
++                    *profile->state_effects,
++                    *profile->parameters,
++                    profile->layer_count,
++                    layer_start,
++                    layer_end,
++                    profile_plan.slice,
++                    error)) {
++            error = "execution profile " + profile->profile_id + " rejected: " + error;
++            return false;
++        }
++        if (profile_plan.slice.node_indices.empty()) {
++            error = "execution profile " + profile->profile_id + " produced an empty stage slice";
++            return false;
++        }
++        resident_parameters.insert(
++                profile_plan.slice.parameter_identities.begin(),
++                profile_plan.slice.parameter_identities.end());
++        plan.layer_count = profile->layer_count;
++        plan.profiles.push_back(std::move(profile_plan));
++    }
++
++    plan.layer_start = layer_start;
++    plan.layer_end = layer_end;
++    plan.resident_parameter_identities.assign(
++            resident_parameters.begin(), resident_parameters.end());
++    return true;
++}
++
++bool skippy_validate_guarded_stage_chain(
++        const std::vector<const skippy_guarded_stage_slice_plan *> & stages,
++        std::string & error) {
++    error.clear();
++    if (stages.empty()) {
++        error = "stage chain is empty";
++        return false;
++    }
++    for (size_t index = 0; index < stages.size(); ++index) {
++        const auto * stage = stages[index];
++        if (stage == nullptr || stage->layer_count <= 0 || stage->profiles.empty() ||
++                stage->layer_start < 0 || stage->layer_start >= stage->layer_end ||
++                stage->layer_end > stage->layer_count) {
++            error = "stage chain contains an invalid plan";
++            return false;
++        }
++        if ((index == 0 && stage->layer_start != 0) ||
++                (index > 0 && stage->layer_start != stages[index - 1]->layer_end) ||
++                (index + 1 == stages.size() && stage->layer_end != stage->layer_count)) {
++            error = "stage chain ranges are not a complete contiguous partition";
++            return false;
++        }
++        if (index == 0) {
++            continue;
++        }
++        const auto * previous = stages[index - 1];
++        if (stage->layer_count != previous->layer_count ||
++                stage->profiles.size() != previous->profiles.size()) {
++            error = "adjacent stages disagree on model or profile count";
++            return false;
++        }
++        for (size_t profile_index = 0; profile_index < stage->profiles.size(); ++profile_index) {
++            const auto & left = previous->profiles[profile_index];
++            const auto & right = stage->profiles[profile_index];
++            if (left.profile_id != right.profile_id || left.graph != right.graph ||
++                    left.guard.n_tokens != right.guard.n_tokens ||
++                    left.guard.n_sequences != right.guard.n_sequences ||
++                    left.guard.n_outputs != right.guard.n_outputs ||
++                    left.guard.n_recurrent_rollback_sequences != right.guard.n_recurrent_rollback_sequences ||
++                    left.guard.graph_configuration_id != right.guard.graph_configuration_id ||
++                    left.guard.backend_id != right.guard.backend_id) {
++                error = "adjacent stages disagree on execution profile guard";
++                return false;
++            }
++            if (left.slice.activation_exports != right.slice.activation_imports) {
++                error = "adjacent stages have an incomplete activation frontier";
++                return false;
++            }
++        }
++    }
++    return true;
++}
+diff --git a/src/skippy/stage_slice_plan.h b/src/skippy/stage_slice_plan.h
+index ee801c314..7a6d710e9 100644
+--- a/src/skippy/stage_slice_plan.h
++++ b/src/skippy/stage_slice_plan.h
+@@ -26,6 +26,40 @@ struct skippy_stage_slice_selection {
+     std::vector<skippy_state_effect> state_effects;
+ };
+ 
++struct skippy_execution_profile_guard {
++    uint32_t n_tokens = 0;
++    uint32_t n_sequences = 0;
++    uint32_t n_outputs = 0;
++    uint32_t n_recurrent_rollback_sequences = 0;
++    std::string graph_configuration_id;
++    std::string backend_id;
++};
++
++struct skippy_stage_profile_input {
++    std::string profile_id;
++    ggml_cgraph * graph = nullptr;
++    const std::vector<skippy_block_boundary> * boundaries = nullptr;
++    const std::vector<skippy_state_effect> * state_effects = nullptr;
++    const std::vector<skippy_parameter_binding> * parameters = nullptr;
++    int32_t layer_count = 0;
++    skippy_execution_profile_guard guard;
++};
++
++struct skippy_stage_profile_plan {
++    std::string profile_id;
++    const ggml_cgraph * graph = nullptr;
++    skippy_execution_profile_guard guard;
++    skippy_stage_slice_selection slice;
++};
++
++struct skippy_guarded_stage_slice_plan {
++    int32_t layer_count = 0;
++    int32_t layer_start = 0;
++    int32_t layer_end = 0;
++    std::vector<skippy_stage_profile_plan> profiles;
++    std::vector<std::string> resident_parameter_identities;
++};
++
+ bool skippy_select_stage_slice(
+         ggml_cgraph * graph,
+         const std::vector<skippy_block_boundary> & boundaries,
+@@ -36,3 +70,14 @@ bool skippy_select_stage_slice(
+         int32_t layer_end,
+         skippy_stage_slice_selection & selection,
+         std::string & error);
++
++bool skippy_build_guarded_stage_slice_plan(
++        const std::vector<skippy_stage_profile_input> & profiles,
++        int32_t layer_start,
++        int32_t layer_end,
++        skippy_guarded_stage_slice_plan & plan,
++        std::string & error);
++
++bool skippy_validate_guarded_stage_chain(
++        const std::vector<const skippy_guarded_stage_slice_plan *> & stages,
++        std::string & error);
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index e9a774ddc..a29ad0e94 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -147,6 +147,113 @@ static int check_middle_stage_selection() {
+         return 8;
+     }
+ 
++    const skippy_execution_profile_guard prefill_guard = {
++        8,
++        1,
++        8,
++        0,
++        "config-a",
++        "cpu",
++    };
++    const skippy_execution_profile_guard decode_guard = {
++        1,
++        1,
++        1,
++        0,
++        "config-a",
++        "cpu",
++    };
++    std::vector<skippy_parameter_binding> decode_parameter_bindings = parameter_bindings;
++    decode_parameter_bindings[1].identity = "block.1.decode_weight";
++    std::vector<skippy_stage_profile_input> profiles = {
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, 3, prefill_guard},
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, 3, decode_guard},
++    };
++    skippy_guarded_stage_slice_plan guarded_plan;
++    if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error) ||
++            guarded_plan.layer_count != 3 ||
++            guarded_plan.layer_start != 1 ||
++            guarded_plan.layer_end != 2 ||
++            guarded_plan.profiles.size() != 2 ||
++            guarded_plan.profiles[0].profile_id != "decode" ||
++            guarded_plan.profiles[1].profile_id != "prefill" ||
++            guarded_plan.profiles[0].guard.n_tokens != 1 ||
++            guarded_plan.profiles[1].guard.n_tokens != 8 ||
++            guarded_plan.profiles[0].slice.parameter_identities != std::vector<std::string>{"block.1.decode_weight"} ||
++            guarded_plan.profiles[1].slice.parameter_identities != std::vector<std::string>{"block.1.weight"} ||
++            guarded_plan.resident_parameter_identities !=
++                    std::vector<std::string>{"block.1.decode_weight", "block.1.weight"}) {
++        std::fprintf(stderr, "guarded profile plan was not normalized: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 9;
++    }
++    const skippy_guarded_stage_slice_plan normalized_plan = guarded_plan;
++    std::reverse(profiles.begin(), profiles.end());
++    if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error) ||
++            guarded_plan.profiles[0].profile_id != normalized_plan.profiles[0].profile_id ||
++            guarded_plan.profiles[1].profile_id != normalized_plan.profiles[1].profile_id ||
++            guarded_plan.profiles[0].slice.node_indices != normalized_plan.profiles[0].slice.node_indices ||
++            guarded_plan.profiles[1].slice.node_indices != normalized_plan.profiles[1].slice.node_indices ||
++            guarded_plan.resident_parameter_identities != normalized_plan.resident_parameter_identities) {
++        std::fprintf(stderr, "guarded profile plan changed with input order: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 10;
++    }
++    profiles.push_back(profiles.front());
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "duplicate execution profile identity was accepted\n");
++        ggml_free(ctx);
++        return 11;
++    }
++    profiles.pop_back();
++    profiles[0].guard.n_sequences = 0;
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "invalid execution profile guard was accepted\n");
++        ggml_free(ctx);
++        return 12;
++    }
++    profiles[0].guard = decode_guard;
++
++    std::vector<skippy_stage_profile_input> ordered_profiles = {
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, 3, decode_guard},
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, 3, prefill_guard},
++    };
++    skippy_guarded_stage_slice_plan source_plan;
++    skippy_guarded_stage_slice_plan middle_plan;
++    skippy_guarded_stage_slice_plan final_plan;
++    if (!skippy_build_guarded_stage_slice_plan(ordered_profiles, 0, 1, source_plan, error) ||
++            !skippy_build_guarded_stage_slice_plan(ordered_profiles, 1, 2, middle_plan, error) ||
++            !skippy_build_guarded_stage_slice_plan(ordered_profiles, 2, 3, final_plan, error)) {
++        std::fprintf(stderr, "complete guarded stage chain could not be built: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 13;
++    }
++    const std::vector<const skippy_guarded_stage_slice_plan *> stage_chain = {
++        &source_plan,
++        &middle_plan,
++        &final_plan,
++    };
++    if (!skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "complete guarded stage chain was rejected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 14;
++    }
++    const auto removed_export = source_plan.profiles[0].slice.activation_exports.back();
++    source_plan.profiles[0].slice.activation_exports.pop_back();
++    if (skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "incomplete activation frontier was accepted\n");
++        ggml_free(ctx);
++        return 15;
++    }
++    source_plan.profiles[0].slice.activation_exports.push_back(removed_export);
++    middle_plan.profiles[0].guard.n_tokens += 1;
++    if (skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "mismatched adjacent profile guards were accepted\n");
++        ggml_free(ctx);
++        return 16;
++    }
++    middle_plan.profiles[0].guard.n_tokens -= 1;
++
+     const std::vector<skippy_block_boundary> foreign_state_boundaries = {
+         {skippy_block_boundary_kind::entry, 0, entry_0},
+         {skippy_block_boundary_kind::exit, 0, exit_1},
+@@ -167,7 +274,7 @@ static int check_middle_stage_selection() {
+                 error)) {
+         std::fprintf(stderr, "slice accepted persistent state owned by another layer\n");
+         ggml_free(ctx);
+-        return 9;
++        return 17;
+     }
+ 
+     ggml_set_input(parameter_1);
+@@ -183,7 +290,7 @@ static int check_middle_stage_selection() {
+                 error)) {
+         std::fprintf(stderr, "multiply classified parameter was accepted\n");
+         ggml_free(ctx);
+-        return 10;
++        return 18;
+     }
+ 
+     ggml_free(ctx);
+-- 
+2.54.0 (Apple Git-157)
+
+
