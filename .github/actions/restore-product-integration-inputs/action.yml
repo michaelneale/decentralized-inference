@@ -27,9 +27,21 @@ outputs:
   dense_model_file:
     value: ${{ steps.resolve.outputs.dense_file }}
     description: Checksum-pinned dense fixture filename.
+  dense_model_artifact_id:
+    value: ${{ steps.resolve.outputs.dense_artifact_id }}
+    description: Registry artifact ID for the dense fixture.
+  dense_model_sha256:
+    value: ${{ steps.resolve.outputs.dense_sha256 }}
+    description: Verified SHA-256 for the dense fixture.
   recurrent_model_file:
     value: ${{ steps.resolve.outputs.recurrent_file }}
     description: Checksum-pinned recurrent fixture filename.
+  recurrent_model_artifact_id:
+    value: ${{ steps.resolve.outputs.recurrent_artifact_id }}
+    description: Registry artifact ID for the recurrent fixture.
+  recurrent_model_sha256:
+    value: ${{ steps.resolve.outputs.recurrent_sha256 }}
+    description: Verified SHA-256 for the recurrent fixture.
 
 runs:
   using: composite

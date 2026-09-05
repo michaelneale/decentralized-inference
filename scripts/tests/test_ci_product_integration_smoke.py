@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,10 @@ REQUIRED_PHASES = [
     "dense-split-kv",
     "recurrent-split-kv",
 ]
+DENSE_ARTIFACT_ID = "smollm2-q8-inference"
+RECURRENT_ARTIFACT_ID = "family-granite-hybrid"
+DENSE_FIXTURE = b"dense fixture"
+RECURRENT_FIXTURE = b"recurrent fixture"
 
 
 class ProductIntegrationSmokeTests(unittest.TestCase):
@@ -41,7 +46,15 @@ fi
         )
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-    def run_suite(self, failure_phase: str | None = None) -> tuple[subprocess.CompletedProcess[str], dict]:
+    def run_suite(
+        self,
+        failure_phase: str | None = None,
+        *,
+        dense_artifact_id: str = DENSE_ARTIFACT_ID,
+        dense_sha256: str | None = None,
+        recurrent_artifact_id: str = RECURRENT_ARTIFACT_ID,
+        recurrent_sha256: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scripts = root / "scripts"
@@ -63,8 +76,12 @@ fi
             )
             dense_model = root / "dense.gguf"
             recurrent_model = root / "recurrent.gguf"
-            dense_model.touch()
-            recurrent_model.touch()
+            dense_model.write_bytes(DENSE_FIXTURE)
+            recurrent_model.write_bytes(RECURRENT_FIXTURE)
+            if dense_sha256 is None:
+                dense_sha256 = hashlib.sha256(DENSE_FIXTURE).hexdigest()
+            if recurrent_sha256 is None:
+                recurrent_sha256 = hashlib.sha256(RECURRENT_FIXTURE).hexdigest()
             phase_root = root / "phase-evidence"
             env = {
                 **os.environ,
@@ -84,6 +101,10 @@ fi
                     str(recurrent_model),
                     "linux",
                     "cpu",
+                    dense_artifact_id,
+                    dense_sha256,
+                    recurrent_artifact_id,
+                    recurrent_sha256,
                 ],
                 cwd=root,
                 env=env,
@@ -91,13 +112,18 @@ fi
                 capture_output=True,
                 check=False,
             )
-            manifest = json.loads((phase_root / "phase-results.json").read_text())
+            manifest_path = phase_root / "phase-results.json"
+            manifest = (
+                json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+            )
             return result, manifest
 
     def test_success_reconciles_the_exact_five_phases(self) -> None:
         result, manifest = self.run_suite()
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(manifest)
+        assert manifest is not None
         self.assertEqual(manifest["suite_status"], "passed")
         self.assertEqual(
             manifest["provenance"],
@@ -112,19 +138,39 @@ fi
         self.assertEqual(
             [phase["phase"] for phase in manifest["phases"]], REQUIRED_PHASES
         )
-        self.assertEqual(manifest["reconciliation"], {
-            "status": "passed",
-            "finalized": True,
-            "failure_phase": None,
-            "missing_phases": [],
-            "errors": [],
-        })
+        self.assertEqual(
+            manifest["reconciliation"],
+            {
+                "status": "passed",
+                "finalized": True,
+                "failure_phase": None,
+                "missing_phases": [],
+                "errors": [],
+            },
+        )
         for phase in manifest["phases"]:
             with self.subTest(phase=phase["phase"]):
                 self.assertEqual(phase["status"], "passed")
                 self.assertEqual(phase["exit_code"], 0)
-                self.assertTrue(phase["model"]["label"])
-                self.assertTrue(phase["model"]["identity"])
+                expected_recurrent = phase["phase"] == "recurrent-split-kv"
+                self.assertEqual(
+                    phase["model"]["label"],
+                    "recurrent" if expected_recurrent else "dense",
+                )
+                self.assertEqual(
+                    phase["model"]["artifact_id"],
+                    RECURRENT_ARTIFACT_ID if expected_recurrent else DENSE_ARTIFACT_ID,
+                )
+                self.assertEqual(
+                    phase["model"]["sha256"],
+                    hashlib.sha256(
+                        RECURRENT_FIXTURE if expected_recurrent else DENSE_FIXTURE
+                    ).hexdigest(),
+                )
+                self.assertEqual(
+                    Path(phase["model"]["path"]).name,
+                    "recurrent.gguf" if expected_recurrent else "dense.gguf",
+                )
                 self.assertTrue(phase["workdir"])
                 self.assertTrue(phase["log_paths"])
                 self.assertLessEqual(
@@ -135,10 +181,14 @@ fi
         result, manifest = self.run_suite("dense-openai-sdk")
 
         self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIsNotNone(manifest)
+        assert manifest is not None
         self.assertEqual(manifest["suite_status"], "failed")
         self.assertEqual(manifest["reconciliation"]["status"], "failed")
         self.assertTrue(manifest["reconciliation"]["finalized"])
-        self.assertEqual(manifest["reconciliation"]["failure_phase"], "dense-openai-sdk")
+        self.assertEqual(
+            manifest["reconciliation"]["failure_phase"], "dense-openai-sdk"
+        )
         self.assertEqual(
             [phase["phase"] for phase in manifest["phases"]],
             ["dense-standalone", "dense-openai-sdk"],
@@ -146,8 +196,35 @@ fi
         failed = manifest["phases"][-1]
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["exit_code"], 42)
-        self.assertIn("missing required phase: dense-constrained-tokio-restart", manifest["reconciliation"]["errors"])
-        self.assertIn("phase did not pass: dense-openai-sdk", manifest["reconciliation"]["errors"])
+        self.assertIn(
+            "missing required phase: dense-constrained-tokio-restart",
+            manifest["reconciliation"]["errors"],
+        )
+        self.assertIn(
+            "phase did not pass: dense-openai-sdk",
+            manifest["reconciliation"]["errors"],
+        )
+
+    def test_fixture_identity_rejects_missing_malformed_swapped_and_unverified_inputs(self) -> None:
+        cases = {
+            "missing": ({"dense_sha256": ""}, "Usage:"),
+            "malformed": (
+                {"dense_sha256": "not-a-sha"},
+                "invalid dense fixture SHA-256",
+            ),
+            "swapped": (
+                {"dense_artifact_id": RECURRENT_ARTIFACT_ID},
+                "unexpected dense fixture artifact id",
+            ),
+            "unverified": ({"dense_sha256": "0" * 64}, "dense fixture digest mismatch"),
+        }
+
+        for name, (kwargs, expected_error) in cases.items():
+            with self.subTest(name=name):
+                result, manifest = self.run_suite(**kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
+                self.assertIsNone(manifest)
 
 
 if __name__ == "__main__":

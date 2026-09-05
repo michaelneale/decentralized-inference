@@ -124,10 +124,14 @@ jobs:
             "$HOME/.models/${{ steps.inputs.outputs.dense_model_file }}" \
             "$HOME/.models/${{ steps.inputs.outputs.recurrent_model_file }}" \
             "${{ inputs.platform }}" \
-            "${{ inputs.backend }}"
+            "${{ inputs.backend }}" \
+            "${{ steps.inputs.outputs.dense_model_artifact_id }}" \
+            "${{ steps.inputs.outputs.dense_model_sha256 }}" \
+            "${{ steps.inputs.outputs.recurrent_model_artifact_id }}" \
+            "${{ steps.inputs.outputs.recurrent_model_sha256 }}"
 
       - name: Upload product integration phase evidence
-        if: always()
+        if: success() || failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: product-integration-${{ inputs.platform }}-${{ inputs.backend }}-evidence

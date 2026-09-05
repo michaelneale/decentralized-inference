@@ -3,15 +3,21 @@
 #
 # Usage: scripts/ci-product-integration-smoke.sh <mesh-llm> <artifact-dir>
 #        <dense-model> <recurrent-model> <platform> <backend>
+#        <dense-artifact-id> <dense-sha256> <recurrent-artifact-id> <recurrent-sha256>
 
 set -euo pipefail
 
-MESH_LLM="${1:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
-ARTIFACT_DIR="${2:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
-DENSE_MODEL="${3:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
-RECURRENT_MODEL="${4:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
-PLATFORM="${5:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
-BACKEND="${6:?Usage: $0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend>}"
+readonly USAGE="$0 <mesh-llm> <artifact-dir> <dense-model> <recurrent-model> <platform> <backend> <dense-artifact-id> <dense-sha256> <recurrent-artifact-id> <recurrent-sha256>"
+MESH_LLM="${1:?Usage: $USAGE}"
+ARTIFACT_DIR="${2:?Usage: $USAGE}"
+DENSE_MODEL="${3:?Usage: $USAGE}"
+RECURRENT_MODEL="${4:?Usage: $USAGE}"
+PLATFORM="${5:?Usage: $USAGE}"
+BACKEND="${6:?Usage: $USAGE}"
+DENSE_ARTIFACT_ID="${7:?Usage: $USAGE}"
+DENSE_SHA256="${8:?Usage: $USAGE}"
+RECURRENT_ARTIFACT_ID="${9:?Usage: $USAGE}"
+RECURRENT_SHA256="${10:?Usage: $USAGE}"
 PHASE_ROOT="${MESH_PRODUCT_INTEGRATION_PHASE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/mesh-product-integration.XXXXXX")}"
 PHASE_MANIFEST="$PHASE_ROOT/phase-results.json"
 PHASE_RECORDS="$PHASE_ROOT/.phase-results.jsonl"
@@ -43,6 +49,82 @@ for required in "$MESH_LLM" "$DENSE_MODEL" "$RECURRENT_MODEL" "$ARTIFACT_DIR/pro
     }
 done
 
+fixture_sha256() {
+    python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
+
+verify_fixture_identity() {
+    local label="$1"
+    local expected_artifact_id="$2"
+    local artifact_id="$3"
+    local expected_sha256="$4"
+    local model_path="$5"
+    local actual_sha256
+
+    if [[ "$artifact_id" != "$expected_artifact_id" ]]; then
+        echo "unexpected ${label} fixture artifact id: expected ${expected_artifact_id}, got ${artifact_id}" >&2
+        return 1
+    fi
+    if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "invalid ${label} fixture SHA-256" >&2
+        return 1
+    fi
+    actual_sha256="$(fixture_sha256 "$model_path")"
+    if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+        echo "${label} fixture digest mismatch: expected ${expected_sha256}, got ${actual_sha256}" >&2
+        return 1
+    fi
+}
+
+fixture_manifest_model() {
+    local label="$1"
+    local artifact_id
+    local sha256
+    local path
+
+    case "$label" in
+        dense)
+            artifact_id="$DENSE_ARTIFACT_ID"
+            sha256="$DENSE_SHA256"
+            path="$DENSE_MODEL"
+            ;;
+        recurrent)
+            artifact_id="$RECURRENT_ARTIFACT_ID"
+            sha256="$RECURRENT_SHA256"
+            path="$RECURRENT_MODEL"
+            ;;
+        *)
+            echo "unplanned fixture label: ${label}" >&2
+            return 1
+            ;;
+    esac
+
+    python3 - "$label" "$artifact_id" "$sha256" "$path" <<'PY'
+import json
+import sys
+
+label, artifact_id, sha256, path = sys.argv[1:]
+print(json.dumps({
+    "label": label,
+    "artifact_id": artifact_id,
+    "sha256": sha256,
+    "path": path,
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+verify_fixture_identity dense smollm2-q8-inference "$DENSE_ARTIFACT_ID" "$DENSE_SHA256" "$DENSE_MODEL"
+verify_fixture_identity recurrent family-granite-hybrid "$RECURRENT_ARTIFACT_ID" "$RECURRENT_SHA256" "$RECURRENT_MODEL"
+
 bundle_backend="$(python3 - "$ARTIFACT_DIR/product-manifest.json" <<'PY'
 import json
 import sys
@@ -65,16 +147,15 @@ phase_now_unix_ns() {
 append_phase_record() {
     local phase="$1"
     local status="$2"
-    local model_label="$3"
-    local model_identity="$4"
-    local workdir="$5"
-    local log_paths_json="$6"
-    local started_at_unix_ns="$7"
-    local ended_at_unix_ns="$8"
-    local exit_code="$9"
+    local model_json="$3"
+    local workdir="$4"
+    local log_paths_json="$5"
+    local started_at_unix_ns="$6"
+    local ended_at_unix_ns="$7"
+    local exit_code="$8"
 
-    python3 - "$PHASE_RECORDS" "$phase" "$status" "$model_label" \
-        "$model_identity" "$workdir" "$log_paths_json" "$started_at_unix_ns" \
+    python3 - "$PHASE_RECORDS" "$phase" "$status" "$model_json" \
+        "$workdir" "$log_paths_json" "$started_at_unix_ns" \
         "$ended_at_unix_ns" "$exit_code" <<'PY'
 import json
 import sys
@@ -83,8 +164,7 @@ import sys
     records_path,
     phase,
     status,
-    model_label,
-    model_identity,
+    model_json,
     workdir,
     log_paths_json,
     started_at_unix_ns,
@@ -95,7 +175,7 @@ import sys
 record = {
     "phase": phase,
     "status": status,
-    "model": {"label": model_label, "identity": model_identity},
+    "model": json.loads(model_json),
     "workdir": workdir,
     "log_paths": json.loads(log_paths_json),
     "started_at_unix_ns": int(started_at_unix_ns),
@@ -117,6 +197,7 @@ write_phase_manifest() {
         "$failure_phase" "$finalize" "${REQUIRED_PHASES[@]}" <<'PY'
 import json
 import os
+import re
 import sys
 
 (
@@ -162,8 +243,12 @@ for record in records:
         or not isinstance(model, dict)
         or not isinstance(model.get("label"), str)
         or not model["label"]
-        or not isinstance(model.get("identity"), str)
-        or not model["identity"]
+        or not isinstance(model.get("artifact_id"), str)
+        or not model["artifact_id"]
+        or not isinstance(model.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", model["sha256"])
+        or not isinstance(model.get("path"), str)
+        or not model["path"]
         or not isinstance(record.get("workdir"), str)
         or not record["workdir"]
         or not isinstance(record.get("log_paths"), list)
@@ -267,9 +352,9 @@ echo "  phase root:        $PHASE_ROOT"
 run_phase() {
     local phase="$1"
     local model_label="$2"
-    local model_identity="$3"
-    local log_paths_json="$4"
-    shift 4
+    local log_paths_json="$3"
+    local model_json
+    shift 3
     local phase_dir="${PHASE_ROOT}/${phase}"
     local started_at_unix_ns
     local ended_at_unix_ns
@@ -283,6 +368,7 @@ run_phase() {
     fi
     mkdir -p "$phase_dir"
     echo "=== phase: ${phase} ==="
+    model_json="$(fixture_manifest_model "$model_label")"
     started_at_unix_ns="$(phase_now_unix_ns)"
     if MESH_PRODUCT_INTEGRATION_PHASE="$phase" "$@"; then
         phase_exit_code=0
@@ -292,8 +378,8 @@ run_phase() {
         phase_status=failed
     fi
     ended_at_unix_ns="$(phase_now_unix_ns)"
-    append_phase_record "$phase" "$phase_status" "$model_label" "$model_identity" \
-        "$phase_dir" "$log_paths_json" "$started_at_unix_ns" "$ended_at_unix_ns" \
+    append_phase_record "$phase" "$phase_status" "$model_json" "$phase_dir" \
+        "$log_paths_json" "$started_at_unix_ns" "$ended_at_unix_ns" \
         "$phase_exit_code"
     if [[ "$phase_exit_code" -ne 0 ]]; then
         write_phase_manifest failed "$phase" 1 || true
@@ -303,7 +389,7 @@ run_phase() {
     write_phase_manifest in-progress "" 0
 }
 
-run_phase dense-standalone dense "$DENSE_MODEL" \
+run_phase dense-standalone dense \
     "[\"$PHASE_ROOT/dense-standalone/server.log\",\"$PHASE_ROOT/dense-standalone/headless.log\"]" env \
     MESH_CI_DEVICE="$DEVICE" \
     MESH_CI_API_PORT=9337 MESH_CI_CONSOLE_PORT=3131 \
@@ -312,14 +398,14 @@ run_phase dense-standalone dense "$DENSE_MODEL" \
     MESH_CI_HEADLESS_LOG="$PHASE_ROOT/dense-standalone/headless.log" \
     scripts/ci-smoke-test.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
-run_phase dense-openai-sdk dense "$DENSE_MODEL" \
+run_phase dense-openai-sdk dense \
     "[\"$PHASE_ROOT/dense-openai-sdk/server.log\"]" env \
     MESH_COMPAT_DEVICE="$DEVICE" \
     MESH_COMPAT_API_PORT=9348 MESH_COMPAT_CONSOLE_PORT=3142 \
     MESH_COMPAT_LOG="$PHASE_ROOT/dense-openai-sdk/server.log" \
     scripts/ci-compat-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
-run_phase dense-constrained-tokio-restart dense "$DENSE_MODEL" \
+run_phase dense-constrained-tokio-restart dense \
     "[\"$PHASE_ROOT/dense-constrained-tokio-restart/server.log\",\"$PHASE_ROOT/dense-constrained-tokio-restart/headless.log\"]" env \
     MESH_CI_DEVICE="$DEVICE" MESH_TOKIO_STACK_SIZE=2097152 \
     MESH_CI_API_PORT=9347 MESH_CI_CONSOLE_PORT=3141 \
@@ -328,7 +414,7 @@ run_phase dense-constrained-tokio-restart dense "$DENSE_MODEL" \
     MESH_CI_HEADLESS_LOG="$PHASE_ROOT/dense-constrained-tokio-restart/headless.log" \
     scripts/ci-smoke-test.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
-run_phase dense-split-kv dense "$DENSE_MODEL" \
+run_phase dense-split-kv dense \
     "[\"$PHASE_ROOT/dense-split-kv/dense-seed.log\",\"$PHASE_ROOT/dense-split-kv/dense-worker.log\",\"$PHASE_ROOT/dense-split-kv/dense-client.log\"]" env \
     MESH_TWO_NODE_SPLIT_DEVICE="$DEVICE" \
     MESH_TWO_NODE_SPLIT_MODEL="$DENSE_MODEL" \
@@ -337,7 +423,7 @@ run_phase dense-split-kv dense "$DENSE_MODEL" \
     MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/dense-split-kv" \
     scripts/ci-two-node-split-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
-run_phase recurrent-split-kv recurrent "$RECURRENT_MODEL" \
+run_phase recurrent-split-kv recurrent \
     "[\"$PHASE_ROOT/recurrent-split-kv/recurrent-seed.log\",\"$PHASE_ROOT/recurrent-split-kv/recurrent-worker.log\",\"$PHASE_ROOT/recurrent-split-kv/recurrent-client.log\"]" env \
     MESH_TWO_NODE_SPLIT_DEVICE="$DEVICE" \
     MESH_TWO_NODE_SPLIT_MODEL="$RECURRENT_MODEL" \
