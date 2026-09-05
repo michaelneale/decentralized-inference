@@ -108,8 +108,14 @@ flowchart LR
 
 - Treat Astrid's immediate QKV correction as a separate correctness fix; do not
   duplicate or block it in this structural project.
+- Carry forward the final reviewed result of
+  [PR #1662](https://github.com/Mesh-LLM/mesh-llm/pull/1662), including the
+  consolidated dense/recurrent smoke and repeated-prompt coverage merged from
+  [PR #1665](https://github.com/Mesh-LLM/mesh-llm/pull/1665). Do not fork or
+  reimplement that recurrent-KV work in this project.
 - Start the structural work from the integration commit containing the current
-  staged-runtime behavior and the immediate correctness fix.
+  staged-runtime behavior, the recurrent-KV work, and the immediate correctness
+  fix.
 - Record exact baseline commits for Mesh and the prepared llama.cpp tree.
 - Capture current package corpus identities, supported-family registry, stage
   protocol generation, and end-to-end parity results.
@@ -117,6 +123,9 @@ flowchart LR
   every certified model profile, required lane, currently supported cut, and
   capability obligation independently of what the new partitioner later
   chooses to accept or reject.
+- Record the recurrent/split live result as required but not accepted until the
+  null-weight graph-filter failure is fixed and the dense plus recurrent
+  composed-product cases pass.
 - Use a dedicated worktree. Do not modify the default branch.
 
 **Exit gate:** reproducible baseline, independently frozen expected support
@@ -369,7 +378,9 @@ publication.
 
 ## Workstream 7: Migration and Deletion
 
-Use a shadow-first migration so the old path can be compared, then deleted.
+Use shadow comparison and qualification before release, followed by one atomic
+production cutover. There is no phased production or model-family cutover and
+no release in which v1 and v2 serving paths coexist.
 
 1. Add the new planner behind a development-only switch.
 2. In shadow mode, build the current stage and independently compute the new
@@ -377,23 +388,30 @@ Use a shadow-first migration so the old path can be compared, then deleted.
    and logical bytes without changing execution. Treat this comparison as a
    migration diagnostic; unsplit numerical execution remains the correctness
    oracle, and old over-retention or bugs are not compatibility requirements.
-3. Enable execution from the new plan for compact dense fixtures.
-4. Expand to fused-QKV, separate-QKV, MoE/shared-weight, hybrid/recurrent,
+3. Exercise execution from the new plan only in development and qualification
+   environments, starting with compact dense fixtures and expanding to
+   fused-QKV, separate-QKV, MoE/shared-weight, hybrid/recurrent,
    hyper-connected, sideband, MTP, and multimodal fixtures.
-5. Run the full registry canary and every-cut certification.
-6. Rebuild or convert the production package corpus to v2.
-7. Land typed boundary transport first if any frozen baseline obligation cannot
+4. Rebuild or independently certify and convert the complete production package
+   corpus offline to v2. The v1 converter is migration tooling only; it is never
+   linked or invoked as a serving fallback or runtime compatibility mode.
+5. Run the full frozen-matrix, every-cut, composed-product, recurrent-KV, and
+   staged CPU/CUDA/Metal qualification gates against the converted v2 corpus.
+6. Land typed boundary transport first if any frozen baseline obligation cannot
    be represented by generation 7.
-8. Atomically cut over the runtime to v2 plus graph-derived planning.
-9. Delete:
+7. Ship one atomic release that accepts only package v2 and executes only the
+   graph-derived plan.
+8. In that same cutover, delete:
    - thread-local and mutable stage-filter diagnostics;
    - loader family retention branches;
    - package role/name stage-selection policy;
    - stage-range branches and stage-boundary early returns from model builders;
-   - development shadow mode and v1 package acceptance.
+   - development shadow mode, v1 package acceptance, and every runtime selector
+     for the old path.
 
-Rollback is by reverting to the previous binary and v1 package corpus, not by
-shipping two permanent runtime implementations.
+Rollback is an explicit deployment rollback to the previous binary and v1
+package corpus. It is not a runtime toggle, mixed-fleet compatibility promise,
+or reason to ship both serving implementations in one release.
 
 **Exit gate:** searches over the splitter, loader, package planner, and model
 builders find no model-family staging policy and no stage-filter control flow.
@@ -453,6 +471,147 @@ For every legal cut:
 Run the same behavioral matrix through direct GGUF, callback/SafeTensors, and
 model-package v2 sources where those paths are supported.
 
+### Cross-cutting product integration and KV acceptance
+
+Lane D owns one product-level correctness contract for changes to cache,
+split-serving, llama.cpp or the native runtime ABI, package/model loading, and
+the certification harness. It complements graph-level certification by proving
+the composed product, real mesh topology, and OpenAI traffic together.
+
+#### Suite topology and CI simplification
+
+- Define one registry-backed, checksum-pinned standard product manifest for all
+  supported platforms. It contains exactly these two immutable fixtures:
+
+  | Role | Required fixture |
+  | --- | --- |
+  | Dense | SmolLM2-135M Q8 |
+  | Hybrid/recurrent | IBM Granite 4.0 H 350M Q4 |
+
+  CPU, CUDA, and Metal resolve the same model/package/tokenizer identities from
+  that manifest and stage both inputs once per job. Workflow-local URLs,
+  mutable revisions, and divergent per-platform model lists are forbidden.
+- Replace the separate CPU `Core inference smoke`, `Two-node client smoke`,
+  dense split smoke, and recurrent split smoke jobs with one required
+  `CPU product integration suite`.
+- Restore the composed product once, then execute the CPU phases in this exact
+  order: dense standalone inference plus OpenAI/SDK compatibility; one
+  constrained-Tokio restart; one dense seed/worker pair plus passive client for
+  routing, streaming, and every dense split/KV probe; dense teardown; one
+  Granite seed/worker pair for every recurrent split/KV probe; Granite teardown.
+- Give every phase a separate work directory and log bundle, label topology
+  views with the model identity, and make cleanup mandatory even after failure.
+- A phase failure fails the suite and publishes phase-specific evidence. Dense
+  and recurrent results are independently recorded and cannot mask one another.
+- Each split family receives one two-node fixture per run: start the dense pair,
+  pass all compatible split/cache checks while it is alive, tear it down, then
+  start and test the recurrent pair and tear it down. Never construct a mixed
+  dense/recurrent pair.
+- Each fixture owns one readiness gate. Consolidation removes duplicate product
+  restore, input staging, topology startup, and smoke orchestration; it does not
+  remove or weaken any named phase.
+- Implement the shared phase runner with typed `platform` and `backend` inputs.
+  Invoke it from the existing Linux, CUDA, and macOS lanes while retaining all
+  five CI entrypoints and visible per-platform results; do not create one
+  monolithic cross-platform workflow.
+- CPU remains the normal fast PR row. macOS Metal and CUDA are first-class
+  qualification/certification rows using explicit backend-specific device
+  selection. Both record backend, device, and runtime provenance and fail if
+  execution falls back to CPU.
+- Preserve genuinely independent signals, including the upstream llama canary
+  and separately justified backend-specific CUDA qualification. Consolidation
+  must not collapse distinct compatibility or hardware evidence into the
+  product suite.
+- Keep deeper family and competitive evidence outside the standard two-model
+  product-download suite: Falcon-H1 and Granite-1B competitive fixtures remain
+  scheduled/manual coverage, and the Mamba family battery remains a diversity
+  signal. The suite consolidation does not delete or replace those lanes.
+
+#### Semantic cache correctness
+
+For both dense and recurrent family rows, require:
+
+- deterministic split/unsplit output or token equivalence;
+- cold recomputation equivalence with the permitted restored continuation;
+- explicit expected-hit evidence and internally consistent cache accounting;
+- failure on fatal native cache, state, allocation, or graph logs;
+- repeated-equal and growing-prefix traffic in one fixture:
+  `X, X, X+E1, X+E1, X+E1+E2, X+E1+E2`;
+- a deliberately incompatible cache identity that must miss, recompute safely,
+  and reproduce the reference continuation;
+- a bounded deterministic overlap/pressure case that checks independent request
+  tails, cache accounting, and ownership/eviction safety.
+
+A cache hit metric is evidence, not correctness by itself. A fast or plausible
+continuation that differs from the cold/unsplit oracle fails.
+
+#### Atomic recurrent-state rule
+
+- The recurrent/hybrid row accepts only complete `KvRecurrent` restoration with
+  continuation equivalence.
+- KV-only reuse, partial-prefix recurrent reuse, partial state restoration, or
+  a plausible hit without complete recurrent-state evidence cannot pass.
+- Recurrent state is atomic: exact checkpoint replay is valid; any divergent
+  checkpoint, model, topology, stage, runtime, or prefix identity must miss and
+  recompute.
+- These recurrent assertions are release and cutover criteria, not optional
+  smoke coverage.
+
+#### Granite migration gate and backend rollout
+
+- Granite is a migration gate, not an assumed replacement. First run IBM
+  Granite 4.0 H 350M Q4 through today's real two-node repeated-prompt smoke and
+  require the strict `kv-recurrent` payload plus continuation-equivalence
+  contract.
+- The currently reviewed capability reports `rejected-too-large` for exact-state
+  mobility. That is an unresolved result, not permission to accept KV-only or
+  partial recurrent reuse.
+- If Granite cannot satisfy the atomic runtime contract, stop this consolidation
+  at the migration gate. Retain the existing Qwen3.5 recurrent leg and do not
+  weaken, delete, or relabel the `kv-recurrent` assertion to make the suite pass.
+- Roll out in order: prove Granite and the CPU integration suite; qualify CUDA;
+  then qualify Metal. Make each platform row required at its intended cadence
+  only after its own live suite passes with the immutable two-model manifest.
+
+#### Boundary and topology coverage
+
+- The bounded PR suite uses representative midpoint cuts for dense and
+  recurrent fixtures.
+- Full graph-filter-v2 acceptance exercises legal start, middle, and final
+  ownership where applicable, state handoff, multi-stage frontier/sideband
+  forwarding, and every cut required by the frozen support matrix.
+- Product acceptance requires the real two-node mesh readiness and topology
+  contract plus OpenAI requests; native-only in-process or binary splitting
+  cannot satisfy it.
+- On readiness or topology timeout, capture both nodes' stage views and log
+  tails before teardown.
+
+#### Fixed-hardware performance certification
+
+Retain the fast correctness suite and add a protected fixed-hardware lane for
+pinned dense and recurrent models. It measures cold/warm TTFT, prefill and
+decode throughput, end-to-end split overhead, and cache-hit lift.
+
+- Build the candidate in the ordinary untrusted workflow. The protected runner
+  consumes only a verified immutable artifact bound to the exact source SHA.
+- Record source/artifact digests, model/package/tokenizer and prompt-corpus
+  hashes, topology/cut/cache/concurrency settings, runner/device identity,
+  driver, container/toolchain/runtime versions, and clocks/power state where
+  available.
+- Exclude a warm-up, retain at least five raw measured repetitions, and compare
+  only exact cohorts using median and spread.
+- Bootstrap three clean matching baselines before performance becomes a hard
+  gate. Baselines are immutable and reviewed separately from a candidate run.
+- After bootstrap, fail only when reviewed absolute and relative tolerances are
+  both exceeded; derive tolerances from observed variance rather than guessing
+  them in advance.
+- Endpoint monitoring, nightly runs, and competitive-backend benchmarks never
+  substitute for source/artifact-bound commit certification.
+
+Correctness failures always block. Performance remains informational only
+during its explicit three-baseline bootstrap, then becomes required for the
+affected fixed-hardware cases.
+
 ### Mic Studio full-registry acceptance gate
 
 Extend the existing `.github/workflows/llama-upstream-canary.yml`; do not create
@@ -460,6 +619,8 @@ a second graph-filter canary workflow, roster, or orchestration path. The
 existing `ci/model-artifacts/registry.json` source and generated
 `ci/llama-canary/family-certified.json` policy remain authoritative. This is a
 harness, matrix, and reconciliation expansion inside the existing canary.
+The product integration suite remains separately required because the canary
+does not replace real two-node mesh topology and OpenAI traffic coverage.
 
 Final acceptance requires a green full-registry `manual-full` or `llama-bump`
 execution on the trusted Mic Studio `family-certify` runner at the candidate
@@ -529,7 +690,7 @@ boundary identity/schema.
 | A. Native graph contract and partitioner | Workstreams 2–4: end-to-end feasibility proof, block/effect/alias annotations, guarded profiles, complete frontier liveness, and the pure partitioner | Critical path. Keep annotations and slicing under one design owner until their contract is proven. |
 | B. Package v2 and conversion | Workstream 1: catalog/schema, writer/reader, independent source-inventory proof, integrity checks, and malformed-package tests | Schema work can begin with A and implementation can proceed independently after the minimal catalog contract is agreed. |
 | C. Realization and host admission | Workstream 5 plus the native ABI portion of Workstream 6: selected-weight allocation, runtime contract checks, realized descriptor/FFI, neighboring-stage validation, and readiness | May scaffold against contract fixtures; integration requires A and B. Native reports local facts and the host validates composed topology. |
-| D. Independent acceptance harness | Workstreams 0 and 8: frozen support baseline, expansion of the existing canary harness, complete Mic Studio roster, plan/execution reconciliation, unsplit oracle, multi-stage/state/negative tests, and resource evidence | Baseline and harness work can start with A. Final acceptance consumes A, B, C, and E where required. The expected-support set must remain independent of planner rejection results, and no second canary orchestration or roster is introduced. |
+| D. Independent acceptance harness | Workstreams 0 and 8: frozen support baseline, the shared backend-parameterized product integration runner, strict dense/recurrent KV gates, fixed-hardware performance certification, expansion of the existing canary harness, complete Mic Studio roster, plan/execution reconciliation, unsplit oracle, multi-stage/state/negative tests, and resource evidence | Baseline and harness work can start with A. Final acceptance consumes A, B, C, and E where required. The expected-support set must remain independent of planner rejection results, the five CI entrypoints stay visible, and no second canary orchestration or roster is introduced. |
 | E. Boundary transport | Network portion of Workstream 6: generation-7 representability, typed bundles, semantic ids, shape constraints, bounded framing, and negotiation | Proceeds after boundary-contract agreement and coordinates with existing activation-plane work. Required before cutover for any baseline obligation that needs it. |
 
 The integration owner owns Workstream 7, serializes shared llama.cpp patch-queue
@@ -548,13 +709,20 @@ Deliver as reviewable, independently gated changes rather than one giant patch:
 4. Complete Lane A graph semantics and partitioner implementation.
 5. Lane C integrates exact realization, native reporting, and host admission.
 6. Run shadow diagnostics without treating old behavior as the oracle.
-7. Complete cross-family execution rollout, every-cut certification, and the
+7. Rebuild or independently certify and convert the complete production package
+   corpus offline to v2; the converter never enters the serving runtime.
+8. Prove Granite's strict recurrent contract and the consolidated CPU product
+   integration suite; if Granite fails, retain Qwen3.5 and stop consolidation.
+9. Qualify the same immutable product manifest and shared phase contract on
+   CUDA, then Metal, without CPU fallback.
+10. Complete cross-family execution qualification, every-cut certification, and
+   frozen-matrix acceptance against the converted v2 corpus through the
    existing canary's full `manual-full`/`llama-bump` Mic Studio acceptance
    path.
-8. Rebuild or independently certify and convert the production package corpus.
-9. Land Lane E before cutover when any frozen baseline boundary requires it.
-10. The integration owner deletes the old stage filter and family policy, then
-    performs the v2-only cutover.
+11. Land Lane E before cutover when any frozen baseline boundary requires it.
+12. The integration owner performs one atomic v2-only release cutover and
+    deletes the old stage filter, family policy, v1 runtime acceptance, shadow
+    mode, and old-path selectors in that same change.
 
 Each change must state its base commit, tests, observed fixture coverage, and
 whether it changes package, native ABI, or network compatibility.
@@ -579,6 +747,14 @@ The project is complete only when all of the following are true:
   supported unless a separate product decision explicitly removes it;
 - three-or-more-stage composition preserves pass-through values and persistent
   state lifecycle;
+- the standard product integration suite uses the checksum-pinned SmolLM2 Q8
+  and Granite H Q4 manifest, passes every named phase on CPU, and has qualified
+  CUDA then Metal without CPU fallback at their intended cadences;
+- Granite passes the strict atomic `KvRecurrent` contract, or consolidation has
+  stopped with the Qwen3.5 recurrent leg and its assertion preserved;
+- correctness is release-blocking on every required product row, and the
+  fixed-hardware performance gate has accumulated three clean baselines before
+  enforcing reviewed regression thresholds;
 - the candidate commit has a green Mic Studio canary result covering every
   certified model profile in the generated full-registry plan, with no missing,
   skipped, duplicate, unplanned, or incomplete model/cut/lane result;
@@ -645,6 +821,9 @@ Approval is requested for these decisions:
 - [ ] The splitter, package selector, and loader contain no model-family policy.
 - [ ] Model package v2 is a deliberate hard format cutover; no permanent v1
       runtime compatibility.
+- [ ] Production changes in one atomic v2-only release after offline corpus
+      conversion and every required acceptance gate; there is no phased
+      family rollout, serving fallback, or v1/v2 runtime coexistence.
 - [ ] An offline converter may reuse old weight artifacts only after exact
       coverage validation against an independent source-bound inventory.
 - [ ] Legal cuts are discovered and certified; not every numbered boundary is
@@ -665,6 +844,13 @@ Approval is requested for these decisions:
 - [ ] The existing llama canary and registry remain the sole orchestration and
       roster; full `manual-full`/`llama-bump` runs block release and cutover,
       while the bounded nightly cadence remains non-acceptance coverage.
+- [ ] The product suite uses one checksum-pinned SmolLM2 Q8 plus Granite H Q4
+      manifest across CPU, CUDA, and Metal through a shared typed runner while
+      preserving the five existing CI entrypoints and independent deeper-model
+      coverage.
+- [ ] Granite must pass strict `KvRecurrent` restoration before replacing the
+      Qwen3.5 recurrent leg; no assertion may be weakened to complete the
+      consolidation, and backend rollout proceeds CPU, then CUDA, then Metal.
 - [ ] The work is split across lanes A–E with one integration owner and three
       shared contracts.
 
@@ -680,3 +866,5 @@ No implementation starts under this plan until these decisions are approved.
 - `crates/skippy-protocol/proto/stage.proto`
 - `crates/skippy-protocol/src/binary/types.rs`
 - `third_party/llama.cpp/patches/0001-Add-staged-model-graph-and-family-support.patch`
+- [PR #1662: recurrent KV restoration and split-cache integration](https://github.com/Mesh-LLM/mesh-llm/pull/1662)
+- [PR #1665: consolidated dense/recurrent split smoke](https://github.com/Mesh-LLM/mesh-llm/pull/1665)
