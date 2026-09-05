@@ -76,14 +76,20 @@ def valid_snapshots() -> dict[str, dict]:
             "peers": [{"id": "worker-node"}],
         },
         "seed_stages": copy.deepcopy(stage_snapshot),
-        "seed_models": {"object": "list", "data": [{"id": "model-a"}]},
+        "seed_models": {
+            "object": "list",
+            "data": [{"id": "model-a"}, {"id": "mesh"}],
+        },
         "worker_status": {
             "node_id": "worker-node",
             "mesh_id": "mesh-a",
             "peers": [{"id": "seed-node"}],
         },
         "worker_stages": worker_stage_snapshot,
-        "worker_models": {"object": "list", "data": [{"id": "model-a"}]},
+        "worker_models": {
+            "object": "list",
+            "data": [{"id": "model-a"}, {"id": "mesh"}],
+        },
     }
 
 

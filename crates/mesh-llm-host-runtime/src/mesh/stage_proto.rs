@@ -1644,9 +1644,11 @@ mod tests {
             swa_full: Some(false),
             cache_idle_slots: Some(3),
         };
-        let mut load = skippy_stage_proto::LoadStage::default();
-        load.admission = Some(crate::inference::skippy::test_stage_admission(0, 1).into());
-        load.activation_codec = skippy_stage_proto::StageActivationCodec::F16RneV1 as i32;
+        let load = skippy_stage_proto::LoadStage {
+            admission: Some(crate::inference::skippy::test_stage_admission(0, 1).into()),
+            activation_codec: skippy_stage_proto::StageActivationCodec::F16RneV1 as i32,
+            ..Default::default()
+        };
         let mut encoded = load.encode_to_vec();
         CompatLoadStage {
             runtime_settings: Some(settings.clone()),

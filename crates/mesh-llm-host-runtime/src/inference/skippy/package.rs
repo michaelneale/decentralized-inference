@@ -23,6 +23,19 @@ pub use content_addressed::synthetic_content_addressed_gguf_package;
 
 const PACKAGE_V2_MANIFEST: &str = "model-package.json";
 
+pub(crate) fn is_package_v2_ref(package_ref: &str) -> bool {
+    let manifest_path = Path::new(package_ref).join(PACKAGE_V2_MANIFEST);
+    std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+        })
+        == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
     pub package_ref: String,
@@ -1125,6 +1138,18 @@ mod tests {
             .to_string();
 
         assert!(error.contains("requires package schema 2"), "{error}");
+    }
+
+    #[test]
+    fn package_v2_ref_requires_the_v2_schema_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join(PACKAGE_V2_MANIFEST);
+
+        std::fs::write(&manifest, br#"{"schema_version":1}"#).unwrap();
+        assert!(!is_package_v2_ref(&root.path().to_string_lossy()));
+
+        std::fs::write(&manifest, br#"{"schema_version":2}"#).unwrap();
+        assert!(is_package_v2_ref(&root.path().to_string_lossy()));
     }
 
     #[test]

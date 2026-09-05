@@ -62,6 +62,7 @@ fn write_local_configs(
             batch_max_tokens: None,
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
+            activation_codec: skippy_protocol::StageActivationCodec::RawF32V1,
             stage_id: stage.stage_id.clone(),
             stage_index: stage.stage_index as u32,
             layer_start: stage.layer_start,

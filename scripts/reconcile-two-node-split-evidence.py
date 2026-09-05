@@ -216,12 +216,18 @@ def canonical_statuses(payload: dict[str, Any], label: str) -> list[dict[str, An
 
 def canonical_model_id(payload: dict[str, Any], label: str) -> str:
     models = require_list(payload.get("data"), f"{label}.data")
-    if len(models) != 1:
+    concrete_models = []
+    for index, model in enumerate(models):
+        value = require_object(model, f"{label}.data[{index}]")
+        model_id = require_string(value.get("id"), f"{label}.data[{index}].id")
+        if model_id != "mesh":
+            concrete_models.append(model_id)
+    if len(concrete_models) != 1:
         raise ReconciliationError(
-            f"{label}.data must contain exactly one model, got {len(models)}"
+            f"{label}.data must contain exactly one concrete model, "
+            f"got {len(concrete_models)}"
         )
-    model = require_object(models[0], f"{label}.data[0]")
-    return require_string(model.get("id"), f"{label}.data[0].id")
+    return concrete_models[0]
 
 
 def observer_identity(status: dict[str, Any], label: str) -> tuple[str, str]:

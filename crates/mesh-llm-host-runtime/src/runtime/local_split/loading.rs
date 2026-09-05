@@ -612,7 +612,9 @@ pub(super) fn stage_source_prepare_timeout(
     stage: &RuntimeSliceStagePlan,
     include_output: bool,
 ) -> Result<Duration> {
-    let assigned_bytes = if skippy::is_layer_package_ref(&package.package_ref) {
+    let assigned_bytes = if skippy::is_layer_package_ref(&package.package_ref)
+        && !skippy::is_package_v2_ref(&package.package_ref)
+    {
         crate::models::artifact_transfer::required_stage_package_bytes(
             model_path,
             &package.package_ref,
@@ -880,7 +882,9 @@ pub(super) fn apply_split_generation_pinned_device(
 }
 
 pub(super) fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
-    if skippy::is_layer_package_ref(&package.package_ref) {
+    if skippy::is_layer_package_ref(&package.package_ref)
+        && !skippy::is_package_v2_ref(&package.package_ref)
+    {
         LoadMode::LayerPackage
     } else {
         LoadMode::RuntimeSlice
