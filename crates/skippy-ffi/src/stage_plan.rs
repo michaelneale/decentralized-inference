@@ -66,6 +66,8 @@ pub struct StagePlannerConfigV1 {
     pub tensor_count: usize,
     pub profiles: *const StagePlannerProfileV1,
     pub profile_count: usize,
+    pub graph_configuration_id: *const c_char,
+    pub backend_id: *const c_char,
 }
 
 #[repr(i32)]

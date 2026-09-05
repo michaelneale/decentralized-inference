@@ -1,25 +1,52 @@
-From 7d00060c566969227ff355972cd04bcf14801f12 Mon Sep 17 00:00:00 2001
+From 7a484cb458292487b3fa27e858699ee4180428be Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 5 Sep 2026 23:30:05 +1000
 Subject: [PATCH] skippy: realize guarded stage plans through public ABI
 
 ---
+ include/skippy/stage_plan.h                   |   8 +-
  src/CMakeLists.txt                            |  15 +
  src/skippy/graph_identity.cpp                 |  39 ++
  src/skippy/graph_identity.h                   |   7 +
- src/skippy/stage_plan.cpp                     | 512 ++++++++++++++++++
+ src/skippy/stage_plan.cpp                     | 516 ++++++++++++++++++
  src/skippy/stage_slice_plan.cpp               |  27 +-
  src/skippy/stage_slice_plan.h                 |   4 +-
  src/skippy/tests/noalloc_graph_planning.cpp   |   3 +
- .../tests/renamed_multishard_planning.cpp     | 142 +++++
- src/skippy/tests/stage_plan_header.c          |   6 +
- src/skippy/tests/stage_plan_header.cpp        |   9 +
+ .../tests/renamed_multishard_planning.cpp     | 166 ++++++
+ src/skippy/tests/stage_plan_header.c          |  10 +
+ src/skippy/tests/stage_plan_header.cpp        |  13 +
  src/skippy/tests/stage_slice_plan.cpp         |  85 ++-
- 11 files changed, 831 insertions(+), 18 deletions(-)
+ 12 files changed, 874 insertions(+), 19 deletions(-)
  create mode 100644 src/skippy/stage_plan.cpp
  create mode 100644 src/skippy/tests/stage_plan_header.c
  create mode 100644 src/skippy/tests/stage_plan_header.cpp
 
+diff --git a/include/skippy/stage_plan.h b/include/skippy/stage_plan.h
+index fccb21c12..852145ebf 100644
+--- a/include/skippy/stage_plan.h
++++ b/include/skippy/stage_plan.h
+@@ -56,7 +56,11 @@ struct skippy_stage_planner_profile_v1 {
+     uint32_t n_recurrent_rollback_sequences;
+ };
+ 
+-/** @brief Versioned inputs for a metadata-only stage planner. */
++/** @brief Versioned inputs for a metadata-only stage planner.
++ *
++ * Graph configuration and backend identities are copied by the planner and
++ * become part of every guarded profile and plan identity.
++ */
+ struct skippy_stage_planner_config_v1 {
+     uint32_t abi_version;
+     uint32_t struct_size;
+@@ -67,6 +71,8 @@ struct skippy_stage_planner_config_v1 {
+     size_t tensor_count;
+     const struct skippy_stage_planner_profile_v1 * profiles;
+     size_t profile_count;
++    const char * graph_configuration_id;
++    const char * backend_id;
+ };
+ 
+ /** @brief Kind of semantic value enumerated for an execution profile. */
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index e42e68a7a..312d1248b 100644
 --- a/src/CMakeLists.txt
@@ -129,10 +156,10 @@ index cedb21b3e..b6f6c8c13 100644
 +        std::string & error);
 diff --git a/src/skippy/stage_plan.cpp b/src/skippy/stage_plan.cpp
 new file mode 100644
-index 000000000..00b56834d
+index 000000000..f8ae80b65
 --- /dev/null
 +++ b/src/skippy/stage_plan.cpp
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,516 @@
 +#include "skippy/stage_plan.h"
 +
 +#include "errors.h"
@@ -157,8 +184,6 @@ index 000000000..00b56834d
 +
 +namespace {
 +
-+constexpr const char * graph_configuration_id = "skippy.metadata-plan.whole-model.v1";
-+constexpr const char * backend_id = "cpu";
 +using model_owner = std::shared_ptr<llama_model>;
 +using context_owner = std::unique_ptr<llama_context, decltype(&llama_free)>;
 +
@@ -245,6 +270,8 @@ index 000000000..00b56834d
 +
 +struct skippy_stage_planner {
 +    std::string package_id;
++    std::string graph_configuration_id;
++    std::string backend_id;
 +    model_owner model;
 +    std::vector<skippy_parameter_binding> bindings;
 +    std::vector<owned_profile> profiles;
@@ -376,7 +403,8 @@ index 000000000..00b56834d
 +        &result->get_state_effects(), &planner.bindings, &result->get_request_input_bindings(),
 +        llama_model_n_layer(planner.model.get()),
 +        {profile.n_tokens, profile.n_sequences, profile.n_outputs,
-+            profile.n_recurrent_rollback_sequences, graph_configuration_id, backend_id},
++            profile.n_recurrent_rollback_sequences, planner.graph_configuration_id,
++            planner.backend_id},
 +        explicit_output};
 +    return true;
 +}
@@ -408,7 +436,10 @@ index 000000000..00b56834d
 +    try {
 +        auto planner = std::make_unique<skippy_stage_planner>();
 +        if (!read_string(config->package_id, planner->package_id) ||
-+                !valid_package_id(planner->package_id) || config->shard_paths == nullptr ||
++                !valid_package_id(planner->package_id) ||
++                !read_string(config->graph_configuration_id, planner->graph_configuration_id) ||
++                !read_string(config->backend_id, planner->backend_id) ||
++                config->shard_paths == nullptr ||
 +                config->shard_count == 0 || config->tensors == nullptr || config->tensor_count == 0 ||
 +                config->profiles == nullptr || config->profile_count == 0) {
 +            return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "stage planner config is incomplete");
@@ -769,7 +800,7 @@ index 9dbc7fb0a..f46288a22 100644
      skippy_guarded_stage_slice_plan full_plan;
      std::string full_plan_error;
 diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
-index cfe7224cb..b8f549c29 100644
+index cfe7224cb..789d1b7b4 100644
 --- a/src/skippy/tests/renamed_multishard_planning.cpp
 +++ b/src/skippy/tests/renamed_multishard_planning.cpp
 @@ -9,6 +9,7 @@
@@ -788,7 +819,7 @@ index cfe7224cb..b8f549c29 100644
      }};
      skippy_guarded_stage_slice_plan plan;
      if (!skippy_build_guarded_stage_slice_plan(
-@@ -475,6 +477,142 @@ bool rejects_invalid_bindings(
+@@ -475,6 +477,166 @@ bool rejects_invalid_bindings(
      return rejects(changed);
  }
  
@@ -832,9 +863,11 @@ index cfe7224cb..b8f549c29 100644
 +        {1, sizeof(skippy_stage_planner_profile_v1), "prefill", 8, 1, 8, 0},
 +    };
 +    const std::string package_id = "sha256:" + std::string(64, 'a');
++    const std::string graph_configuration_id = "skippy.test.graph.v1";
++    const std::string backend_id = "skippy.test.backend";
 +    skippy_stage_planner_config_v1 config = {1, sizeof(skippy_stage_planner_config_v1),
 +        package_id.c_str(), shard_paths.data(), shard_paths.size(), tensors.data(), tensors.size(),
-+        profiles.data(), profiles.size()};
++        profiles.data(), profiles.size(), graph_configuration_id.c_str(), backend_id.c_str()};
 +    skippy_error * error = nullptr;
 +    skippy_stage_planner * planner = nullptr;
 +    if (skippy_stage_planner_create_v1(&config, &planner, &error) != SKIPPY_STATUS_OK || planner == nullptr) {
@@ -871,6 +904,8 @@ index cfe7224cb..b8f549c29 100644
 +            plan_string(source, descriptor.plan_id).compare(0, 15, "skippy-plan:v1:") != 0 ||
 +            skippy_stage_plan_profile_at_v1(source, 0, &profile, &error) != SKIPPY_STATUS_OK ||
 +            plan_string(source, profile.profile_id) != "batched" ||
++            plan_string(source, profile.graph_configuration_id) != graph_configuration_id ||
++            plan_string(source, profile.backend_id) != backend_id ||
 +            skippy_stage_plan_resident_tensor_at_v1(source, 0, &resident, &error) != SKIPPY_STATUS_OK ||
 +            plan_string(source, resident.identity).compare(0, 15, "package.tensor.") != 0) {
 +        std::fprintf(stderr, "public stage descriptors are incomplete\n");
@@ -914,6 +949,26 @@ index cfe7224cb..b8f549c29 100644
 +    }
 +    skippy_error_free(error);
 +    error = nullptr;
++    malformed = config;
++    malformed.graph_configuration_id = "";
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    malformed = config;
++    malformed.backend_id = nullptr;
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
 +    auto reversed_paths = shard_paths;
 +    std::reverse(reversed_paths.begin(), reversed_paths.end());
 +    malformed = config;
@@ -931,7 +986,7 @@ index cfe7224cb..b8f549c29 100644
  int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
      std::string error;
      std::vector<std::string> generated_paths;
-@@ -540,6 +678,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+@@ -540,6 +702,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
          std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
          return 8;
      }
@@ -944,29 +999,37 @@ index cfe7224cb..b8f549c29 100644
              bindings.size(),
 diff --git a/src/skippy/tests/stage_plan_header.c b/src/skippy/tests/stage_plan_header.c
 new file mode 100644
-index 000000000..c3e502be7
+index 000000000..2e5a5e1a6
 --- /dev/null
 +++ b/src/skippy/tests/stage_plan_header.c
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,10 @@
 +#include "skippy/stage_plan.h"
 +
 +int main(void) {
 +    struct skippy_stage_plan_desc_v1 descriptor = {0};
-+    return sizeof(descriptor) > 0 && SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
++    struct skippy_stage_planner_config_v1 config = {0};
++    config.graph_configuration_id = "skippy.test.graph.v1";
++    config.backend_id = "skippy.test.backend";
++    return sizeof(descriptor) > 0 && config.graph_configuration_id != 0 &&
++            config.backend_id != 0 && SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
 +}
 diff --git a/src/skippy/tests/stage_plan_header.cpp b/src/skippy/tests/stage_plan_header.cpp
 new file mode 100644
-index 000000000..035721446
+index 000000000..beb86aaae
 --- /dev/null
 +++ b/src/skippy/tests/stage_plan_header.cpp
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,13 @@
 +#include "skippy/stage_plan.h"
 +
++#include <cstddef>
 +#include <type_traits>
 +
 +int main() {
++    static_assert(std::is_standard_layout<skippy_stage_planner_config_v1>::value, "C ABI layout required");
 +    static_assert(std::is_standard_layout<skippy_stage_plan_profile_desc_v1>::value, "C ABI layout required");
 +    static_assert(std::is_trivial<skippy_stage_plan_state_desc_v1>::value, "C ABI triviality required");
++    static_assert(offsetof(skippy_stage_planner_config_v1, graph_configuration_id) >
++            offsetof(skippy_stage_planner_config_v1, profile_count), "identity fields must be appended");
 +    return SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
 +}
 diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp

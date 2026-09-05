@@ -86,9 +86,11 @@ fn stage_plan_types_match_native_layout() {
 
     assert_eq!(size_of::<StagePlannerProfileV1>(), 32);
     assert_eq!(offset_of!(StagePlannerProfileV1, profile_id), 8);
-    assert_eq!(size_of::<StagePlannerConfigV1>(), 64);
+    assert_eq!(size_of::<StagePlannerConfigV1>(), 80);
     assert_eq!(offset_of!(StagePlannerConfigV1, shard_paths), 16);
     assert_eq!(offset_of!(StagePlannerConfigV1, profiles), 48);
+    assert_eq!(offset_of!(StagePlannerConfigV1, graph_configuration_id), 64);
+    assert_eq!(offset_of!(StagePlannerConfigV1, backend_id), 72);
 
     assert_eq!(size_of::<StagePlanDescV1>(), 72);
     assert_eq!(offset_of!(StagePlanDescV1, profile_count), 56);
