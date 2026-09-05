@@ -42,6 +42,7 @@ pub(crate) enum Command {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// Emit a source-complete v2 package (not accepted by the v1 serving path).
     WritePackage {
         model: String,
         #[arg(long)]

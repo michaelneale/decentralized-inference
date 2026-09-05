@@ -7453,6 +7453,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "skippy-ffi",
+ "skippy-model",
+ "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
  "tempfile",

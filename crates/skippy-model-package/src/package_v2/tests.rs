@@ -1,0 +1,401 @@
+use super::*;
+use skippy_model::gguf_catalog::read_gguf_catalog;
+use skippy_package_format::TensorStorage;
+
+#[derive(Clone)]
+struct FixtureTensor<'a> {
+    name: &'a str,
+    dimensions: Vec<u64>,
+    dtype: u32,
+    offset: u64,
+}
+
+fn tensor(name: &str, offset: u64) -> FixtureTensor<'_> {
+    FixtureTensor {
+        name,
+        dimensions: vec![2, 2],
+        dtype: 0,
+        offset,
+    }
+}
+
+fn string(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn fixture(path: &Path, tensors: &[FixtureTensor<'_>], split: Option<(u16, u16, u64)>) {
+    let mut bytes = b"GGUF".to_vec();
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&(if split.is_some() { 7_u64 } else { 4 }).to_le_bytes());
+    string(&mut bytes, "general.architecture");
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    string(&mut bytes, "llama");
+    string(&mut bytes, "llama.block_count");
+    bytes.extend_from_slice(&4_u32.to_le_bytes());
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    string(&mut bytes, "general.alignment");
+    bytes.extend_from_slice(&4_u32.to_le_bytes());
+    bytes.extend_from_slice(&32_u32.to_le_bytes());
+    string(&mut bytes, "tokenizer.ggml.tokens");
+    bytes.extend_from_slice(&9_u32.to_le_bytes());
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    string(&mut bytes, "fixture-token");
+    if let Some((number, count, total)) = split {
+        for (key, value) in [("split.no", number), ("split.count", count)] {
+            string(&mut bytes, key);
+            bytes.extend_from_slice(&2_u32.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        string(&mut bytes, "split.tensors.count");
+        bytes.extend_from_slice(&10_u32.to_le_bytes());
+        bytes.extend_from_slice(&total.to_le_bytes());
+    }
+    for t in tensors {
+        string(&mut bytes, t.name);
+        bytes.extend_from_slice(&(t.dimensions.len() as u32).to_le_bytes());
+        for dimension in &t.dimensions {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&t.dtype.to_le_bytes());
+        bytes.extend_from_slice(&t.offset.to_le_bytes());
+    }
+    bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+    // All fixtures use a 32-byte padded extent per tensor, including quantized Q8_0
+    // fixtures below which explicitly extend their payload.
+    bytes.resize(bytes.len() + tensors.len() * 32, 0x3f);
+    fs::write(path, bytes).unwrap();
+}
+
+fn explicit(source: &Path) -> ExplicitSourceIdentity {
+    ExplicitSourceIdentity {
+        model_id: Some("fixture/model:Q8_0".to_string()),
+        source_revision: Some("immutable-source".to_string()),
+        source_file: Some(source.file_name().unwrap().to_str().unwrap().to_string()),
+        ..ExplicitSourceIdentity::default()
+    }
+}
+
+fn write(source: &Path, out: &Path, resume: bool) -> Result<()> {
+    write_package(
+        source.display().to_string(),
+        out.to_path_buf(),
+        Vec::new(),
+        ArtifactHook { command: None },
+        ArtifactHook { command: None },
+        explicit(source),
+        resume,
+    )
+}
+
+fn read_manifest(out: &Path) -> PackageManifest {
+    serde_json::from_slice(&fs::read(out.join("model-package.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn writer_round_trips_all_source_tensors_without_role_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("model.gguf");
+    fixture(
+        &source,
+        &[tensor("unknown-global", 0), tensor("blk.1.arbitrary", 32)],
+        None,
+    );
+    let out = temp.path().join("package");
+    write(&source, &out, false).unwrap();
+    let manifest = read_manifest(&out);
+    manifest.validate().unwrap();
+    assert_eq!(manifest.schema_version, 2);
+    assert_eq!(manifest.tensor_catalog.entries.len(), 2);
+    let directory = read_gguf_catalog(&source).unwrap();
+    assert_eq!(manifest.model_metadata, directory.metadata);
+    assert_eq!(
+        fs::read(&source).unwrap(),
+        fs::read(out.join(&manifest.artifact_catalog.entries[0].path)).unwrap()
+    );
+    for tensor in &manifest.tensor_catalog.entries {
+        assert_eq!(tensor.layer_ordinal, None, "do not infer layers from names");
+        let expected = directory
+            .tensors
+            .iter()
+            .find(|t| t.name == tensor.name)
+            .unwrap();
+        match tensor.storage {
+            TensorStorage::Owned {
+                data_offset,
+                stored_length,
+                alignment,
+                ..
+            } => {
+                assert_eq!(data_offset, expected.data_offset);
+                assert_eq!(stored_length, 16, "not the 32-byte offset gap/padding");
+                assert_eq!(alignment, 32);
+            }
+            _ => panic!("independent allocations are not aliases"),
+        }
+    }
+    let json = serde_json::to_string(&manifest).unwrap();
+    assert_eq!(
+        manifest,
+        serde_json::from_str::<PackageManifest>(&json).unwrap()
+    );
+    assert_eq!(manifest.package_id, manifest.computed_package_id().unwrap());
+}
+
+#[test]
+fn complete_shards_bind_every_file_and_tensor() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("model-00001-of-00002.gguf");
+    let second = temp.path().join("model-00002-of-00002.gguf");
+    fixture(&first, &[tensor("first", 0)], Some((0, 2, 2)));
+    fixture(&second, &[tensor("second", 0)], Some((1, 2, 2)));
+    let out = temp.path().join("package");
+    write(&second, &out, false).unwrap();
+    let manifest = read_manifest(&out);
+    manifest.validate().unwrap();
+    assert_eq!(manifest.source_model.files.len(), 2);
+    assert_eq!(manifest.artifact_catalog.entries.len(), 2);
+    assert_eq!(manifest.tensor_catalog.entries.len(), 2);
+    assert_eq!(manifest.source_model.sha256, file_sha256(&second).unwrap());
+}
+
+#[test]
+fn incomplete_renamed_shard_cannot_claim_complete_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("renamed.gguf");
+    fixture(&source, &[tensor("first", 0)], Some((0, 2, 2)));
+    let out = temp.path().join("package");
+    assert!(
+        write(&source, &out, false)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete source shard")
+    );
+    assert!(!out.join("model-package.json").exists());
+}
+
+#[test]
+fn incorrect_declared_total_and_duplicate_source_names_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("model-00001-of-00002.gguf");
+    let second = temp.path().join("model-00002-of-00002.gguf");
+    fixture(&first, &[tensor("first", 0)], Some((0, 2, 3)));
+    fixture(&second, &[tensor("second", 0)], Some((1, 2, 3)));
+    let out = temp.path().join("package");
+    assert!(
+        write(&first, &out, false)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete source tensor")
+    );
+    fixture(&second, &[tensor("first", 0)], Some((1, 2, 2)));
+    assert!(
+        write(&first, &out, false)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate source tensor")
+    );
+    assert!(!out.join("model-package.json").exists());
+}
+
+#[test]
+fn resumed_artifacts_cannot_self_certify_missing_or_substituted_tensors() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0), tensor("second", 32)], None);
+    let out = temp.path().join("package");
+    fs::create_dir_all(out.join("artifacts")).unwrap();
+    let artifact = out.join("artifacts/source-00000.gguf");
+    for tensors in [
+        vec![tensor("first", 0)],
+        vec![tensor("first", 0), tensor("replacement", 32)],
+        vec![
+            tensor("first", 0),
+            FixtureTensor {
+                dimensions: vec![4],
+                ..tensor("second", 32)
+            },
+        ],
+        vec![
+            tensor("first", 0),
+            FixtureTensor {
+                dtype: 1,
+                ..tensor("second", 32)
+            },
+        ],
+    ] {
+        fixture(&artifact, &tensors, None);
+        assert!(write(&source, &out, true).is_err());
+        assert!(!out.join("model-package.json").exists());
+    }
+}
+
+#[test]
+fn corruption_truncation_and_bad_offsets_fail_before_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0), tensor("second", 32)], None);
+    let out = temp.path().join("package");
+    fs::create_dir_all(out.join("artifacts")).unwrap();
+    let artifact = out.join("artifacts/source-00000.gguf");
+    let original = fs::read(&source).unwrap();
+    let mut corrupted = original.clone();
+    *corrupted.last_mut().unwrap() ^= 1;
+    fs::write(&artifact, &corrupted).unwrap();
+    assert!(
+        write(&source, &out, true)
+            .unwrap_err()
+            .to_string()
+            .contains("checksum")
+    );
+    fs::write(&artifact, &original[..original.len() - 24]).unwrap();
+    assert!(write(&source, &out, true).is_err());
+    fixture(&artifact, &[tensor("first", 0), tensor("second", 1)], None);
+    assert!(write(&source, &out, true).is_err());
+    assert!(!out.join("model-package.json").exists());
+}
+
+#[test]
+fn native_quantized_extent_is_not_guessed_from_padding() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("quantized.gguf");
+    fixture(
+        &source,
+        &[FixtureTensor {
+            name: "quant",
+            dimensions: vec![32],
+            dtype: 8,
+            offset: 0,
+        }],
+        None,
+    );
+    let mut bytes = fs::read(&source).unwrap();
+    bytes.extend_from_slice(&[0; 32]);
+    fs::write(&source, bytes).unwrap();
+    let out = temp.path().join("package");
+    write(&source, &out, false).unwrap();
+    let manifest = read_manifest(&out);
+    assert!(matches!(
+        manifest.tensor_catalog.entries[0].storage,
+        TensorStorage::Owned {
+            stored_length: 34,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn shared_offsets_fail_closed_until_native_inspection_supports_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("aliases.gguf");
+    fixture(&source, &[tensor("first", 0), tensor("alias", 0)], None);
+    let out = temp.path().join("package");
+    assert!(write(&source, &out, false).is_err());
+    assert!(!out.join("model-package.json").exists());
+}
+
+#[test]
+fn missing_independent_source_prevents_resume_certification() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0)], None);
+    let input = resolve_package_input(source.display().to_string(), explicit(&source)).unwrap();
+    fs::remove_file(&source).unwrap();
+    assert!(SourceInventory::read(&input).is_err());
+}
+
+#[test]
+fn refuses_transform_hooks_and_existing_completion_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0)], None);
+    let out = temp.path().join("package");
+    let result = write_package(
+        source.display().to_string(),
+        out.clone(),
+        Vec::new(),
+        ArtifactHook { command: None },
+        ArtifactHook {
+            command: Some("must-not-run".into()),
+        },
+        explicit(&source),
+        false,
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("transform the independent source")
+    );
+    write(&source, &out, false).unwrap();
+    let old = fs::read(out.join("model-package.json")).unwrap();
+    assert!(write(&source, &out, true).is_err());
+    assert_eq!(old, fs::read(out.join("model-package.json")).unwrap());
+}
+
+#[test]
+fn verified_resume_and_projector_sidecar_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0)], None);
+    let projector = temp.path().join("projector.gguf");
+    fixture(&projector, &[tensor("vision", 0)], None);
+    let out = temp.path().join("package");
+    fs::create_dir_all(out.join("artifacts")).unwrap();
+    fs::copy(&source, out.join("artifacts/source-00000.gguf")).unwrap();
+    write_package(
+        source.display().to_string(),
+        out.clone(),
+        vec![projector],
+        ArtifactHook { command: None },
+        ArtifactHook { command: None },
+        explicit(&source),
+        true,
+    )
+    .unwrap();
+    let manifest = read_manifest(&out);
+    manifest.validate().unwrap();
+    assert_eq!(manifest.tensor_catalog.entries.len(), 1);
+    assert_eq!(manifest.sidecars.len(), 1);
+    assert_eq!(manifest.sidecars[0].kind, "mmproj");
+    assert_eq!(manifest.artifact_catalog.entries.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn upload_hook_can_delete_verified_copies_without_losing_inventory() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0), tensor("second", 32)], None);
+    let hook = temp.path().join("upload.sh");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nset -eu\nrm -- \"$SKIPPY_PACKAGE_ARTIFACT_PATH\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = temp.path().join("package");
+    write_package(
+        source.display().to_string(),
+        out.clone(),
+        Vec::new(),
+        ArtifactHook {
+            command: Some(hook),
+        },
+        ArtifactHook { command: None },
+        explicit(&source),
+        false,
+    )
+    .unwrap();
+    let manifest = read_manifest(&out);
+    manifest.validate().unwrap();
+    assert_eq!(manifest.tensor_catalog.entries.len(), 2);
+    assert!(
+        !out.join(&manifest.artifact_catalog.entries[0].path)
+            .exists()
+    );
+    assert!(source.exists());
+}

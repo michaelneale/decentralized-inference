@@ -28,6 +28,9 @@ pub struct PackageManifest {
 }
 
 impl PackageManifest {
+    /// Validate manifest structure and self-consistency, not source completeness.
+    /// Creation/certification must separately compare with independent source
+    /// directories and verify the artifact bytes; a manifest cannot certify itself.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
         let mut issues = Vec::new();
         validate_manifest_fields(self, &mut issues);
@@ -192,6 +195,7 @@ pub enum ValidationCode {
     InvalidAlignment,
     MisalignedOffset,
     StorageOutOfBounds,
+    InvalidStoredLength,
     OverlappingStorage,
     UnknownAliasTarget,
     AliasTargetIsAlias,
@@ -386,12 +390,12 @@ fn collect_tensors<'a>(
         let prefix = format!("tensors[{index}]");
         validate_nonempty(&format!("{prefix}.id"), &tensor.id, issues);
         validate_nonempty(&format!("{prefix}.name"), &tensor.name, issues);
-        if tensor.dimensions.contains(&0) {
+        if tensor.dimensions.is_empty() || tensor.dimensions.contains(&0) {
             push_issue(
                 issues,
                 ValidationCode::InvalidDimension,
                 format!("{prefix}.dimensions"),
-                "tensor dimensions must be non-zero",
+                "tensor dimensions must be non-empty and non-zero",
             );
         }
         if let Some(layer_ordinal) = tensor.layer_ordinal
@@ -467,6 +471,14 @@ fn validate_owned_tensor_storage(
                 ValidationCode::MisalignedOffset,
                 format!("{prefix}.data_offset"),
                 format!("offset {data_offset} is not aligned to {alignment} bytes"),
+            );
+        }
+        if *stored_length == 0 {
+            push_issue(
+                issues,
+                ValidationCode::InvalidStoredLength,
+                format!("{prefix}.stored_length"),
+                "owned tensor storage must not be empty",
             );
         }
         match data_offset.checked_add(*stored_length) {
@@ -820,6 +832,26 @@ mod tests {
             .unwrap()
             .insert("future_policy".to_string(), Value::Bool(true));
         assert!(serde_json::from_value::<PackageManifest>(encoded).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_dimensions_and_empty_storage() {
+        let mut manifest = fixture();
+        manifest.tensor_catalog.entries[0].dimensions.clear();
+        if let TensorStorage::Owned { stored_length, .. } =
+            &mut manifest.tensor_catalog.entries[0].storage
+        {
+            *stored_length = 0;
+        }
+        manifest.package_id = manifest.computed_package_id().unwrap();
+        let error = manifest.validate().unwrap_err();
+        let codes = error
+            .issues()
+            .iter()
+            .map(|issue| issue.code)
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains(&ValidationCode::InvalidDimension));
+        assert!(codes.contains(&ValidationCode::InvalidStoredLength));
     }
 
     fn fixture() -> PackageManifest {

@@ -8,9 +8,11 @@ mod glm_dsa_generation_policy;
 mod hash;
 mod inspect;
 mod package;
+mod package_v2;
 mod plan;
 mod preflight;
 mod progress;
+mod source_inventory;
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -96,7 +98,7 @@ fn run(args: Args) -> Result<()> {
             source_revision,
             source_file,
             resume_existing_artifacts,
-        } => package::write_package(
+        } => package_v2::write_package(
             model,
             out_dir,
             projectors,

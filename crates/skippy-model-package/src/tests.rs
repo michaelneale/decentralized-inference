@@ -1,7 +1,6 @@
 use crate::package::{
-    ArtifactHook, ExplicitSourceIdentity, model_distribution_id, native_mtp_layer_indices,
-    package_generation, resolve_local_package_input, run_artifact_hook,
-    should_resume_package_artifact,
+    ArtifactHook, ExplicitSourceIdentity, model_distribution_id, resolve_local_package_input,
+    run_artifact_hook,
 };
 use crate::write::{local_artifact_files, resolve_gguf_shard_paths};
 use skippy_ffi::TensorRole;
@@ -13,7 +12,7 @@ use std::path::{Path, PathBuf};
 fn artifact_hook_tolerates_a_hook_that_deletes_the_uploaded_file() {
     // The production upload hook (split-model-job.sh) uploads each artifact
     // and then unlinks it locally to stay under the HF Jobs ephemeral
-    // storage limit. write_package_artifact must therefore read all artifact
+    // storage limit. v2 writer must therefore read all artifact
     // metadata before invoking the hook; this test locks in that the hook is
     // allowed to remove the file and still report success.
     let dir = std::env::temp_dir().join(format!("skippy-hook-test-{}", std::process::id()));
@@ -108,53 +107,6 @@ fn local_package_input_uses_explicit_coordinate_identity() {
 }
 
 #[test]
-fn package_generation_is_absent_without_native_mtp_tensors() {
-    let tensors = vec![tensor("blk.0.attn_norm.weight", Some(0))];
-
-    assert!(package_generation(&tensors).is_none());
-}
-
-#[test]
-fn package_generation_advertises_mtp_strategy() {
-    let tensors = vec![
-        tensor("blk.0.attn_norm.weight", Some(0)),
-        tensor("blk.47.nextn.eh_proj.weight", Some(47)),
-        tensor("blk.47.nextn.enorm.weight", Some(47)),
-        tensor("blk.47.nextn.hnorm.weight", Some(47)),
-    ];
-
-    assert_eq!(native_mtp_layer_indices(&tensors), vec![47]);
-    let generation = package_generation(&tensors).expect("MTP tensors should enable generation");
-    let speculative = generation
-        .speculative_decoding
-        .expect("MTP generation should configure speculative decoding");
-    assert_eq!(speculative.default, "mtp");
-    let proposer = speculative
-        .proposers
-        .get("mtp")
-        .expect("native MTP proposer should be present");
-    assert_eq!(proposer.proposer_type, "native-mtp");
-    assert_eq!(proposer.prediction_depth, Some(1));
-    assert_eq!(proposer.layer_indices, vec![47]);
-    let strategy = speculative
-        .strategies
-        .get("mtp")
-        .expect("default strategy should be present");
-    assert_eq!(strategy.strategy_type, "native-mtp");
-    assert_eq!(strategy.proposer.as_deref(), Some("mtp"));
-    assert_eq!(strategy.prediction_depth, Some(1));
-    assert_eq!(strategy.layer_indices, vec![47]);
-    let window = strategy
-        .window_policy
-        .as_ref()
-        .expect("native MTP should declare its fixed window");
-    assert_eq!(window.default, "fixed");
-    assert_eq!(window.initial_window, 1);
-    assert_eq!(window.min_window, 1);
-    assert_eq!(window.max_window, 1);
-}
-
-#[test]
 fn split_gguf_path_resolves_sibling_shards() {
     let dir = unique_test_dir("split-gguf-path");
     std::fs::create_dir_all(&dir).unwrap();
@@ -214,22 +166,6 @@ fn local_artifact_files_preserve_shard_subdirectory() {
             "UD-Q2_K_XL/MiniMax-M2.7-UD-Q2_K_XL-00002-of-00002.gguf",
         ]
     );
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn resumes_only_existing_artifacts_when_requested() {
-    let dir = unique_test_dir("resume-artifact");
-    std::fs::create_dir_all(&dir).unwrap();
-    let artifact = dir.join("layer-000.gguf");
-    std::fs::write(&artifact, b"existing").unwrap();
-
-    assert!(should_resume_package_artifact(&artifact, true));
-    assert!(!should_resume_package_artifact(&artifact, false));
-    assert!(!should_resume_package_artifact(
-        &dir.join("missing.gguf"),
-        true
-    ));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -480,17 +416,6 @@ fn sized_tensor(
         role,
         ggml_type: 0,
         byte_size,
-        element_count: 1,
-    }
-}
-
-fn tensor(name: &str, layer_index: Option<u32>) -> TensorInfo {
-    TensorInfo {
-        name: name.to_string(),
-        layer_index,
-        role: TensorRole::Layer,
-        ggml_type: 0,
-        byte_size: 1,
         element_count: 1,
     }
 }

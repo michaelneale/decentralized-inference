@@ -65,33 +65,36 @@ backed `model-hf` adapter, downloads the resolved source artifact, and records
 the resolved repo, revision, primary file, canonical ref, distribution id, and
 artifact file set in `model-package.json`.
 
-`write-package` currently records supported source-model speculation metadata
-under `generation.speculative_decoding`; it does not populate GLM-DSA execution
-policy or threshold fields. For GLM-DSA packages, run
-`repair-glm-dsa-generation-policy model-package/ --in-place` to add
-`generation.policy` and `generation.thresholds`, then validate the strict
-contract. Policy uses stable semantic execution choices such as
-`decode: "compact-flash"` or `indexshare: "required"`, while thresholds carry
-numeric resolver inputs such as `short_prefill_max_tokens`,
-`compact_flash_min_kv`, and `dense_mask_max_bytes`. Do not add
-model-family-specific objects such as `generation.glm_dsa`; use a versioned
-policy profile such as `glm-dsa-v1`.
+### Package v2 writer (development branch)
 
-Generation defaults should be grounded in gated package/backend evidence, not
-single diagnostic microbench rows. For GLM-DSA MoE tuning, production-shaped
-routed whole-graph consumer probes are sanity checks only unless they are
-physically plausible against isolated routed FFN estimates.
+`write-package` emits the shared `skippy-package-format` schema v2. It captures
+all source GGUF directories and native stored sizes before writing, copies whole
+source shards into generic `artifacts/source-NNNNN.gguf` containers, reopens each
+copy, and compares exact names, types, dimensions, absolute offsets, lengths,
+alignment and file SHA-256 against that independent inventory. Padding is not
+counted as tensor storage. Shard counts and total tensors are checked against
+GGUF split metadata; duplicate source names and missing source files fail closed.
+No stage count, tensor role, endpoint, or tensor-name predicate selects content.
 
-Layer packages store input-boundary tensors in `shared/embeddings.gguf` and
-final-boundary tensors in `shared/output.gguf`; owned tensors should appear in
-exactly one package artifact.
+Whole-shard copying preserves the original typed model and tokenizer metadata;
+the manifest also records the decoded metadata map. This first writer unit does
+not optimize physical grouping into per-layer files. Layer ordinals are absent
+because GGUF directories do not contain a structural per-tensor layer field;
+the native inspector's name-derived layer index is deliberately not reused.
 
-Multimodal projectors are explicit package artifacts. Pass one or more
-`--projector path/to/mmproj*.gguf` arguments to `write-package`; the CLI copies
-them into `projectors/`, fingerprints them, records them as `kind: "mmproj"` in
-`model-package.json`, and `validate-package` checks the declared projector
-checksums and sizes. Package-backed serving uses the first declared projector
-when no explicit `projector_path` is supplied by the caller.
+The catalog supports explicit storage aliases. The pinned native GGUF inspector
+currently rejects shared-offset tensor directories, so such sources are rejected
+rather than silently expanded or certified. Ingesting those sources requires a
+separate native inspection change. Equal bytes in distinct source allocations
+are **not** aliases.
+
+Pass `--projector path/to/mmproj*.gguf` to copy and verify explicit projector
+sidecars. This writer does not infer generation policy/defaults from tensor names
+or implement offline conversion. The existing `plan`, `write`, `write-stages`,
+`validate`, `validate-package`, `preflight`, and GLM-DSA commands still serve their
+existing slice/v1 contracts; they are not v2 certification or serving paths.
+Runtime admission, metadata-graph certification and atomic serving cutover remain
+separate integration work. Do not publish these packages for the current v1 runtime.
 
 Local paths are only accepted for package creation when the caller supplies
 explicit provenance:
@@ -107,16 +110,16 @@ skippy-model-package write-package ./model.gguf \
 This keeps canonical package identity tied to real model coordinates rather
 than inferred from arbitrary filesystem paths.
 
-`--transform-artifact-command` runs an in-place transformation before package
-metadata is measured, so the manifest describes the transformed artifact.
-`--after-artifact-command` remains suitable for upload hooks that may remove
-the artifact after its metadata is captured. Pass `--resume-existing-artifacts`
-to reuse existing artifacts; transform and upload hooks are still run for each
-resumed artifact.
-
-`validate-package` checks the source-model checksum, manifest artifact checksums
-and sizes, declared tensor counts/bytes, layer coverage, duplicate layers, and
-exact owned tensor coverage against the source model.
+V2 creation rejects `--transform-artifact-command`: perform conversion or
+quantization on the independent source before packaging. It must not redefine the
+expected inventory from transformed or incomplete output.
+`--after-artifact-command` runs only after an artifact passes exact source checks;
+as before, an upload hook may delete that verified local copy. If it leaves a copy,
+that copy is checked again. Remote upload verification remains the hook's duty.
+`--resume-existing-artifacts` verifies existing copies against the original source
+before reuse; source files remain mandatory. An existing `model-package.json` is
+never overwritten; use a new output directory. The manifest completion marker is
+written only after all artifact checks succeed.
 
 `validate-glm-dsa-contract` is the local pre-spend gate for GLM-5.2-style
 artifacts. It checks GGUF metadata, tensor completeness, native MTP

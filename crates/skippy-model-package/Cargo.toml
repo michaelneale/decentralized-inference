@@ -8,6 +8,8 @@ version.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 skippy-ffi = { path = "../skippy-ffi", default-features = false }
+skippy-model = { path = "../skippy-model" }
+skippy-package-format = { path = "../skippy-package-format" }
 skippy-protocol = { path = "../skippy-protocol" }
 skippy-runtime = { path = "../skippy-runtime" }
 model-artifact = { path = "../model-artifact" }
