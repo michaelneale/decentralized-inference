@@ -192,6 +192,16 @@ or converted only where independent source evidence proves full coverage.
   description.
 - Remove the stage filter from planning builds; every model builder emits its
   unsplit computation.
+- Replace all six current graph-build thread-local inputs with explicit,
+  session-scoped build inputs: the stage filter, activation tokens, RWKV7
+  `v_first`, Gemma3n AltUp, GLM-DSA top-k, and MTP embeddings. Removing only
+  `g_skippy_graph_filter` does not eliminate call-order dependence.
+- Unify set/clear ownership under one scoped lifetime. The current mix of
+  unconditional session-end clearing and an RAII filter scope must not permit
+  one interleaved session to clear or inherit another session's graph inputs.
+- Keep graph-affecting activation policy such as GLM-DSA policy explicit and
+  digest-bound; explicit input does not imply that it belongs in the derived
+  tensor closure.
 - Add a planning profile matrix covering at minimum:
   - prompt prefill;
   - single-token decode;
@@ -243,6 +253,9 @@ partition. Do not encode staging policy.
 
 - Represent KV/recurrent state reads, writes, and ordering dependencies in the
   graph or in a side table owned by that exact `ggml_cgraph`.
+- Bind the memory/KV layer filter to the same normalized `StageSlicePlan` used
+  for graph nodes and parameter loading. It must not remain an independent
+  fifth interpretation of `layer_start` / `layer_end`.
 - Attach each persistent state component to its stage-independent layer owner.
 - Distinguish persistent local state from values that genuinely cross a stage
   boundary.
@@ -705,9 +718,9 @@ stage policy.
 
 | Owner | Descriptive ownership | Boundary |
 | --- | --- | --- |
-| scama | Package v2, `TensorCatalog`, source-bound offline converter, shared-contract and specification authority, sole integration/release ownership | Does not own native graph/runtime implementation or acceptance-suite implementation. Serializes shared contract and llama.cpp patch-queue changes and performs the atomic cutover. |
-| jy | Native graph/runtime implementation: explicit graph-build input, runtime parity hooks, fail-closed closure/frontier admission, graph partitioner, selected-weight realization, and Granite runtime correction | Does not own package schema/conversion or workflow orchestration. Exposes hooks and evidence consumed by the independent harness. |
-| astrid | Acceptance infrastructure: reusable every-cut parity harness, registry-backed product fixtures, CPU/CUDA/Metal phase runner, recurrent/cache semantics, canary reconciliation, performance/provenance, and boundary-transport qualification | Does not edit native graph/runtime implementation or define package completeness. The harness consumes jy's runtime hooks and independently validates both package and runtime results. |
+| scama | Package v2 and source-bound offline conversion; the complete native graph/runtime migration including explicit build inputs, closure/frontier admission, partitioning, realization, and Granite correction; shared-contract/specification authority; sole integration/release ownership | Owns the tightly coupled package/runtime design and serializes shared contract and llama.cpp patch-queue changes. Does not own independent acceptance-suite implementation. |
+| astrid | Acceptance infrastructure: reusable every-cut parity harness, registry-backed product fixtures, CPU/CUDA/Metal phase runner, recurrent/cache semantics, canary reconciliation, performance/provenance, and boundary-transport qualification | Does not edit native graph/runtime implementation or certify package completeness from planner output. The harness consumes narrow checked-in runtime hooks and independently validates package and runtime results. |
+| jy | No standing migration lane. Receives one small, closed unit at a time after sign-off, with exact files, acceptance command/evidence, and non-goals; stops and reports before any next assignment | Does not own or extend the multi-model partitioner, filter-lifetime rewrite, realization path, package/runtime integration, or CI orchestration. Suitable units include a single parity regression fixture defined by astrid or fresh-context review of one completed patch. |
 
 Boundary transport implementation remains with the existing typed-plane owner.
 Astrid qualifies it and scama integrates it only if the frozen support matrix
@@ -715,8 +728,9 @@ requires it; this project does not start a competing transport implementation.
 
 No implementation or test edits begin until the owner signs off on these
 descriptions and the three shared contracts against one pinned base SHA. After
-approval, create one worktree and branch per owner; never share uncommitted
-source edits across worktrees.
+approval, create separate worktrees and branches for scama and astrid, plus at
+most one short-lived jy task worktree for the currently assigned bounded unit;
+never share uncommitted source edits across worktrees.
 
 ## Delivery Sequence
 
