@@ -865,6 +865,65 @@ fn stage_source_prepare_timeout_scales_with_assigned_package_bytes() {
 }
 
 #[test]
+fn split_stage_topology_instance_populates_stage_zero_endpoint() {
+    let stages = vec![
+        RuntimeSliceStagePlan {
+            stage_id: "stage-0".to_string(),
+            stage_index: 0,
+            node_id: make_id(1),
+            layer_start: 0,
+            layer_end: 12,
+            parameter_bytes: 0,
+        },
+        RuntimeSliceStagePlan {
+            stage_id: "stage-1".to_string(),
+            stage_index: 1,
+            node_id: make_id(2),
+            layer_start: 12,
+            layer_end: 24,
+            parameter_bytes: 0,
+        },
+    ];
+
+    let initial_topology = split_stage_topology_instance(
+        "topology-a",
+        "run-a",
+        "model-a",
+        &package(24),
+        &stages,
+        None,
+        &std::collections::HashMap::new(),
+    );
+    assert!(initial_topology.stages[0].endpoint.bind_addr.is_empty());
+    assert!(initial_topology.stages[1].endpoint.bind_addr.is_empty());
+
+    let downstream_load = stage_load_request(LoadMode::LayerPackage);
+    let mut ready_by_stage = std::collections::HashMap::new();
+    ready_by_stage.insert(
+        downstream_load.stage_id.clone(),
+        test_stage_status_from_load(&downstream_load, skippy::StageRuntimeState::Ready),
+    );
+    let active_topology = split_stage_topology_instance(
+        "topology-a",
+        "run-a",
+        "model-a",
+        &package(24),
+        &stages,
+        Some("127.0.0.1:5501"),
+        &ready_by_stage,
+    );
+
+    assert_eq!(
+        active_topology.stages[0].endpoint.bind_addr,
+        "127.0.0.1:5501"
+    );
+    assert_eq!(
+        active_topology.stages[1].endpoint.bind_addr,
+        "127.0.0.1:31000"
+    );
+}
+
+#[test]
 fn startup_runtime_plan_auto_splits_when_model_exceeds_local_capacity() {
     assert_eq!(
         startup_runtime_plan(false, 3_000_000_000, 4_800_000_000),

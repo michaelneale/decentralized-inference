@@ -210,6 +210,7 @@ pub(super) async fn load_split_runtime_generation_inner(
                 spec.model_ref,
                 spec.package,
                 &spec.generation.stages,
+                None,
                 &ready_by_stage,
             ))
             .await;
@@ -325,6 +326,7 @@ pub(super) async fn load_split_runtime_generation_inner(
             spec.model_ref,
             spec.package,
             &spec.generation.stages,
+            Some(&stage0_return_endpoint),
             &ready_by_stage,
         ))
         .await;
@@ -1195,6 +1197,7 @@ pub(super) fn split_stage_topology_instance(
     model_ref: &str,
     package: &skippy::SkippyPackageIdentity,
     stages: &[RuntimeSliceStagePlan],
+    stage0_bind_addr: Option<&str>,
     ready_by_stage: &HashMap<String, skippy::StageStatusSnapshot>,
 ) -> mesh::StageTopologyInstance {
     mesh::StageTopologyInstance {
@@ -1215,6 +1218,13 @@ pub(super) fn split_stage_topology_instance(
                     bind_addr: ready_by_stage
                         .get(&stage.stage_id)
                         .map(|status| status.bind_addr.clone())
+                        .or_else(|| {
+                            if stage.stage_index == 0 {
+                                stage0_bind_addr.map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or_default(),
                 },
             })
