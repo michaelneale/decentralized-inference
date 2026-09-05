@@ -57,6 +57,7 @@ pub(super) fn stage_load_request(load_mode: LoadMode) -> skippy::StageLoadReques
         participant_set_hash: "participants".to_string(),
         topology_hash: "topology".to_string(),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        topology_stages: Vec::new(),
         model_path: Some("/models/qwen.gguf".to_string()),
         source_model_bytes: Some(4_900_000_000),
         source_model_sha256: None,

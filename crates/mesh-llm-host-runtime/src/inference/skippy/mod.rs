@@ -88,7 +88,7 @@ pub(crate) use stage::{
     StageLoadRuntimeSettings, StagePackagePrefetcher, StagePeerDescriptor, StagePreparationState,
     StagePreparationStatus, StagePrepareAcceptedResponse, StagePrepareRequest, StageReadyResponse,
     StageRuntimeState, StageStatusAck, StageStatusFilter, StageStatusSnapshot, StageStopRequest,
-    spawn_stage_control_loop, stage_load_timeout,
+    StageTopologyStageDescriptor, spawn_stage_control_loop, stage_load_timeout,
 };
 #[cfg(test)]
 pub(crate) use topology::{StageTopologyParticipant, plan_package_identity_topology};

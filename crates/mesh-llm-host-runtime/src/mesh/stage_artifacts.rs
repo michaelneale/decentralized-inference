@@ -6,7 +6,7 @@ use crate::mesh::artifact_transfer_io::{
 };
 use crate::mesh::stage_proto::{
     stage_control_request_from_proto, stage_control_response_to_proto,
-    stage_control_unavailable_response, stage_status_from_load, stage_topology_from_load,
+    stage_control_unavailable_response, stage_status_from_load,
 };
 use crate::mesh::stage_transport::{
     ARTIFACT_TRANSFER_BUFFER_BYTES, ARTIFACT_TRANSFER_INVALID_OFFSET_ERROR,
@@ -232,12 +232,17 @@ impl Node {
         if let crate::inference::skippy::StageControlRequest::Load(load)
         | crate::inference::skippy::StageControlRequest::LoadLocal(load) = &request
         {
-            self.record_stage_topology(stage_topology_from_load(self.endpoint.id(), load))
-                .await;
+            self.record_stage_load_topology(load).await;
         }
-        let response = self
-            .execute_stage_control_request_for_peer(remote, request)
-            .await?;
+        let response =
+            if let crate::inference::skippy::StageControlRequest::Status(filter) = &request {
+                crate::inference::skippy::StageControlResponse::Status(
+                    self.cached_stage_statuses(filter).await,
+                )
+            } else {
+                self.execute_stage_control_request_for_peer(remote, request)
+                    .await?
+            };
         self.record_stage_control_response(&response).await;
         let proto_response = stage_control_response_to_proto(response);
         write_len_prefixed(&mut send, &proto_response.encode_to_vec()).await?;

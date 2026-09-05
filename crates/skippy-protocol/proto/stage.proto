@@ -115,6 +115,16 @@ message LoadStage {
   string participant_set_hash = 49;
   string topology_hash = 50;
   StageActivationCodec activation_codec = 51;
+  repeated StageTopologyStage topology_stages = 52;
+}
+
+message StageTopologyStage {
+  string stage_id = 1;
+  uint32 stage_index = 2;
+  bytes node_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  string bind_addr = 6;
 }
 
 message StageLoadRuntimeSettings {

@@ -42,6 +42,7 @@ pub enum StageFrameError {
     MissingStageAdmissionDescriptor,
     MissingLoadClaimHashes,
     InvalidActivationCodec { got: i32 },
+    InvalidTopologyStages(&'static str),
     InvalidStageAdmissionDescriptor(&'static str),
     MissingStageTransportTarget,
     MissingStageArtifactTarget,
@@ -120,6 +121,9 @@ impl std::fmt::Display for StageFrameError {
             }
             StageFrameError::InvalidActivationCodec { got } => {
                 write!(f, "unsupported generation-8 activation codec {got}")
+            }
+            StageFrameError::InvalidTopologyStages(reason) => {
+                write!(f, "invalid generation-8 topology stage list: {reason}")
             }
             StageFrameError::InvalidStageAdmissionDescriptor(reason) => {
                 write!(f, "invalid stage admission descriptor: {reason}")
@@ -279,6 +283,75 @@ fn validate_load_stage_admission(load: &proto::stage::LoadStage) -> Result<(), S
         ));
     }
     validate_activation_codec(load.activation_codec)?;
+    validate_topology_stages(load)?;
+    Ok(())
+}
+
+fn validate_topology_stages(load: &proto::stage::LoadStage) -> Result<(), StageFrameError> {
+    if load.topology_stages.is_empty() {
+        return Err(StageFrameError::InvalidTopologyStages(
+            "canonical stage list is required",
+        ));
+    }
+    let mut current_matches = 0usize;
+    let mut previous_end = None;
+    for (position, stage) in load.topology_stages.iter().enumerate() {
+        if stage.stage_index as usize != position {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage indexes must be ordered and contiguous from zero",
+            ));
+        }
+        if stage.stage_id.is_empty() || stage.bind_addr.is_empty() {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage id and bind address are required",
+            ));
+        }
+        if load.topology_stages[..position]
+            .iter()
+            .any(|prior| prior.stage_id == stage.stage_id)
+        {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage ids must be unique",
+            ));
+        }
+        if load.topology_stages[..position]
+            .iter()
+            .any(|prior| prior.node_id == stage.node_id)
+        {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage node ids must be unique",
+            ));
+        }
+        validate_endpoint_id(stage.node_id.len())?;
+        if stage.layer_start >= stage.layer_end {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage layer ranges must be non-empty",
+            ));
+        }
+        if previous_end.is_some_and(|end| end != stage.layer_start) {
+            return Err(StageFrameError::InvalidTopologyStages(
+                "stage layer ranges must be contiguous",
+            ));
+        }
+        previous_end = Some(stage.layer_end);
+        if stage.stage_id == load.stage_id {
+            current_matches += 1;
+            if stage.stage_index != load.stage_index
+                || stage.layer_start != load.layer_start
+                || stage.layer_end != load.layer_end
+                || stage.bind_addr != load.bind_addr
+            {
+                return Err(StageFrameError::InvalidTopologyStages(
+                    "current stage entry does not match load assignment",
+                ));
+            }
+        }
+    }
+    if current_matches != 1 {
+        return Err(StageFrameError::InvalidTopologyStages(
+            "current stage must appear exactly once",
+        ));
+    }
     Ok(())
 }
 

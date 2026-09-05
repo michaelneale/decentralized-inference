@@ -64,6 +64,10 @@ pub(crate) struct StageLoadRequest {
     pub(crate) participant_set_hash: String,
     pub(crate) topology_hash: String,
     pub(crate) activation_codec: skippy_protocol::StageActivationCodec,
+    /// Canonical generation-wide stage list. Every participant receives the
+    /// same identities, ownership, and ranges; readiness updates replace any
+    /// provisional `:0` endpoint with the observed bound address.
+    pub(crate) topology_stages: Vec<StageTopologyStageDescriptor>,
     pub(crate) model_path: Option<String>,
     pub(crate) source_model_bytes: Option<u64>,
     pub(crate) source_model_sha256: Option<String>,
@@ -98,6 +102,16 @@ pub(crate) struct StageLoadRequest {
     pub(crate) load_mode: LoadMode,
     pub(crate) upstream: Option<StagePeerDescriptor>,
     pub(crate) downstream: Option<StagePeerDescriptor>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StageTopologyStageDescriptor {
+    pub(crate) stage_id: String,
+    pub(crate) stage_index: u32,
+    pub(crate) node_id: iroh::EndpointId,
+    pub(crate) layer_start: u32,
+    pub(crate) layer_end: u32,
+    pub(crate) bind_addr: String,
 }
 
 #[cfg(test)]

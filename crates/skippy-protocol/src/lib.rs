@@ -73,8 +73,8 @@ mod tests {
         StageAdmissionSidecar, StageAdmissionSidecarKind, StageArtifactTransferRequest,
         StageArtifactTransferResponse, StageControlRequest, StageControlResponse, StageLoadMode,
         StagePreparationState, StagePreparationStatus, StageReady, StageRuntimeState, StageStatus,
-        StageStatusAck, StageStatusList, StageStatusUpdate, StageTransportOpen, StopStage,
-        stage_control_request, stage_control_response,
+        StageStatusAck, StageStatusList, StageStatusUpdate, StageTopologyStage, StageTransportOpen,
+        StopStage, stage_control_request, stage_control_response,
     };
 
     fn admission(layer_start: u32, layer_end: u32) -> StageAdmissionDescriptor {
@@ -194,6 +194,15 @@ mod tests {
                 source_model_sha256: Some("b6".repeat(32)),
                 source_resolution_policy: SourceResolutionPolicy::Fallback as i32,
                 runtime_profile: Some("strict-profile".to_string()),
+                bind_addr: "127.0.0.1:9000".to_string(),
+                topology_stages: vec![StageTopologyStage {
+                    stage_id: "stage-0".to_string(),
+                    stage_index: 0,
+                    node_id: vec![7u8; 32],
+                    layer_start: 0,
+                    layer_end: 16,
+                    bind_addr: "127.0.0.1:9000".to_string(),
+                }],
                 ..Default::default()
             })),
             ..frame.clone()
@@ -368,12 +377,32 @@ mod tests {
                     package_ref: "gguf:///model.gguf".to_string(),
                     manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
                     stage_id: "stage-1".to_string(),
+                    stage_index: 1,
                     layer_start: 8,
                     layer_end: 16,
                     admission: Some(admission(8, 16)),
                     participant_set_hash: "participants".to_string(),
                     topology_hash: "topology".to_string(),
                     activation_codec: StageActivationCodec::F16RneV1 as i32,
+                    bind_addr: "127.0.0.1:9001".to_string(),
+                    topology_stages: vec![
+                        StageTopologyStage {
+                            stage_id: "stage-0".to_string(),
+                            stage_index: 0,
+                            node_id: vec![7u8; 32],
+                            layer_start: 0,
+                            layer_end: 8,
+                            bind_addr: "127.0.0.1:9000".to_string(),
+                        },
+                        StageTopologyStage {
+                            stage_id: "stage-1".to_string(),
+                            stage_index: 1,
+                            node_id: vec![8u8; 32],
+                            layer_start: 8,
+                            layer_end: 16,
+                            bind_addr: "127.0.0.1:9001".to_string(),
+                        },
+                    ],
                     ..Default::default()
                 }),
                 coordinator_id: Some(vec![8u8; 32]),

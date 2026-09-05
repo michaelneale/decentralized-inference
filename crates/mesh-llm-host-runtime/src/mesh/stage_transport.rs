@@ -710,6 +710,33 @@ impl Node {
         self.stage_topologies.lock().await.record_topology(topology);
     }
 
+    pub(crate) async fn record_stage_load_topology(
+        &self,
+        load: &crate::inference::skippy::StageLoadRequest,
+    ) {
+        let topology = stage_topology_from_load(self.endpoint.id(), load);
+        let mut state = self.stage_topologies.lock().await;
+        state.record_topology(topology.clone());
+        for stage in topology.stages {
+            let mut snapshot = crate::mesh::stage_status_from_load(
+                load,
+                crate::inference::skippy::StageRuntimeState::Starting,
+            );
+            snapshot.stage_id = stage.stage_id;
+            snapshot.stage_index = stage.stage_index;
+            snapshot.layer_start = stage.layer_start;
+            snapshot.layer_end = stage.layer_end;
+            snapshot.bind_addr = stage.endpoint.bind_addr;
+            snapshot.admission =
+                (snapshot.stage_id == load.stage_id).then(|| load.admission.clone());
+            snapshot.error = None;
+            state.record_status(stage_runtime_status_from_snapshot(
+                Some(stage.node_id),
+                snapshot,
+            ));
+        }
+    }
+
     pub async fn activate_stage_topology(&self, topology: StageTopologyInstance) {
         self.stage_topologies
             .lock()
@@ -732,6 +759,35 @@ impl Node {
         self.stage_topologies.lock().await.runtime_statuses()
     }
 
+    pub(crate) async fn cached_stage_statuses(
+        &self,
+        filter: &crate::inference::skippy::StageStatusFilter,
+    ) -> Vec<crate::inference::skippy::StageStatusSnapshot> {
+        self.stage_topologies
+            .lock()
+            .await
+            .runtime_statuses()
+            .into_iter()
+            .filter(|status| {
+                filter
+                    .topology_id
+                    .as_ref()
+                    .is_none_or(|value| value == &status.topology_id)
+                    && filter
+                        .run_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.run_id)
+                    && filter
+                        .stage_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.stage_id)
+            })
+            .map(|status| {
+                stage_snapshot_from_runtime_status(&status, status.state, status.error.clone())
+            })
+            .collect()
+    }
+
     pub async fn refresh_stage_runtime_statuses(&self, timeout: std::time::Duration) {
         let active_statuses = self.stage_topologies.lock().await.active_statuses();
         for status in active_statuses {
@@ -744,12 +800,12 @@ impl Node {
         status: StageRuntimeStatus,
         timeout: std::time::Duration,
     ) {
-        if status.stage_index == 0 {
-            return;
-        }
         let Some(peer_id) = status.node_id else {
             return;
         };
+        if peer_id == self.endpoint.id() {
+            return;
+        }
         let filter = crate::inference::skippy::StageStatusFilter {
             topology_id: Some(status.topology_id.clone()),
             run_id: Some(status.run_id.clone()),
@@ -887,8 +943,7 @@ impl Node {
         if let crate::inference::skippy::StageControlRequest::Load(load)
         | crate::inference::skippy::StageControlRequest::LoadLocal(load) = &request
         {
-            self.record_stage_topology(stage_topology_from_load(self.endpoint.id(), load))
-                .await;
+            self.record_stage_load_topology(load).await;
         }
         // Load/Prepare can take minutes on large stages; use the same
         // per-request budget remote control uses instead of the short default.
@@ -931,8 +986,7 @@ impl Node {
         if let crate::inference::skippy::StageControlRequest::Load(load)
         | crate::inference::skippy::StageControlRequest::LoadLocal(load) = &request
         {
-            self.record_stage_topology(stage_topology_from_load(peer_id, load))
-                .await;
+            self.record_stage_load_topology(load).await;
         }
         let frame = stage_control_request_to_proto(self.endpoint.id(), request)?;
         let response = tokio::time::timeout(timeout, async {

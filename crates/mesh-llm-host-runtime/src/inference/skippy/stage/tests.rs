@@ -81,6 +81,7 @@ fn load_request() -> StageLoadRequest {
         participant_set_hash: "participants".to_string(),
         topology_hash: "topology".to_string(),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        topology_stages: Vec::new(),
         model_path: Some("/models/model.gguf".to_string()),
         source_model_bytes: Some(64 * 1024 * 1024 * 1024),
         source_model_sha256: None,

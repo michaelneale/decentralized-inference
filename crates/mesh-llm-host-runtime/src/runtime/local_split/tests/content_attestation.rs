@@ -179,6 +179,7 @@ async fn strict_multimodal_stage_loads() -> StrictMultimodalStageLoads {
         &generation.stages[0],
         Some(downstream),
         "127.0.0.1:41000",
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     let worker = split_runtime_stage_load_request(
@@ -187,6 +188,7 @@ async fn strict_multimodal_stage_loads() -> StrictMultimodalStageLoads {
         downstream_stage,
         None,
         "127.0.0.1:41000",
+        &std::collections::HashMap::new(),
     )
     .unwrap();
 
@@ -295,7 +297,7 @@ fn strict_ready_status_attests_digest_without_worker_path() {
             status.admission.as_mut().unwrap().plan_id = "other-plan".into()
         }),
         ("activation codec", |status| {
-            status.activation_codec = skippy_protocol::StageActivationCodec::RawF32V1
+            status.activation_codec = skippy_protocol::StageActivationCodec::F16RneV1
         }),
         ("source bytes", |status| {
             status.source_model_bytes = status.source_model_bytes.map(|bytes| bytes + 1)

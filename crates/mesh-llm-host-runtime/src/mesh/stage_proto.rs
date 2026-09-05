@@ -85,7 +85,7 @@ pub(super) fn stage_runtime_status_from_snapshot(
     }
 }
 
-pub(super) fn stage_snapshot_from_runtime_status(
+pub(crate) fn stage_snapshot_from_runtime_status(
     status: &StageRuntimeStatus,
     state: crate::inference::skippy::StageRuntimeState,
     error: Option<String>,
@@ -132,7 +132,7 @@ pub(super) fn stage_snapshot_from_runtime_status(
 }
 
 pub(super) fn stage_topology_from_load(
-    node_id: EndpointId,
+    _node_id: EndpointId,
     load: &crate::inference::skippy::StageLoadRequest,
 ) -> StageTopologyInstance {
     StageTopologyInstance {
@@ -141,16 +141,20 @@ pub(super) fn stage_topology_from_load(
         model_id: load.model_id.clone(),
         package_ref: load.package_ref.clone(),
         manifest_sha256: load.manifest_sha256.clone(),
-        stages: vec![StageAssignment {
-            stage_id: load.stage_id.clone(),
-            stage_index: load.stage_index,
-            node_id,
-            layer_start: load.layer_start,
-            layer_end: load.layer_end,
-            endpoint: StageEndpoint {
-                bind_addr: load.bind_addr.clone(),
-            },
-        }],
+        stages: load
+            .topology_stages
+            .iter()
+            .map(|stage| StageAssignment {
+                stage_id: stage.stage_id.clone(),
+                stage_index: stage.stage_index,
+                node_id: stage.node_id,
+                layer_start: stage.layer_start,
+                layer_end: stage.layer_end,
+                endpoint: StageEndpoint {
+                    bind_addr: stage.bind_addr.clone(),
+                },
+            })
+            .collect(),
     }
 }
 
@@ -312,6 +316,24 @@ pub(super) fn stage_load_to_proto(
         participant_set_hash: load.participant_set_hash,
         topology_hash: load.topology_hash,
         activation_codec: stage_activation_codec_to_proto(load.activation_codec) as i32,
+        topology_stages: load
+            .topology_stages
+            .into_iter()
+            .map(stage_topology_stage_to_proto)
+            .collect(),
+    }
+}
+
+fn stage_topology_stage_to_proto(
+    stage: crate::inference::skippy::StageTopologyStageDescriptor,
+) -> skippy_stage_proto::StageTopologyStage {
+    skippy_stage_proto::StageTopologyStage {
+        stage_id: stage.stage_id,
+        stage_index: stage.stage_index,
+        node_id: stage.node_id.as_bytes().to_vec(),
+        layer_start: stage.layer_start,
+        layer_end: stage.layer_end,
+        bind_addr: stage.bind_addr,
     }
 }
 
@@ -501,6 +523,11 @@ pub(super) fn stage_load_from_proto(
         participant_set_hash: load.participant_set_hash,
         topology_hash: load.topology_hash,
         activation_codec: stage_activation_codec_from_proto(load.activation_codec)?,
+        topology_stages: load
+            .topology_stages
+            .into_iter()
+            .map(stage_topology_stage_from_proto)
+            .collect::<anyhow::Result<Vec<_>>>()?,
         model_path: load.model_path,
         source_model_bytes: load.source_model_bytes,
         source_model_sha256: load.source_model_sha256,
@@ -546,6 +573,19 @@ pub(super) fn stage_load_from_proto(
         load_mode: stage_load_mode_from_proto(load.load_mode),
         upstream: load.upstream.map(stage_peer_from_proto).transpose()?,
         downstream: load.downstream.map(stage_peer_from_proto).transpose()?,
+    })
+}
+
+fn stage_topology_stage_from_proto(
+    stage: skippy_stage_proto::StageTopologyStage,
+) -> anyhow::Result<crate::inference::skippy::StageTopologyStageDescriptor> {
+    Ok(crate::inference::skippy::StageTopologyStageDescriptor {
+        stage_id: stage.stage_id,
+        stage_index: stage.stage_index,
+        node_id: endpoint_id_from_bytes(stage.node_id).context("invalid topology stage node_id")?,
+        layer_start: stage.layer_start,
+        layer_end: stage.layer_end,
+        bind_addr: stage.bind_addr,
     })
 }
 
@@ -795,7 +835,7 @@ pub(super) fn stage_control_unavailable_response(
     )
 }
 
-pub(super) fn stage_status_from_load(
+pub(crate) fn stage_status_from_load(
     load: &crate::inference::skippy::StageLoadRequest,
     state: crate::inference::skippy::StageRuntimeState,
 ) -> crate::inference::skippy::StageStatusSnapshot {
