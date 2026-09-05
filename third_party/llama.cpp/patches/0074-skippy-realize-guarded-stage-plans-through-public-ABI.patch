@@ -1,9 +1,10 @@
-From 7a484cb458292487b3fa27e858699ee4180428be Mon Sep 17 00:00:00 2001
+From e4f195c4d358347ff8cdc126d4528b0e29c9d465 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 5 Sep 2026 23:30:05 +1000
 Subject: [PATCH] skippy: realize guarded stage plans through public ABI
 
 ---
+ include/skippy/common.h                       |   2 +-
  include/skippy/stage_plan.h                   |   8 +-
  src/CMakeLists.txt                            |  15 +
  src/skippy/graph_identity.cpp                 |  39 ++
@@ -12,15 +13,28 @@ Subject: [PATCH] skippy: realize guarded stage plans through public ABI
  src/skippy/stage_slice_plan.cpp               |  27 +-
  src/skippy/stage_slice_plan.h                 |   4 +-
  src/skippy/tests/noalloc_graph_planning.cpp   |   3 +
- .../tests/renamed_multishard_planning.cpp     | 166 ++++++
+ .../tests/renamed_multishard_planning.cpp     | 219 ++++++++
  src/skippy/tests/stage_plan_header.c          |  10 +
  src/skippy/tests/stage_plan_header.cpp        |  13 +
  src/skippy/tests/stage_slice_plan.cpp         |  85 ++-
- 12 files changed, 874 insertions(+), 19 deletions(-)
+ 13 files changed, 928 insertions(+), 20 deletions(-)
  create mode 100644 src/skippy/stage_plan.cpp
  create mode 100644 src/skippy/tests/stage_plan_header.c
  create mode 100644 src/skippy/tests/stage_plan_header.cpp
 
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index 26f3ac86c..fbbb636ef 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -46,7 +46,7 @@ extern "C" {
+ 
+ #define SKIPPY_ABI_VERSION_MAJOR 0
+ #define SKIPPY_ABI_VERSION_MINOR 1
+-#define SKIPPY_ABI_VERSION_PATCH 50
++#define SKIPPY_ABI_VERSION_PATCH 51
+ 
+ #if defined(_MSC_VER)
+ #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
 diff --git a/include/skippy/stage_plan.h b/include/skippy/stage_plan.h
 index fccb21c12..852145ebf 100644
 --- a/include/skippy/stage_plan.h
@@ -800,7 +814,7 @@ index 9dbc7fb0a..f46288a22 100644
      skippy_guarded_stage_slice_plan full_plan;
      std::string full_plan_error;
 diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
-index cfe7224cb..789d1b7b4 100644
+index cfe7224cb..bfb14fd5f 100644
 --- a/src/skippy/tests/renamed_multishard_planning.cpp
 +++ b/src/skippy/tests/renamed_multishard_planning.cpp
 @@ -9,6 +9,7 @@
@@ -819,7 +833,7 @@ index cfe7224cb..789d1b7b4 100644
      }};
      skippy_guarded_stage_slice_plan plan;
      if (!skippy_build_guarded_stage_slice_plan(
-@@ -475,6 +477,166 @@ bool rejects_invalid_bindings(
+@@ -475,6 +477,219 @@ bool rejects_invalid_bindings(
      return rejects(changed);
  }
  
@@ -912,6 +926,15 @@ index cfe7224cb..789d1b7b4 100644
 +        skippy_error_free(error);
 +        return false;
 +    }
++    for (size_t index = 0; index < profiles.size(); ++index) {
++        if (skippy_stage_plan_profile_at_v1(source, index, &profile, &error) != SKIPPY_STATUS_OK ||
++                plan_string(source, profile.profile_id) != profiles[index].profile_id ||
++                plan_string(source, profile.graph_configuration_id) != graph_configuration_id ||
++                plan_string(source, profile.backend_id) != backend_id) {
++            skippy_error_free(error);
++            return false;
++        }
++    }
 +    skippy_stage_plan * repeated = nullptr;
 +    if (skippy_stage_planner_realize_v1(planner, 0, 1, &repeated, &error) != SKIPPY_STATUS_OK) {
 +        skippy_error_free(error);
@@ -923,6 +946,40 @@ index cfe7224cb..789d1b7b4 100644
 +    if (skippy_stage_plan_describe_v1(repeated, &repeated_descriptor, &error) != SKIPPY_STATUS_OK ||
 +            plan_string(source, descriptor.plan_id) != plan_string(repeated, repeated_descriptor.plan_id)) {
 +        skippy_error_free(error);
++        return false;
++    }
++    const std::string original_plan_id = plan_string(source, descriptor.plan_id);
++    const auto identity_plan_id = [&](const skippy_stage_planner_config_v1 & identity_config) {
++        skippy_stage_planner * identity_planner = nullptr;
++        skippy_stage_plan * identity_plan = nullptr;
++        skippy_stage_plan_desc_v1 identity_descriptor{};
++        skippy_error * identity_error = nullptr;
++        if (skippy_stage_planner_create_v1(&identity_config, &identity_planner, &identity_error) != SKIPPY_STATUS_OK ||
++                identity_planner == nullptr ||
++                skippy_stage_planner_realize_v1(identity_planner, 0, 1, &identity_plan, &identity_error) !=
++                        SKIPPY_STATUS_OK ||
++                identity_plan == nullptr ||
++                skippy_stage_plan_describe_v1(identity_plan, &identity_descriptor, &identity_error) !=
++                        SKIPPY_STATUS_OK) {
++            skippy_error_free(identity_error);
++            skippy_stage_plan_free(identity_plan);
++            skippy_stage_planner_free(identity_planner);
++            return std::string{};
++        }
++        const std::string identity = plan_string(identity_plan, identity_descriptor.plan_id);
++        skippy_stage_plan_free(identity_plan);
++        skippy_stage_planner_free(identity_planner);
++        return identity;
++    };
++    auto changed_identity = config;
++    changed_identity.graph_configuration_id = "skippy.test.graph.v2";
++    const std::string changed_graph_plan_id = identity_plan_id(changed_identity);
++    changed_identity = config;
++    changed_identity.backend_id = "skippy.test.other-backend";
++    const std::string changed_backend_plan_id = identity_plan_id(changed_identity);
++    if (changed_graph_plan_id.empty() || changed_backend_plan_id.empty() ||
++            changed_graph_plan_id == original_plan_id || changed_backend_plan_id == original_plan_id ||
++            changed_graph_plan_id == changed_backend_plan_id) {
 +        return false;
 +    }
 +    skippy_stage_plan * partial = reinterpret_cast<skippy_stage_plan *>(1);
@@ -942,6 +999,16 @@ index cfe7224cb..789d1b7b4 100644
 +    auto malformed = config;
 +    malformed.abi_version = 0;
 +    skippy_stage_planner * partial_planner = reinterpret_cast<skippy_stage_planner *>(1);
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    malformed = config;
++    malformed.struct_size = offsetof(skippy_stage_planner_config_v1, graph_configuration_id);
++    partial_planner = nullptr;
 +    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
 +            partial_planner != nullptr) {
 +        skippy_error_free(error);
@@ -986,7 +1053,7 @@ index cfe7224cb..789d1b7b4 100644
  int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
      std::string error;
      std::vector<std::string> generated_paths;
-@@ -540,6 +702,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+@@ -540,6 +755,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
          std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
          return 8;
      }
@@ -1170,4 +1237,5 @@ index 8a4048097..380cf4976 100644
      if (!result) { result = check_state_preparation_execution(true, true); }
 -- 
 2.54.0 (Apple Git-157)
+
 
