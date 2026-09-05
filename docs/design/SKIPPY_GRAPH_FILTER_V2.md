@@ -192,10 +192,11 @@ or converted only where independent source evidence proves full coverage.
   description.
 - Remove the stage filter from planning builds; every model builder emits its
   unsplit computation.
-- Replace all six current graph-build thread-local inputs with explicit,
+- Replace all seven current graph-build thread-local inputs with explicit,
   session-scoped build inputs: the stage filter, activation tokens, RWKV7
-  `v_first`, Gemma3n AltUp, GLM-DSA top-k, and MTP embeddings. Removing only
-  `g_skippy_graph_filter` does not eliminate call-order dependence.
+  `v_first`, Gemma3n AltUp, Qwen4Exp HC, GLM-DSA top-k, and MTP embeddings.
+  Removing only `g_skippy_graph_filter` does not eliminate call-order
+  dependence.
 - Unify set/clear ownership under one scoped lifetime. The current mix of
   unconditional session-end clearing and an RAII filter scope must not permit
   one interleaved session to clear or inherit another session's graph inputs.
