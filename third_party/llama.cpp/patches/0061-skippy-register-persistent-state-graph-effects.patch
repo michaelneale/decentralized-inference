@@ -1,0 +1,585 @@
+From 97e9252e31bbe11ef6d9e9433e9f5e7d99811338 Mon Sep 17 00:00:00 2001
+From: Galadriel
+ <b81c841ed20a8e17caf4e6fac2f6f3bc61d304c84b8394720f6d00f37538c47e@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 18:41:02 +1000
+Subject: [PATCH] skippy: register persistent-state graph effects
+
+---
+ src/CMakeLists.txt                          |   1 +
+ src/llama-graph.cpp                         |  24 ++-
+ src/llama-graph.h                           |   9 ++
+ src/models/mamba-base.cpp                   |  24 ++-
+ src/skippy/state_effects.cpp                | 119 +++++++++++++++
+ src/skippy/state_effects.h                  |  56 +++++++
+ src/skippy/tests/noalloc_graph_planning.cpp | 156 +++++++++++++++++++-
+ 7 files changed, 379 insertions(+), 10 deletions(-)
+ create mode 100644 src/skippy/state_effects.cpp
+ create mode 100644 src/skippy/state_effects.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 3ac27ef8b..3e31ac8fe 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -57,6 +57,7 @@ add_library(llama
+             skippy/model_package.cpp
+             skippy/sampling.cpp
+             skippy/state.cpp
++            skippy/state_effects.cpp
+             skippy/speculative_decoding.cpp
+             skippy/tokenization.cpp
+             llama-vocab.cpp
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 014f95205..a714f1b89 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1580,6 +1580,7 @@ void llm_graph_result::reset() {
+     inputs.clear();
+     fused_nodes.clear();
+     block_boundaries.clear();
++    state_effects.clear();
+ 
+     buf_compute_meta.resize(ggml_tensor_overhead()*max_nodes + ggml_graph_overhead_custom(max_nodes, false));
+ 
+@@ -1761,6 +1762,16 @@ void llm_graph_context::end_block(ggml_tensor * cur, int il) const {
+     res->block_boundaries.push_back({skippy_block_boundary_kind::exit, il, cur});
+ }
+ 
++void llm_graph_context::state_read(skippy_state_kind kind, ggml_tensor * storage, int il) const {
++    res->state_effects.push_back({kind, skippy_state_access::read,
++            il, skippy_state_canonical_storage(storage), nullptr});
++}
++
++void llm_graph_context::state_write(skippy_state_kind kind, ggml_tensor * storage, ggml_tensor * effect_node, int il) const {
++    res->state_effects.push_back({kind, skippy_state_access::write,
++            il, skippy_state_canonical_storage(storage), effect_node});
++}
++
+ 
+ 
+ ggml_tensor * llm_graph_context::build_cvec(
+@@ -3120,8 +3131,14 @@ ggml_tensor * llm_graph_context::build_attn(
+         const auto & k_idxs = inp->get_k_idxs();
+         const auto & v_idxs = inp->get_v_idxs();
+ 
+-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+-        ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
++        ggml_tensor * k_write = mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il);
++        ggml_tensor * v_write = mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il);
++
++        ggml_build_forward_expand(gf, k_write);
++        ggml_build_forward_expand(gf, v_write);
++
++        state_write(skippy_state_kind::kv_key,   k_write, k_write, il);
++        state_write(skippy_state_kind::kv_value, v_write, v_write, il);
+     }
+ 
+     ggml_tensor * kq_mask = inp->get_kq_mask();
+@@ -3130,6 +3147,9 @@ ggml_tensor * llm_graph_context::build_attn(
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+ 
++    state_read(skippy_state_kind::kv_key,   k, il);
++    state_read(skippy_state_kind::kv_value, v, il);
++
+     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+     cb(cur, "kqv_out", il);
+ 
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index f6a5e39e4..fbda56aeb 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -6,6 +6,7 @@
+ #include "llama-adapter.h"
+ 
+ #include "skippy/block_boundaries.h"
++#include "skippy/state_effects.h"
+ 
+ #include <cstdint>
+ #include <vector>
+@@ -1097,6 +1098,8 @@ public:
+ 
+     const std::vector<skippy_block_boundary> & get_block_boundaries() const { return block_boundaries; }
+ 
++    const std::vector<skippy_state_effect> & get_state_effects() const { return state_effects; }
++
+     void set_params(const llm_graph_params & params);
+ 
+     // important graph nodes
+@@ -1122,6 +1125,7 @@ public:
+     std::vector<llm_graph_input_ptr> inputs;
+     std::vector<llm_graph_fused_node> fused_nodes;
+     std::vector<skippy_block_boundary> block_boundaries;
++    std::vector<skippy_state_effect> state_effects;
+ 
+     ggml_context_ptr ctx_compute;
+ 
+@@ -1222,6 +1226,11 @@ struct llm_graph_context {
+     void begin_block(ggml_tensor * cur, int il) const;
+     void end_block(ggml_tensor * cur, int il) const;
+ 
++    // register a persistent-state read or ordered write established by a
++    // generic helper; owned by the exact graph result, stage-independent
++    void state_read(skippy_state_kind kind, ggml_tensor * storage, int il) const;
++    void state_write(skippy_state_kind kind, ggml_tensor * storage, ggml_tensor * effect_node, int il) const;
++
+     //
+     // common
+     //
+diff --git a/src/models/mamba-base.cpp b/src/models/mamba-base.cpp
+index 03ee3805b..41f00313f 100644
+--- a/src/models/mamba-base.cpp
++++ b/src/models/mamba-base.cpp
+@@ -182,6 +182,8 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+     ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs);
+ 
++    state_read(skippy_state_kind::recurrent_conv, conv_states_all, il);
++
+     // d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
+ 
+     // Keep the projection 2D: with a {n_embd, 1, n_seqs} batch the CUDA backend
+@@ -212,10 +214,14 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+             ggml_tensor * last_conv = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs,
+                                                    conv_x->nb[1], conv_x->nb[2], (n_seq_tokens - slot) * conv_x->nb[0]);
+ 
+-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, last_conv,
+-                                                   ggml_view_2d(ctx0, conv_states_all, row_count, n_seqs,
+-                                                                conv_states_all->nb[1],
+-                                                                ((size_t) slot * mem_size + kv_head) * row_size)));
++            ggml_tensor * conv_write = ggml_cpy(ctx0, last_conv,
++                                                ggml_view_2d(ctx0, conv_states_all, row_count, n_seqs,
++                                                             conv_states_all->nb[1],
++                                                             ((size_t) slot * mem_size + kv_head) * row_size));
++            ggml_build_forward_expand(gf, conv_write);
++            if (slot == 0) {
++                state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
++            }
+         }
+ 
+         // 1D convolution
+@@ -263,18 +269,22 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+         };
+ 
+         ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
++
++        state_read(skippy_state_kind::recurrent_ssm, ssm_states_all, il);
++
+         const int64_t D            = d_state * d_inner;
+         const int64_t n_written    = std::min<int64_t>(n_seq_tokens, K);
+         const size_t  row_size     = ggml_row_size(ssm_states_all->type, D);
+         const size_t  y_row_size   = ggml_row_size(y_ssm->type, D);
+         const size_t  state_offset = ggml_nelements(x) * ggml_element_size(x);
+ 
+-        ggml_build_forward_expand(
+-            gf, ggml_cpy(ctx0,
++        ggml_tensor * ssm_write = ggml_cpy(ctx0,
+                          ggml_view_3d(ctx0, y_ssm, D, n_seqs, n_written,
+                                       y_row_size, y_row_size * n_seqs, state_offset),
+                          ggml_view_3d(ctx0, ssm_states_all, D, n_seqs, n_written,
+-                                      ssm_states_all->nb[1], (size_t) mem_size * row_size, kv_head * row_size)));
++                                      ssm_states_all->nb[1], (size_t) mem_size * row_size, kv_head * row_size));
++        ggml_build_forward_expand(gf, ssm_write);
++        state_write(skippy_state_kind::recurrent_ssm, ssm_states_all, ssm_write, il);
+ 
+         ggml_tensor * y = ggml_view_4d(ctx0, y_ssm, head_dim, n_head, n_seq_tokens, n_seqs, x->nb[1], n_head * x->nb[1],
+                                        n_seq_tokens * n_head * x->nb[1], 0);
+diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
+new file mode 100644
+index 000000000..589cf5cc2
+--- /dev/null
++++ b/src/skippy/state_effects.cpp
+@@ -0,0 +1,119 @@
++#include "state_effects.h"
++
++#include "ggml.h"
++
++#include <cinttypes>
++#include <cstdio>
++#include <set>
++#include <tuple>
++#include <unordered_set>
++
++const ggml_tensor * skippy_state_canonical_storage(const ggml_tensor * tensor) {
++    while (tensor != nullptr && tensor->view_src != nullptr) {
++        tensor = tensor->view_src;
++    }
++    return tensor;
++}
++
++static std::string effect_error(const char * fmt, size_t index) {
++    char buf[192];
++    std::snprintf(buf, sizeof(buf), fmt, index);
++    return buf;
++}
++
++static bool state_kind_known(skippy_state_kind kind) {
++    switch (kind) {
++        case skippy_state_kind::kv_key:
++        case skippy_state_kind::kv_value:
++        case skippy_state_kind::recurrent_conv:
++        case skippy_state_kind::recurrent_ssm:
++            return true;
++    }
++    return false;
++}
++
++static bool state_access_known(skippy_state_access access) {
++    switch (access) {
++        case skippy_state_access::read:
++        case skippy_state_access::write:
++            return true;
++    }
++    return false;
++}
++
++bool skippy_validate_state_effects(
++        const std::vector<skippy_state_effect> & effects,
++        const ggml_cgraph * graph,
++        std::string & error) {
++    if (graph == nullptr) {
++        error = "state effects require the exact graph";
++        return false;
++    }
++
++    std::unordered_set<const ggml_tensor *> graph_nodes;
++    for (int i = 0; i < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++i) {
++        graph_nodes.insert(ggml_graph_node(const_cast<ggml_cgraph *>(graph), i));
++    }
++
++    using access_key = std::tuple<int32_t, int32_t, int32_t>;
++    std::set<access_key> seen;
++    std::set<std::tuple<int32_t, int32_t, const ggml_tensor *>> reads;
++
++    for (size_t i = 0; i < effects.size(); ++i) {
++        const skippy_state_effect & effect = effects[i];
++        if (!state_kind_known(effect.kind)) {
++            error = effect_error("state effect %zu has an unknown kind", i);
++            return false;
++        }
++        if (!state_access_known(effect.access)) {
++            error = effect_error("state effect %zu has an unknown access", i);
++            return false;
++        }
++        if (effect.layer < 0) {
++            error = effect_error("state effect %zu has an invalid layer", i);
++            return false;
++        }
++        if (effect.storage == nullptr) {
++            error = effect_error("state effect %zu has null storage", i);
++            return false;
++        }
++        if (effect.storage->view_src != nullptr) {
++            error = effect_error("state effect %zu storage is a view, not canonical", i);
++            return false;
++        }
++        const access_key key{
++            static_cast<int32_t>(effect.kind),
++            static_cast<int32_t>(effect.access),
++            effect.layer,
++        };
++        if (!seen.insert(key).second) {
++            error = effect_error("state effect %zu duplicates a (kind, access, layer) record", i);
++            return false;
++        }
++        if (effect.access == skippy_state_access::read) {
++            reads.insert({static_cast<int32_t>(effect.kind), effect.layer, effect.storage});
++        } else {
++            if (effect.effect_node == nullptr) {
++                error = effect_error("state effect %zu write has no ordered effect node", i);
++                return false;
++            }
++            if (graph_nodes.find(effect.effect_node) == graph_nodes.end()) {
++                error = effect_error("state effect %zu write node is not in the exact graph", i);
++                return false;
++            }
++        }
++    }
++
++    for (size_t i = 0; i < effects.size(); ++i) {
++        const skippy_state_effect & effect = effects[i];
++        if (effect.access != skippy_state_access::write) {
++            continue;
++        }
++        if (reads.find({static_cast<int32_t>(effect.kind), effect.layer, effect.storage}) == reads.end()) {
++            error = effect_error("state effect %zu write has no matching read owner", i);
++            return false;
++        }
++    }
++
++    return true;
++}
+diff --git a/src/skippy/state_effects.h b/src/skippy/state_effects.h
+new file mode 100644
+index 000000000..a4a57865e
+--- /dev/null
++++ b/src/skippy/state_effects.h
+@@ -0,0 +1,56 @@
++#pragma once
++
++// Stage-independent persistent-state access/effect records for the
++// executable graph.
++//
++// Generic graph helpers register every persistent-state read and ordered
++// write they establish, keyed by semantic state kind and layer ordinal and
++// owned by the exact graph result that built them. Records carry no stage
++// range, endpoint ownership, family policy, tensor-name rule, or split
++// decision. Storage identity is the canonical backing tensor: views are
++// resolved through view_src before recording.
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++struct ggml_cgraph;
++struct ggml_tensor;
++
++enum class skippy_state_kind : int32_t {
++    kv_key         = 0,
++    kv_value       = 1,
++    recurrent_conv = 2,
++    recurrent_ssm  = 3,
++};
++
++enum class skippy_state_access : int32_t {
++    read  = 0,
++    write = 1,
++};
++
++struct skippy_state_effect {
++    skippy_state_kind kind = skippy_state_kind::kv_key;
++    skippy_state_access access = skippy_state_access::read;
++    int32_t layer = -1;
++    // canonical backing storage tensor of the persistent state
++    const ggml_tensor * storage = nullptr;
++    // for writes: the graph node that establishes the ordered state update;
++    // null for reads, whose ordering the storage dependency already carries
++    const ggml_tensor * effect_node = nullptr;
++};
++
++// Resolve a possibly-view tensor to its canonical backing storage.
++const ggml_tensor * skippy_state_canonical_storage(const ggml_tensor * tensor);
++
++// Validate the state effects registered while building one graph profile.
++//
++// Fails closed: returns false and sets `error` on an unknown kind or access,
++// invalid layer, null storage, a write without an effect node, a write whose
++// effect node is not present in the exact graph, a duplicate (kind, access,
++// layer) record, or a write without a matching read of the same kind and
++// layer against the same canonical storage.
++bool skippy_validate_state_effects(
++        const std::vector<skippy_state_effect> & effects,
++        const ggml_cgraph * graph,
++        std::string & error);
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index a5814145d..2fd838615 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -9,6 +9,7 @@
+ #include "llama.h"
+ #include "skippy/block_boundaries.h"
+ #include "skippy/graph_dependencies.h"
++#include "skippy/state_effects.h"
+ 
+ #include <algorithm>
+ #include <cstdint>
+@@ -176,9 +177,87 @@ static llama_model * load_metadata_only_model(const char * model_path) {
+ struct graph_profile_result {
+     int node_count = 0;
+     size_t boundary_pairs = 0;
++    size_t state_effects = 0;
+     std::vector<std::string> dependencies;
+ };
+ 
++static bool layer_has_state(
++        const std::vector<skippy_state_effect> & effects,
++        int32_t layer,
++        skippy_state_kind kind,
++        skippy_state_access access) {
++    for (const auto & effect : effects) {
++        if (effect.layer == layer && effect.kind == kind && effect.access == access) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool check_state_effects(
++        const llm_graph_result * graph_result,
++        ggml_cgraph * graph,
++        const llama_model * model,
++        const char * profile_name) {
++    const auto & effects = graph_result->get_state_effects();
++    std::string effect_error;
++    if (!skippy_validate_state_effects(effects, graph, effect_error)) {
++        std::fprintf(stderr, "metadata-only %s state effects invalid: %s\n",
++                profile_name, effect_error.c_str());
++        return false;
++    }
++
++    // every declared layer carries its expected local state class
++    const int32_t n_layer = llama_model_n_layer(model);
++    for (int32_t il = 0; il < n_layer; ++il) {
++        const bool recurrent = model->hparams.is_recr(il);
++        bool ok = true;
++        if (recurrent) {
++            ok = layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read) &&
++                 layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::write) &&
++                 layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read) &&
++                 layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::write);
++        } else {
++            ok = layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::read) &&
++                 layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::write) &&
++                 layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::read) &&
++                 layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::write);
++        }
++        if (!ok) {
++            std::fprintf(stderr,
++                    "metadata-only %s layer %d does not declare its expected %s state class\n",
++                    profile_name, il, recurrent ? "recurrent" : "KV");
++            return false;
++        }
++        // no layer declares the other class's state
++        const bool cross = recurrent
++                ? (layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::read) ||
++                   layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::read))
++                : (layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read) ||
++                   layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read));
++        if (cross) {
++            std::fprintf(stderr,
++                    "metadata-only %s layer %d declares state of the wrong class\n",
++                    profile_name, il);
++            return false;
++        }
++    }
++
++    // persistent state stays local: no state storage is an activation boundary
++    const ggml_tensor * activation_in  = skippy_state_canonical_storage(graph_result->get_skippy_activation_input());
++    const ggml_tensor * activation_out = skippy_state_canonical_storage(graph_result->get_skippy_activation_output());
++    for (const auto & effect : effects) {
++        if (effect.storage == activation_in || effect.storage == activation_out) {
++            std::fprintf(stderr,
++                    "metadata-only %s state storage leaked into an activation boundary\n",
++                    profile_name);
++            return false;
++        }
++    }
++
++    return true;
++}
++
+ static bool build_graph_profile(
+         llama_model * model,
+         bool expect_recurrent,
+@@ -237,6 +316,12 @@ static bool build_graph_profile(
+     }
+     result.boundary_pairs = boundaries.size() / 2;
+ 
++    if (!check_state_effects(graph_result, graph, model, profile_name)) {
++        llama_free(context);
++        return false;
++    }
++    result.state_effects = graph_result->get_state_effects().size();
++
+     result.dependencies = skippy_graph_parameter_dependencies(graph, model);
+     if (result.dependencies.empty()) {
+         std::fprintf(stderr, "metadata-only %s graph has no parameter dependencies\n", profile_name);
+@@ -303,12 +388,24 @@ static int check_noalloc_graphs(const char * model_path, bool expect_recurrent)
+         return 6;
+     }
+ 
+-    std::printf("metadata-only planning: prefill_nodes=%d batched_nodes=%d decode_nodes=%d parameters=%zu block_pairs=%zu recurrent=%d\n",
++    if (prefill.state_effects != batched.state_effects ||
++            prefill.state_effects != decode.state_effects) {
++        std::fprintf(stderr,
++                "metadata-only state effect counts differ: prefill=%zu batched=%zu decode=%zu\n",
++                prefill.state_effects,
++                batched.state_effects,
++                decode.state_effects);
++        llama_model_free(model);
++        return 7;
++    }
++
++    std::printf("metadata-only planning: prefill_nodes=%d batched_nodes=%d decode_nodes=%d parameters=%zu block_pairs=%zu state_effects=%zu recurrent=%d\n",
+             prefill.node_count,
+             batched.node_count,
+             decode.node_count,
+             prefill.dependencies.size(),
+             prefill.boundary_pairs,
++            prefill.state_effects,
+             expect_recurrent ? 1 : 0);
+     llama_model_free(model);
+     return 0;
+@@ -365,6 +462,60 @@ static bool check_boundary_validation_rejects() {
+     return true;
+ }
+ 
++static bool check_state_validation_rejects() {
++    // minimal real graph so effect nodes can be checked for membership
++    std::vector<uint8_t> buf(ggml_tensor_overhead() * 16 + ggml_graph_overhead());
++    ggml_init_params init = { buf.size(), buf.data(), true };
++    ggml_context * ctx = ggml_init(init);
++    ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * value   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * node    = ggml_add(ctx, storage, value);
++    ggml_tensor * stray   = ggml_mul(ctx, storage, value);
++    ggml_cgraph * graph   = ggml_new_graph(ctx);
++    ggml_build_forward_expand(graph, node);
++
++    std::string error;
++    const auto kv = skippy_state_kind::kv_key;
++    const auto rd = skippy_state_access::read;
++    const auto wr = skippy_state_access::write;
++
++    const std::vector<skippy_state_effect> valid = {
++        {kv, rd, 0, storage, nullptr},
++        {kv, wr, 0, storage, node},
++    };
++    if (!skippy_validate_state_effects(valid, graph, error)) {
++        std::fprintf(stderr, "valid state effects rejected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return false;
++    }
++
++    const std::vector<std::vector<skippy_state_effect>> rejected = {
++        // unknown kind
++        {{static_cast<skippy_state_kind>(99), rd, 0, storage, nullptr}},
++        // invalid layer
++        {{kv, rd, -1, storage, nullptr}},
++        // null storage
++        {{kv, rd, 0, nullptr, nullptr}},
++        // write without effect node
++        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, nullptr}},
++        // write whose effect node is not in the exact graph
++        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, stray}},
++        // duplicate (kind, access, layer)
++        {{kv, rd, 0, storage, nullptr}, {kv, rd, 0, storage, nullptr}},
++        // write without matching read owner
++        {{kv, wr, 0, storage, node}},
++    };
++    for (size_t i = 0; i < rejected.size(); ++i) {
++        if (skippy_validate_state_effects(rejected[i], graph, error)) {
++            std::fprintf(stderr, "invalid state effect case %zu was accepted\n", i);
++            ggml_free(ctx);
++            return false;
++        }
++    }
++    ggml_free(ctx);
++    return true;
++}
++
+ int main(int argc, char ** argv) {
+     if (argc != 3) {
+         std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT\n", argv[0]);
+@@ -373,6 +524,9 @@ int main(int argc, char ** argv) {
+     if (!check_boundary_validation_rejects()) {
+         return 65;
+     }
++    if (!check_state_validation_rejects()) {
++        return 66;
++    }
+     llama_backend_init();
+     const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1");
+     llama_backend_free();
+-- 
+2.54.0
+
