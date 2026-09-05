@@ -28,6 +28,7 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 SUITE_OUTPUTS = {
     "product-smoke": MANIFEST_DIR / "product-smoke.json",
+    "product-integration-smoke": MANIFEST_DIR / "product-integration-smoke.json",
     "scripted-binary-smoke": MANIFEST_DIR / "scripted-binary-smoke.json",
     "sdk-smoke": MANIFEST_DIR / "sdk-smoke.json",
     "hf-download-smoke": MANIFEST_DIR / "hf-download-smoke.json",

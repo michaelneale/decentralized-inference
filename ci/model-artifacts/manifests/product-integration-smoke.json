@@ -1,9 +1,48 @@
 {
   "schema_version": 1,
   "manifest_kind": "test-model-artifacts",
-  "suite": "sdk-smoke",
+  "suite": "product-integration-smoke",
   "registry_sha256": "4195a8196e63b8c456f04d3726301e495f0f00e47f0e501771d9a82498249f32",
   "artifacts": [
+    {
+      "id": "family-granite-hybrid",
+      "family": "granite-hybrid",
+      "capability_tags": [
+        "gguf",
+        "hybrid"
+      ],
+      "suites": [
+        "llama-family-certification",
+        "product-integration-smoke"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full",
+        "pull-request",
+        "main",
+        "release"
+      ],
+      "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+      "revision": "a864f823cce6e6048b5752e2816fe7a23987d790",
+      "selector": "Q4_K_M",
+      "files": [
+        "granite-4.0-h-350m-Q4_K_M.gguf"
+      ],
+      "file_integrity": {
+        "granite-4.0-h-350m-Q4_K_M.gguf": {
+          "size_bytes": 222662560,
+          "blob_id": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb"
+        }
+      },
+      "model_ref": "ibm-granite/granite-4.0-h-350m-GGUF:Q4_K_M",
+      "urls": [
+        "https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF/resolve/a864f823cce6e6048b5752e2816fe7a23987d790/granite-4.0-h-350m-Q4_K_M.gguf"
+      ],
+      "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+      "size_bytes": 222662560,
+      "sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb",
+      "url": "https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF/resolve/a864f823cce6e6048b5752e2816fe7a23987d790/granite-4.0-h-350m-Q4_K_M.gguf"
+    },
     {
       "id": "smollm2-q8-inference",
       "family": "smollm2",

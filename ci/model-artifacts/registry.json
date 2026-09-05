@@ -13,6 +13,7 @@
   "suites": [
     "llama-family-certification",
     "product-smoke",
+    "product-integration-smoke",
     "scripted-binary-smoke",
     "sdk-smoke",
     "hf-download-smoke",
@@ -935,11 +936,15 @@
       "id": "family-granite-hybrid",
       "family": "granite-hybrid",
       "suites": [
-        "llama-family-certification"
+        "llama-family-certification",
+        "product-integration-smoke"
       ],
       "cadences": [
         "llama-bump",
-        "manual-full"
+        "manual-full",
+        "pull-request",
+        "main",
+        "release"
       ],
       "capability_tags": [
         "gguf",
@@ -959,6 +964,10 @@
       },
       "certification": {
         "profile": "full",
+        "cadences": [
+          "llama-bump",
+          "manual-full"
+        ],
         "execution": {
           "trunk_layers": 32,
           "mtp_layers": 0,
@@ -1716,6 +1725,7 @@
       "family": "smollm2",
       "suites": [
         "product-smoke",
+        "product-integration-smoke",
         "scripted-binary-smoke",
         "sdk-smoke"
       ],
