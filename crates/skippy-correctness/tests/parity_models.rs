@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 mod harness;
 
 use harness::{
-    activation_handoff_matches_full_model, assert_manifest_row_complete,
+    FULL_LATTICE_MAX_LAYERS, activation_handoff_matches_full_model, assert_manifest_row_complete,
     cache_state_restore_matches_recompute, graph_boundary_contract_matches_stage_roles,
-    mixed_iteration_matches_serial, p0_p1_manifest_rows,
-    representative_cut_lattice, representative_cut_lattice_matches_full_model,
-    FULL_LATTICE_MAX_LAYERS,
+    mixed_iteration_matches_serial, p0_p1_manifest_rows, representative_cut_lattice,
+    representative_cut_lattice_matches_full_model,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,8 +59,14 @@ fn representative_cut_lattice_covers_both_coverage_modes() {
     let reviewed = representative_cut_lattice(16, Some((5, 11))).unwrap();
     assert_eq!(reviewed.first(), Some(&(1, 2)));
     assert_eq!(reviewed.last(), Some(&(14, 15)));
-    assert!(reviewed.contains(&(5, 11)), "reviewed pair must be included");
-    assert_eq!(reviewed.len(), reviewed.iter().collect::<BTreeSet<_>>().len());
+    assert!(
+        reviewed.contains(&(5, 11)),
+        "reviewed pair must be included"
+    );
+    assert_eq!(
+        reviewed.len(),
+        reviewed.iter().collect::<BTreeSet<_>>().len()
+    );
     let expected: BTreeSet<(u32, u32)> = (1..15)
         .flat_map(|s| [(s, s + 1), (1, s + 1), (s, 15)])
         .chain(std::iter::once((5, 11)))

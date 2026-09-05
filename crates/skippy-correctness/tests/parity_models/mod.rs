@@ -1048,9 +1048,7 @@ pub(crate) fn representative_cut_lattice(
     reviewed: Option<(u32, u32)>,
 ) -> Result<Vec<(u32, u32)>> {
     if layer_count < 3 {
-        bail!(
-            "cut lattice requires at least three layers, got {layer_count}"
-        );
+        bail!("cut lattice requires at least three layers, got {layer_count}");
     }
     let last = layer_count - 1;
     let mut cuts: BTreeSet<(u32, u32)> = BTreeSet::new();
