@@ -423,6 +423,7 @@ pub struct StageRuntimeStatus {
     pub node_id: Option<EndpointId>,
     pub layer_start: u32,
     pub layer_end: u32,
+    pub admission: Option<skippy_protocol::StageAdmissionDescriptor>,
     pub state: crate::inference::skippy::StageRuntimeState,
     pub bind_addr: String,
     pub input_activation_boundary: Option<skippy_runtime::ActivationBoundaryDesc>,

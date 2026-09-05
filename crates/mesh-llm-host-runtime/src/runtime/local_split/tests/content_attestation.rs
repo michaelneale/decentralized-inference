@@ -92,6 +92,14 @@ fn strict_multimodal_generation(
     local_id: iroh::EndpointId,
     remote_id: iroh::EndpointId,
 ) -> SplitTopologyGeneration {
+    let stages = vec![
+        local_stage(local_id, 0, 0, 20),
+        local_stage(remote_id, 1, 20, 40),
+    ];
+    let admissions = stages
+        .iter()
+        .map(|stage| skippy::test_stage_admission(stage.layer_start, stage.layer_end))
+        .collect();
     SplitTopologyGeneration::new(
         "strict-multimodal-topology".into(),
         "strict-multimodal-run".into(),
@@ -100,11 +108,10 @@ fn strict_multimodal_generation(
             SplitParticipant::new(local_id, 24_000_000_000, None),
             SplitParticipant::new(remote_id, 24_000_000_000, None),
         ],
-        vec![
-            local_stage(local_id, 0, 0, 20),
-            local_stage(remote_id, 1, 20, 40),
-        ],
+        stages,
     )
+    .with_admissions(admissions)
+    .unwrap()
 }
 
 async fn strict_multimodal_stage_loads() -> StrictMultimodalStageLoads {
@@ -172,14 +179,16 @@ async fn strict_multimodal_stage_loads() -> StrictMultimodalStageLoads {
         &generation.stages[0],
         Some(downstream),
         "127.0.0.1:41000",
-    );
+    )
+    .unwrap();
     let worker = split_runtime_stage_load_request(
         &spec,
         &settings,
         downstream_stage,
         None,
         "127.0.0.1:41000",
-    );
+    )
+    .unwrap();
 
     StrictMultimodalStageLoads {
         projector_path,
@@ -264,7 +273,7 @@ fn strict_ready_status_attests_digest_without_worker_path() {
     accepted.source_model_path = None;
     accepted.source_model_sha256 = load.source_model_sha256.clone();
     type StatusMutation = fn(&mut skippy::StageStatusSnapshot);
-    let mutations: [(&str, StatusMutation); 12] = [
+    let mutations: [(&str, StatusMutation); 13] = [
         ("state", |status| {
             status.state = skippy::StageRuntimeState::Failed
         }),
@@ -281,6 +290,9 @@ fn strict_ready_status_attests_digest_without_worker_path() {
         }),
         ("layer end", |status| {
             status.layer_end = status.layer_end.saturating_sub(1)
+        }),
+        ("admission descriptor", |status| {
+            status.admission.as_mut().unwrap().plan_id = "other-plan".into()
         }),
         ("source bytes", |status| {
             status.source_model_bytes = status.source_model_bytes.map(|bytes| bytes + 1)

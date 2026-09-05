@@ -380,7 +380,7 @@ negative fixtures fail before topology publication.
 - Do not block the internal graph design on a wire change.
 - At the atomic v2-only cutover, advance the stage control protocol to
   generation 8 and require a versioned stage-plan admission descriptor carrying
-  `package_id`, coordinator-minted `plan_id`, the exact stage range, strictly
+  `package_id`, the content-derived native `plan_id`, the exact stage range, strictly
   sorted resident tensor ids, typed sidecars, and all guarded profile/slice
   identities. Generation-7 nodes may remain visible to mesh discovery but
   cannot join, coordinate, source artifacts for, or receive a generation-8

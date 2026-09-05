@@ -374,7 +374,7 @@ async fn stage0_runtime_options(
             settings.stage0,
             Some(downstream.clone()),
             stage0_return_endpoint,
-        );
+        )?;
         let stage0_load = tokio::task::spawn_blocking(move || {
             let verified = skippy::apply_verified_local_source(&mut stage0_load)?;
             anyhow::ensure!(verified, "local-required stage 0 was not content-verified");
@@ -445,7 +445,7 @@ pub(super) async fn load_downstream_split_runtime_stages(
             stage,
             downstream.clone(),
             stage0_return_endpoint,
-        );
+        )?;
         if load.local_source_required {
             let inventory = query_stage_inventory(spec.node, stage.node_id, &load)
                 .await
@@ -635,14 +635,25 @@ pub(super) fn split_runtime_stage_load_request(
     stage: &RuntimeSliceStagePlan,
     downstream: Option<skippy::StagePeerDescriptor>,
     stage0_return_endpoint: &str,
-) -> skippy::StageLoadRequest {
+) -> Result<skippy::StageLoadRequest> {
     let resolved_config = &settings.runtime_options.config;
     let upstream = if downstream.is_none() {
         split_runtime_stage_upstream(spec, stage0_return_endpoint)
     } else {
         None
     };
-    skippy::StageLoadRequest {
+    let admission = spec
+        .generation
+        .admissions
+        .get(&stage.stage_id)
+        .with_context(|| {
+            format!(
+                "stage {} is missing native admission evidence",
+                stage.stage_id
+            )
+        })?
+        .clone();
+    Ok(skippy::StageLoadRequest {
         topology_id: spec.generation.topology_id.clone(),
         run_id: spec.generation.run_id.clone(),
         model_id: spec.model_ref.to_string(),
@@ -654,6 +665,9 @@ pub(super) fn split_runtime_stage_load_request(
         stage_index: stage.stage_index,
         layer_start: stage.layer_start,
         layer_end: stage.layer_end,
+        admission,
+        participant_set_hash: split_participant_set_hash(&spec.generation.participants),
+        topology_hash: split_topology_hash(&spec.generation.stages, &spec.generation.admissions),
         model_path: (!spec.local_source_required).then(|| {
             stage_load_model_path(
                 settings.load_mode.clone(),
@@ -708,7 +722,7 @@ pub(super) fn split_runtime_stage_load_request(
         load_mode: settings.load_mode.clone(),
         upstream,
         downstream,
-    }
+    })
 }
 
 pub(super) fn split_runtime_stage_upstream(
@@ -1042,7 +1056,7 @@ pub(super) fn split_coordinator_claim(
         coordinator_id: coordinator_id.to_string(),
         coordinator_term: generation.coordinator_term,
         participant_set_hash: split_participant_set_hash(&generation.participants),
-        topology_hash: split_topology_hash(&generation.stages),
+        topology_hash: split_topology_hash(&generation.stages, &generation.admissions),
         lease_until_unix_ms: generation.lease_until_unix_ms,
     }
 }

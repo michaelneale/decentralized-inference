@@ -706,6 +706,8 @@ fn load_claim_ref(load: &StageLoadRequest) -> LoadClaimRef {
         run_id: load.run_id.clone(),
         coordinator_id: load.coordinator_id.map(|id| id.to_string()),
         coordinator_term: load.coordinator_term,
+        participant_set_hash: load.participant_set_hash.clone(),
+        topology_hash: load.topology_hash.clone(),
     }
 }
 
@@ -1014,6 +1016,7 @@ fn status_from_running(stage: &RunningStage) -> StageStatusSnapshot {
         stage_index: stage.load.stage_index,
         layer_start: stage.load.layer_start,
         layer_end: stage.load.layer_end,
+        admission: Some(stage.load.admission.clone()),
         state,
         bind_addr: server.bind_addr.to_string(),
         input_activation_boundary: server.input_activation_boundary,
@@ -1050,6 +1053,7 @@ fn stopped_status(stop: &StageStopRequest) -> StageStatusSnapshot {
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
         state: StageRuntimeState::Stopped,
         bind_addr: String::new(),
         input_activation_boundary: None,
@@ -1092,6 +1096,7 @@ fn failed_status_from_load(load: &StageLoadRequest, error: String) -> StageStatu
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
         state: StageRuntimeState::Failed,
         bind_addr: load.bind_addr.clone(),
         input_activation_boundary: None,
@@ -1126,6 +1131,7 @@ fn preparation_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
         state,
         bytes_done: None,
         bytes_total: None,
@@ -1150,6 +1156,7 @@ fn preparation_status_from_cancel(cancel: StageCancelPrepareRequest) -> StagePre
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
         state: StagePreparationState::Cancelled,
         bytes_done: None,
         bytes_total: None,

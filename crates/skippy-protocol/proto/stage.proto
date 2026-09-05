@@ -111,6 +111,9 @@ message LoadStage {
   optional string source_model_sha256 = 45;
   SourceResolutionPolicy source_resolution_policy = 46;
   optional string runtime_profile = 47;
+  StageAdmissionDescriptor admission = 48;
+  string participant_set_hash = 49;
+  string topology_hash = 50;
 }
 
 message StageLoadRuntimeSettings {
@@ -246,6 +249,7 @@ message StageStatus {
   uint64 lease_until_unix_ms = 31;
   optional ActivationBoundaryDescriptor input_activation_boundary = 32;
   optional ActivationBoundaryDescriptor output_activation_boundary = 33;
+  StageAdmissionDescriptor admission = 34;
 }
 
 message StageStatusList {
@@ -298,6 +302,39 @@ message StagePreparationStatus {
   uint64 coordinator_term = 17;
   optional string coordinator_id = 18;
   uint64 lease_until_unix_ms = 19;
+  StageAdmissionDescriptor admission = 20;
+}
+
+message StageAdmissionDescriptor {
+  uint32 version = 1;
+  string package_id = 2;
+  string plan_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  repeated string resident_tensor_ids = 6;
+  repeated StageAdmissionSidecar sidecars = 7;
+  repeated StageAdmissionProfile profiles = 8;
+}
+
+message StageAdmissionSidecar {
+  StageAdmissionSidecarKind kind = 1;
+  string artifact_id = 2;
+  optional string name = 3;
+}
+
+enum StageAdmissionSidecarKind {
+  STAGE_ADMISSION_SIDECAR_KIND_UNSPECIFIED = 0;
+  STAGE_ADMISSION_SIDECAR_KIND_MMPROJ = 1;
+}
+
+message StageAdmissionProfile {
+  string profile_id = 1;
+  string graph_identity = 2;
+  string profile_identity = 3;
+  string slice_identity = 4;
+  string source_snapshot_identity = 5;
+  string graph_configuration_id = 6;
+  string backend_id = 7;
 }
 
 enum SourceModelKind {

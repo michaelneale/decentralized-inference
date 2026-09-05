@@ -496,6 +496,7 @@ fn health_test_stage_status(
         node_id,
         layer_start: 0,
         layer_end: 1,
+        admission: None,
         state,
         bind_addr: "127.0.0.1:9000".to_string(),
         input_activation_boundary: None,

@@ -34,6 +34,7 @@ use crate::inference::skippy;
 use crate::mesh;
 use crate::models;
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -200,6 +201,7 @@ pub(super) async fn start_runtime_split_model(
         compact_meta,
         kv_bytes_per_token,
         planned_topology,
+        stage_admissions,
         topology_locked,
     } = split_setup;
     let stages = planned_topology.stages;
@@ -245,7 +247,8 @@ pub(super) async fn start_runtime_split_model(
         SPLIT_INITIAL_SHUTDOWN_GENERATION,
         planned_participants,
         stages,
-    );
+    )
+    .with_admissions(stage_admissions)?;
     let mut loaded = load_split_runtime_generation(SplitGenerationLoadSpec {
         node: spec.node,
         mesh_config: spec.mesh_config,
@@ -329,6 +332,7 @@ struct SplitRuntimeStartPreparation {
     compact_meta: models::gguf::GgufCompactMeta,
     kv_bytes_per_token: u64,
     planned_topology: PlannedRuntimeSliceTopology,
+    stage_admissions: Vec<skippy_protocol::StageAdmissionDescriptor>,
     topology_locked: bool,
 }
 
@@ -437,14 +441,84 @@ async fn prepare_split_runtime_start(
             Some(canonical_coordinator),
         )?
     };
+    let stage_admissions = realize_split_stage_admissions(
+        spec.model_path,
+        &package,
+        &planned_topology,
+        spec.runtime_profile,
+    )?;
     Ok(SplitRuntimeStartPreparation {
         package,
         participant_snapshot,
         compact_meta,
         kv_bytes_per_token,
         planned_topology,
+        stage_admissions,
         topology_locked,
     })
+}
+
+fn realize_split_stage_admissions(
+    model_path: &Path,
+    package: &skippy::SkippyPackageIdentity,
+    topology: &PlannedRuntimeSliceTopology,
+    runtime_profile: &str,
+) -> Result<Vec<skippy_protocol::StageAdmissionDescriptor>> {
+    let package_ref = Path::new(&package.package_ref);
+    let package_dir = [model_path, package_ref]
+        .into_iter()
+        .find(|path| path.join("model-package.json").is_file())
+        .context("generation-8 split serving requires a local package-v2 directory")?;
+    let lanes = u32::try_from(topology.slots).context("split lane count exceeds u32")?;
+    let batched_tokens = lanes
+        .checked_mul(8)
+        .context("batched native planning token count overflow")?;
+    let profiles = [
+        super::stage_admission::StagePlannerProfile {
+            profile_id: "batched".to_string(),
+            n_tokens: batched_tokens,
+            n_sequences: lanes,
+            n_outputs: batched_tokens,
+            n_recurrent_rollback_sequences: 0,
+        },
+        super::stage_admission::StagePlannerProfile {
+            profile_id: "decode".to_string(),
+            n_tokens: lanes,
+            n_sequences: lanes,
+            n_outputs: lanes,
+            n_recurrent_rollback_sequences: 0,
+        },
+        super::stage_admission::StagePlannerProfile {
+            profile_id: "prefill".to_string(),
+            n_tokens: 8,
+            n_sequences: 1,
+            n_outputs: 8,
+            n_recurrent_rollback_sequences: 0,
+        },
+    ];
+    let mut graph_configuration = Sha256::new();
+    graph_configuration.update(b"skippy-graph-configuration:v1\0");
+    graph_configuration.update(topology.context_length.to_le_bytes());
+    graph_configuration.update(lanes.to_le_bytes());
+    graph_configuration.update((runtime_profile.len() as u64).to_le_bytes());
+    graph_configuration.update(runtime_profile.as_bytes());
+    let graph_configuration_id = format!(
+        "skippy-graph-configuration:v1:{}",
+        hex::encode(graph_configuration.finalize())
+    );
+    let ranges = topology
+        .stages
+        .iter()
+        .map(|stage| (stage.layer_start, stage.layer_end))
+        .collect::<Vec<_>>();
+    super::stage_admission::realize_stage_admissions(
+        package_dir,
+        &ranges,
+        &profiles,
+        &graph_configuration_id,
+        "skippy-backend:auto:v1",
+    )
+    .context("realize and admit generation-8 native stage chain")
 }
 
 async fn elect_split_start_coordinator(

@@ -23,6 +23,10 @@ fn test_stage_status(
         node_id: Some(node_id),
         layer_start: stage_index * 12,
         layer_end: (stage_index + 1) * 12,
+        admission: Some(crate::inference::skippy::test_stage_admission(
+            stage_index * 12,
+            (stage_index + 1) * 12,
+        )),
         state,
         bind_addr: bind_addr.to_string(),
         input_activation_boundary: None,
@@ -51,6 +55,9 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         stage_index: 1,
         layer_start: 12,
         layer_end: 24,
+        admission: crate::inference::skippy::test_stage_admission(12, 24),
+        participant_set_hash: "participants".to_string(),
+        topology_hash: "topology".to_string(),
         model_path: Some("/model.gguf".to_string()),
         source_model_bytes: Some(123_456_789),
         source_model_sha256: None,
@@ -149,6 +156,7 @@ fn test_preparation_status(
         stage_index: 1,
         layer_start: 12,
         layer_end: 24,
+        admission: Some(crate::inference::skippy::test_stage_admission(12, 24)),
         state,
         bytes_done: Some(1024),
         bytes_total: Some(4096),
@@ -256,6 +264,10 @@ fn strict_local_load_uses_distinct_fail_closed_proto_command() {
     assert!(decoded.local_source_required);
     assert!(decoded.model_path.is_none());
     assert!(decoded.projector_path.is_none());
+    assert_eq!(
+        decoded.admission,
+        crate::inference::skippy::test_stage_admission(12, 24)
+    );
 }
 
 #[test]

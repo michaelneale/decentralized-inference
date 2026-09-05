@@ -68,6 +68,7 @@ pub(super) fn stage_runtime_status_from_snapshot(
         node_id,
         layer_start: status.layer_start,
         layer_end: status.layer_end,
+        admission: status.admission,
         state: status.state,
         bind_addr: status.bind_addr,
         input_activation_boundary: status.input_activation_boundary,
@@ -109,6 +110,7 @@ pub(super) fn stage_snapshot_from_runtime_status(
         stage_index: status.stage_index,
         layer_start: status.layer_start,
         layer_end: status.layer_end,
+        admission: status.admission.clone(),
         state,
         bind_addr: status.bind_addr.clone(),
         input_activation_boundary: status.input_activation_boundary,
@@ -304,6 +306,9 @@ pub(super) fn stage_load_to_proto(
         },
         upstream: load.upstream.map(stage_peer_to_proto),
         downstream: load.downstream.map(stage_peer_to_proto),
+        admission: Some(load.admission.into()),
+        participant_set_hash: load.participant_set_hash,
+        topology_hash: load.topology_hash,
     }
 }
 
@@ -458,7 +463,7 @@ pub(super) fn stage_control_request_from_proto(
                 .status
                 .ok_or_else(|| anyhow::anyhow!("stage status update missing status"))?;
             Ok(crate::inference::skippy::StageControlRequest::StatusUpdate(
-                stage_preparation_status_from_proto(status),
+                stage_preparation_status_from_proto(status)?,
             ))
         }
     }
@@ -471,6 +476,12 @@ pub(super) fn stage_load_from_proto(
     let projector_path = (!local_source_required)
         .then(|| load.projector_path.clone())
         .flatten();
+    let admission = load
+        .admission
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("stage load missing admission descriptor"))?
+        .try_into()
+        .map_err(|error| anyhow::anyhow!("invalid stage load admission descriptor: {error}"))?;
     Ok(crate::inference::skippy::StageLoadRequest {
         topology_id: load.topology_id,
         run_id: load.run_id,
@@ -483,6 +494,9 @@ pub(super) fn stage_load_from_proto(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission,
+        participant_set_hash: load.participant_set_hash,
+        topology_hash: load.topology_hash,
         model_path: load.model_path,
         source_model_bytes: load.source_model_bytes,
         source_model_sha256: load.source_model_sha256,
@@ -657,6 +671,7 @@ pub(super) fn stage_control_unavailable_response(
                 stage_index: 0,
                 layer_start: 0,
                 layer_end: 0,
+                admission: None,
                 state: crate::inference::skippy::StageRuntimeState::Failed,
                 bind_addr: String::new(),
                 input_activation_boundary: None,
@@ -763,6 +778,7 @@ pub(super) fn stage_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
         state,
         bind_addr: load.bind_addr.clone(),
         input_activation_boundary: None,
@@ -797,6 +813,7 @@ pub(super) fn stage_preparation_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
         state,
         bytes_done: None,
         bytes_total: None,
@@ -825,6 +842,7 @@ pub(super) fn stage_preparation_status_from_cancel(
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
         state,
         bytes_done: None,
         bytes_total: None,
@@ -935,7 +953,7 @@ pub(super) fn stage_control_response_from_proto(
         }
         Response::LayerInventory(inventory) => {
             Ok(crate::inference::skippy::StageControlResponse::Inventory(
-                layer_inventory_from_proto(inventory),
+                layer_inventory_from_proto(inventory)?,
             ))
         }
         Response::PrepareStageAccepted(accepted) => {
@@ -946,7 +964,7 @@ pub(super) fn stage_control_response_from_proto(
                 crate::inference::skippy::StageControlResponse::PrepareAccepted(
                     crate::inference::skippy::StagePrepareAcceptedResponse {
                         accepted: accepted.accepted,
-                        status: stage_preparation_status_from_proto(status),
+                        status: stage_preparation_status_from_proto(status)?,
                         error: accepted.error,
                     },
                 ),
@@ -954,7 +972,7 @@ pub(super) fn stage_control_response_from_proto(
         }
         Response::StagePreparationStatus(status) => Ok(
             crate::inference::skippy::StageControlResponse::PreparationStatus(
-                stage_preparation_status_from_proto(status),
+                stage_preparation_status_from_proto(status)?,
             ),
         ),
         Response::StageStatusAck(ack) => {
@@ -1006,8 +1024,8 @@ pub(super) fn layer_inventory_to_proto(
 
 pub(super) fn layer_inventory_from_proto(
     inventory: skippy_stage_proto::LayerInventory,
-) -> crate::inference::skippy::StageLayerInventory {
-    crate::inference::skippy::StageLayerInventory {
+) -> anyhow::Result<crate::inference::skippy::StageLayerInventory> {
+    Ok(crate::inference::skippy::StageLayerInventory {
         model_id: inventory.model_id,
         package_ref: inventory.package_ref,
         manifest_sha256: inventory.manifest_sha256,
@@ -1031,13 +1049,13 @@ pub(super) fn layer_inventory_from_proto(
             .preparing_ranges
             .into_iter()
             .map(stage_preparation_status_from_proto)
-            .collect(),
+            .collect::<anyhow::Result<Vec<_>>>()?,
         source_model_path: inventory.source_model_path,
         source_model_bytes: inventory.source_model_bytes,
         source_model_sha256: inventory.source_model_sha256,
         content_addressed_local_source: inventory.content_addressed_local_source,
         source_model_kind: source_model_kind_from_proto(inventory.source_model_kind),
-    }
+    })
 }
 
 fn source_resolution_policy_to_proto(
@@ -1139,12 +1157,13 @@ pub(super) fn stage_preparation_status_to_proto(
         coordinator_term: status.coordinator_term,
         coordinator_id: status.coordinator_id.map(|id| id.to_string()),
         lease_until_unix_ms: status.lease_until_unix_ms,
+        admission: status.admission.map(Into::into),
     }
 }
 
 pub(super) fn stage_preparation_status_from_proto(
     status: skippy_stage_proto::StagePreparationStatus,
-) -> crate::inference::skippy::StagePreparationStatus {
+) -> anyhow::Result<crate::inference::skippy::StagePreparationStatus> {
     let coordinator_id = status.coordinator_id.and_then(|id| match id.parse() {
         Ok(id) => Some(id),
         Err(error) => {
@@ -1156,7 +1175,14 @@ pub(super) fn stage_preparation_status_from_proto(
             None
         }
     });
-    crate::inference::skippy::StagePreparationStatus {
+    let admission = status
+        .admission
+        .map(TryInto::try_into)
+        .transpose()
+        .map_err(|error| {
+            anyhow::anyhow!("invalid stage preparation admission descriptor: {error}")
+        })?;
+    Ok(crate::inference::skippy::StagePreparationStatus {
         topology_id: status.topology_id,
         run_id: status.run_id,
         model_id: status.model_id,
@@ -1167,6 +1193,7 @@ pub(super) fn stage_preparation_status_from_proto(
         stage_index: status.stage_index,
         layer_start: status.layer_start,
         layer_end: status.layer_end,
+        admission,
         state: stage_preparation_state_from_proto(status.state),
         bytes_done: status.bytes_done,
         bytes_total: status.bytes_total,
@@ -1176,7 +1203,7 @@ pub(super) fn stage_preparation_status_from_proto(
         coordinator_term: status.coordinator_term,
         coordinator_id,
         lease_until_unix_ms: status.lease_until_unix_ms,
-    }
+    })
 }
 
 pub(super) fn stage_status_to_proto(
@@ -1220,6 +1247,7 @@ pub(super) fn stage_status_to_proto(
         coordinator_term: status.coordinator_term,
         coordinator_id: status.coordinator_id.map(|id| id.to_string()),
         lease_until_unix_ms: status.lease_until_unix_ms,
+        admission: status.admission.map(Into::into),
     }
 }
 
@@ -1228,6 +1256,11 @@ pub(super) fn stage_status_from_proto(
 ) -> anyhow::Result<crate::inference::skippy::StageStatusSnapshot> {
     let projector_path =
         path_free_stage_projector_path(status.package_ref.as_deref(), status.projector_path);
+    let admission = status
+        .admission
+        .map(TryInto::try_into)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid stage status admission descriptor: {error}"))?;
     Ok(crate::inference::skippy::StageStatusSnapshot {
         topology_id: status.topology_id,
         run_id: status.run_id,
@@ -1237,6 +1270,7 @@ pub(super) fn stage_status_from_proto(
         stage_index: status.stage_index,
         layer_start: status.layer_start,
         layer_end: status.layer_end,
+        admission,
         state: stage_runtime_state_from_proto(status.state),
         bind_addr: status.bind_addr,
         input_activation_boundary: status

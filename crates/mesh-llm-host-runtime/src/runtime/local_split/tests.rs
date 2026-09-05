@@ -45,6 +45,21 @@ lifecycle_health_interval_ms = 5000
     .expect("lifecycle config")
 }
 
+#[test]
+fn topology_hash_commits_exact_stage_admission() {
+    let stages = vec![stage(1, 0, 0, 8)];
+    let mut admissions = std::collections::BTreeMap::from([(
+        stages[0].stage_id.clone(),
+        skippy::test_stage_admission(0, 8),
+    )]);
+    let original = split_topology_hash(&stages, &admissions);
+    admissions
+        .get_mut(&stages[0].stage_id)
+        .unwrap()
+        .plan_id = format!("skippy-plan:v1:{}", "c7".repeat(32));
+    assert_ne!(original, split_topology_hash(&stages, &admissions));
+}
+
 #[tokio::test(start_paused = true)]
 async fn configured_startup_timeout_drives_real_timeout_deadline() {
     let intervals = configured_stage_lifecycle_intervals(&lifecycle_config(), Some("test/model"));

@@ -31,6 +31,8 @@ pub struct LoadClaimRef {
     pub run_id: String,
     pub coordinator_id: Option<String>,
     pub coordinator_term: u64,
+    pub participant_set_hash: String,
+    pub topology_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +85,10 @@ pub enum LoadRejection {
     CoordinatorMismatch,
     #[error("coordinator claim does not match topology/run")]
     TopologyRunMismatch,
+    #[error("coordinator claim participant set hash does not match load")]
+    ParticipantSetMismatch,
+    #[error("coordinator claim topology hash does not match load")]
+    TopologyHashMismatch,
     #[error("coordinator lease expired")]
     ExpiredLease,
 }
@@ -158,6 +164,12 @@ impl ClaimFence {
         }
         if claim.topology_id != load.topology_id || claim.run_id != load.run_id {
             return Err(LoadRejection::TopologyRunMismatch);
+        }
+        if claim.participant_set_hash != load.participant_set_hash {
+            return Err(LoadRejection::ParticipantSetMismatch);
+        }
+        if claim.topology_hash != load.topology_hash {
+            return Err(LoadRejection::TopologyHashMismatch);
         }
         if claim.lease_until_unix_ms < now_unix_ms {
             return Err(LoadRejection::ExpiredLease);
@@ -275,6 +287,8 @@ mod tests {
             run_id: format!("run-{term}"),
             coordinator_id: Some("node-a".to_string()),
             coordinator_term: term,
+            participant_set_hash: "participants".to_string(),
+            topology_hash: format!("topology-hash-{term}"),
         }
     }
 
@@ -339,6 +353,26 @@ mod tests {
         let mut fence = ClaimFence::default();
         fence.accept_claim(claim(3), 1_000);
         assert_eq!(fence.validate_load(&load(3), 1_000), Ok(()));
+    }
+
+    #[test]
+    fn rejects_load_when_claim_hashes_do_not_match() {
+        let mut fence = ClaimFence::default();
+        fence.accept_claim(claim(3), 1_000);
+
+        let mut participant_mismatch = load(3);
+        participant_mismatch.participant_set_hash = "other-participants".to_string();
+        assert_eq!(
+            fence.validate_load(&participant_mismatch, 1_000),
+            Err(LoadRejection::ParticipantSetMismatch)
+        );
+
+        let mut topology_mismatch = load(3);
+        topology_mismatch.topology_hash = "other-topology".to_string();
+        assert_eq!(
+            fence.validate_load(&topology_mismatch, 1_000),
+            Err(LoadRejection::TopologyHashMismatch)
+        );
     }
 
     #[test]

@@ -9,9 +9,13 @@
 //! profile identities must agree on both sides. Any mismatch produces a
 //! structured [`StagePlanAdmissionError`] before `activate_stage_topology`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{CStr, CString};
 use std::fmt;
+use std::path::{Component, Path, PathBuf};
+use std::ptr;
 
+use anyhow::Context as _;
 use skippy_package_format::{PackageManifest, Sidecar};
 
 /// The planned admission expectations for one stage.
@@ -22,7 +26,7 @@ use skippy_package_format::{PackageManifest, Sidecar};
 pub struct PlannedStageAdmission {
     /// Content-derived package identity (`sha256:...`).
     pub package_id: String,
-    /// Coordinator-minted plan identity.
+    /// Deterministic native semantic plan identity (`skippy-plan:v1:...`).
     pub plan_id: String,
     pub layer_start: u32,
     pub layer_end: u32,
@@ -70,6 +74,119 @@ pub struct RealizedStageProfile {
     pub source_snapshot_identity: String,
     pub graph_configuration_id: String,
     pub backend_id: String,
+    pub activation_imports: Vec<String>,
+    pub activation_exports: Vec<String>,
+    pub request_inputs: Vec<String>,
+    pub state_effects: Vec<RealizedStageStateEffect>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RealizedStageStateEffect {
+    pub identity: String,
+    pub kind: skippy_ffi::StagePlanStateKind,
+    pub access: skippy_ffi::StagePlanStateAccess,
+    pub layer: i32,
+    pub write_ordinal: i64,
+}
+
+/// Exact native planning profiles. The IDs must be strictly sorted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagePlannerProfile {
+    pub profile_id: String,
+    pub n_tokens: u32,
+    pub n_sequences: u32,
+    pub n_outputs: u32,
+    pub n_recurrent_rollback_sequences: u32,
+}
+
+impl From<&RealizedStagePlan> for PlannedStageAdmission {
+    fn from(realized: &RealizedStagePlan) -> Self {
+        Self {
+            package_id: realized.package_id.clone(),
+            plan_id: realized.plan_id.clone(),
+            layer_start: realized.layer_start,
+            layer_end: realized.layer_end,
+            resident_tensor_ids: realized.resident_tensor_ids.clone(),
+            sidecars: realized.sidecars.clone(),
+            profiles: realized
+                .profiles
+                .iter()
+                .map(|profile| PlannedStageProfile {
+                    profile_id: profile.profile_id.clone(),
+                    graph_identity: profile.graph_identity.clone(),
+                    profile_identity: profile.profile_identity.clone(),
+                    slice_identity: profile.slice_identity.clone(),
+                    source_snapshot_identity: profile.source_snapshot_identity.clone(),
+                    graph_configuration_id: profile.graph_configuration_id.clone(),
+                    backend_id: profile.backend_id.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&PlannedStageAdmission> for skippy_protocol::StageAdmissionDescriptor {
+    fn from(planned: &PlannedStageAdmission) -> Self {
+        Self {
+            version: skippy_protocol::STAGE_ADMISSION_DESCRIPTOR_VERSION,
+            package_id: planned.package_id.clone(),
+            plan_id: planned.plan_id.clone(),
+            layer_start: planned.layer_start,
+            layer_end: planned.layer_end,
+            resident_tensor_ids: planned.resident_tensor_ids.clone(),
+            sidecars: planned
+                .sidecars
+                .iter()
+                .map(|sidecar| skippy_protocol::StageAdmissionSidecar {
+                    kind: match sidecar.kind {
+                        skippy_package_format::SidecarKind::Mmproj => {
+                            skippy_protocol::StageAdmissionSidecarKind::Mmproj
+                        }
+                    },
+                    artifact_id: sidecar.artifact_id.clone(),
+                    name: sidecar.name.clone(),
+                })
+                .collect(),
+            profiles: planned
+                .profiles
+                .iter()
+                .map(|profile| skippy_protocol::StageAdmissionProfile {
+                    profile_id: profile.profile_id.clone(),
+                    graph_identity: profile.graph_identity.clone(),
+                    profile_identity: profile.profile_identity.clone(),
+                    slice_identity: profile.slice_identity.clone(),
+                    source_snapshot_identity: profile.source_snapshot_identity.clone(),
+                    graph_configuration_id: profile.graph_configuration_id.clone(),
+                    backend_id: profile.backend_id.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A native realized plan kept alive until the complete chain has been
+/// validated through the public ABI.
+struct NativePlan {
+    raw: *mut skippy_ffi::StagePlan,
+    realized: RealizedStagePlan,
+}
+
+impl Drop for NativePlan {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe { skippy_ffi::skippy_stage_plan_free(self.raw) };
+        }
+    }
+}
+
+struct NativePlanner(*mut skippy_ffi::StagePlanner);
+
+impl Drop for NativePlanner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { skippy_ffi::skippy_stage_planner_free(self.0) };
+        }
+    }
 }
 
 /// The admitted stage: exact identities that passed every check.
@@ -192,21 +309,21 @@ impl fmt::Display for StagePlanAdmissionError {
                 realized_only,
             } => write!(
                 formatter,
-                "realized resident tensor closure differs from plan: unplanned realized {planned_only:?}, unrealized planned {realized_only:?}"
+                "realized resident tensor closure differs from plan: unrealized planned {planned_only:?}, unplanned realized {realized_only:?}"
             ),
             Self::SidecarMismatch {
                 planned_only,
                 realized_only,
             } => write!(
                 formatter,
-                "realized sidecars differ from plan: unplanned realized {planned_only:?}, unrealized planned {realized_only:?}"
+                "realized sidecars differ from plan: unrealized planned {planned_only:?}, unplanned realized {realized_only:?}"
             ),
             Self::ProfileSetMismatch {
                 planned_only,
                 realized_only,
             } => write!(
                 formatter,
-                "realized profile set differs from plan: unplanned realized {planned_only:?}, unrealized planned {realized_only:?}"
+                "realized profile set differs from plan: unrealized planned {planned_only:?}, unplanned realized {realized_only:?}"
             ),
             Self::ProfileIdentityMismatch {
                 profile_id,
@@ -223,6 +340,769 @@ impl fmt::Display for StagePlanAdmissionError {
 }
 
 impl std::error::Error for StagePlanAdmissionError {}
+
+/// Open a package-v2 manifest and realize an exact native plan for every
+/// requested stage. The native plan objects remain alive until the complete
+/// chain passes `skippy_stage_plan_validate_chain_v1`.
+pub fn realize_native_stage_chain(
+    package_dir: &Path,
+    ranges: &[(u32, u32)],
+    profiles: &[StagePlannerProfile],
+    graph_configuration_id: &str,
+    backend_id: &str,
+    sidecars_by_stage: &[Vec<Sidecar>],
+) -> anyhow::Result<(PackageManifest, Vec<RealizedStagePlan>)> {
+    anyhow::ensure!(!ranges.is_empty(), "stage plan chain is empty");
+    anyhow::ensure!(
+        ranges.len() == sidecars_by_stage.len(),
+        "stage ranges and sidecar selections differ in length"
+    );
+    let manifest_path = package_dir.join("model-package.json");
+    let manifest: PackageManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("validate package-v2 manifest")?;
+    let computed_package_id = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed_package_id,
+        "package-v2 manifest package_id does not match its content"
+    );
+
+    let inputs = PlannerInputs::new(
+        package_dir,
+        &manifest,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+    )?;
+    let planner = inputs.create_native_planner()?;
+    let mut plans = Vec::with_capacity(ranges.len());
+    for ((layer_start, layer_end), sidecars) in ranges.iter().zip(sidecars_by_stage) {
+        plans.push(realize_native_plan(
+            &planner,
+            *layer_start,
+            *layer_end,
+            sidecars.clone(),
+        )?);
+    }
+    let raw_plans = plans
+        .iter()
+        .map(|plan| plan.raw.cast_const())
+        .collect::<Vec<_>>();
+    let mut error = ptr::null_mut();
+    let status = unsafe {
+        skippy_ffi::skippy_stage_plan_validate_chain_v1(
+            raw_plans.as_ptr(),
+            raw_plans.len(),
+            &mut error,
+        )
+    };
+    ffi_result(status, error).context("validate native stage-plan chain")?;
+    Ok((
+        manifest,
+        plans
+            .into_iter()
+            .map(|plan| plan.realized.clone())
+            .collect(),
+    ))
+}
+
+/// Realize, package-resolve, and admit every stage before a topology can be
+/// published. Returned descriptors are canonical generation-8 wire values.
+pub fn realize_stage_admissions(
+    package_dir: &Path,
+    ranges: &[(u32, u32)],
+    profiles: &[StagePlannerProfile],
+    graph_configuration_id: &str,
+    backend_id: &str,
+) -> anyhow::Result<Vec<skippy_protocol::StageAdmissionDescriptor>> {
+    let manifest_bytes = std::fs::read(package_dir.join("model-package.json"))
+        .context("read package-v2 manifest for sidecar assignment")?;
+    let manifest: PackageManifest =
+        serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    let sidecars_by_stage = ranges
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if index == 0 {
+                manifest.sidecars.clone()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect::<Vec<_>>();
+    let (manifest, realized) = realize_native_stage_chain(
+        package_dir,
+        ranges,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+        &sidecars_by_stage,
+    )?;
+    realized
+        .iter()
+        .map(|realized| {
+            let planned = PlannedStageAdmission::from(realized);
+            admit_stage_plan(&planned, realized, &manifest).context("admit native stage plan")?;
+            Ok(skippy_protocol::StageAdmissionDescriptor::from(&planned))
+        })
+        .collect()
+}
+
+struct PlannerInputs {
+    package_id: CString,
+    shard_paths: Vec<CString>,
+    _tensor_ids: Vec<CString>,
+    _tensor_names: Vec<CString>,
+    tensors: Vec<skippy_ffi::StagePlannerTensorV1>,
+    _profile_ids: Vec<CString>,
+    profiles: Vec<skippy_ffi::StagePlannerProfileV1>,
+    graph_configuration_id: CString,
+    backend_id: CString,
+}
+
+impl PlannerInputs {
+    fn new(
+        package_dir: &Path,
+        manifest: &PackageManifest,
+        profiles: &[StagePlannerProfile],
+        graph_configuration_id: &str,
+        backend_id: &str,
+    ) -> anyhow::Result<Self> {
+        let artifact_by_id = manifest
+            .artifact_catalog
+            .entries
+            .iter()
+            .map(|artifact| (artifact.id.as_str(), artifact))
+            .collect::<BTreeMap<_, _>>();
+        let mut source_artifacts = artifact_by_id
+            .iter()
+            .filter_map(|(id, artifact)| source_artifact_index(id).map(|index| (index, *artifact)))
+            .collect::<Vec<_>>();
+        source_artifacts.sort_by_key(|(index, _)| *index);
+        anyhow::ensure!(
+            !source_artifacts.is_empty()
+                && source_artifacts
+                    .iter()
+                    .enumerate()
+                    .all(|(expected, (actual, _))| expected == *actual),
+            "package-v2 source artifacts are not a contiguous source-00000 shard set"
+        );
+        let mut shard_paths = Vec::with_capacity(source_artifacts.len());
+        let mut shard_index_by_artifact = BTreeMap::new();
+        for (index, artifact) in &source_artifacts {
+            let path = contained_package_path(package_dir, &artifact.path)?;
+            anyhow::ensure!(
+                path.is_file(),
+                "package-v2 artifact is missing: {}",
+                path.display()
+            );
+            shard_paths.push(path_cstring(&path, "package-v2 shard path")?);
+            shard_index_by_artifact.insert(artifact.id.as_str(), *index);
+        }
+
+        let tensor_by_id = manifest
+            .tensor_catalog
+            .entries
+            .iter()
+            .map(|tensor| (tensor.id.as_str(), tensor))
+            .collect::<BTreeMap<_, _>>();
+        anyhow::ensure!(
+            tensor_by_id.len() == manifest.tensor_catalog.entries.len(),
+            "package-v2 tensor IDs are duplicated"
+        );
+        let ordered_tensors = tensor_by_id.values().copied().collect::<Vec<_>>();
+        let tensor_ids = ordered_tensors
+            .iter()
+            .map(|tensor| cstring(&tensor.id, "tensor ID"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let tensor_names = ordered_tensors
+            .iter()
+            .map(|tensor| cstring(&tensor.name, "native tensor name"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut tensors = Vec::with_capacity(ordered_tensors.len());
+        for (index, tensor) in ordered_tensors.iter().enumerate() {
+            let (artifact_id, data_offset, stored_length) =
+                tensor_storage(manifest, &tensor_by_id, &tensor.id)?;
+            let split_no = *shard_index_by_artifact.get(artifact_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tensor {:?} resolves to non-source artifact {:?}",
+                    tensor.id,
+                    artifact_id
+                )
+            })?;
+            let mut dimensions = [0_i64; skippy_ffi::STAGE_PLAN_MAX_DIMS];
+            anyhow::ensure!(
+                !tensor.dimensions.is_empty()
+                    && tensor.dimensions.len() <= skippy_ffi::STAGE_PLAN_MAX_DIMS,
+                "tensor {:?} has unsupported rank {}",
+                tensor.id,
+                tensor.dimensions.len()
+            );
+            for (destination, source) in dimensions.iter_mut().zip(&tensor.dimensions) {
+                *destination = i64::try_from(*source)
+                    .with_context(|| format!("tensor {:?} dimension exceeds i64", tensor.id))?;
+                anyhow::ensure!(
+                    *destination > 0,
+                    "tensor {:?} has an empty dimension",
+                    tensor.id
+                );
+            }
+            tensors.push(skippy_ffi::StagePlannerTensorV1 {
+                abi_version: skippy_ffi::STAGE_PLANNER_TENSOR_V1_ABI_VERSION,
+                struct_size: u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerTensorV1>())
+                    .expect("stage planner tensor descriptor size fits u32"),
+                tensor_id: tensor_ids[index].as_ptr(),
+                native_name: tensor_names[index].as_ptr(),
+                ggml_type: i32::try_from(tensor.ggml_type)
+                    .context("GGML tensor type exceeds i32")?,
+                dimension_count: u32::try_from(tensor.dimensions.len())
+                    .expect("validated tensor rank fits u32"),
+                dimensions,
+                split_no: u32::try_from(split_no).context("shard index exceeds u32")?,
+                reserved: 0,
+                data_offset,
+                stored_length,
+            });
+        }
+
+        let mut previous_profile = None;
+        let profile_ids = profiles
+            .iter()
+            .map(|profile| {
+                if previous_profile
+                    .is_some_and(|previous: &str| previous >= profile.profile_id.as_str())
+                {
+                    anyhow::bail!("stage planner profile IDs are not strictly sorted");
+                }
+                previous_profile = Some(profile.profile_id.as_str());
+                cstring(&profile.profile_id, "profile ID")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            !profile_ids.is_empty(),
+            "stage planner profile set is empty"
+        );
+        let profiles = profiles
+            .iter()
+            .zip(&profile_ids)
+            .map(|(profile, id)| skippy_ffi::StagePlannerProfileV1 {
+                abi_version: skippy_ffi::STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
+                struct_size:
+                    u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerProfileV1>())
+                        .expect("stage planner profile descriptor size fits u32"),
+                profile_id: id.as_ptr(),
+                n_tokens: profile.n_tokens,
+                n_sequences: profile.n_sequences,
+                n_outputs: profile.n_outputs,
+                n_recurrent_rollback_sequences: profile.n_recurrent_rollback_sequences,
+            })
+            .collect();
+        Ok(Self {
+            package_id: cstring(&manifest.package_id, "package ID")?,
+            shard_paths,
+            _tensor_ids: tensor_ids,
+            _tensor_names: tensor_names,
+            tensors,
+            _profile_ids: profile_ids,
+            profiles,
+            graph_configuration_id: cstring(graph_configuration_id, "graph configuration ID")?,
+            backend_id: cstring(backend_id, "backend ID")?,
+        })
+    }
+
+    fn create_native_planner(&self) -> anyhow::Result<NativePlanner> {
+        let shard_path_ptrs = self
+            .shard_paths
+            .iter()
+            .map(|path| path.as_ptr())
+            .collect::<Vec<_>>();
+        let config = skippy_ffi::StagePlannerConfigV1 {
+            abi_version: skippy_ffi::STAGE_PLANNER_CONFIG_V1_ABI_VERSION,
+            struct_size: u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerConfigV1>())
+                .expect("stage planner config size fits u32"),
+            package_id: self.package_id.as_ptr(),
+            shard_paths: shard_path_ptrs.as_ptr(),
+            shard_count: shard_path_ptrs.len(),
+            tensors: self.tensors.as_ptr(),
+            tensor_count: self.tensors.len(),
+            profiles: self.profiles.as_ptr(),
+            profile_count: self.profiles.len(),
+            graph_configuration_id: self.graph_configuration_id.as_ptr(),
+            backend_id: self.backend_id.as_ptr(),
+        };
+        let mut raw = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let status =
+            unsafe { skippy_ffi::skippy_stage_planner_create_v1(&config, &mut raw, &mut error) };
+        ffi_result(status, error).context("create native stage planner")?;
+        anyhow::ensure!(
+            !raw.is_null(),
+            "native stage planner returned a null handle"
+        );
+        Ok(NativePlanner(raw))
+    }
+}
+
+fn realize_native_plan(
+    planner: &NativePlanner,
+    layer_start: u32,
+    layer_end: u32,
+    sidecars: Vec<Sidecar>,
+) -> anyhow::Result<NativePlan> {
+    let layer_start_i32 = i32::try_from(layer_start).context("stage layer start exceeds i32")?;
+    let layer_end_i32 = i32::try_from(layer_end).context("stage layer end exceeds i32")?;
+    let mut raw = ptr::null_mut();
+    let mut error = ptr::null_mut();
+    let status = unsafe {
+        skippy_ffi::skippy_stage_planner_realize_v1(
+            planner.0,
+            layer_start_i32,
+            layer_end_i32,
+            &mut raw,
+            &mut error,
+        )
+    };
+    if let Err(error) = ffi_result(status, error).context("realize native stage plan") {
+        if !raw.is_null() {
+            unsafe { skippy_ffi::skippy_stage_plan_free(raw) };
+        }
+        return Err(error);
+    }
+    anyhow::ensure!(
+        !raw.is_null(),
+        "native stage realization returned a null plan"
+    );
+
+    let realized = describe_native_plan(raw, sidecars).inspect_err(|_| unsafe {
+        skippy_ffi::skippy_stage_plan_free(raw);
+    })?;
+    anyhow::ensure!(
+        realized.layer_start == layer_start && realized.layer_end == layer_end,
+        "native stage descriptor range {}..{} differs from requested {}..{}",
+        realized.layer_start,
+        realized.layer_end,
+        layer_start,
+        layer_end
+    );
+    Ok(NativePlan { raw, realized })
+}
+
+fn describe_native_plan(
+    raw: *const skippy_ffi::StagePlan,
+    sidecars: Vec<Sidecar>,
+) -> anyhow::Result<RealizedStagePlan> {
+    let mut descriptor = unsafe { std::mem::zeroed::<skippy_ffi::StagePlanDescV1>() };
+    let mut error = ptr::null_mut();
+    let status =
+        unsafe { skippy_ffi::skippy_stage_plan_describe_v1(raw, &mut descriptor, &mut error) };
+    ffi_result(status, error).context("describe native stage plan")?;
+    ensure_descriptor_abi(
+        "stage plan",
+        descriptor.abi_version,
+        skippy_ffi::STAGE_PLAN_DESC_V1_ABI_VERSION,
+        descriptor.struct_size,
+        std::mem::size_of::<skippy_ffi::StagePlanDescV1>(),
+    )?;
+    anyhow::ensure!(
+        descriptor.layer_count > 0,
+        "native stage plan has no layers"
+    );
+    anyhow::ensure!(
+        descriptor.layer_start >= 0
+            && descriptor.layer_end > descriptor.layer_start
+            && descriptor.layer_end <= descriptor.layer_count,
+        "native stage plan has invalid layer range {}..{} for {} layers",
+        descriptor.layer_start,
+        descriptor.layer_end,
+        descriptor.layer_count
+    );
+
+    let resident_count = usize::try_from(descriptor.resident_tensor_count)
+        .context("native resident tensor count exceeds usize")?;
+    let mut resident_tensor_ids = Vec::with_capacity(resident_count);
+    for index in 0..resident_count {
+        let mut value = unsafe { std::mem::zeroed::<skippy_ffi::StagePlanValueDescV1>() };
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_stage_plan_resident_tensor_at_v1(raw, index, &mut value, &mut error)
+        };
+        ffi_result(status, error)
+            .with_context(|| format!("read native resident tensor {index}"))?;
+        ensure_descriptor_abi(
+            "stage plan resident tensor",
+            value.abi_version,
+            skippy_ffi::STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION,
+            value.struct_size,
+            std::mem::size_of::<skippy_ffi::StagePlanValueDescV1>(),
+        )?;
+        resident_tensor_ids.push(read_plan_string(raw, value.identity)?);
+    }
+    ensure_canonical_strings("native resident tensor IDs", &resident_tensor_ids)?;
+
+    let profile_count =
+        usize::try_from(descriptor.profile_count).context("native profile count exceeds usize")?;
+    anyhow::ensure!(
+        profile_count > 0,
+        "native stage plan has no guarded profiles"
+    );
+    let mut profiles = Vec::with_capacity(profile_count);
+    for profile_index in 0..profile_count {
+        profiles.push(read_native_profile(raw, profile_index)?);
+    }
+    ensure_canonical_strings(
+        "native profile IDs",
+        &profiles
+            .iter()
+            .map(|profile| profile.profile_id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+
+    for (index, window) in sidecars.windows(2).enumerate() {
+        anyhow::ensure!(
+            window[0] < window[1],
+            "native stage host sidecars are not strictly sorted at index {index}"
+        );
+    }
+    let package_id = read_plan_string(raw, descriptor.package_id)?;
+    let plan_id = read_plan_string(raw, descriptor.plan_id)?;
+    anyhow::ensure!(
+        package_id
+            .strip_prefix("sha256:")
+            .is_some_and(is_lower_hex_digest),
+        "native stage package identity is not canonical"
+    );
+    anyhow::ensure!(
+        plan_id
+            .strip_prefix("skippy-plan:v1:")
+            .is_some_and(is_lower_hex_digest),
+        "native stage plan identity is not canonical"
+    );
+    Ok(RealizedStagePlan {
+        package_id,
+        plan_id,
+        layer_start: u32::try_from(descriptor.layer_start)
+            .expect("validated nonnegative native layer start"),
+        layer_end: u32::try_from(descriptor.layer_end)
+            .expect("validated positive native layer end"),
+        resident_tensor_ids,
+        sidecars,
+        profiles,
+    })
+}
+
+fn read_native_profile(
+    raw: *const skippy_ffi::StagePlan,
+    profile_index: usize,
+) -> anyhow::Result<RealizedStageProfile> {
+    let mut descriptor = unsafe { std::mem::zeroed::<skippy_ffi::StagePlanProfileDescV1>() };
+    let mut error = ptr::null_mut();
+    let status = unsafe {
+        skippy_ffi::skippy_stage_plan_profile_at_v1(raw, profile_index, &mut descriptor, &mut error)
+    };
+    ffi_result(status, error)
+        .with_context(|| format!("read native stage profile {profile_index}"))?;
+    ensure_descriptor_abi(
+        "stage plan profile",
+        descriptor.abi_version,
+        skippy_ffi::STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION,
+        descriptor.struct_size,
+        std::mem::size_of::<skippy_ffi::StagePlanProfileDescV1>(),
+    )?;
+    anyhow::ensure!(
+        descriptor.n_tokens > 0
+            && descriptor.n_sequences > 0
+            && descriptor.n_outputs > 0
+            && descriptor.n_tokens % descriptor.n_sequences == 0
+            && descriptor.n_outputs <= descriptor.n_tokens,
+        "native stage profile {profile_index} has an invalid execution guard"
+    );
+
+    let activation_imports = read_native_values(
+        raw,
+        profile_index,
+        skippy_ffi::StagePlanValueKind::ActivationImport,
+        descriptor.activation_import_count,
+    )?;
+    let activation_exports = read_native_values(
+        raw,
+        profile_index,
+        skippy_ffi::StagePlanValueKind::ActivationExport,
+        descriptor.activation_export_count,
+    )?;
+    let request_inputs = read_native_values(
+        raw,
+        profile_index,
+        skippy_ffi::StagePlanValueKind::RequestInput,
+        descriptor.request_input_count,
+    )?;
+    let state_count = usize::try_from(descriptor.state_effect_count)
+        .context("native state effect count exceeds usize")?;
+    let mut state_effects = Vec::with_capacity(state_count);
+    let mut state_identities = BTreeSet::new();
+    for index in 0..state_count {
+        let mut state = unsafe { std::mem::zeroed::<skippy_ffi::StagePlanStateDescV1>() };
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_stage_plan_state_at_v1(
+                raw,
+                profile_index,
+                index,
+                &mut state,
+                &mut error,
+            )
+        };
+        ffi_result(status, error).with_context(|| {
+            format!("read native state effect {index} for profile {profile_index}")
+        })?;
+        ensure_descriptor_abi(
+            "stage plan state effect",
+            state.abi_version,
+            skippy_ffi::STAGE_PLAN_STATE_DESC_V1_ABI_VERSION,
+            state.struct_size,
+            std::mem::size_of::<skippy_ffi::StagePlanStateDescV1>(),
+        )?;
+        anyhow::ensure!(
+            state.reserved == 0,
+            "native state effect reserved field is nonzero"
+        );
+        let identity = read_plan_string(raw, state.identity)?;
+        anyhow::ensure!(
+            state_identities.insert(identity.clone()),
+            "native state effect identity {identity:?} is duplicated"
+        );
+        let kind = match state.kind {
+            value if value == skippy_ffi::StagePlanStateKind::KvKey as i32 => {
+                skippy_ffi::StagePlanStateKind::KvKey
+            }
+            value if value == skippy_ffi::StagePlanStateKind::KvValue as i32 => {
+                skippy_ffi::StagePlanStateKind::KvValue
+            }
+            value if value == skippy_ffi::StagePlanStateKind::RecurrentConv as i32 => {
+                skippy_ffi::StagePlanStateKind::RecurrentConv
+            }
+            value if value == skippy_ffi::StagePlanStateKind::RecurrentSsm as i32 => {
+                skippy_ffi::StagePlanStateKind::RecurrentSsm
+            }
+            unknown => anyhow::bail!("native state effect kind {unknown} is unsupported"),
+        };
+        let access = match state.access {
+            value if value == skippy_ffi::StagePlanStateAccess::Read as i32 => {
+                skippy_ffi::StagePlanStateAccess::Read
+            }
+            value if value == skippy_ffi::StagePlanStateAccess::Write as i32 => {
+                skippy_ffi::StagePlanStateAccess::Write
+            }
+            unknown => anyhow::bail!("native state effect access {unknown} is unsupported"),
+        };
+        state_effects.push(RealizedStageStateEffect {
+            identity,
+            kind,
+            access,
+            layer: state.layer,
+            write_ordinal: state.write_ordinal,
+        });
+    }
+
+    Ok(RealizedStageProfile {
+        profile_id: read_plan_string(raw, descriptor.profile_id)?,
+        graph_identity: read_plan_string(raw, descriptor.graph_identity)?,
+        profile_identity: read_plan_string(raw, descriptor.profile_identity)?,
+        slice_identity: read_plan_string(raw, descriptor.slice_identity)?,
+        source_snapshot_identity: read_plan_string(raw, descriptor.source_snapshot_identity)?,
+        graph_configuration_id: read_plan_string(raw, descriptor.graph_configuration_id)?,
+        backend_id: read_plan_string(raw, descriptor.backend_id)?,
+        activation_imports,
+        activation_exports,
+        request_inputs,
+        state_effects,
+    })
+}
+
+fn read_native_values(
+    raw: *const skippy_ffi::StagePlan,
+    profile_index: usize,
+    kind: skippy_ffi::StagePlanValueKind,
+    count: u64,
+) -> anyhow::Result<Vec<String>> {
+    let count = usize::try_from(count).context("native stage value count exceeds usize")?;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut descriptor = unsafe { std::mem::zeroed::<skippy_ffi::StagePlanValueDescV1>() };
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_stage_plan_value_at_v1(
+                raw,
+                profile_index,
+                kind,
+                index,
+                &mut descriptor,
+                &mut error,
+            )
+        };
+        ffi_result(status, error).with_context(|| {
+            format!("read native {kind:?} value {index} for profile {profile_index}")
+        })?;
+        ensure_descriptor_abi(
+            "stage plan value",
+            descriptor.abi_version,
+            skippy_ffi::STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION,
+            descriptor.struct_size,
+            std::mem::size_of::<skippy_ffi::StagePlanValueDescV1>(),
+        )?;
+        values.push(read_plan_string(raw, descriptor.identity)?);
+    }
+    ensure_canonical_strings(&format!("native {kind:?} identities"), &values)?;
+    Ok(values)
+}
+
+fn read_plan_string(
+    raw: *const skippy_ffi::StagePlan,
+    reference: skippy_ffi::StagePlanStringRefV1,
+) -> anyhow::Result<String> {
+    let mut data = ptr::null();
+    let mut length = 0;
+    let mut error = ptr::null_mut();
+    let status = unsafe {
+        skippy_ffi::skippy_stage_plan_string_v1(raw, reference, &mut data, &mut length, &mut error)
+    };
+    ffi_result(status, error).context("read native stage-plan string")?;
+    anyhow::ensure!(length > 0, "native stage-plan string is empty");
+    anyhow::ensure!(!data.is_null(), "native stage-plan string data is null");
+    let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+    Ok(std::str::from_utf8(bytes)
+        .context("native stage-plan string is not UTF-8")?
+        .to_owned())
+}
+
+fn ensure_descriptor_abi(
+    label: &str,
+    actual_version: u32,
+    expected_version: u32,
+    actual_size: u32,
+    expected_size: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual_version == expected_version,
+        "native {label} ABI version {actual_version} differs from expected {expected_version}"
+    );
+    anyhow::ensure!(
+        usize::try_from(actual_size).ok() == Some(expected_size),
+        "native {label} size {actual_size} differs from expected {expected_size}"
+    );
+    Ok(())
+}
+
+fn ensure_canonical_strings(label: &str, values: &[String]) -> anyhow::Result<()> {
+    for (index, window) in values.windows(2).enumerate() {
+        anyhow::ensure!(
+            window[0] < window[1],
+            "{label} are not strictly sorted at index {index}"
+        );
+    }
+    Ok(())
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn ffi_result(status: skippy_ffi::Status, error: *mut skippy_ffi::Error) -> anyhow::Result<()> {
+    let message = if error.is_null() {
+        String::new()
+    } else {
+        let message = unsafe { (*error).message };
+        if message.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    if !error.is_null() {
+        unsafe { skippy_ffi::skippy_error_free(error) };
+    }
+    anyhow::ensure!(
+        status == skippy_ffi::Status::Ok,
+        "native stage planner returned {status:?}: {message}"
+    );
+    Ok(())
+}
+
+fn source_artifact_index(id: &str) -> Option<usize> {
+    id.strip_prefix("source-")?.parse().ok()
+}
+
+fn tensor_storage<'a>(
+    manifest: &'a PackageManifest,
+    tensors: &BTreeMap<&str, &'a skippy_package_format::Tensor>,
+    tensor_id: &str,
+) -> anyhow::Result<(&'a str, u64, u64)> {
+    let mut current = tensor_id;
+    let mut visited = BTreeSet::new();
+    loop {
+        anyhow::ensure!(visited.insert(current), "tensor alias cycle at {current:?}");
+        let tensor = tensors
+            .get(current)
+            .with_context(|| format!("tensor alias target {current:?} is absent"))?;
+        match &tensor.storage {
+            skippy_package_format::TensorStorage::Owned {
+                artifact_id,
+                data_offset,
+                stored_length,
+                ..
+            } => {
+                anyhow::ensure!(
+                    manifest
+                        .artifact_catalog
+                        .entries
+                        .iter()
+                        .any(|artifact| artifact.id == *artifact_id),
+                    "tensor {tensor_id:?} references missing artifact {artifact_id:?}"
+                );
+                return Ok((artifact_id, *data_offset, *stored_length));
+            }
+            skippy_package_format::TensorStorage::Alias { target_tensor_id } => {
+                current = target_tensor_id;
+            }
+        }
+    }
+}
+
+fn contained_package_path(package_dir: &Path, relative: &str) -> anyhow::Result<PathBuf> {
+    let relative = Path::new(relative);
+    anyhow::ensure!(
+        !relative.as_os_str().is_empty()
+            && relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+        "package-v2 artifact path is not a safe relative path: {relative:?}"
+    );
+    Ok(package_dir.join(relative))
+}
+
+fn cstring(value: &str, label: &str) -> anyhow::Result<CString> {
+    anyhow::ensure!(!value.is_empty(), "{label} is empty");
+    CString::new(value).with_context(|| format!("{label} contains an interior NUL byte"))
+}
+
+fn path_cstring(path: &Path, label: &str) -> anyhow::Result<CString> {
+    let value = path
+        .to_str()
+        .with_context(|| format!("{label} is not valid UTF-8: {}", path.display()))?;
+    cstring(value, label)
+}
 
 fn ensure_strictly_sorted(
     ids: &[String],
@@ -579,6 +1459,10 @@ mod tests {
             source_snapshot_identity: planned.source_snapshot_identity,
             graph_configuration_id: planned.graph_configuration_id,
             backend_id: planned.backend_id,
+            activation_imports: Vec::new(),
+            activation_exports: Vec::new(),
+            request_inputs: Vec::new(),
+            state_effects: Vec::new(),
         }
     }
 

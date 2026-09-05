@@ -25,6 +25,7 @@ use crate::runtime::local_package::{
 use crate::runtime::survey;
 use anyhow::Result;
 use skippy_protocol::FlashAttentionType;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
@@ -43,6 +44,7 @@ pub(super) struct SplitTopologyGeneration {
     pub(super) lease_until_unix_ms: u64,
     pub(super) participants: Vec<SplitParticipant>,
     pub(super) stages: Vec<RuntimeSliceStagePlan>,
+    pub(super) admissions: BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
 }
 
 impl SplitTopologyGeneration {
@@ -61,7 +63,38 @@ impl SplitTopologyGeneration {
             lease_until_unix_ms: split_coordinator_lease_until_unix_ms(),
             participants,
             stages,
+            admissions: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn with_admissions(
+        mut self,
+        admissions: Vec<skippy_protocol::StageAdmissionDescriptor>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            admissions.len() == self.stages.len(),
+            "stage admission count differs from topology stage count"
+        );
+        for (stage, admission) in self.stages.iter().zip(admissions) {
+            anyhow::ensure!(
+                admission.layer_start == stage.layer_start
+                    && admission.layer_end == stage.layer_end,
+                "stage {} admission range differs from its topology placement",
+                stage.stage_id
+            );
+            let proto: skippy_protocol::proto::stage::StageAdmissionDescriptor =
+                admission.clone().into();
+            skippy_protocol::validate_stage_admission_descriptor(&proto)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            anyhow::ensure!(
+                self.admissions
+                    .insert(stage.stage_id.clone(), admission)
+                    .is_none(),
+                "topology contains duplicate stage id {}",
+                stage.stage_id
+            );
+        }
+        Ok(self)
     }
 }
 
@@ -597,19 +630,20 @@ impl SplitTopologyCoordinator {
             &[],
             resources,
         )?;
+        let admissions = super::realize_split_stage_admissions(
+            &self.model_path,
+            &self.package,
+            &planned,
+            &self.runtime_profile,
+        )?;
         let stages = planned.stages;
         let participants = split_participants_for_stages(planned_participants, &stages);
         anyhow::ensure!(
             split_stages_meet_minimum(&stages),
             "split runtime needs at least two stage participants"
         );
-        Ok(SplitTopologyGeneration::new(
-            topology_id,
-            run_id,
-            generation,
-            participants,
-            stages,
-        ))
+        SplitTopologyGeneration::new(topology_id, run_id, generation, participants, stages)
+            .with_admissions(admissions)
     }
 
     fn local_model_fits(&self) -> bool {

@@ -8,6 +8,7 @@ use crate::mesh::{self, NodeRole};
 use crate::models;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(super) const SPLIT_DEFAULT_MIN_PARTICIPANTS: usize = 2;
@@ -832,17 +833,68 @@ pub(super) fn split_participant_set_hash(participants: &[SplitParticipant]) -> S
     hex::encode(hasher.finalize())
 }
 
-pub(super) fn split_topology_hash(stages: &[RuntimeSliceStagePlan]) -> String {
+pub(super) fn split_topology_hash(
+    stages: &[RuntimeSliceStagePlan],
+    admissions: &BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
+) -> String {
     let mut hasher = Sha256::new();
+    hash_field(&mut hasher, b"skippy-topology:v2");
     for stage in stages {
-        hasher.update(stage.stage_id.as_bytes());
+        hash_field(&mut hasher, stage.stage_id.as_bytes());
         hasher.update(stage.stage_index.to_le_bytes());
-        hasher.update(stage.node_id.to_string().as_bytes());
+        hash_field(&mut hasher, stage.node_id.to_string().as_bytes());
         hasher.update(stage.layer_start.to_le_bytes());
         hasher.update(stage.layer_end.to_le_bytes());
         hasher.update(stage.parameter_bytes.to_le_bytes());
+        if let Some(admission) = admissions.get(&stage.stage_id) {
+            hasher.update([1]);
+            hasher.update(admission.version.to_le_bytes());
+            hash_field(&mut hasher, admission.package_id.as_bytes());
+            hash_field(&mut hasher, admission.plan_id.as_bytes());
+            hasher.update(admission.layer_start.to_le_bytes());
+            hasher.update(admission.layer_end.to_le_bytes());
+            hasher.update((admission.resident_tensor_ids.len() as u64).to_le_bytes());
+            for tensor_id in &admission.resident_tensor_ids {
+                hash_field(&mut hasher, tensor_id.as_bytes());
+            }
+            hasher.update((admission.sidecars.len() as u64).to_le_bytes());
+            for sidecar in &admission.sidecars {
+                hasher.update([match sidecar.kind {
+                    skippy_protocol::StageAdmissionSidecarKind::Mmproj => 1,
+                }]);
+                hash_field(&mut hasher, sidecar.artifact_id.as_bytes());
+                match &sidecar.name {
+                    Some(name) => {
+                        hasher.update([1]);
+                        hash_field(&mut hasher, name.as_bytes());
+                    }
+                    None => hasher.update([0]),
+                }
+            }
+            hasher.update((admission.profiles.len() as u64).to_le_bytes());
+            for profile in &admission.profiles {
+                for value in [
+                    &profile.profile_id,
+                    &profile.graph_identity,
+                    &profile.profile_identity,
+                    &profile.slice_identity,
+                    &profile.source_snapshot_identity,
+                    &profile.graph_configuration_id,
+                    &profile.backend_id,
+                ] {
+                    hash_field(&mut hasher, value.as_bytes());
+                }
+            }
+        } else {
+            hasher.update([0]);
+        }
     }
     hex::encode(hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
 }
 
 pub(super) fn split_node_labels(nodes: &[iroh::EndpointId]) -> Vec<String> {

@@ -76,6 +76,8 @@ pub(crate) use resolver::{
     resolve_skippy_config_for_selector,
 };
 pub(crate) use skippy_server::OpenAiGuardrailsStatus as SkippyOpenAiGuardrailsStatus;
+#[cfg(test)]
+pub(crate) use stage::test_stage_admission;
 pub(crate) use stage::{
     LayerRange, SourceModelKind, StageCancelPrepareRequest, StageControlCommand,
     StageControlHandle, StageControlRequest, StageControlResponse, StageCoordinatorClaim,
