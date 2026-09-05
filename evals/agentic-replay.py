@@ -850,9 +850,13 @@ def stream_request(
 
 def openai_message(recorded: dict[str, Any]) -> dict[str, Any]:
     # ChatMessage preserves arbitrary OpenAI-compatible fields, so retain the
-    # captured object verbatim apart from the dataset-only JSON encoding below.
+    # captured object apart from null optional fields and the dataset-only JSON
+    # encoding below. Older OpenAI-compatible servers reject null fields that
+    # their schemas model as optional strings.
     message = {
-        key: value for key, value in recorded.items() if key != "tool_calls_json"
+        key: value
+        for key, value in recorded.items()
+        if key != "tool_calls_json" and value is not None
     }
     tool_calls_json = recorded.get("tool_calls_json")
     if tool_calls_json:

@@ -383,6 +383,19 @@ class AgenticReplayTest(unittest.TestCase):
             },
         )
 
+    def test_captured_message_omits_null_optional_fields(self) -> None:
+        recorded = {
+            "role": "user",
+            "content": "task",
+            "tool_call_id": None,
+            "tool_calls_json": None,
+        }
+
+        self.assertEqual(
+            BENCH.openai_message(recorded),
+            {"role": "user", "content": "task"},
+        )
+
     def test_captured_tool_call_sizes_the_generated_output_budget(self) -> None:
         recorded = {
             "role": "assistant",
