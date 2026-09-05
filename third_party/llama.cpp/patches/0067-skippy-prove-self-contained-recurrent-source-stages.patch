@@ -7,8 +7,8 @@ Subject: [PATCH] skippy: prove self-contained recurrent source stages
 ---
  src/CMakeLists.txt                          | 18 +++++
  src/models/mamba.cpp                        |  4 +
- src/skippy/tests/noalloc_graph_planning.cpp | 90 +++++++++++++++++----
- 3 files changed, 95 insertions(+), 17 deletions(-)
+ src/skippy/tests/noalloc_graph_planning.cpp | 86 +++++++++++++++++----
+ 3 files changed, 91 insertions(+), 17 deletions(-)
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 5572cfce9..a323bff2f 100644
@@ -85,7 +85,7 @@ index 04064fbf2..b8807005b 100644
      for (int32_t layer = 0; layer < n_layer; ++layer) {
          const skippy_execution_profile_guard guard = {
              n_tokens,
-@@ -276,23 +279,71 @@ static bool check_stage_slices(
+@@ -276,23 +279,67 @@ static bool check_stage_slices(
                      profile_name, layer);
              return false;
          }
