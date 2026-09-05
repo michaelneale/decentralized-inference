@@ -1,0 +1,267 @@
+From d67b4661f377dee8c22677c57e570dba83d99545 Mon Sep 17 00:00:00 2001
+From: jy
+ <b6f6f5dcd25f52f73609ead409e2c676233c5acf37e59fe56d933ea981fa2dfa@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 23:05:02 +1000
+Subject: [PATCH] skippy: register Qwen3 block boundaries
+
+Register stage-independent Qwen3 block frontiers and prove the existing
+token/KV request-input and state-effect contracts across generated profiles.
+
+---
+ src/CMakeLists.txt                          |  20 ++++
+ src/models/qwen3.cpp                        |   4 +
+ src/skippy/tests/noalloc_graph_planning.cpp | 115 ++++++++++++++++++--
+ 3 files changed, 129 insertions(+), 10 deletions(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 249a08ba6..998e2e001 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -160,6 +160,15 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_generate_gemma_fixture PROPERTIES
+         FIXTURES_SETUP skippy-model-loader-fixtures)
+ 
++    add_test(
++        NAME skippy_generate_qwen3_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen3
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen3_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen3-fixture)
++
+     add_test(
+         NAME skippy_generate_qwen2moe_fixture
+         COMMAND skippy-model-fixture-generator
+@@ -201,6 +210,17 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_noalloc_graph_planning_dense PROPERTIES
+         FIXTURES_REQUIRED skippy-model-loader-fixtures)
+ 
++    add_test(
++        NAME skippy_noalloc_graph_planning_qwen3
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen3-dense.gguf"
++            0
++            "kv,kv"
++            0
++            "token-kv")
++    set_tests_properties(skippy_noalloc_graph_planning_qwen3 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen3-fixture)
++
+     add_test(
+         NAME skippy_noalloc_graph_planning_granite_hybrid
+         COMMAND skippy-noalloc-graph-planning
+diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index bce53fa43..af5410829 100644
+--- a/src/models/qwen3.cpp
++++ b/src/models/qwen3.cpp
+@@ -74,6 +74,8 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
+ 
+     for (int il = il_start; il < il_end; ++il) {
++        begin_block(inpL, il);
++
+         res->t_layer_inp[il] = inpL;
+ 
+         ggml_tensor * inpSA = inpL;
+@@ -142,6 +144,8 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+ 
++        end_block(cur, il);
++
+         // input for next layer
+         inpL = cur;
+     }
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index 786d83396..9dbc7fb0a 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -186,6 +186,69 @@ struct graph_profile_result {
+     std::vector<std::string> dependencies;
+ };
+ 
++enum class request_contract {
++    unchecked,
++    token_kv,
++};
++
++static bool check_request_contract(
++        const skippy_stage_slice_selection & selection,
++        const std::vector<skippy_request_input_binding> & bindings,
++        request_contract contract,
++        const char * profile_name,
++        int32_t layer_start,
++        int32_t layer_end,
++        int32_t layer_count) {
++    if (contract == request_contract::unchecked) {
++        return true;
++    }
++
++    std::vector<std::string> expected = {
++        "attention.key_indices.0",
++        "attention.mask.0",
++        "attention.value_indices.0",
++        "positions.0",
++    };
++    if (layer_start == 0) {
++        expected.push_back("tokens.0");
++    }
++    if (layer_end == layer_count) {
++        expected.push_back("output.indices.0");
++    }
++    std::sort(expected.begin(), expected.end());
++    std::vector<std::string> actual;
++    for (const ggml_tensor * input : selection.request_inputs) {
++        const auto found = std::find_if(bindings.begin(), bindings.end(), [input](const auto & binding) {
++            return binding.tensor == input;
++        });
++        if (found == bindings.end()) {
++            std::fprintf(stderr,
++                    "metadata-only %s layers %d..%d contain an unbound request input\n",
++                    profile_name, layer_start, layer_end);
++            return false;
++        }
++        actual.push_back(found->identity);
++    }
++    std::sort(actual.begin(), actual.end());
++    if (actual != expected) {
++        std::fprintf(stderr,
++                "metadata-only %s layers %d..%d request-input identities differ from the token/KV contract\n",
++                profile_name, layer_start, layer_end);
++        return false;
++    }
++
++    const size_t expected_imports = layer_start == 0 ? 0 : 1;
++    const size_t expected_exports = layer_end == layer_count ? 0 : 1;
++    if (selection.activation_imports.size() != expected_imports ||
++            selection.activation_exports.size() != expected_exports) {
++        std::fprintf(stderr,
++                "metadata-only %s layers %d..%d do not expose exactly one hidden-state frontier per cut\n",
++                profile_name, layer_start, layer_end);
++        return false;
++    }
++    return true;
++}
++
+ static size_t layer_state_count(
+         const std::vector<skippy_state_effect> & effects,
+         int32_t layer,
+@@ -208,7 +271,8 @@ static bool check_stage_slices(
+         uint32_t n_tokens,
+         uint32_t n_seqs,
+         uint32_t n_outputs,
+-        uint32_t n_rs_seq) {
++        uint32_t n_rs_seq,
++        request_contract contract) {
+     std::vector<skippy_parameter_binding> parameters;
+     std::map<std::string, uint32_t> parameter_ordinals;
+     for (const auto & [name, tensor] : llama_internal_get_tensor_map(model)) {
+@@ -247,6 +311,16 @@ static bool check_stage_slices(
+                 profile_name, full_plan_error.c_str());
+         return false;
+     }
++    if (!check_request_contract(
++                full_plan.profiles[0].slice,
++                graph_result->get_request_input_bindings(),
++                contract,
++                profile_name,
++                0,
++                n_layer,
++                n_layer)) {
++        return false;
++    }
+     const auto & full_parameter_identities = full_plan.profiles[0].slice.parameter_identities;
+     std::vector<std::string> selected_dependencies;
+     std::vector<skippy_guarded_stage_slice_plan> stage_plans;
+@@ -268,6 +342,16 @@ static bool check_stage_slices(
+             return false;
+         }
+         const auto & selection = stage_plan.profiles[0].slice;
++        if (!check_request_contract(
++                    selection,
++                    graph_result->get_request_input_bindings(),
++                    contract,
++                    profile_name,
++                    layer,
++                    layer + 1,
++                    n_layer)) {
++            return false;
++        }
+         if (selection.node_indices.empty() || selection.parameter_identities.empty()) {
+             std::fprintf(stderr, "metadata-only %s layer %d slice is incomplete\n",
+                     profile_name, layer);
+@@ -594,6 +678,7 @@ static bool build_graph_profile(
+         uint32_t n_outputs,
+         const std::vector<layer_state_class> & layer_classes,
+         uint32_t n_rs_seq,
++        request_contract contract,
+         graph_profile_result & result) {
+     llama_context_params context_params = llama_context_default_params();
+     context_params.n_ctx = 32;
+@@ -682,7 +767,8 @@ static bool build_graph_profile(
+                 n_tokens,
+                 n_seqs,
+                 n_outputs,
+-                n_rs_seq)) {
++                n_rs_seq,
++                contract)) {
+         llama_free(context);
+         return false;
+     }
+@@ -694,7 +780,8 @@ static int check_noalloc_graphs(
+         const char * model_path,
+         bool expect_recurrent,
+         const std::vector<layer_state_class> & layer_classes,
+-        uint32_t n_rs_seq) {
++        uint32_t n_rs_seq,
++        request_contract contract) {
+     llama_model * model = load_metadata_only_model(model_path);
+     if (model == nullptr) {
+         std::fprintf(stderr, "failed to load metadata-only model\n");
+@@ -708,9 +795,9 @@ static int check_noalloc_graphs(
+     graph_profile_result prefill;
+     graph_profile_result batched;
+     graph_profile_result decode;
+-    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, prefill) ||
+-            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, batched) ||
+-            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, decode)) {
++    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, contract, prefill) ||
++            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, contract, batched) ||
++            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, contract, decode)) {
+         llama_model_free(model);
+         return 3;
+     }
+@@ -902,8 +989,8 @@ static bool check_state_validation_rejects() {
+ }
+ 
+ int main(int argc, char ** argv) {
+-    if (argc != 4 && argc != 5) {
+-        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ]\n", argv[0]);
++    if (argc < 4 || argc > 6) {
++        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ] [REQUEST_CONTRACT]\n", argv[0]);
+         return 64;
+     }
+     if (!check_boundary_validation_rejects()) {
+@@ -917,9 +1004,17 @@ int main(int argc, char ** argv) {
+         std::fprintf(stderr, "invalid layer class list: %s\n", argv[3]);
+         return 64;
+     }
+-    const uint32_t n_rs_seq = argc == 5 ? static_cast<uint32_t>(std::atoi(argv[4])) : 0;
++    const uint32_t n_rs_seq = argc >= 5 ? static_cast<uint32_t>(std::atoi(argv[4])) : 0;
++    request_contract contract = request_contract::unchecked;
++    if (argc == 6) {
++        if (std::string(argv[5]) != "token-kv") {
++            std::fprintf(stderr, "invalid request contract: %s\n", argv[5]);
++            return 64;
++        }
++        contract = request_contract::token_kv;
++    }
+     llama_backend_init();
+-    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq);
++    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq, contract);
+     llama_backend_free();
+     return result;
+ }
+-- 
+2.54.0 (Apple Git-157)
