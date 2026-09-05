@@ -45,6 +45,9 @@ pub(super) fn scan_layer_package_metadata(
 }
 
 pub(super) fn runtime_model_planning_bytes(model_path: &Path) -> Result<u64> {
+    if model_path.join("model-package.json").is_file() {
+        return Ok(skippy::identity_from_package_v2(model_path)?.source_model_bytes);
+    }
     let package_ref = model_path.to_string_lossy().to_string();
     if skippy::is_layer_package_ref(&package_ref) {
         return Ok(skippy::identity_from_layer_package(&package_ref)?.source_model_bytes);
@@ -121,33 +124,24 @@ pub(super) fn split_effective_kv_cache_quant(
 }
 pub(super) async fn resolve_split_runtime_package(
     model_path: &Path,
-    model_ref: &str,
+    _model_ref: &str,
     local_source_required: bool,
 ) -> Result<skippy::SkippyPackageIdentity> {
-    let model_path_str = model_path.to_string_lossy().to_string();
-    if skippy::is_layer_package_ref(&model_path_str) {
-        anyhow::ensure!(
-            !local_source_required,
-            "skippy.source_policy = \"local-required\" supports direct local GGUF files, not layer package references"
-        );
-        Ok(tokio::task::spawn_blocking(move || {
-            skippy::identity_from_layer_package(&model_path_str)
-        })
-        .await
-        .context("join identify skippy layer package task")??)
-    } else {
-        let model_ref = model_ref.to_string();
-        let model_path = model_path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            if local_source_required {
-                skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
-            } else {
-                skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
-            }
-        })
-        .await
-        .context("join identify direct GGUF task")?
-    }
+    anyhow::ensure!(
+        model_path.join("model-package.json").is_file(),
+        "generation-8 split serving accepts only a local package-v2 directory; convert the source with skippy-model-package"
+    );
+    let package_dir = model_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let identity = skippy::identity_from_package_v2(&package_dir)?;
+        if local_source_required {
+            skippy::into_content_addressed_identity(identity)
+        } else {
+            Ok(identity)
+        }
+    })
+    .await
+    .context("join identify package-v2 task")?
 }
 
 pub(super) fn split_kv_cache_quant(

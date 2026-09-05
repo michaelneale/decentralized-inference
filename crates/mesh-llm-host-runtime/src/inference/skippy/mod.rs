@@ -57,8 +57,9 @@ pub(crate) use kv_cache::KvCachePolicy;
 #[cfg(test)]
 pub(crate) use local_source::local_source_required_for_model;
 pub(crate) use local_source::{
-    apply_verified_local_source, effective_local_source_required, is_content_addressed_gguf_ref,
-    register_local_source_policy, unregister_local_source_policy, verify_registered_content_source,
+    apply_verified_local_source, effective_local_source_required, into_content_addressed_identity,
+    is_content_addressed_gguf_ref, register_local_source_policy, unregister_local_source_policy,
+    verify_registered_content_source,
 };
 pub use materialization::{
     configure_materialized_stage_cache, is_layer_package_ref, materialize_stage_config,
@@ -67,8 +68,10 @@ pub use materialization::{
     resolve_hf_package_to_local,
 };
 pub(crate) use package::direct_gguf_source_paths;
+#[cfg(test)]
+pub(crate) use package::synthetic_content_addressed_gguf_package;
 pub use package::{
-    SkippyPackageIdentity, identity_from_layer_package, synthetic_content_addressed_gguf_package,
+    SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,
     synthetic_direct_gguf_package,
 };
 pub(crate) use resolver::{

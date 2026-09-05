@@ -962,6 +962,20 @@ fn runtime_model_planning_bytes_uses_layer_package_source_model_bytes() {
     );
 }
 
+#[tokio::test]
+async fn generation8_split_rejects_direct_gguf_without_package_v2() {
+    let root = tempfile::tempdir().unwrap();
+    let gguf = root.path().join("model.gguf");
+    std::fs::write(&gguf, b"GGUF").unwrap();
+
+    let error = resolve_split_runtime_package(&gguf, "test/model", false)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("accepts only a local package-v2 directory"));
+}
+
 #[test]
 fn startup_runtime_plan_keeps_local_when_model_fits_without_split_flag() {
     assert_eq!(

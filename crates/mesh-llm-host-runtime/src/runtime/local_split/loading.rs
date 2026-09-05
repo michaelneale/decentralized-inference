@@ -394,7 +394,7 @@ async fn stage0_runtime_options(
         stage_load_model_path(
             settings.load_mode.clone(),
             &spec.package.package_ref,
-            spec.model_path,
+            &spec.package.source_model_path,
         )
     });
     runtime_options.config.source_model_path = Some(effective_model_path.clone());
@@ -594,7 +594,7 @@ pub(super) fn stage_source_prepare_timeout(
     stage: &RuntimeSliceStagePlan,
     include_output: bool,
 ) -> Result<Duration> {
-    let assigned_bytes = if model_path.is_dir() {
+    let assigned_bytes = if skippy::is_layer_package_ref(&package.package_ref) {
         crate::models::artifact_transfer::required_stage_package_bytes(
             model_path,
             &package.package_ref,
@@ -672,7 +672,7 @@ pub(super) fn split_runtime_stage_load_request(
             stage_load_model_path(
                 settings.load_mode.clone(),
                 &spec.package.package_ref,
-                spec.model_path,
+                &spec.package.source_model_path,
             )
         }),
         source_model_bytes: Some(spec.package.source_model_bytes),
@@ -1064,12 +1064,12 @@ pub(super) fn split_coordinator_claim(
 pub(super) fn stage_load_model_path(
     load_mode: LoadMode,
     package_ref: &str,
-    model_path: &Path,
+    source_model_path: &Path,
 ) -> String {
     match load_mode {
         LoadMode::LayerPackage => package_ref.to_string(),
         LoadMode::RuntimeSlice | LoadMode::ArtifactSlice => {
-            model_path.to_string_lossy().to_string()
+            source_model_path.to_string_lossy().to_string()
         }
     }
 }
