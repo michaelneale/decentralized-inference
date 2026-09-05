@@ -137,5 +137,7 @@ jobs:
           name: product-integration-${{ inputs.platform }}-${{ inputs.backend }}-evidence
           path: |
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/phase-results.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence-snapshots/*.json
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/*.log
           if-no-files-found: error

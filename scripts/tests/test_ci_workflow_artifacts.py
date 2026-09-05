@@ -221,6 +221,8 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("name: Upload product integration phase evidence", workflow)
         self.assertIn("if: success() || failure()", workflow)
         self.assertIn("phase-results.json", workflow)
+        self.assertIn("*/split-evidence.json", workflow)
+        self.assertIn("*/split-evidence-snapshots/*.json", workflow)
         self.assertIn("*/*.log", workflow)
         self.assertIn("-evidence", workflow)
         self.assertIn("if-no-files-found: error", workflow)

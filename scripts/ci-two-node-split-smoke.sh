@@ -26,7 +26,18 @@ SEED_BIND_PORT="${MESH_TWO_NODE_SPLIT_SEED_BIND_PORT:-53647}"
 WORKER_API_PORT="${MESH_TWO_NODE_SPLIT_WORKER_API_PORT:-9368}"
 WORKER_CONSOLE_PORT="${MESH_TWO_NODE_SPLIT_WORKER_CONSOLE_PORT:-3162}"
 WORKER_BIND_PORT="${MESH_TWO_NODE_SPLIT_WORKER_BIND_PORT:-53648}"
-MAX_WAIT="${MESH_TWO_NODE_SPLIT_MAX_WAIT:-300}"
+READINESS_TIMEOUT_SECONDS="${MESH_TWO_NODE_SPLIT_READINESS_TIMEOUT_SECONDS:-${MESH_TWO_NODE_SPLIT_MAX_WAIT:-300}}"
+SNAPSHOT_REQUEST_TIMEOUT_SECONDS="${MESH_TWO_NODE_SPLIT_SNAPSHOT_REQUEST_TIMEOUT_SECONDS:-2}"
+if [[ ! "$READINESS_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+    [[ "$READINESS_TIMEOUT_SECONDS" -gt 300 ]]; then
+    echo "MESH_TWO_NODE_SPLIT_READINESS_TIMEOUT_SECONDS must be an integer from 1 through 300" >&2
+    exit 2
+fi
+if [[ ! "$SNAPSHOT_REQUEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+    [[ "$SNAPSHOT_REQUEST_TIMEOUT_SECONDS" -gt 10 ]]; then
+    echo "MESH_TWO_NODE_SPLIT_SNAPSHOT_REQUEST_TIMEOUT_SECONDS must be an integer from 1 through 10" >&2
+    exit 2
+fi
 # Optional second model: when set, the smoke runs the whole split flow once
 # against MODEL (dense) and once against this (recurrent), restarting both
 # processes between legs so a single CI job covers both cache families.
@@ -61,6 +72,10 @@ fi
 SEED_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-seed.log"
 WORKER_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-worker.log"
 CLIENT_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-client.log"
+MODEL_LABEL="$PRIMARY_MODEL_LABEL"
+SPLIT_EVIDENCE_PATH=""
+SPLIT_SNAPSHOT_DIR=""
+SPLIT_RECONCILE_LOG=""
 
 echo "=== CI Two-Node Split Smoke ==="
 echo "  mesh-llm:       $MESH_LLM"
@@ -72,6 +87,8 @@ echo "  seed bind:      $SEED_BIND_PORT"
 echo "  worker api:     $WORKER_API_PORT"
 echo "  worker console: $WORKER_CONSOLE_PORT"
 echo "  worker bind:    $WORKER_BIND_PORT"
+echo "  readiness timeout: ${READINESS_TIMEOUT_SECONDS}s"
+echo "  snapshot request timeout: ${SNAPSHOT_REQUEST_TIMEOUT_SECONDS}s"
 echo "  request settle: ${REQUEST_SETTLE_SECONDS}s"
 echo "  prefix attempts: ${PREFIX_ATTEMPTS}"
 echo "  expected exact payload: ${EXPECTED_EXACT_PAYLOAD_KIND:-none}"
@@ -144,12 +161,10 @@ trap cleanup EXIT
 
 status_json() {
     local console_port="$1"
-    curl -fsS --max-time 5 "http://127.0.0.1:${console_port}/api/status" 2>/dev/null || true
-}
-
-stages_json() {
-    local console_port="$1"
-    curl -fsS --max-time 5 "http://127.0.0.1:${console_port}/api/runtime/stages" 2>/dev/null || true
+    local request_timeout="${2:-$SNAPSHOT_REQUEST_TIMEOUT_SECONDS}"
+    curl -fsS --connect-timeout "$request_timeout" \
+        --max-time "$request_timeout" \
+        "http://127.0.0.1:${console_port}/api/status" 2>/dev/null || true
 }
 
 query_token() {
@@ -165,50 +180,240 @@ print(status.get("token") or "")
 PY
 }
 
-query_peer_count() {
-    STATUS_JSON="$1" python3 - <<'PY'
-import json
-import os
+wait_for_seed_token() {
+    local context="$1"
+    local started_at
+    local deadline
+    local now
+    local remaining
+    local request_timeout
 
-try:
-    status = json.loads(os.environ.get("STATUS_JSON", "") or "{}")
-except Exception:
-    status = {}
-print(len(status.get("peers") or []))
-PY
+    TOKEN=""
+    started_at="$(date +%s)"
+    deadline=$((started_at + READINESS_TIMEOUT_SECONDS))
+    while :; do
+        if ! kill -0 "$SEED_PID" 2>/dev/null; then
+            echo "${context}seed exited unexpectedly" >&2
+            tail -160 "$SEED_LOG" >&2 || true
+            return 1
+        fi
+        now="$(date +%s)"
+        remaining=$((deadline - now))
+        if [[ "$remaining" -le 0 ]]; then
+            echo "${context}timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for seed invite token" >&2
+            tail -160 "$SEED_LOG" >&2 || true
+            return 1
+        fi
+        request_timeout="$SNAPSHOT_REQUEST_TIMEOUT_SECONDS"
+        if [[ "$remaining" -lt "$request_timeout" ]]; then
+            request_timeout="$remaining"
+        fi
+        TOKEN="$(query_token "$(status_json "$SEED_CONSOLE_PORT" "$request_timeout")")"
+        now="$(date +%s)"
+        if [[ "$now" -ge "$deadline" ]]; then
+            echo "${context}timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for seed invite token" >&2
+            tail -160 "$SEED_LOG" >&2 || true
+            return 1
+        fi
+        if [[ -n "$TOKEN" ]]; then
+            echo "Seed produced invite token after $((now - started_at))s${context:+ (${context%: })}"
+            return 0
+        fi
+        sleep 1
+    done
 }
 
-query_split_ready() {
-    STAGES_JSON="$1" MODELS_JSON="$2" python3 - <<'PY'
+configure_split_evidence_paths() {
+    local label="$1"
+    local prefix=""
+    if [[ "$label" != "$PRIMARY_MODEL_LABEL" ]]; then
+        prefix="${label}-"
+    fi
+    SPLIT_EVIDENCE_PATH="${WORK_DIR}/${prefix}split-evidence.json"
+    SPLIT_SNAPSHOT_DIR="${WORK_DIR}/${prefix}split-evidence-snapshots"
+    SPLIT_RECONCILE_LOG="${WORK_DIR}/${prefix}split-evidence-reconcile.log"
+    mkdir -p "$SPLIT_SNAPSHOT_DIR"
+}
+
+capture_json_snapshot() {
+    local kind="$1"
+    local url="$2"
+    local output="$3"
+    local request_timeout="$4"
+    local raw="${output}.curl.$$.tmp"
+
+    if ! curl -fsS --connect-timeout "$request_timeout" \
+        --max-time "$request_timeout" "$url" >"$raw" 2>/dev/null; then
+        : >"$raw"
+    fi
+    python3 - "$kind" "$raw" "$output" <<'PY'
+import hashlib
 import json
 import os
+from pathlib import Path
+import sys
 
+kind, raw_path, output_path = sys.argv[1:]
+raw = Path(raw_path).read_bytes()
 try:
-    stages = json.loads(os.environ.get("STAGES_JSON", "") or "{}")
-except Exception:
-    stages = {}
-try:
-    models = json.loads(os.environ.get("MODELS_JSON", "") or "{}")
-except Exception:
-    models = {}
-
-nodes = []
-stage_count = 0
-for topology in stages.get("topologies") or []:
-    for stage in topology.get("stages") or []:
-        stage_count += 1
-        node = stage.get("node_id")
-        if node and node not in nodes:
-            nodes.append(node)
-
-model_count = len(models.get("data") or [])
-ready = stage_count >= 2 and len(nodes) >= 2 and model_count >= 1
-print(
-    f"ready={str(ready).lower()} stages={stage_count} "
-    f"nodes={len(nodes)} models={model_count}"
-)
-raise SystemExit(0 if ready else 1)
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("response root is not an object")
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+    payload = {
+        "capture_error": str(error),
+        "response_bytes": len(raw),
+        "response_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+if kind == "status" and "capture_error" not in payload:
+    peers = payload.get("peers")
+    if not isinstance(peers, list):
+        peers = []
+    payload = {
+        "mesh_id": payload.get("mesh_id"),
+        "node_id": payload.get("node_id"),
+        "peers": [
+            {"id": peer.get("id")}
+            for peer in peers
+            if isinstance(peer, dict) and isinstance(peer.get("id"), str)
+        ],
+    }
+temporary_path = f"{output_path}.tmp"
+with open(temporary_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary_path, output_path)
 PY
+    rm -f "$raw"
+}
+
+capture_split_snapshots() {
+    local request_timeout="$1"
+    local -a capture_pids=()
+    local capture_pid
+
+    capture_json_snapshot status \
+        "http://127.0.0.1:${SEED_CONSOLE_PORT}/api/status" \
+        "$SPLIT_SNAPSHOT_DIR/seed-status.json" "$request_timeout" &
+    capture_pids+=("$!")
+    capture_json_snapshot stages \
+        "http://127.0.0.1:${SEED_CONSOLE_PORT}/api/runtime/stages" \
+        "$SPLIT_SNAPSHOT_DIR/seed-stages.json" "$request_timeout" &
+    capture_pids+=("$!")
+    capture_json_snapshot models \
+        "http://127.0.0.1:${SEED_API_PORT}/v1/models" \
+        "$SPLIT_SNAPSHOT_DIR/seed-models.json" "$request_timeout" &
+    capture_pids+=("$!")
+    capture_json_snapshot status \
+        "http://127.0.0.1:${WORKER_CONSOLE_PORT}/api/status" \
+        "$SPLIT_SNAPSHOT_DIR/worker-status.json" "$request_timeout" &
+    capture_pids+=("$!")
+    capture_json_snapshot stages \
+        "http://127.0.0.1:${WORKER_CONSOLE_PORT}/api/runtime/stages" \
+        "$SPLIT_SNAPSHOT_DIR/worker-stages.json" "$request_timeout" &
+    capture_pids+=("$!")
+    capture_json_snapshot models \
+        "http://127.0.0.1:${WORKER_API_PORT}/v1/models" \
+        "$SPLIT_SNAPSHOT_DIR/worker-models.json" "$request_timeout" &
+    capture_pids+=("$!")
+
+    for capture_pid in "${capture_pids[@]}"; do
+        wait "$capture_pid"
+    done
+}
+
+reconcile_split_snapshots() {
+    python3 scripts/reconcile-two-node-split-evidence.py \
+        --seed-status "$SPLIT_SNAPSHOT_DIR/seed-status.json" \
+        --seed-stages "$SPLIT_SNAPSHOT_DIR/seed-stages.json" \
+        --seed-models "$SPLIT_SNAPSHOT_DIR/seed-models.json" \
+        --worker-status "$SPLIT_SNAPSHOT_DIR/worker-status.json" \
+        --worker-stages "$SPLIT_SNAPSHOT_DIR/worker-stages.json" \
+        --worker-models "$SPLIT_SNAPSHOT_DIR/worker-models.json" \
+        --model-label "$MODEL_LABEL" \
+        --output "$SPLIT_EVIDENCE_PATH"
+}
+
+report_split_readiness_failure() {
+    local context="$1"
+    local reason="$2"
+    echo "${context}${reason}" >&2
+    for snapshot in \
+        "$SPLIT_SNAPSHOT_DIR/seed-status.json" \
+        "$SPLIT_SNAPSHOT_DIR/seed-stages.json" \
+        "$SPLIT_SNAPSHOT_DIR/seed-models.json" \
+        "$SPLIT_SNAPSHOT_DIR/worker-status.json" \
+        "$SPLIT_SNAPSHOT_DIR/worker-stages.json" \
+        "$SPLIT_SNAPSHOT_DIR/worker-models.json" \
+        "$SPLIT_EVIDENCE_PATH"; do
+        echo "--- ${snapshot} at timeout ---" >&2
+        cat "$snapshot" >&2 2>/dev/null || true
+    done
+    echo "--- split evidence reconciler error at timeout ---" >&2
+    cat "$SPLIT_RECONCILE_LOG" >&2 2>/dev/null || true
+    echo "--- seed log tail at timeout ---" >&2
+    tail -160 "$SEED_LOG" >&2 || true
+    echo "--- worker log tail at timeout ---" >&2
+    tail -160 "$WORKER_LOG" >&2 || true
+}
+
+wait_for_split_topology() {
+    local context="$1"
+    local started_at
+    local deadline
+    local now
+    local remaining
+    local request_timeout
+    local reconciliation_ready
+    configure_split_evidence_paths "$MODEL_LABEL"
+    started_at="$(date +%s)"
+    deadline=$((started_at + READINESS_TIMEOUT_SECONDS))
+    while :; do
+        if ! kill -0 "$SEED_PID" 2>/dev/null; then
+            capture_split_snapshots 1
+            reconcile_split_snapshots 2>"$SPLIT_RECONCILE_LOG" || true
+            report_split_readiness_failure "$context" \
+                "seed exited unexpectedly before split readiness"
+            return 1
+        fi
+        if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+            capture_split_snapshots 1
+            reconcile_split_snapshots 2>"$SPLIT_RECONCILE_LOG" || true
+            report_split_readiness_failure "$context" \
+                "worker exited unexpectedly before split readiness"
+            return 1
+        fi
+
+        now="$(date +%s)"
+        remaining=$((deadline - now))
+        if [[ "$remaining" -le 0 ]]; then
+            report_split_readiness_failure "$context" \
+                "timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for reconciled real split topology"
+            return 1
+        fi
+        request_timeout="$SNAPSHOT_REQUEST_TIMEOUT_SECONDS"
+        if [[ "$remaining" -lt "$request_timeout" ]]; then
+            request_timeout="$remaining"
+        fi
+        capture_split_snapshots "$request_timeout"
+        reconciliation_ready=0
+        if READY_SUMMARY="$(reconcile_split_snapshots 2>"$SPLIT_RECONCILE_LOG")"; then
+            reconciliation_ready=1
+        fi
+        now="$(date +%s)"
+        if [[ "$now" -ge "$deadline" ]]; then
+            report_split_readiness_failure "$context" \
+                "timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for reconciled real split topology"
+            return 1
+        fi
+        if [[ "$reconciliation_ready" -eq 1 ]]; then
+            DRIVER_LABEL=seed
+            DRIVER_API_PORT="$SEED_API_PORT"
+            echo "Split topology ready after $((now - started_at))s (${MODEL_LABEL}): ${READY_SUMMARY}"
+            return 0
+        fi
+        sleep 1
+    done
 }
 
 start_node() {
@@ -264,13 +469,39 @@ run_client_routing_probe() {
         >"$CLIENT_LOG" 2>&1 &
     CLIENT_PID=$!
 
-    for i in $(seq 1 "$MAX_WAIT"); do
+    local started_at
+    local deadline
+    local now
+    local remaining
+    local request_timeout
+    started_at="$(date +%s)"
+    deadline=$((started_at + READINESS_TIMEOUT_SECONDS))
+    while :; do
         if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
             echo "passive client exited unexpectedly" >&2
             tail -160 "$CLIENT_LOG" >&2 || true
             exit 1
         fi
-        client_models="$(curl -fsS --max-time 5 "http://127.0.0.1:${CLIENT_API_PORT}/v1/models" 2>/dev/null || true)"
+        now="$(date +%s)"
+        remaining=$((deadline - now))
+        if [[ "$remaining" -le 0 ]]; then
+            echo "timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for passive client model routing" >&2
+            tail -160 "$CLIENT_LOG" >&2 || true
+            exit 1
+        fi
+        request_timeout="$SNAPSHOT_REQUEST_TIMEOUT_SECONDS"
+        if [[ "$remaining" -lt "$request_timeout" ]]; then
+            request_timeout="$remaining"
+        fi
+        client_models="$(curl -fsS --connect-timeout "$request_timeout" \
+            --max-time "$request_timeout" \
+            "http://127.0.0.1:${CLIENT_API_PORT}/v1/models" 2>/dev/null || true)"
+        now="$(date +%s)"
+        if [[ "$now" -ge "$deadline" ]]; then
+            echo "timed out after ${READINESS_TIMEOUT_SECONDS}s waiting for passive client model routing" >&2
+            tail -160 "$CLIENT_LOG" >&2 || true
+            exit 1
+        fi
         if CLIENT_MODELS_JSON="$client_models" MODEL_ID="$MODEL_ID" python3 - <<'PY' 2>/dev/null; then
 import json
 import os
@@ -279,11 +510,6 @@ models = json.loads(os.environ.get("CLIENT_MODELS_JSON", "") or "{}").get("data"
 raise SystemExit(0 if any(item.get("id") == os.environ["MODEL_ID"] for item in models) else 1)
 PY
             break
-        fi
-        if [[ "$i" -eq "$MAX_WAIT" ]]; then
-            echo "timed out waiting for passive client model routing" >&2
-            tail -160 "$CLIENT_LOG" >&2 || true
-            exit 1
         fi
         sleep 1
     done
@@ -325,89 +551,26 @@ PY
 
 SEED_PID="$(start_node seed "" "$SEED_API_PORT" "$SEED_CONSOLE_PORT" "$SEED_BIND_PORT" "$SEED_LOG")"
 
-TOKEN=""
-for i in $(seq 1 "$MAX_WAIT"); do
-    if ! kill -0 "$SEED_PID" 2>/dev/null; then
-        echo "seed exited unexpectedly" >&2
-        tail -160 "$SEED_LOG" >&2 || true
-        exit 1
-    fi
-    TOKEN="$(query_token "$(status_json "$SEED_CONSOLE_PORT")")"
-    if [[ -n "$TOKEN" ]]; then
-        echo "Seed produced invite token after ${i}s"
-        break
-    fi
-    if [[ "$i" -eq "$MAX_WAIT" ]]; then
-        echo "timed out waiting for seed invite token" >&2
-        tail -160 "$SEED_LOG" >&2 || true
-        exit 1
-    fi
-    sleep 1
-done
+wait_for_seed_token ""
 
 WORKER_PID="$(start_node worker "$TOKEN" "$WORKER_API_PORT" "$WORKER_CONSOLE_PORT" "$WORKER_BIND_PORT" "$WORKER_LOG")"
 
 DRIVER_LABEL=""
 DRIVER_API_PORT=""
-for i in $(seq 1 "$MAX_WAIT"); do
-    if ! kill -0 "$SEED_PID" 2>/dev/null; then
-        echo "seed exited unexpectedly" >&2
-        tail -160 "$SEED_LOG" >&2 || true
-        exit 1
-    fi
-    if ! kill -0 "$WORKER_PID" 2>/dev/null; then
-        echo "worker exited unexpectedly" >&2
-        tail -160 "$WORKER_LOG" >&2 || true
-        exit 1
-    fi
-
-    for endpoint in \
-        "seed:${SEED_API_PORT}:${SEED_CONSOLE_PORT}" \
-        "worker:${WORKER_API_PORT}:${WORKER_CONSOLE_PORT}"; do
-        IFS=: read -r label api_port console_port <<<"$endpoint"
-        PEERS="$(query_peer_count "$(status_json "$console_port")")"
-        if [[ "$PEERS" -lt 1 ]]; then
-            continue
-        fi
-        MODELS_JSON="$(curl -fsS --max-time 5 "http://127.0.0.1:${api_port}/v1/models" 2>/dev/null || true)"
-        READY_SUMMARY="$(query_split_ready "$(stages_json "$console_port")" "$MODELS_JSON" 2>/dev/null || true)"
-        if [[ "$READY_SUMMARY" == ready=true* ]]; then
-            DRIVER_LABEL="$label"
-            DRIVER_API_PORT="$api_port"
-            echo "Split topology ready after ${i}s on ${label}: ${READY_SUMMARY}"
-            break 2
-        fi
-    done
-
-    if [[ "$i" -eq "$MAX_WAIT" ]]; then
-        echo "timed out waiting for real split topology" >&2
-        echo "last checked endpoint: ${label:-unknown}" >&2
-        echo "last peer count: ${PEERS:-unknown}" >&2
-        echo "last split summary: ${READY_SUMMARY:-unknown}" >&2
-        echo "--- seed /api/runtime/stages at timeout ---" >&2
-        printf '%s\n' "$(stages_json "$SEED_CONSOLE_PORT")" >&2
-        echo "--- worker /api/runtime/stages at timeout ---" >&2
-        printf '%s\n' "$(stages_json "$WORKER_CONSOLE_PORT")" >&2
-        tail -160 "$SEED_LOG" >&2 || true
-        tail -160 "$WORKER_LOG" >&2 || true
-        exit 1
-    fi
-    sleep 1
-done
+wait_for_split_topology ""
 
 if [[ -z "$DRIVER_API_PORT" ]]; then
     echo "no split driver API port was selected" >&2
     exit 1
 fi
 MODEL_ID="$(
-    curl -fsS --max-time 5 "http://127.0.0.1:${DRIVER_API_PORT}/v1/models" |
-        python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", []); print(data[0].get("id", "") if data else "")'
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("model_id", ""))' \
+        "$SPLIT_EVIDENCE_PATH"
 )"
 if [[ -z "$MODEL_ID" ]]; then
-    echo "${DRIVER_LABEL:-selected driver} /v1/models did not return a model id" >&2
+    echo "${DRIVER_LABEL:-selected driver} split evidence did not return a model id" >&2
     exit 1
 fi
-MODEL_LABEL="$PRIMARY_MODEL_LABEL"
 export MODEL_ID MODEL_LABEL
 
 run_client_routing_probe
@@ -655,86 +818,24 @@ run_recurrent_leg() {
 
     SEED_PID="$(start_node seed "" "$SEED_API_PORT" "$SEED_CONSOLE_PORT" "$SEED_BIND_PORT" "$SEED_LOG")"
 
-    TOKEN=""
-    for i in $(seq 1 "$MAX_WAIT"); do
-        if ! kill -0 "$SEED_PID" 2>/dev/null; then
-            echo "recurrent leg: seed exited unexpectedly" >&2
-            tail -160 "$SEED_LOG" >&2 || true
-            exit 1
-        fi
-        TOKEN="$(query_token "$(status_json "$SEED_CONSOLE_PORT")")"
-        if [[ -n "$TOKEN" ]]; then
-            echo "Seed produced invite token after ${i}s (recurrent leg)"
-            break
-        fi
-        if [[ "$i" -eq "$MAX_WAIT" ]]; then
-            echo "recurrent leg: timed out waiting for seed invite token" >&2
-            tail -160 "$SEED_LOG" >&2 || true
-            exit 1
-        fi
-        sleep 1
-    done
+    wait_for_seed_token "recurrent leg: "
 
     WORKER_PID="$(start_node worker "$TOKEN" "$WORKER_API_PORT" "$WORKER_CONSOLE_PORT" "$WORKER_BIND_PORT" "$WORKER_LOG")"
 
     DRIVER_LABEL=""
     DRIVER_API_PORT=""
-    for i in $(seq 1 "$MAX_WAIT"); do
-        if ! kill -0 "$SEED_PID" 2>/dev/null; then
-            echo "recurrent leg: seed exited unexpectedly" >&2
-            tail -160 "$SEED_LOG" >&2 || true
-            exit 1
-        fi
-        if ! kill -0 "$WORKER_PID" 2>/dev/null; then
-            echo "recurrent leg: worker exited unexpectedly" >&2
-            tail -160 "$WORKER_LOG" >&2 || true
-            exit 1
-        fi
-
-        for endpoint in \
-            "seed:${SEED_API_PORT}:${SEED_CONSOLE_PORT}" \
-            "worker:${WORKER_API_PORT}:${WORKER_CONSOLE_PORT}"; do
-            IFS=: read -r label api_port console_port <<<"$endpoint"
-            PEERS="$(query_peer_count "$(status_json "$console_port")")"
-            if [[ "$PEERS" -lt 1 ]]; then
-                continue
-            fi
-            MODELS_JSON="$(curl -fsS --max-time 5 "http://127.0.0.1:${api_port}/v1/models" 2>/dev/null || true)"
-            READY_SUMMARY="$(query_split_ready "$(stages_json "$console_port")" "$MODELS_JSON" 2>/dev/null || true)"
-            if [[ "$READY_SUMMARY" == ready=true* ]]; then
-                DRIVER_LABEL="$label"
-                DRIVER_API_PORT="$api_port"
-                echo "Split topology ready after ${i}s on ${label} (recurrent leg): ${READY_SUMMARY}"
-                break 2
-            fi
-        done
-
-        if [[ "$i" -eq "$MAX_WAIT" ]]; then
-            echo "recurrent leg: timed out waiting for real split topology" >&2
-            echo "last checked endpoint: ${label:-unknown}" >&2
-            echo "last peer count: ${PEERS:-unknown}" >&2
-            echo "last split summary: ${READY_SUMMARY:-unknown}" >&2
-            echo "--- seed /api/runtime/stages at timeout (recurrent leg) ---" >&2
-            printf '%s\n' "$(stages_json "$SEED_CONSOLE_PORT")" >&2
-            echo "--- worker /api/runtime/stages at timeout (recurrent leg) ---" >&2
-            printf '%s\n' "$(stages_json "$WORKER_CONSOLE_PORT")" >&2
-            tail -160 "$SEED_LOG" >&2 || true
-            tail -160 "$WORKER_LOG" >&2 || true
-            exit 1
-        fi
-        sleep 1
-    done
+    wait_for_split_topology "recurrent leg: "
 
     if [[ -z "$DRIVER_API_PORT" ]]; then
         echo "recurrent leg: no split driver API port was selected" >&2
         exit 1
     fi
     MODEL_ID="$(
-        curl -fsS --max-time 5 "http://127.0.0.1:${DRIVER_API_PORT}/v1/models" |
-            python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", []); print(data[0].get("id", "") if data else "")'
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("model_id", ""))' \
+            "$SPLIT_EVIDENCE_PATH"
     )"
     if [[ -z "$MODEL_ID" ]]; then
-        echo "${DRIVER_LABEL:-selected driver} /v1/models did not return a model id (recurrent leg)" >&2
+        echo "${DRIVER_LABEL:-selected driver} split evidence did not return a model id (recurrent leg)" >&2
         exit 1
     fi
 }

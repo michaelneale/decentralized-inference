@@ -28,6 +28,66 @@ RECURRENT_FIXTURE = b"recurrent fixture"
 
 class ProductIntegrationSmokeTests(unittest.TestCase):
     def write_stub(self, path: Path) -> None:
+        if path.name == "ci-two-node-split-smoke.sh":
+            path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+phase="${MESH_PRODUCT_INTEGRATION_PHASE:?missing phase}"
+if [[ "${STUB_FAIL_PHASE:-}" == "$phase" ]]; then
+    exit 42
+fi
+evidence_root="${MESH_TWO_NODE_SPLIT_WORK_DIR:?missing evidence root}"
+snapshot_root="$evidence_root/split-evidence-snapshots"
+mkdir -p "$snapshot_root"
+python3 - "$snapshot_root" <<'PY'
+import copy
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+stages = [
+    {"stage_id": "stage-0", "stage_index": 0, "node_id": "seed-node-0001", "layer_start": 0, "layer_end": 12, "endpoint": {"bind_addr": "127.0.0.1:5501"}},
+    {"stage_id": "stage-1", "stage_index": 1, "node_id": "worker-node-0002", "layer_start": 12, "layer_end": 24, "endpoint": {"bind_addr": "127.0.0.1:5502"}},
+]
+topology = {"topology_id": "topology-a", "run_id": "run-a", "model_id": "model-a", "package_ref": "hf:test/model@revision", "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "stages": stages}
+statuses = [
+    {"topology_id": "topology-a", "run_id": "run-a", "model_id": "model-a", "package_ref": "hf:test/model@revision", "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "stage_id": stage["stage_id"], "stage_index": stage["stage_index"], "node_id": stage["node_id"], "layer_start": stage["layer_start"], "layer_end": stage["layer_end"], "bind_addr": stage["endpoint"]["bind_addr"], "state": "ready"}
+    for stage in stages
+]
+stage_snapshot = {"stages": statuses, "topologies": [topology], "statuses": statuses}
+snapshots = {
+    "seed-status.json": {"node_id": "seed-node", "mesh_id": "mesh-a", "peers": [{"id": "worker-node"}]},
+    "seed-stages.json": stage_snapshot,
+    "seed-models.json": {"data": [{"id": "model-a"}]},
+    "worker-status.json": {"node_id": "worker-node", "mesh_id": "mesh-a", "peers": [{"id": "seed-node"}]},
+    "worker-stages.json": copy.deepcopy(stage_snapshot),
+    "worker-models.json": {"data": [{"id": "model-a"}]},
+}
+for name, payload in snapshots.items():
+    (root / name).write_text(json.dumps(payload, sort_keys=True) + "\\n", encoding="utf-8")
+PY
+python3 scripts/reconcile-two-node-split-evidence.py \
+    --seed-status "$snapshot_root/seed-status.json" \
+    --seed-stages "$snapshot_root/seed-stages.json" \
+    --seed-models "$snapshot_root/seed-models.json" \
+    --worker-status "$snapshot_root/worker-status.json" \
+    --worker-stages "$snapshot_root/worker-stages.json" \
+    --worker-models "$snapshot_root/worker-models.json" \
+    --model-label "${MESH_TWO_NODE_SPLIT_MODEL_LABEL:?missing model label}" \
+    --output "$evidence_root/split-evidence.json"
+case "${STUB_SPLIT_EVIDENCE_MODE:-valid}" in
+    valid) ;;
+    missing|"missing-$phase") rm -f "$evidence_root/split-evidence.json" ;;
+    tampered|"tampered-$phase") printf '{"status":"ready"}\n' >"$evidence_root/split-evidence.json" ;;
+    missing-*|tampered-*) ;;
+    *) exit 64 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+            return
         path.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -54,12 +114,17 @@ fi
         dense_sha256: str | None = None,
         recurrent_artifact_id: str = RECURRENT_ARTIFACT_ID,
         recurrent_sha256: str | None = None,
+        split_evidence_mode: str = "valid",
     ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             scripts = root / "scripts"
             scripts.mkdir()
             shutil.copy2(PRODUCT_SCRIPT, scripts / PRODUCT_SCRIPT.name)
+            shutil.copy2(
+                ROOT / "scripts" / "reconcile-two-node-split-evidence.py",
+                scripts / "reconcile-two-node-split-evidence.py",
+            )
             for name in (
                 "ci-smoke-test.sh",
                 "ci-compat-smoke.sh",
@@ -87,6 +152,7 @@ fi
                 **os.environ,
                 "PATH": "/usr/bin:/bin",
                 "MESH_PRODUCT_INTEGRATION_PHASE_ROOT": str(phase_root),
+                "STUB_SPLIT_EVIDENCE_MODE": split_evidence_mode,
             }
             if failure_phase is not None:
                 env["STUB_FAIL_PHASE"] = failure_phase
@@ -173,6 +239,17 @@ fi
                 )
                 self.assertTrue(phase["workdir"])
                 self.assertTrue(phase["log_paths"])
+                if phase["phase"] in {"dense-split-kv", "recurrent-split-kv"}:
+                    self.assertRegex(
+                        phase["split_evidence"]["sha256"], r"^[0-9a-f]{64}$"
+                    )
+                    self.assertTrue(
+                        phase["split_evidence"]["path"].endswith(
+                            "split-evidence.json"
+                        )
+                    )
+                else:
+                    self.assertIsNone(phase["split_evidence"])
                 self.assertLessEqual(
                     phase["started_at_unix_ns"], phase["ended_at_unix_ns"]
                 )
@@ -225,6 +302,24 @@ fi
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stderr)
                 self.assertIsNone(manifest)
+
+    def test_missing_or_tampered_split_evidence_fails_the_owning_phase(self) -> None:
+        cases = {
+            "missing-dense-split-kv": "dense-split-kv",
+            "tampered-recurrent-split-kv": "recurrent-split-kv",
+        }
+        for mode, failure_phase in cases.items():
+            with self.subTest(mode=mode):
+                result, manifest = self.run_suite(split_evidence_mode=mode)
+                self.assertEqual(result.returncode, 71, result.stderr)
+                self.assertIsNotNone(manifest)
+                assert manifest is not None
+                self.assertEqual(manifest["suite_status"], "failed")
+                self.assertEqual(
+                    manifest["reconciliation"]["failure_phase"], failure_phase
+                )
+                self.assertEqual(manifest["phases"][-1]["status"], "failed")
+                self.assertIsNone(manifest["phases"][-1]["split_evidence"])
 
 
 if __name__ == "__main__":

@@ -290,8 +290,24 @@ runtime producers are not duplicated.
   IBM Granite 4.0 H 350M Q4. Its ordered phases cover dense standalone,
   OpenAI/SDK, constrained-Tokio restart, and a dense seed/worker/passive-client
   topology followed by a separately evidenced strict Granite `KvRecurrent`
-  phase. The existing Qwen3.5 recurrent job remains required until Granite
-  passes that live contract. The typed runner supports CPU, CUDA, and Metal,
+  phase. Each split phase persists strict-whitelist seed and worker status
+  snapshots containing only node, mesh, and peer identity, plus runtime-stage
+  and OpenAI model-list snapshots. The network-free reconciler fails closed
+  unless both distinct observers report the same mesh, non-empty
+  topology/run/model/package/manifest identity, the same exact two-stage
+  contiguous cut on distinct nodes and bind addresses, two matching `ready`
+  statuses, and the same sole served model. It atomically records
+  `split-evidence.json`. Readiness uses a capped five-minute wall-clock deadline
+  and parallel endpoint captures bounded to two seconds by default; timeout or
+  process-exit diagnostics retain the final snapshots, failed reconciliation,
+  and both server log tails. The status projection never persists invite
+  tokens, nested fields, or unrelated path fields.
+  The product suite independently replays reconciliation from the persisted
+  snapshots, records each split evidence path and SHA-256 in
+  `phase-results.json`, and rejects missing, modified, or self-inconsistent
+  evidence. All JSON snapshots and reconciled evidence upload with the phase
+  logs on success or failure. The existing Qwen3.5 recurrent job remains
+  required until Granite passes that live contract. The typed runner supports CPU, CUDA, and Metal,
   but only CPU is selected during the first qualification stage; the existing
   CUDA inference and Metal model-load signals remain required until their typed
   product rows pass live qualification in that order. CUDA and Metal request

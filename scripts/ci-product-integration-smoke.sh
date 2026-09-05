@@ -150,12 +150,13 @@ append_phase_record() {
     local model_json="$3"
     local workdir="$4"
     local log_paths_json="$5"
-    local started_at_unix_ns="$6"
-    local ended_at_unix_ns="$7"
-    local exit_code="$8"
+    local split_evidence_json="$6"
+    local started_at_unix_ns="$7"
+    local ended_at_unix_ns="$8"
+    local exit_code="$9"
 
     python3 - "$PHASE_RECORDS" "$phase" "$status" "$model_json" \
-        "$workdir" "$log_paths_json" "$started_at_unix_ns" \
+        "$workdir" "$log_paths_json" "$split_evidence_json" "$started_at_unix_ns" \
         "$ended_at_unix_ns" "$exit_code" <<'PY'
 import json
 import sys
@@ -167,6 +168,7 @@ import sys
     model_json,
     workdir,
     log_paths_json,
+    split_evidence_json,
     started_at_unix_ns,
     ended_at_unix_ns,
     exit_code,
@@ -178,6 +180,7 @@ record = {
     "model": json.loads(model_json),
     "workdir": workdir,
     "log_paths": json.loads(log_paths_json),
+    "split_evidence": json.loads(split_evidence_json),
     "started_at_unix_ns": int(started_at_unix_ns),
     "ended_at_unix_ns": int(ended_at_unix_ns),
     "exit_code": int(exit_code),
@@ -195,6 +198,7 @@ write_phase_manifest() {
     python3 - "$PHASE_RECORDS" "$PHASE_MANIFEST" "$PLATFORM" "$BACKEND" \
         "$DEVICE" "$bundle_backend" "$SUITE_STARTED_AT_UNIX_NS" "$suite_status" \
         "$failure_phase" "$finalize" "${REQUIRED_PHASES[@]}" <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -229,6 +233,10 @@ if os.path.exists(records_path):
 errors = []
 seen = set()
 required = set(required_phases)
+split_phases = {
+    "dense-split-kv": "dense",
+    "recurrent-split-kv": "recurrent",
+}
 for record in records:
     phase = record.get("phase")
     if phase not in required:
@@ -238,6 +246,7 @@ for record in records:
         errors.append(f"duplicate phase record: {phase}")
     seen.add(phase)
     model = record.get("model")
+    split_evidence = record.get("split_evidence")
     if (
         record.get("status") not in {"passed", "failed"}
         or not isinstance(model, dict)
@@ -260,6 +269,39 @@ for record in records:
         or not isinstance(record.get("exit_code"), int)
     ):
         errors.append(f"incomplete phase record: {phase!r}")
+    expected_model_label = split_phases.get(phase)
+    if expected_model_label is None:
+        if split_evidence is not None:
+            errors.append(f"unexpected split evidence for phase: {phase!r}")
+    elif record.get("status") == "passed":
+        if (
+            not isinstance(split_evidence, dict)
+            or not isinstance(split_evidence.get("path"), str)
+            or not split_evidence["path"]
+            or not isinstance(split_evidence.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", split_evidence["sha256"])
+        ):
+            errors.append(f"missing split evidence for passed phase: {phase!r}")
+        else:
+            evidence_path = split_evidence["path"]
+            try:
+                with open(evidence_path, "rb") as evidence_file:
+                    raw_evidence = evidence_file.read()
+                actual_digest = hashlib.sha256(raw_evidence).hexdigest()
+                evidence_payload = json.loads(raw_evidence)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                errors.append(f"unreadable split evidence for phase {phase!r}: {error}")
+            else:
+                if actual_digest != split_evidence["sha256"]:
+                    errors.append(f"split evidence digest mismatch for phase: {phase!r}")
+                if (
+                    not isinstance(evidence_payload, dict)
+                    or evidence_payload.get("kind")
+                    != "mesh-llm-two-node-split-readiness"
+                    or evidence_payload.get("status") != "ready"
+                    or evidence_payload.get("model_label") != expected_model_label
+                ):
+                    errors.append(f"invalid split evidence payload for phase: {phase!r}")
 
 missing = [phase for phase in required_phases if phase not in seen]
 if finalize:
@@ -329,6 +371,44 @@ with open(records_path, encoding="utf-8") as handle:
 PY
 }
 
+verify_split_phase_evidence() {
+    local phase="$1"
+    local model_label="$2"
+    local phase_dir="$3"
+    local evidence_path="${phase_dir}/split-evidence.json"
+    local snapshot_dir="${phase_dir}/split-evidence-snapshots"
+    local evidence_sha256
+
+    case "$phase" in
+        dense-split-kv|recurrent-split-kv) ;;
+        *)
+            printf 'null\n'
+            return 0
+            ;;
+    esac
+
+    if ! python3 scripts/reconcile-two-node-split-evidence.py \
+        --seed-status "$snapshot_dir/seed-status.json" \
+        --seed-stages "$snapshot_dir/seed-stages.json" \
+        --seed-models "$snapshot_dir/seed-models.json" \
+        --worker-status "$snapshot_dir/worker-status.json" \
+        --worker-stages "$snapshot_dir/worker-stages.json" \
+        --worker-models "$snapshot_dir/worker-models.json" \
+        --model-label "$model_label" \
+        --verify "$evidence_path" >&2; then
+        echo "${phase} did not produce independently verifiable split evidence" >&2
+        return 1
+    fi
+    evidence_sha256="$(fixture_sha256 "$evidence_path")"
+    python3 - "$evidence_path" "$evidence_sha256" <<'PY'
+import json
+import sys
+
+path, sha256 = sys.argv[1:]
+print(json.dumps({"path": path, "sha256": sha256}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 finalize_interrupted_suite() {
     local exit_code="$?"
     trap - EXIT
@@ -360,6 +440,7 @@ run_phase() {
     local ended_at_unix_ns
     local phase_exit_code
     local phase_status
+    local split_evidence_json=null
 
     if ! ensure_phase_is_planned_once "$phase"; then
         write_phase_manifest failed "$phase" 1 || true
@@ -377,9 +458,16 @@ run_phase() {
         phase_exit_code=$?
         phase_status=failed
     fi
+    if [[ "$phase_exit_code" -eq 0 ]]; then
+        if ! split_evidence_json="$(verify_split_phase_evidence "$phase" "$model_label" "$phase_dir")"; then
+            phase_exit_code=71
+            phase_status=failed
+            split_evidence_json=null
+        fi
+    fi
     ended_at_unix_ns="$(phase_now_unix_ns)"
     append_phase_record "$phase" "$phase_status" "$model_json" "$phase_dir" \
-        "$log_paths_json" "$started_at_unix_ns" "$ended_at_unix_ns" \
+        "$log_paths_json" "$split_evidence_json" "$started_at_unix_ns" "$ended_at_unix_ns" \
         "$phase_exit_code"
     if [[ "$phase_exit_code" -ne 0 ]]; then
         write_phase_manifest failed "$phase" 1 || true
