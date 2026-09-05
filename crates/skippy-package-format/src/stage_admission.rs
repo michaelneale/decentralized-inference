@@ -169,7 +169,7 @@ impl PackageManifest {
 
 fn validate_requested_sidecars(sidecars: &[Sidecar]) -> Result<(), StageAdmissionError> {
     for (index, pair) in sidecars.windows(2).enumerate() {
-        if compare_sidecars(&pair[0], &pair[1]).is_ge() {
+        if pair[0] >= pair[1] {
             return Err(StageAdmissionError::SidecarsNotStrictlySorted {
                 index: index + 1,
                 previous: pair[0].clone(),
@@ -178,10 +178,6 @@ fn validate_requested_sidecars(sidecars: &[Sidecar]) -> Result<(), StageAdmissio
         }
     }
     Ok(())
-}
-
-fn compare_sidecars(left: &Sidecar, right: &Sidecar) -> std::cmp::Ordering {
-    (&left.kind, &left.name, &left.artifact_id).cmp(&(&right.kind, &right.name, &right.artifact_id))
 }
 
 fn required_artifact<'a>(
@@ -318,6 +314,57 @@ mod tests {
             manifest.resolve_stage_admission(&unknown),
             Err(StageAdmissionError::UnknownSidecar { .. })
         ));
+    }
+
+    #[test]
+    fn ordinary_sidecar_sort_matches_admission_order() {
+        let mut manifest = fixture();
+        manifest.sidecars = vec![
+            Sidecar {
+                kind: SidecarKind::Mmproj,
+                artifact_id: "mmproj-b".to_string(),
+                name: None,
+            },
+            Sidecar {
+                kind: SidecarKind::Mmproj,
+                artifact_id: "mmproj-a".to_string(),
+                name: Some("vision".to_string()),
+            },
+        ];
+        manifest.package_id = manifest.computed_package_id().unwrap();
+        manifest.validate().unwrap();
+
+        let mut descriptor = descriptor(&manifest);
+        descriptor.sidecars.reverse();
+        assert!(matches!(
+            manifest.resolve_stage_admission(&descriptor),
+            Err(StageAdmissionError::SidecarsNotStrictlySorted { .. })
+        ));
+
+        descriptor.sidecars.sort();
+        manifest.resolve_stage_admission(&descriptor).unwrap();
+        assert_eq!(descriptor.sidecars, manifest.sidecars);
+
+        let mut tied_names = [
+            Sidecar {
+                kind: SidecarKind::Mmproj,
+                artifact_id: "mmproj-b".to_string(),
+                name: Some("vision".to_string()),
+            },
+            Sidecar {
+                kind: SidecarKind::Mmproj,
+                artifact_id: "mmproj-a".to_string(),
+                name: Some("vision".to_string()),
+            },
+        ];
+        tied_names.sort();
+        assert_eq!(tied_names[0].artifact_id, "mmproj-a");
+        assert_eq!(tied_names[1].artifact_id, "mmproj-b");
+
+        assert_eq!(
+            serde_json::to_string(&tied_names[0]).unwrap(),
+            r#"{"kind":"mmproj","artifact_id":"mmproj-a","name":"vision"}"#
+        );
     }
 
     #[test]

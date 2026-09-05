@@ -73,13 +73,7 @@ impl PackageManifest {
             .tensor_catalog
             .entries
             .sort_by(|left, right| left.id.cmp(&right.id));
-        normalized.sidecars.sort_by(|left, right| {
-            (&left.kind, &left.name, &left.artifact_id).cmp(&(
-                &right.kind,
-                &right.name,
-                &right.artifact_id,
-            ))
-        });
+        normalized.sidecars.sort();
         let digest = Sha256::digest(serde_json::to_vec(&normalized)?);
         let hex = digest
             .iter()
@@ -171,13 +165,29 @@ pub enum TensorIntegrity {
     TensorSha256 { sha256: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sidecar {
     pub kind: SidecarKind,
     pub artifact_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+impl Ord for Sidecar {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.kind, &self.name, &self.artifact_id).cmp(&(
+            &other.kind,
+            &other.name,
+            &other.artifact_id,
+        ))
+    }
+}
+
+impl PartialOrd for Sidecar {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
