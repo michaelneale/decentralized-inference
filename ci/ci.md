@@ -284,10 +284,14 @@ runtime producers are not duplicated.
 - `ci-platform-checks-slice.yml` — macOS portable/unit, Windows portable, and
   focused Windows log-store privacy ACL checks.
 - `ci-linux-product-smoke-slice.yml` and
-  `ci-macos-product-smoke-slice.yml` — platform-local CPU core, CUDA,
-  two-node, Metal and model-download consumers using only composed artifacts.
-  One Linux KV caching smoke job runs a fixed dense SmolLM2 leg followed by a
-  recurrent Qwen3.5 leg; both must pass.
+  `ci-macos-product-smoke-slice.yml` — platform-local callers of the typed
+  product-integration suite and the model-download consumer. The suite stages
+  its registry-derived pair exactly once: dense SmolLM2-135M Q8 and recurrent
+  IBM Granite 4.0 H 350M Q4. Its ordered phases cover dense standalone,
+  OpenAI/SDK, constrained-Tokio restart, and a dense seed/worker/passive-client
+  topology followed by strict Granite `KvRecurrent` cache validation. CPU,
+  CUDA, and Metal use the same fixture identities; CUDA and Metal request their
+  explicit accelerator device and reject unsupported typed backend selections.
   CUDA inference uses the
   approved `gpu-nvidia` ephemeral self-hosted scale set, including for
   same-repository PRs. That hardware-qualified exception executes only through

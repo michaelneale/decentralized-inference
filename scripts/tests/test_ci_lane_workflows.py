@@ -162,6 +162,7 @@ class CiLaneWorkflowTests(unittest.TestCase):
             "swift-sdk-artifact.yml",
             "smoke.yml",
             "scripted-binary-smoke.yml",
+            "product-integration-smoke.yml",
             "sdk-smoke.yml",
             "hf-download-smoke.yml",
         )
@@ -171,7 +172,10 @@ class CiLaneWorkflowTests(unittest.TestCase):
                 self.assertIn("source_sha:", workflow)
                 checkout_ref = (
                     "ref: ${{ inputs.source_sha }}"
-                    if workflow_name == "ci-windows-runtime-slice.yml"
+                    if workflow_name in (
+                        "ci-windows-runtime-slice.yml",
+                        "product-integration-smoke.yml",
+                    )
                     else "ref: ${{ inputs.source_sha || github.sha }}"
                 )
                 self.assertIn(
@@ -296,13 +300,11 @@ class CiLaneWorkflowTests(unittest.TestCase):
     def test_product_smoke_jobs_parse_formatted_matrix_json(self) -> None:
         smoke_workflows = {
             "ci-linux-product-smoke-slice.yml": (
-                "core",
-                "core-cuda",
-                "two-node-client",
-                "two-node-split",
+                "product-integration-cpu",
+                "product-integration-cuda",
                 "model-download",
             ),
-            "ci-macos-product-smoke-slice.yml": ("metal-model-load",),
+            "ci-macos-product-smoke-slice.yml": ("product-integration-metal",),
         }
         for workflow_name, smoke_ids in smoke_workflows.items():
             workflow = self.workflow(workflow_name)

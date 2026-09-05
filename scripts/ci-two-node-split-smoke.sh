@@ -47,8 +47,12 @@ WORK_DIR="${MESH_TWO_NODE_SPLIT_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/mesh-two-
 # Keep this under /tmp with a short prefix because plugin Unix socket paths
 # must fit platform SUN_LEN limits, especially on macOS where TMPDIR is long.
 PROCESS_ROOT="${MESH_TWO_NODE_SPLIT_PROCESS_ROOT:-$(mktemp -d "/tmp/m2split.XXXXXX")}"
-SEED_LOG="${WORK_DIR}/seed.log"
-WORKER_LOG="${WORK_DIR}/worker.log"
+SEED_LOG="${WORK_DIR}/dense-seed.log"
+WORKER_LOG="${WORK_DIR}/dense-worker.log"
+CLIENT_ROUTING="${MESH_TWO_NODE_SPLIT_CLIENT_ROUTING:-0}"
+CLIENT_API_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_API_PORT:-9369}"
+CLIENT_CONSOLE_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_CONSOLE_PORT:-3163}"
+CLIENT_LOG="${WORK_DIR}/dense-client.log"
 
 echo "=== CI Two-Node Split Smoke ==="
 echo "  mesh-llm:       $MESH_LLM"
@@ -66,6 +70,7 @@ echo "  expected exact payload: ${EXPECTED_EXACT_PAYLOAD_KIND:-none}"
 echo "  ctx size:       ${CTX_SIZE:-model default}"
 echo "  max vram:       ${MAX_VRAM}GB"
 echo "  device:         $DEVICE"
+echo "  client routing: $CLIENT_ROUTING"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -108,13 +113,17 @@ kill_tree() {
 
 SEED_PID=""
 WORKER_PID=""
+CLIENT_PID=""
 cleanup() {
+    kill_tree "$CLIENT_PID"
     kill_tree "$WORKER_PID"
     kill_tree "$SEED_PID"
     echo "--- seed log tail ---"
     tail -160 "$SEED_LOG" 2>/dev/null || true
     echo "--- worker log tail ---"
     tail -160 "$WORKER_LOG" 2>/dev/null || true
+    echo "--- client log tail ---"
+    tail -160 "$CLIENT_LOG" 2>/dev/null || true
     echo "--- end logs ---"
     if [[ -z "${MESH_TWO_NODE_SPLIT_WORK_DIR:-}" ]]; then
         rm -rf "$WORK_DIR"
@@ -233,6 +242,79 @@ start_node() {
     printf '%s\n' "$!"
 }
 
+run_client_routing_probe() {
+    [[ "$CLIENT_ROUTING" == "1" ]] || return 0
+    echo "Starting passive client against dense split topology"
+    local client_home="${PROCESS_ROOT}/client/h"
+    local client_runtime="${PROCESS_ROOT}/client/r"
+    mkdir -p "$client_home" "$client_runtime"
+    HOME="$client_home" \
+        MESH_LLM_RUNTIME_ROOT="$client_runtime" \
+        MESH_LLM_EPHEMERAL_KEY=1 \
+        "$MESH_LLM" --log-format json client --join "$TOKEN" \
+        --port "$CLIENT_API_PORT" --console "$CLIENT_CONSOLE_PORT" --headless \
+        >"$CLIENT_LOG" 2>&1 &
+    CLIENT_PID=$!
+
+    for i in $(seq 1 "$MAX_WAIT"); do
+        if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+            echo "passive client exited unexpectedly" >&2
+            tail -160 "$CLIENT_LOG" >&2 || true
+            exit 1
+        fi
+        client_models="$(curl -fsS --max-time 5 "http://127.0.0.1:${CLIENT_API_PORT}/v1/models" 2>/dev/null || true)"
+        if CLIENT_MODELS_JSON="$client_models" MODEL_ID="$MODEL_ID" python3 - <<'PY' 2>/dev/null; then
+import json
+import os
+
+models = json.loads(os.environ.get("CLIENT_MODELS_JSON", "") or "{}").get("data", [])
+raise SystemExit(0 if any(item.get("id") == os.environ["MODEL_ID"] for item in models) else 1)
+PY
+            break
+        fi
+        if [[ "$i" -eq "$MAX_WAIT" ]]; then
+            echo "timed out waiting for passive client model routing" >&2
+            tail -160 "$CLIENT_LOG" >&2 || true
+            exit 1
+        fi
+        sleep 1
+    done
+
+    local probe_root="${WORK_DIR}/client-routing"
+    mkdir -p "$probe_root"
+    python3 - "$MODEL_ID" "$probe_root/request.json" "$probe_root/stream.json" <<'PY'
+import json
+import sys
+
+model, request_path, stream_path = sys.argv[1:4]
+for path, stream in ((request_path, False), (stream_path, True)):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({
+            "model": model,
+            "messages": [{"role": "user", "content": "Say ok."}],
+            "stream": stream,
+            "max_tokens": 8,
+            "temperature": 0,
+        }, handle)
+PY
+    curl -fsS --max-time 120 "http://127.0.0.1:${CLIENT_API_PORT}/v1/chat/completions" \
+        -H 'content-type: application/json' -d @"$probe_root/request.json" \
+        -o "$probe_root/response.json"
+    python3 - "$probe_root/response.json" <<'PY'
+import json
+import sys
+
+body = json.load(open(sys.argv[1], encoding="utf-8"))
+if body.get("object") != "chat.completion" or not body.get("choices"):
+    raise SystemExit(f"invalid passive-client response: {body!r}")
+PY
+    curl -fsS --max-time 120 -N "http://127.0.0.1:${CLIENT_API_PORT}/v1/chat/completions" \
+        -H 'content-type: application/json' -d @"$probe_root/stream.json" \
+        -o "$probe_root/stream.txt"
+    grep -q 'data: \[DONE\]' "$probe_root/stream.txt"
+    echo "Passive client routing and streaming validated against dense split topology"
+}
+
 SEED_PID="$(start_node seed "" "$SEED_API_PORT" "$SEED_CONSOLE_PORT" "$SEED_BIND_PORT" "$SEED_LOG")"
 
 TOKEN=""
@@ -319,6 +401,8 @@ if [[ -z "$MODEL_ID" ]]; then
 fi
 MODEL_LABEL="dense"
 export MODEL_ID MODEL_LABEL
+
+run_client_routing_probe
 
 PREFIX_PAYLOAD_ROOT="${WORK_DIR}/prefix-payloads"
 PREFIX_RESPONSE_ROOT="${WORK_DIR}/prefix-responses"
@@ -548,10 +632,12 @@ echo "Two-node split smoke passed for model leg: ${MODEL_LABEL:-default}"
 # token, fresh stage split), and reruns the prefix cache assertions.
 run_recurrent_leg() {
     echo "=== Two-node split smoke: recurrent leg ==="
+    kill_tree "$CLIENT_PID"
+    CLIENT_PID=""
     kill_tree "$WORKER_PID"
     kill_tree "$SEED_PID"
-    : >"$SEED_LOG"
-    : >"$WORKER_LOG"
+    SEED_LOG="${WORK_DIR}/recurrent-seed.log"
+    WORKER_LOG="${WORK_DIR}/recurrent-worker.log"
 
     MODEL="$RECURRENT_MODEL"
     CTX_SIZE="$RECURRENT_CTX_SIZE"
