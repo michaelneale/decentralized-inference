@@ -1,4 +1,12 @@
 mod activation;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "generation-15 frame integration intentionally lands separately"
+    )
+)]
+mod activation_codec;
 mod codec;
 mod types;
 
