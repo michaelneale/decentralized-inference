@@ -301,6 +301,7 @@ mod tests {
             model_id: "model".to_string(),
             source_model: SourceModel {
                 sha256: DIGEST.to_string(),
+                metadata_artifact_id: "weights".to_string(),
                 repo: None,
                 revision: None,
                 primary_file: Some("model.gguf".to_string()),

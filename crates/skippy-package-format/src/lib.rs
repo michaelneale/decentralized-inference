@@ -42,6 +42,7 @@ impl PackageManifest {
         let artifacts = collect_artifacts(&self.artifact_catalog.entries, &mut issues);
         let tensors = collect_tensors(self, &mut issues);
 
+        validate_metadata_artifact_binding(self, &artifacts, &mut issues);
         validate_owned_tensor_storage(&self.tensor_catalog.entries, &artifacts, &mut issues);
         validate_aliases(&self.tensor_catalog.entries, &tensors, &mut issues);
         validate_sidecars(&self.sidecars, &artifacts, &mut issues);
@@ -91,6 +92,7 @@ impl PackageManifest {
 #[serde(deny_unknown_fields)]
 pub struct SourceModel {
     pub sha256: String,
+    pub metadata_artifact_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,6 +312,8 @@ pub enum ValidationCode {
     InvalidIdentifier,
     InvalidPath,
     UnknownSourceFile,
+    InvalidMetadataArtifact,
+    SourceIdentityMismatch,
     DuplicateArtifact,
     DuplicateArtifactPath,
     DuplicateTensor,
@@ -379,6 +383,11 @@ fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<Validat
     }
     validate_prefixed_sha256("package_id", &manifest.package_id, issues);
     validate_sha256("source_model.sha256", &manifest.source_model.sha256, issues);
+    validate_nonempty(
+        "source_model.metadata_artifact_id",
+        &manifest.source_model.metadata_artifact_id,
+        issues,
+    );
     if manifest.model_metadata.is_empty() {
         push_issue(
             issues,
@@ -459,19 +468,125 @@ fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<Validat
             );
         }
     }
-    if let Some(primary_file) = &manifest.source_model.primary_file {
-        validate_relative_path("source_model.primary_file", primary_file, issues);
-        if !source_paths.contains(primary_file.as_str()) {
+    match &manifest.source_model.primary_file {
+        Some(primary_file) => {
+            validate_relative_path("source_model.primary_file", primary_file, issues);
+            if !source_paths.contains(primary_file.as_str()) {
+                push_issue(
+                    issues,
+                    ValidationCode::UnknownSourceFile,
+                    "source_model.primary_file",
+                    format!(
+                        "primary file {:?} is absent from source files",
+                        primary_file
+                    ),
+                );
+            }
+        }
+        None => {
             push_issue(
                 issues,
-                ValidationCode::UnknownSourceFile,
+                ValidationCode::MissingValue,
                 "source_model.primary_file",
-                format!(
-                    "primary file {:?} is absent from source files",
-                    primary_file
-                ),
+                "primary source file is required",
             );
         }
+    }
+}
+
+fn validate_metadata_artifact_binding(
+    manifest: &PackageManifest,
+    artifacts: &BTreeMap<&str, &Artifact>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let artifact_id = manifest.source_model.metadata_artifact_id.as_str();
+    if artifact_id.trim().is_empty() {
+        return;
+    }
+    let Some(artifact) = artifacts.get(artifact_id) else {
+        push_issue(
+            issues,
+            ValidationCode::UnknownArtifact,
+            "source_model.metadata_artifact_id",
+            format!("metadata artifact {artifact_id:?} is absent from artifact catalog"),
+        );
+        return;
+    };
+    if Path::new(&artifact.path)
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("gguf")
+    {
+        push_issue(
+            issues,
+            ValidationCode::InvalidMetadataArtifact,
+            "source_model.metadata_artifact_id",
+            format!("metadata artifact {:?} is not a GGUF artifact", artifact.id),
+        );
+    }
+    if manifest
+        .sidecars
+        .iter()
+        .any(|sidecar| sidecar.artifact_id == artifact.id)
+    {
+        push_issue(
+            issues,
+            ValidationCode::InvalidMetadataArtifact,
+            "source_model.metadata_artifact_id",
+            format!("metadata artifact {:?} has a sidecar role", artifact.id),
+        );
+    }
+    if artifact.sha256 != manifest.source_model.sha256 {
+        push_issue(
+            issues,
+            ValidationCode::SourceIdentityMismatch,
+            "source_model.metadata_artifact_id",
+            format!(
+                "metadata artifact {:?} SHA-256 does not match source model digest",
+                artifact.id
+            ),
+        );
+    }
+    let Some(primary_path) = manifest.source_model.primary_file.as_deref() else {
+        return;
+    };
+    let Some(primary_file) = manifest
+        .source_model
+        .files
+        .iter()
+        .find(|file| file.path == primary_path)
+    else {
+        return;
+    };
+    if manifest.source_model.sha256 != primary_file.sha256 {
+        push_issue(
+            issues,
+            ValidationCode::SourceIdentityMismatch,
+            "source_model.sha256",
+            "source model digest does not match the primary source file",
+        );
+    }
+    if artifact.sha256 != primary_file.sha256 {
+        push_issue(
+            issues,
+            ValidationCode::SourceIdentityMismatch,
+            "source_model.metadata_artifact_id",
+            format!(
+                "metadata artifact {:?} SHA-256 does not match primary source file {:?}",
+                artifact.id, primary_file.path
+            ),
+        );
+    }
+    if artifact.byte_size != primary_file.byte_size {
+        push_issue(
+            issues,
+            ValidationCode::SourceIdentityMismatch,
+            "source_model.metadata_artifact_id",
+            format!(
+                "metadata artifact {:?} byte size does not match primary source file {:?}",
+                artifact.id, primary_file.path
+            ),
+        );
     }
 }
 
@@ -1196,6 +1311,105 @@ mod tests {
     #[test]
     fn valid_manifest_passes() {
         fixture().validate().unwrap();
+    }
+
+    #[test]
+    fn metadata_artifact_binding_is_required_and_exact() {
+        let manifest = fixture();
+        let mut encoded = serde_json::to_value(&manifest).unwrap();
+        encoded["source_model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata_artifact_id");
+        assert!(serde_json::from_value::<PackageManifest>(encoded).is_err());
+
+        let mut empty = manifest.clone();
+        empty.source_model.metadata_artifact_id.clear();
+        empty.package_id = empty.computed_package_id().unwrap();
+        assert!(empty.validate().unwrap_err().issues().iter().any(|issue| {
+            issue.code == ValidationCode::MissingValue
+                && issue.path == "source_model.metadata_artifact_id"
+        }));
+
+        let mut unknown = manifest.clone();
+        unknown.source_model.metadata_artifact_id = "missing".to_string();
+        unknown.package_id = unknown.computed_package_id().unwrap();
+        assert!(
+            unknown
+                .validate()
+                .unwrap_err()
+                .issues()
+                .iter()
+                .any(|issue| {
+                    issue.code == ValidationCode::UnknownArtifact
+                        && issue.path == "source_model.metadata_artifact_id"
+                })
+        );
+
+        let mut missing_primary = manifest.clone();
+        missing_primary.source_model.primary_file = None;
+        missing_primary.package_id = missing_primary.computed_package_id().unwrap();
+        assert!(
+            missing_primary
+                .validate()
+                .unwrap_err()
+                .issues()
+                .iter()
+                .any(|issue| {
+                    issue.code == ValidationCode::MissingValue
+                        && issue.path == "source_model.primary_file"
+                })
+        );
+
+        for mismatch in 0..3 {
+            let mut changed = manifest.clone();
+            match mismatch {
+                0 => changed.artifact_catalog.entries[0].sha256 = "1".repeat(64),
+                1 => changed.artifact_catalog.entries[0].byte_size += 1,
+                _ => changed.source_model.sha256 = "1".repeat(64),
+            }
+            changed.package_id = changed.computed_package_id().unwrap();
+            assert!(
+                changed
+                    .validate()
+                    .unwrap_err()
+                    .issues()
+                    .iter()
+                    .any(|issue| { issue.code == ValidationCode::SourceIdentityMismatch })
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_artifact_must_have_gguf_source_role() {
+        let manifest = fixture();
+        let mut wrong_format = manifest.clone();
+        wrong_format.artifact_catalog.entries[0].path = "layers/layer-00000.bin".to_string();
+        wrong_format.package_id = wrong_format.computed_package_id().unwrap();
+        assert!(
+            wrong_format
+                .validate()
+                .unwrap_err()
+                .issues()
+                .iter()
+                .any(|issue| { issue.code == ValidationCode::InvalidMetadataArtifact })
+        );
+
+        let mut sidecar = manifest;
+        sidecar.sidecars.push(Sidecar {
+            kind: "mmproj".to_string(),
+            artifact_id: sidecar.source_model.metadata_artifact_id.clone(),
+            name: None,
+        });
+        sidecar.package_id = sidecar.computed_package_id().unwrap();
+        assert!(
+            sidecar
+                .validate()
+                .unwrap_err()
+                .issues()
+                .iter()
+                .any(|issue| { issue.code == ValidationCode::InvalidMetadataArtifact })
+        );
     }
 
     #[test]
@@ -2127,6 +2341,7 @@ mod tests {
             model_id: "fixture/model".to_string(),
             source_model: SourceModel {
                 sha256: DIGEST.to_string(),
+                metadata_artifact_id: "layer-0".to_string(),
                 repo: Some("fixture/model".to_string()),
                 revision: Some("revision".to_string()),
                 primary_file: Some("model.gguf".to_string()),

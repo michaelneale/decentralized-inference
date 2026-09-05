@@ -80,6 +80,7 @@ fn verifies_whole_shard_package_read_only_and_accepts_catalog_reordering() {
     let mut manifest = case.manifest();
     manifest.tensor_catalog.entries.reverse();
     manifest.artifact_catalog.entries[0].id = "renamed-container".into();
+    manifest.source_model.metadata_artifact_id = "renamed-container".into();
     for t in &mut manifest.tensor_catalog.entries {
         if let TensorStorage::Owned { artifact_id, .. } = &mut t.storage {
             *artifact_id = "renamed-container".into();

@@ -85,6 +85,21 @@ fn complete_shards_bind_every_file_and_tensor() {
     assert_eq!(manifest.artifact_catalog.entries.len(), 2);
     assert_eq!(manifest.tensor_catalog.entries.len(), 2);
     assert_eq!(manifest.source_model.sha256, file_sha256(&second).unwrap());
+    assert_eq!(manifest.source_model.metadata_artifact_id, "source-00001");
+    let metadata_artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .unwrap();
+    let primary_file = manifest
+        .source_model
+        .files
+        .iter()
+        .find(|file| Some(file.path.as_str()) == manifest.source_model.primary_file.as_deref())
+        .unwrap();
+    assert_eq!(metadata_artifact.sha256, primary_file.sha256);
+    assert_eq!(metadata_artifact.byte_size, primary_file.byte_size);
 }
 
 #[test]

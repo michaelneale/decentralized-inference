@@ -115,20 +115,18 @@ fn manifest_from_source(
         .primary_file
         .as_ref()
         .context("missing primary source identity")?;
-    let source_sha = inventory
+    let primary_shard = inventory
         .shards
         .iter()
         .find(|s| &s.source_file.path == primary)
-        .context("primary source absent from independent inventory")?
-        .source_file
-        .sha256
-        .clone();
+        .context("primary source absent from independent inventory")?;
     Ok(PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION,
         package_id: String::new(),
         model_id: input.model_id.clone(),
         source_model: SourceModel {
-            sha256: source_sha,
+            sha256: primary_shard.source_file.sha256.clone(),
+            metadata_artifact_id: primary_shard.artifact_id.clone(),
             repo: identity.repo.clone(),
             revision: identity.revision.clone(),
             primary_file: identity.primary_file.clone(),
