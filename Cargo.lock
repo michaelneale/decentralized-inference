@@ -7460,6 +7460,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippy-package-format"
+version = "0.76.0-rc9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "skippy-prompt"
 version = "0.76.0-rc9"
 dependencies = [
