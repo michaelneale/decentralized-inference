@@ -1,8 +1,8 @@
-From d5548b9f410a0d0913f5c2e9b48a1ad1ed2a8dc8 Mon Sep 17 00:00:00 2001
+From afa0b1f5b50c5544ee8f21661aedd55b7b1c8ce4 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Wed, 2 Sep 2026 19:15:16 +1000
-Subject: [PATCH] skippy: validate runtime slices by realized contract
+Subject: [PATCH 30/56] skippy: validate runtime slices by realized contract
 
 ---
  src/skippy/model_loading.cpp | 116 -----------------------------------
@@ -136,5 +136,5 @@ index 9ad6d4f3a..64ddaf1bb 100644
              llama_model_free(model);
              const char * message = "layer_end exceeds model layer count";
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

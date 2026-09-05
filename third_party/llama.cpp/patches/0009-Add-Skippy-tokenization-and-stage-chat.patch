@@ -1,13 +1,13 @@
-From c03954c5783aeefd40529495f4873eaf9838676b Mon Sep 17 00:00:00 2001
+From 200cc3d34ffe22f3a5aaf36902f17794b25fa28a Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 16:02:20 +1000
-Subject: [PATCH 09/32] Add Skippy tokenization and stage chat
+Subject: [PATCH 09/56] Add Skippy tokenization and stage chat
 
 ---
- common/chat-auto-parser-generator.cpp |  51 ++---
+ common/chat-auto-parser-generator.cpp |  51 +++--
  common/chat-diff-analyzer.cpp         |  10 +-
- common/chat-peg-parser.cpp            |  31 ++-
- common/chat-peg-parser.h              |  11 +
+ common/chat-peg-parser.cpp            |  15 +-
+ common/chat-peg-parser.h              |   2 +-
  common/chat.cpp                       | 245 ++++++++++++++++++++-
  common/chat.h                         |   5 +-
  common/stage-chat.cpp                 | 296 ++++++++++++++++++++++++++
@@ -15,17 +15,17 @@ Subject: [PATCH 09/32] Add Skippy tokenization and stage chat
  include/skippy/tokenization.h         |  69 ++++++
  src/skippy/tokenization.cpp           | 137 ++++++++++++
  tests/test-chat-auto-parser.cpp       |  47 ++++
- tests/test-chat.cpp                   | 278 +++++++++++++++++++++++-
- 12 files changed, 1135 insertions(+), 47 deletions(-)
+ tests/test-chat.cpp                   | 285 ++++++++++++++++++++++++-
+ 12 files changed, 1128 insertions(+), 36 deletions(-)
  create mode 100644 common/stage-chat.cpp
  create mode 100644 include/skippy/tokenization.h
  create mode 100644 src/skippy/tokenization.cpp
 
 diff --git a/common/chat-auto-parser-generator.cpp b/common/chat-auto-parser-generator.cpp
-index af84ff323..422408d9e 100644
+index d7e117e4d..4707c524a 100644
 --- a/common/chat-auto-parser-generator.cpp
 +++ b/common/chat-auto-parser-generator.cpp
-@@ -23,6 +23,18 @@ static void foreach_function(const json & tools, const std::function<void(const
+@@ -22,6 +22,18 @@ static void foreach_function(const json & tools, const std::function<void(const
      }
  }
  
@@ -44,7 +44,7 @@ index af84ff323..422408d9e 100644
  namespace autoparser {
  
  parser_build_context::parser_build_context(common_chat_peg_builder & p, const generation_params & inputs) :
-@@ -103,7 +115,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &
+@@ -102,7 +114,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &
          // Set grammar triggers based on tool section markers (fall back to per-call markers)
          if (data.grammar_lazy) {
              data.grammar_triggers = {
@@ -53,7 +53,7 @@ index af84ff323..422408d9e 100644
              };
              if (autoparser.tools.format.openai_wrapper_trigger) {
                  // model emits the OpenAI function wrapper, trigger on it
-@@ -397,7 +409,9 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
+@@ -396,7 +408,9 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
          auto schema_info = common_schema_info();
          schema_info.resolve_refs(params);
  
@@ -64,7 +64,7 @@ index af84ff323..422408d9e 100644
          std::vector<common_peg_parser> required_parsers;
          std::vector<common_peg_parser> optional_parsers;
          for (const auto & [param_name, param_schema] : properties.items()) {
-@@ -422,22 +436,33 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
+@@ -421,22 +435,33 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
              }
          }
  
@@ -109,8 +109,6 @@ index af84ff323..422408d9e 100644
          }
  
          if (!arguments.start.empty()) {
-         tool_choice |= p.rule("tool-" + name, func_parser);
-
 diff --git a/common/chat-diff-analyzer.cpp b/common/chat-diff-analyzer.cpp
 index a7e370578..39ffa20f1 100644
 --- a/common/chat-diff-analyzer.cpp
@@ -152,12 +150,11 @@ index a7e370578..39ffa20f1 100644
      };
  
      template_params params_content_only;
-
 diff --git a/common/chat-peg-parser.cpp b/common/chat-peg-parser.cpp
-index 06737b165..2bbbb1d4e 100644
+index 79b97a80f..c38639d03 100644
 --- a/common/chat-peg-parser.cpp
 +++ b/common/chat-peg-parser.cpp
-@@ -388,11 +388,12 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
+@@ -386,11 +386,12 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
      }
  
      if (is_arg_name && current_tool) {
@@ -171,7 +168,7 @@ index 06737b165..2bbbb1d4e 100644
          ++arg_count;
  
          auto & target = args_target();
-@@ -669,10 +670,10 @@ common_peg_parser common_chat_peg_builder::build_json_tools_function_is_key(
+@@ -667,10 +668,10 @@ common_peg_parser common_chat_peg_builder::build_json_tools_function_is_key(
          // Arguments — either wrapped in args_key or parsed directly
          common_peg_parser args_parser = eps();
          if (args_key.empty()) {
@@ -184,7 +181,7 @@ index 06737b165..2bbbb1d4e 100644
          }
          inner_fields.push_back(args_parser);
  
-@@ -733,7 +734,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_nested_keys(
+@@ -731,7 +732,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_nested_keys(
          auto nested_name = literal("\"" + nested_name_field + "\"") + space() + literal(":") + space() +
                            atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
          auto nested_args = literal("\"" + nested_args_field + "\"") + space() + literal(":") + space() +
@@ -193,7 +190,7 @@ index 06737b165..2bbbb1d4e 100644
  
          auto nested_object = literal("{") + space() +
                              nested_name + space() + literal(",") + space() +
-@@ -789,7 +790,9 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
+@@ -787,7 +788,9 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
  
      auto tool_choices    = choice();
      auto name_key_parser = literal("\"" + effective_name_key + "\"");
@@ -204,7 +201,7 @@ index 06737b165..2bbbb1d4e 100644
  
      for (const auto & tool_def : tools) {
          if (!tool_def.contains("function")) {
-@@ -802,7 +805,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
+@@ -800,7 +803,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
          auto tool_name_ = name_key_parser + space() + literal(":") + space() +
                           atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
          auto tool_args_ = args_key_parser + space() + literal(":") + space() +
@@ -213,9 +210,8 @@ index 06737b165..2bbbb1d4e 100644
  
          // Build ID parsers if keys are provided
          common_peg_parser id_parser = eps();
-
 diff --git a/common/chat-peg-parser.h b/common/chat-peg-parser.h
-index 5d764dbaa..0e86e657d 100644
+index 114fa049f..7723d4e35 100644
 --- a/common/chat-peg-parser.h
 +++ b/common/chat-peg-parser.h
 @@ -5,6 +5,7 @@
@@ -234,7 +230,6 @@ index 5d764dbaa..0e86e657d 100644
      // Matches every parser exactly once, in any order.
      common_peg_parser permute(const std::string & rule_prefix, const std::vector<common_peg_parser> & parsers);
  
-
 diff --git a/common/chat.cpp b/common/chat.cpp
 index 743ecde0a..893667722 100644
 --- a/common/chat.cpp
@@ -533,7 +528,6 @@ index 743ecde0a..893667722 100644
      if (is_lfm2_template(src)) {
          LOG_DBG("Using specialized template: LFM2\n");
          return common_chat_params_init_lfm2(tmpl, params, /* tool_list_tokens = */ true);
-
 diff --git a/common/chat.h b/common/chat.h
 index cb39e3458..1826f5f47 100644
 --- a/common/chat.h
@@ -557,7 +551,6 @@ index cb39e3458..1826f5f47 100644
      }
  
      bool operator!=(const common_chat_msg & other) const { return !(*this == other); }
-
 diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
 new file mode 100644
 index 000000000..305b9d081
@@ -860,7 +853,6 @@ index 000000000..305b9d081
 +    skippy_common_copy_output(output, output_message_json);
 +    return skippy_common_success(out_error);
 +}
-
 diff --git a/include/skippy/common.h b/include/skippy/common.h
 index 1aecf7e67..ec9d59ec3 100644
 --- a/include/skippy/common.h
@@ -874,7 +866,6 @@ index 1aecf7e67..ec9d59ec3 100644
  
  enum skippy_feature {
      SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
-
 diff --git a/include/skippy/tokenization.h b/include/skippy/tokenization.h
 new file mode 100644
 index 000000000..7b8c4dcc4
@@ -950,7 +941,6 @@ index 000000000..7b8c4dcc4
 +#endif
 +
 +#endif // SKIPPY_TOKENIZATION_H
-
 diff --git a/src/skippy/tokenization.cpp b/src/skippy/tokenization.cpp
 new file mode 100644
 index 000000000..89d69ff3a
@@ -1094,7 +1084,6 @@ index 000000000..89d69ff3a
 +
 +
 +} // extern "C"
-
 diff --git a/tests/test-chat-auto-parser.cpp b/tests/test-chat-auto-parser.cpp
 index 5aa948251..78df176dd 100644
 --- a/tests/test-chat-auto-parser.cpp
@@ -1176,9 +1165,8 @@ index 5aa948251..78df176dd 100644
  }
  
  static void test_cohere_reasoning_detection(testing & t) {
-
 diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
-index c4670da85..62ea85601 100644
+index 7918f0ffc..635e0d662 100644
 --- a/tests/test-chat.cpp
 +++ b/tests/test-chat.cpp
 @@ -436,6 +436,21 @@ static common_chat_tool special_function_tool{
@@ -1544,6 +1532,6 @@ index c4670da85..62ea85601 100644
          test_template_output_peg_parsers(detailed_debug);
          std::cout << "\n[chat] All template tests passed!" << '\n';
          return 0;
-
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

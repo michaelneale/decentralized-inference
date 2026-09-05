@@ -1,8 +1,8 @@
-From 1c8337ab56b165bebd0ff096ad99362f3025cfcc Mon Sep 17 00:00:00 2001
+From 928e5ebf96d6e7e41b3994d7cb2c461830ce9c2c Mon Sep 17 00:00:00 2001
 From: Scam
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Thu, 27 Aug 2026 04:53:05 +1000
-Subject: [PATCH 23/32] skippy: derive restored position from native memory
+Subject: [PATCH 23/56] skippy: derive restored position from native memory
 
 ---
  src/skippy/state.cpp | 72 ++++++++++++++++++++++++++------------------

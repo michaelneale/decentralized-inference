@@ -1,7 +1,7 @@
-From db38b11f4ea264d96b782a65520561dec43e632c Mon Sep 17 00:00:00 2001
+From 8e061ebed9fd2964ca8dfc1f971f6675e0a88606 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 30 Aug 2026 02:46:33 +0000
-Subject: [PATCH] skippy: clear stale sidecar rows before single-row MTP
+Subject: [PATCH 35/56] skippy: clear stale sidecar rows before single-row MTP
  proposals
 
 The native MTP sidecar keeps its own KV cache. When a proposal is
@@ -51,5 +51,5 @@ index 22bc61858..00ad16493 100644
              mtp_depth_scope.select(depth);
              llama_batch batch = {
 -- 
-2.43.0
+2.55.0
 

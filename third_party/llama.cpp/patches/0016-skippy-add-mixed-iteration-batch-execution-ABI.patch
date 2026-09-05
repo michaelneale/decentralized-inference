@@ -1,14 +1,14 @@
-From dc22ebede056a87691e65cccef8b50960d0b0a48 Mon Sep 17 00:00:00 2001
+From 37c295ca170ff8464effb70c9fb8ca90a28083c6 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 24 Aug 2026 15:35:31 +1000
-Subject: [PATCH 16/32] skippy: add mixed iteration batch execution ABI
+Subject: [PATCH 16/56] skippy: add mixed iteration batch execution ABI
 
 ---
  include/skippy/common.h        |  11 +-
  include/skippy/execution.h     |  60 +++++-
  src/skippy/abi.cpp             |   3 +-
- src/skippy/execution-batch.cpp | 342 +++++++++++++++++++++++++++++++++
- 4 files changed, 410 insertions(+), 6 deletions(-)
+ src/skippy/execution-batch.cpp | 341 +++++++++++++++++++++++++++++++++
+ 4 files changed, 409 insertions(+), 6 deletions(-)
 
 diff --git a/include/skippy/common.h b/include/skippy/common.h
 index 012aceb9a..e7f322abf 100644
@@ -485,3 +485,4 @@ index a8694dbed..8f6facc96 100644
          const llama_token * token_ids,
 -- 
 2.55.0
+

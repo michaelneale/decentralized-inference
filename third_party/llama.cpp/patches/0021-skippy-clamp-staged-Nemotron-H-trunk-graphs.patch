@@ -1,7 +1,7 @@
-From f5d9c94438903e4dcd59e783625f8f76a7761afb Mon Sep 17 00:00:00 2001
+From 0f09146d6bd531d4ce8ad5a146d7f6e3fb721d22 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 26 Aug 2026 14:54:41 +1000
-Subject: [PATCH 21/32] skippy: clamp staged Nemotron H trunk graphs
+Subject: [PATCH 21/56] skippy: clamp staged Nemotron H trunk graphs
 
 Retain the final MTP layer in the runtime slice while limiting the main Nemotron H graph to executable trunk layers.
 ---
@@ -9,10 +9,10 @@ Retain the final MTP layer in the runtime slice while limiting the main Nemotron
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/src/models/nemotron-h.cpp b/src/models/nemotron-h.cpp
-index 2cbfe4d91..e337da107 100644
+index 8f98c7f14..4f73b9995 100644
 --- a/src/models/nemotron-h.cpp
 +++ b/src/models/nemotron-h.cpp
-@@ -173,8 +173,8 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
+@@ -185,8 +185,8 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
  
      const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
      const bool stage_filtered = stage_filter.enabled;

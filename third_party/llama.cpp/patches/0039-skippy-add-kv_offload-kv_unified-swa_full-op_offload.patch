@@ -1,9 +1,9 @@
-From d7e50e616c8493982f09bf6591ff57264c9f64f2 Mon Sep 17 00:00:00 2001
+From 9d30c1955f2ad24138a34f170ac010978ba36486 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 27 Aug 2026 15:26:27 -0400
-Subject: [PATCH] skippy: add kv_offload, kv_unified, swa_full, op_offload,
- no_host_buffer, check_tensors, direct_io, main_gpu, and split_mode runtime
- config controls
+Subject: [PATCH 39/56] skippy: add kv_offload, kv_unified, swa_full,
+ op_offload, no_host_buffer, check_tensors, direct_io, main_gpu, and
+ split_mode runtime config controls
 
 ---
  CMakeLists.txt                                |  5 ++
@@ -18,7 +18,7 @@ Subject: [PATCH] skippy: add kv_offload, kv_unified, swa_full, op_offload,
  create mode 100644 src/skippy/tests/hardware_application_probe.cpp
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 586bf97f6..9de023d3d 100644
+index d090e761d..4a18a0c38 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit
@@ -32,9 +32,9 @@ index 586bf97f6..9de023d3d 100644
 +
  ### llama.cpp version
  set(LLAMA_VERSION_MAJOR 0)
- set(LLAMA_VERSION_MINOR 3)
+ set(LLAMA_VERSION_MINOR 4)
 diff --git a/include/skippy/common.h b/include/skippy/common.h
-index e7f322abf..c9d92c28f 100644
+index af927f835..c9d92c28f 100644
 --- a/include/skippy/common.h
 +++ b/include/skippy/common.h
 @@ -34,7 +34,7 @@ extern "C" {
@@ -94,10 +94,10 @@ index bfb80e105..ba62f60cf 100644
  LLAMA_API enum skippy_status skippy_model_open(
          const char * path,
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 7ee82c713..b59528d62 100644
+index e3bf733af..3d364d6e5 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -80,6 +80,17 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -77,6 +77,17 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -164,7 +164,7 @@ index 8bd88058a..0f7c83139 100644
 +        const skippy_runtime_config * config,
 +        llama_context_params & params);
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 9ad6d4f3a..8ac133f2a 100644
+index 64ddaf1bb..33c54cf42 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
 @@ -452,6 +452,18 @@ static void skippy_enable_integrated_mtp_tensors(
@@ -186,7 +186,7 @@ index 9ad6d4f3a..8ac133f2a 100644
  extern "C" {
  
  static enum skippy_status skippy_finish_model_open(
-@@ -634,6 +646,12 @@ static enum skippy_status skippy_finish_model_open(
+@@ -518,6 +530,12 @@ static enum skippy_status skippy_finish_model_open(
      params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : params.n_threads;
      params.n_seq_max = stage_model->lane_count;
      params.kv_unified = stage_model->lane_count > 1;
@@ -199,7 +199,7 @@ index 9ad6d4f3a..8ac133f2a 100644
      params.type_k = config != nullptr && config->cache_type_k > 0 ? static_cast<ggml_type>(config->cache_type_k) : GGML_TYPE_F16;
      params.type_v = config != nullptr && config->cache_type_v > 0 ? static_cast<ggml_type>(config->cache_type_v) : GGML_TYPE_F16;
      params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
-@@ -753,9 +771,6 @@ enum skippy_status skippy_model_open_impl(
+@@ -637,9 +655,6 @@ enum skippy_status skippy_model_open_impl(
      if (config != nullptr) {
          params.n_gpu_layers = config->n_gpu_layers;
          skippy_apply_model_load_memory_config(config, params);
@@ -209,7 +209,7 @@ index 9ad6d4f3a..8ac133f2a 100644
      }
      if (event_scope.is_enabled()) {
          params.progress_callback = skippy_model_open_progress_callback;
-@@ -840,9 +855,6 @@ enum skippy_status skippy_model_open_from_parts_impl(
+@@ -724,9 +739,6 @@ enum skippy_status skippy_model_open_from_parts_impl(
      if (config != nullptr) {
          params.n_gpu_layers = config->n_gpu_layers;
          skippy_apply_model_load_memory_config(config, params);
@@ -219,7 +219,7 @@ index 9ad6d4f3a..8ac133f2a 100644
      }
      if (event_scope.is_enabled()) {
          params.progress_callback = skippy_model_open_progress_callback;
-@@ -899,9 +911,6 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+@@ -783,9 +795,6 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
      if (config != nullptr) {
          model_params.n_gpu_layers = config->n_gpu_layers;
          skippy_apply_model_load_memory_config(config, model_params);
@@ -229,7 +229,7 @@ index 9ad6d4f3a..8ac133f2a 100644
      }
  
      llama_backend_init();
-@@ -931,6 +940,12 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+@@ -815,6 +824,12 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
      ctx_params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : ctx_params.n_threads;
      ctx_params.n_seq_max = target_model->lane_count;
      ctx_params.kv_unified = target_model->lane_count > 1;
@@ -302,4 +302,5 @@ index 000000000..42fae794a
 +    return passed ? 0 : 1;
 +}
 -- 
-2.50.1 (Apple Git-155)
+2.55.0
+

@@ -1,21 +1,21 @@
-From f8555a4b26f363713ff8dc1808f1ede6e1de6592 Mon Sep 17 00:00:00 2001
+From 3cd28f37759eb356d51e5f0d4cd73c9334d15c36 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 26 Aug 2026 22:47:11 +1000
-Subject: [PATCH 26/32] skippy: propagate ctx_other for nemotron-h-moe MTP
+Subject: [PATCH 28/56] skippy: propagate ctx_other for nemotron-h-moe MTP
  draft contexts
 
 Rediffed for the post-#1436/#1457 patch series: insertion point moved
 after the INKLING clause (the old 'backend samplers' anchor region was
 restructured upstream).
 ---
- src/llama-context.cpp | 10 ++++++++++
- 1 file changed, 10 insertions(+)
+ src/llama-context.cpp | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index aa3d6230d..1d319e5fc 100644
+index 559bd3f39..b4ee4342e 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -165,6 +165,16 @@ llama_context::llama_context(
+@@ -166,10 +166,19 @@ llama_context::llama_context(
          cparams.ctx_other = params.ctx_other;
      }
  
@@ -29,9 +29,13 @@ index aa3d6230d..1d319e5fc 100644
 +        cparams.ctx_other = params.ctx_other;
 +    }
 +
-     auto rope_scaling_type = params.rope_scaling_type;
-     if (rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
-         rope_scaling_type = hparams.rope_scaling_type_train;
+     if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
+         cparams.rope_scaling_type = hparams.rope_scaling_type_train;
+     }
+-    }
+ 
+     if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_NONE) {
+         cparams.rope_freq_scale = 1.0f; // never scale if scaling type is none
 -- 
 2.55.0
 

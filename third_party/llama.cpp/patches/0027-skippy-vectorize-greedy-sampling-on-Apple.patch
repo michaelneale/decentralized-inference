@@ -1,29 +1,31 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From ec35f9ab5952ae028a5010b24387f2e772e47cf3 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 27 Aug 2026 04:30:00 +0000
-Subject: [PATCH] skippy: vectorize greedy sampling on Apple
+Subject: [PATCH 27/56] skippy: vectorize greedy sampling on Apple
 
 ---
- src/CMakeLists.txt       |  5 +++++
+ src/CMakeLists.txt      |  5 +++++
  src/skippy/sampling.cpp | 20 ++++++++++++++++++++
  2 files changed, 25 insertions(+)
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 7ee82c713..a1f98c1f2 100644
+index ca62cfd96..e3bf733af 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -81,0 +82,5 @@ target_link_libraries(llama PUBLIC ggml)
+@@ -82,3 +82,8 @@ if (BUILD_SHARED_LIBS)
+     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+     target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
+ endif()
 +if (APPLE)
 +    find_library(SKIPPY_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
 +    target_link_libraries(llama PRIVATE ${SKIPPY_ACCELERATE_FRAMEWORK})
 +endif()
 +
-
 diff --git a/src/skippy/sampling.cpp b/src/skippy/sampling.cpp
-index 74eb3aa59..7cf74c2ba 100644
+index 1e342060c..0538678f0 100644
 --- a/src/skippy/sampling.cpp
 +++ b/src/skippy/sampling.cpp
-@@ -20,6 +20,10 @@
+@@ -19,6 +19,10 @@
  #include <utility>
  #include <vector>
  
@@ -34,7 +36,7 @@ index 74eb3aa59..7cf74c2ba 100644
  using json = nlohmann::ordered_json;
  
  void skippy_record_tokens(
-@@ -166,6 +170,22 @@ static llama_token skippy_greedy_sample_context_with_eog_policy(
+@@ -159,6 +163,22 @@ static llama_token skippy_greedy_sample_context_with_eog_policy(
          return 0;
      }
  
@@ -58,4 +60,5 @@ index 74eb3aa59..7cf74c2ba 100644
      float best_logit = -std::numeric_limits<float>::infinity();
      for (int32_t token = 0; token < n_vocab; ++token) {
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

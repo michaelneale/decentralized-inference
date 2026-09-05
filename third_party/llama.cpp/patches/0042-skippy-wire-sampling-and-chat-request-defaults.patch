@@ -1,7 +1,7 @@
-From ea0868d3218a03fd6c0a357cb330b84ca689e9c0 Mon Sep 17 00:00:00 2001
+From caeaa78fed0d16e963ffd684b5547650b8b1b0e0 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 30 Aug 2026 18:26:07 +1000
-Subject: [PATCH] skippy: wire sampling and chat request defaults
+Subject: [PATCH 42/56] skippy: wire sampling and chat request defaults
 
 ---
  common/stage-chat.cpp         |  42 +++++-
@@ -12,10 +12,10 @@ Subject: [PATCH] skippy: wire sampling and chat request defaults
  5 files changed, 288 insertions(+), 60 deletions(-)
 
 diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
-index 02492ad81..aa06561d1 100644
+index 02492ad81..b3f2ef4c9 100644
 --- a/common/stage-chat.cpp
 +++ b/common/stage-chat.cpp
-@@ -131,7 +131,8 @@ static json skippy_common_grammar_triggers_to_json(const std::vector<common_gram
+@@ -147,7 +147,8 @@ static json skippy_common_grammar_triggers_to_json(const std::vector<common_gram
  static json skippy_common_chat_metadata_json(
          const common_chat_params & params,
          common_reasoning_format reasoning_format,
@@ -25,7 +25,7 @@ index 02492ad81..aa06561d1 100644
      return {
          {"chat_format", static_cast<int>(params.format)},
          {"reasoning_format", common_reasoning_format_name(reasoning_format)},
-@@ -143,6 +144,7 @@ static json skippy_common_chat_metadata_json(
+@@ -159,6 +160,7 @@ static json skippy_common_chat_metadata_json(
          {"grammar_triggers", skippy_common_grammar_triggers_to_json(params.grammar_triggers)},
          {"preserved_tokens", params.preserved_tokens},
          {"additional_stops", params.additional_stops},
@@ -33,7 +33,7 @@ index 02492ad81..aa06561d1 100644
      };
  }
  
-@@ -157,6 +159,11 @@ enum skippy_status skippy_apply_chat_template_json(
+@@ -173,6 +175,11 @@ enum skippy_status skippy_apply_chat_template_json(
          bool parallel_tool_calls,
          const char * reasoning_format_name,
          const char * chat_template_kwargs_json,
@@ -45,7 +45,7 @@ index 02492ad81..aa06561d1 100644
          char * output_text,
          size_t output_text_capacity,
          size_t * out_text_bytes,
-@@ -194,7 +201,7 @@ enum skippy_status skippy_apply_chat_template_json(
+@@ -210,7 +217,7 @@ enum skippy_status skippy_apply_chat_template_json(
          inputs.tools                 = common_chat_tools_parse_oaicompat(tools);
          inputs.tool_choice           = common_chat_tool_choice_parse_oaicompat(skippy_common_tool_choice_string(tool_choice_json));
          inputs.add_generation_prompt = add_assistant;
@@ -54,7 +54,7 @@ index 02492ad81..aa06561d1 100644
          inputs.parallel_tool_calls   = parallel_tool_calls;
          if (override_enable_thinking) {
              const char * value = enable_thinking ? "true" : "false";
-@@ -215,6 +222,9 @@ enum skippy_status skippy_apply_chat_template_json(
+@@ -231,6 +238,9 @@ enum skippy_status skippy_apply_chat_template_json(
          if (reasoning_format_name != nullptr && reasoning_format_name[0] != '\0') {
              inputs.reasoning_format = common_reasoning_format_from_name(reasoning_format_name);
          }
@@ -64,7 +64,7 @@ index 02492ad81..aa06561d1 100644
          json chat_template_kwargs = skippy_common_parse_json_or_null(chat_template_kwargs_json);
          if (!chat_template_kwargs.is_null()) {
              if (!chat_template_kwargs.is_object()) {
-@@ -244,20 +253,36 @@ enum skippy_status skippy_apply_chat_template_json(
+@@ -244,20 +254,36 @@ enum skippy_status skippy_apply_chat_template_json(
              inputs.chat_template_kwargs["reasoning_effort"] = "0";
          }
  
@@ -191,10 +191,10 @@ index ccf3d020c..80b91879d 100644
          size_t output_text_capacity,
          size_t * out_text_bytes,
 diff --git a/src/skippy/sampling.cpp b/src/skippy/sampling.cpp
-index ee480fc33..c12194bb4 100644
+index 8a798a734..2dd702878 100644
 --- a/src/skippy/sampling.cpp
 +++ b/src/skippy/sampling.cpp
-@@ -370,8 +370,10 @@ static bool skippy_sampling_is_greedy_equivalent(const skippy_sampling_config *
+@@ -369,8 +369,10 @@ static bool skippy_sampling_is_greedy_equivalent(const skippy_sampling_config *
          return true;
      }
      const float repeat_penalty = sampling->repeat_penalty == 0.0f ? 1.0f : sampling->repeat_penalty;
@@ -206,7 +206,7 @@ index ee480fc33..c12194bb4 100644
             sampling->presence_penalty == 0.0f &&
             sampling->frequency_penalty == 0.0f &&
             repeat_penalty == 1.0f &&
-@@ -392,10 +394,44 @@ static bool skippy_sampling_configs_equal(
+@@ -391,10 +393,44 @@ static bool skippy_sampling_configs_equal(
              lhs.frequency_penalty != rhs.frequency_penalty ||
              lhs.repeat_penalty != rhs.repeat_penalty ||
              lhs.logit_bias_count != rhs.logit_bias_count ||
@@ -252,7 +252,7 @@ index ee480fc33..c12194bb4 100644
      const uint32_t logit_bias_count = std::min<uint32_t>(lhs.logit_bias_count, SKIPPY_MAX_LOGIT_BIAS);
      for (uint32_t i = 0; i < logit_bias_count; ++i) {
          if (lhs.logit_bias[i].token != rhs.logit_bias[i].token ||
-@@ -441,6 +477,116 @@ bool skippy_reset_reusable_sampling(skippy_session * session) {
+@@ -440,6 +476,116 @@ bool skippy_reset_reusable_sampling(skippy_session * session) {
      return true;
  }
  
@@ -369,7 +369,7 @@ index ee480fc33..c12194bb4 100644
  llama_sampler * skippy_build_sampling_chain(
          skippy_session * session,
          const skippy_sampling_config * sampling) {
-@@ -455,65 +601,83 @@ llama_sampler * skippy_build_sampling_chain(
+@@ -454,65 +600,83 @@ llama_sampler * skippy_build_sampling_chain(
          return sampler;
      }
  
@@ -503,4 +503,5 @@ index ee480fc33..c12194bb4 100644
  }
  
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

@@ -1,7 +1,7 @@
-From d4da38d76c7b0eb2f90e811c8b39a49138104cc9 Mon Sep 17 00:00:00 2001
+From b56969e9c3e7628b228a148ea2b152e76a419889 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 26 Aug 2026 14:39:57 +1000
-Subject: [PATCH 20/32] skippy: stage-filter GLM4 MoE graphs
+Subject: [PATCH 20/56] skippy: stage-filter GLM4 MoE graphs
 
 Build filtered GLM4 MoE contexts only across the retained trunk layer range. Feed activation input to mid-model stages and return their boundary tensor without touching the absent output head.
 ---
@@ -9,10 +9,10 @@ Build filtered GLM4 MoE contexts only across the retained trunk layer range. Fee
  1 file changed, 17 insertions(+), 4 deletions(-)
 
 diff --git a/src/models/glm4-moe.cpp b/src/models/glm4-moe.cpp
-index 83ea7f8ac..e323f4e7e 100644
+index d6ae5783c..8b236c567 100644
 --- a/src/models/glm4-moe.cpp
 +++ b/src/models/glm4-moe.cpp
-@@ -303,10 +303,15 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -299,10 +299,15 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
      ggml_tensor * cur;
      ggml_tensor * inpL;
  
@@ -30,7 +30,7 @@ index 83ea7f8ac..e323f4e7e 100644
          // unfortunately, we need to forcefully stop here, to avoid users complaining about wrong results
          GGML_ABORT("This GGUF does not support multimodal. Please reconvert it.");
      }
-@@ -316,10 +321,10 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -312,10 +317,10 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
  
      auto * inp_attn = build_attn_inp_kv();
  
@@ -43,7 +43,7 @@ index 83ea7f8ac..e323f4e7e 100644
          ggml_tensor * inpSA = inpL;
  
          // Pre-attention norm
-@@ -426,6 +431,14 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -422,6 +427,14 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
          inpL = cur;
      }
      cur = inpL;

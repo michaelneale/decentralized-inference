@@ -1,17 +1,17 @@
-From e6977d94b17569db010f5cf34fc616934d259ba3 Mon Sep 17 00:00:00 2001
+From 691cb63a2f0c537edb5296e8ed353e9a2442d260 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 29 Aug 2026 10:28:15 +1000
-Subject: [PATCH] skippy: cache chat templates for model lifetime
+Subject: [PATCH 32/56] skippy: cache chat templates for model lifetime
 
 ---
- common/stage-chat.cpp          | 44 +++++++++++++++++++++++++++++++++++++++++--
+ common/stage-chat.cpp          | 44 ++++++++++++++++++++++++++++++++--
  src/skippy/model_lifecycle.cpp |  3 +++
  src/skippy/runtime_types.h     |  3 +++
- src/skippy/tokenization.cpp    | 35 +++++++++++++++++++++++++++++++++++
+ src/skippy/tokenization.cpp    | 35 +++++++++++++++++++++++++++
  4 files changed, 83 insertions(+), 2 deletions(-)
 
 diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
-index 8aa563bef..8ca0974d3 100644
+index 8aa563bef..02492ad81 100644
 --- a/common/stage-chat.cpp
 +++ b/common/stage-chat.cpp
 @@ -12,6 +12,38 @@
@@ -101,7 +101,7 @@ index ff8024a5f..f83801c97 100644
  
  struct skippy_verify_checkpoint {
 diff --git a/src/skippy/tokenization.cpp b/src/skippy/tokenization.cpp
-index 89d69ff3a..778fbf0c8 100644
+index 89d69ff3a..386ad3f24 100644
 --- a/src/skippy/tokenization.cpp
 +++ b/src/skippy/tokenization.cpp
 @@ -6,9 +6,44 @@
@@ -150,4 +150,5 @@ index 89d69ff3a..778fbf0c8 100644
  
  enum skippy_status skippy_tokenize(
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

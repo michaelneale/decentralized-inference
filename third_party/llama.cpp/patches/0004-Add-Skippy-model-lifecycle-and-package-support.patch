@@ -1,7 +1,7 @@
-From b99a5f3b87203b32cf612ea75a3a2817ba4e45b6 Mon Sep 17 00:00:00 2001
+From 270858542946f215b975f1143381eee32a631ca7 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 17:06:42 +1000
-Subject: [PATCH 04/32] Add Skippy model lifecycle and package support
+Subject: [PATCH 04/56] Add Skippy model lifecycle and package support
 
 ---
  src/skippy/devices.cpp                  | 106 +++

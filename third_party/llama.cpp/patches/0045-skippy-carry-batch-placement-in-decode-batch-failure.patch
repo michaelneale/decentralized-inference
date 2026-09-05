@@ -1,7 +1,7 @@
-From 8ecf5c931cdad8709fa39fcb2018a12f3352ad2e Mon Sep 17 00:00:00 2001
+From d9ea01d7c32af7c7c939c2a5626f81f5f4e7363a Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 1 Sep 2026 21:29:55 +1000
-Subject: [PATCH] skippy: carry batch placement in decode-batch failures
+Subject: [PATCH 45/56] skippy: carry batch placement in decode-batch failures
 
 llama.cpp's own diagnostics go to its log callback, which stage hosts
 do not always surface, so a remote llama_decode failure previously
@@ -44,5 +44,5 @@ index beecb2204..d59562c9c 100644
      }
      skippy_mark_context_work_pending(session->stage_model);
 -- 
-2.50.1 (Apple Git-155)
+2.55.0
 

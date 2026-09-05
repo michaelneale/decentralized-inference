@@ -1,8 +1,8 @@
-From 4ce9890d2fab930031ebd10e630f4de85bb4be0f Mon Sep 17 00:00:00 2001
+From 8702e8c7fe436b9806ae604593e41baa0ed378ed Mon Sep 17 00:00:00 2001
 From: Scam
  <44c96d97d4bda5bbcbd62565b0b19bb2e895e1fad5d9e9116f267909f1dae78e@meshllm.communities.buzz.xyz>
 Date: Thu, 27 Aug 2026 21:01:48 +1000
-Subject: [PATCH] skippy: defer token signals in legacy batch sampling
+Subject: [PATCH 24/56] skippy: defer token signals in legacy batch sampling
 
 ---
  src/skippy/execution-batch.cpp  | 1 -
@@ -34,5 +34,5 @@ index d899f0c17..57098af41 100644
          out_predicted_tokens[i] = skippy_sample_token_ith(session, request_sampling, i);
      }
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

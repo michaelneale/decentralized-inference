@@ -1,17 +1,17 @@
-From 521e12a2f6aaf1e68dad129adcc561d77ac76413 Mon Sep 17 00:00:00 2001
+From 84efd9031c523d072726adba4bd820760a378334 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 30 Aug 2026 06:38:46 +0000
-Subject: [PATCH] skippy: avoid reinitializing reused backend samplers
+Subject: [PATCH 43/56] skippy: avoid reinitializing reused backend samplers
 
 ---
  src/skippy/sampling.cpp | 6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/src/skippy/sampling.cpp b/src/skippy/sampling.cpp
-index ee480fc33..03867b722 100644
+index 2dd702878..567388f6d 100644
 --- a/src/skippy/sampling.cpp
 +++ b/src/skippy/sampling.cpp
-@@ -546,7 +546,11 @@ static bool skippy_ensure_plain_sampling_chain(
+@@ -709,7 +709,11 @@ static bool skippy_ensure_plain_sampling_chain(
  void skippy_refresh_backend_sampling(
          skippy_session * session,
          const skippy_sampling_config * sampling) {
@@ -25,5 +25,5 @@ index ee480fc33..03867b722 100644
      }
      session->sampling_backend_enabled = false;
 -- 
-2.43.0
+2.55.0
 

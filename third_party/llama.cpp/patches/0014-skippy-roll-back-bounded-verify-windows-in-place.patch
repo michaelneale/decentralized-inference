@@ -1,7 +1,7 @@
-From 00b92d0847e6fe7a3cbc2de320ccb4572a92590f Mon Sep 17 00:00:00 2001
+From ec7e7fb64228a0844170e05452e9a3874c6d3d9c Mon Sep 17 00:00:00 2001
 From: Michael Neale <14976+michaelneale@users.noreply.github.com>
 Date: Tue, 18 Aug 2026 16:44:10 +1000
-Subject: [PATCH 14/32] skippy: roll back bounded verify windows in place
+Subject: [PATCH 14/56] skippy: roll back bounded verify windows in place
 
 Recurrent memory supports bounded in-place rollback through the RS
 snapshot index, but the verify window copied the whole sequence state to

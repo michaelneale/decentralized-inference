@@ -1,7 +1,7 @@
-From cf4943f670d5f448e51bedfdaedb64208e7c6254 Mon Sep 17 00:00:00 2001
+From 3d70abc265018eeb4e2fa94efcb5de544e310018 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 1 Sep 2026 21:37:06 +1000
-Subject: [PATCH] skippy: let sampled verify windows coexist with backend
+Subject: [PATCH 46/56] skippy: let sampled verify windows coexist with backend
  sampling
 
 Backend (in-graph) sampling limited every decode on the context to one
@@ -34,10 +34,10 @@ Three coordinated changes:
  4 files changed, 32 insertions(+), 3 deletions(-)
 
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 1d319e5fc..756d09a14 100644
+index b4ee4342e..186238c72 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -1730,7 +1730,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
+@@ -1733,7 +1733,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
                  const llama_seq_id seq_id = batch_inp.seq_id ? batch_inp.seq_id[i][s] : 0;
  
                  seq_output_count[seq_id]++;
@@ -123,5 +123,5 @@ index 9ab6b0712..be29b2ff8 100644
      status = skippy_checkpoint_verify_window(
              session,
 -- 
-2.50.1 (Apple Git-155)
+2.55.0
 

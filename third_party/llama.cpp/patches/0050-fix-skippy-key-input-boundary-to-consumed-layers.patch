@@ -1,8 +1,8 @@
-From ec025030af0709eb9ca95115f0b2f5acc237fcb2 Mon Sep 17 00:00:00 2001
+From c750469206aaee6168bb52da7a3fcc5e2411617d Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Wed, 2 Sep 2026 12:41:43 +1000
-Subject: [PATCH 50/50] fix(skippy): key input boundary to consumed layers
+Subject: [PATCH 50/56] fix(skippy): key input boundary to consumed layers
 
 ---
  include/skippy/common.h      | 2 +-
@@ -24,10 +24,10 @@ index a9165abcf..4729ae67b 100644
  #if defined(_MSC_VER)
  #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 6526dd382..accfa6808 100644
+index c1b0fb822..c5499774d 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -2531,7 +2531,7 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -2534,7 +2534,7 @@ ggml_cgraph * llama_context::graph_reserve(
      };
  
      const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
@@ -37,10 +37,10 @@ index 6526dd382..accfa6808 100644
          uint64_t elements_per_token = 0;
          uint64_t bytes_per_token = 0;
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 673df1212..15ac94ac7 100644
+index 9dd911adf..b573780a4 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
-@@ -739,7 +739,7 @@ static enum skippy_status skippy_finish_model_open(
+@@ -622,7 +622,7 @@ static enum skippy_status skippy_finish_model_open(
          };
      }
  
@@ -50,5 +50,5 @@ index 673df1212..15ac94ac7 100644
          uint64_t elements_per_token = 0;
          uint64_t bytes_per_token = 0;
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

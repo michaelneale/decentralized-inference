@@ -1,7 +1,7 @@
-From 92a192d0686c4ff6f7491adb271ae39310159fbb Mon Sep 17 00:00:00 2001
+From a01d3d31f819532cd49967eb08e6351c0caace09 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 29 Aug 2026 12:53:48 +1000
-Subject: [PATCH] skippy: remove serial c1 synchronization overhead
+Subject: [PATCH 40/56] skippy: remove serial c1 synchronization overhead
 
 ---
  src/skippy/activation.cpp       |  2 +-
@@ -9,14 +9,14 @@ Subject: [PATCH] skippy: remove serial c1 synchronization overhead
  src/skippy/execution-single.cpp |  1 +
  src/skippy/runtime_support.h    |  3 ++
  src/skippy/runtime_types.h      |  7 ++++
- src/skippy/sampling.cpp         | 74 +++++++++++++++++++++++++++++----
+ src/skippy/sampling.cpp         | 73 +++++++++++++++++++++++++++++----
  src/skippy/sampling_internal.h  |  6 +++
  src/skippy/session.cpp          | 33 ++++++++++++---
  src/skippy/state.cpp            |  8 ++--
  9 files changed, 116 insertions(+), 19 deletions(-)
 
 diff --git a/src/skippy/activation.cpp b/src/skippy/activation.cpp
-index 2e85acf51..435515075 100644
+index a598963a7..58da7bc25 100644
 --- a/src/skippy/activation.cpp
 +++ b/src/skippy/activation.cpp
 @@ -378,6 +378,7 @@ enum skippy_status skippy_decode_batch(
@@ -27,16 +27,16 @@ index 2e85acf51..435515075 100644
  
      session->n_past += static_cast<int32_t>(token_count);
      return skippy_success(out_error);
-@@ -987,4 +988,3 @@ enum skippy_status skippy_restore_verify_prefix(
+@@ -1019,4 +1020,3 @@ enum skippy_status skippy_restore_verify_prefix(
      *out_restored = true;
      return SKIPPY_STATUS_OK;
  }
 -
 diff --git a/src/skippy/execution-batch.cpp b/src/skippy/execution-batch.cpp
-index c6637b4b3..0df661209 100644
+index 451f5c816..678a40692 100644
 --- a/src/skippy/execution-batch.cpp
 +++ b/src/skippy/execution-batch.cpp
-@@ -261,6 +261,7 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -284,6 +284,7 @@ enum skippy_status skippy_iteration_batch_sampled(
          skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed for scheduler iteration");
          return SKIPPY_STATUS_RUNTIME_ERROR;
      }
@@ -44,7 +44,7 @@ index c6637b4b3..0df661209 100644
  
      float * embeddings = request_embeddings ? llama_get_embeddings(first->ctx) : nullptr;
      if (request_embeddings && embeddings == nullptr) {
-@@ -545,6 +546,7 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -594,6 +595,7 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
          skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed");
          return SKIPPY_STATUS_RUNTIME_ERROR;
      }
@@ -79,7 +79,7 @@ index 8146f5a65..2d35f7d5f 100644
  void skippy_mtp_clear_session_state(skippy_session * session);
  void skippy_clear_chat_sampling(skippy_session * session);
 diff --git a/src/skippy/runtime_types.h b/src/skippy/runtime_types.h
-index 51f4f71cb..2a3b87f40 100644
+index 51f4f71cb..dbe7ab2e4 100644
 --- a/src/skippy/runtime_types.h
 +++ b/src/skippy/runtime_types.h
 @@ -5,6 +5,7 @@
@@ -98,7 +98,7 @@ index 51f4f71cb..2a3b87f40 100644
      skippy_runtime_config config = {};
      skippy_glm_dsa_op_timing glm_dsa_timing = {};
      bool executable = true;
-@@ -115,6 +116,11 @@ struct skippy_session {
+@@ -116,6 +118,11 @@ struct skippy_session {
      int32_t preserve_prefix_tokens = 0;
      std::vector<llama_token> token_history;
      std::vector<skippy_token_signal> signal_history;
@@ -111,7 +111,7 @@ index 51f4f71cb..2a3b87f40 100644
      llama_sampler * grammar_sampler = nullptr;
      bool sampling_backend_enabled = false;
 diff --git a/src/skippy/sampling.cpp b/src/skippy/sampling.cpp
-index 6fb1e1f64..a2d695de7 100644
+index f2885f09b..8a798a734 100644
 --- a/src/skippy/sampling.cpp
 +++ b/src/skippy/sampling.cpp
 @@ -12,6 +12,7 @@
@@ -162,7 +162,7 @@ index 6fb1e1f64..a2d695de7 100644
      if (status == SKIPPY_STATUS_OK) {
          skippy_record_tokens(session, token_ids, token_count);
          status = skippy_mtp_sync_target_inputs(session, token_ids, nullptr, token_count, token_start, out_error);
-@@ -392,6 +406,41 @@ static bool skippy_sampling_configs_equal(
+@@ -392,6 +405,41 @@ static bool skippy_sampling_configs_equal(
      return true;
  }
  
@@ -204,7 +204,7 @@ index 6fb1e1f64..a2d695de7 100644
  llama_sampler * skippy_build_sampling_chain(
          skippy_session * session,
          const skippy_sampling_config * sampling) {
-@@ -623,9 +672,16 @@ static void skippy_sync_chat_sampling_history(skippy_session * session) {
+@@ -621,9 +669,16 @@ static void skippy_sync_chat_sampling_history(skippy_session * session) {
  static llama_token skippy_chat_sample_token(skippy_session * session, int32_t logits_index) {
      skippy_sync_chat_sampling_history(session);
      if (session->sampling_backend_enabled) {
@@ -368,4 +368,5 @@ index 3a8763869..a2292fef8 100644
      return skippy_success(out_error);
  }
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

@@ -1,8 +1,8 @@
-From a4653405a51b0b3a4fe08e7959dddacdb9c9373b Mon Sep 17 00:00:00 2001
+From c0987b58466c7ae156aa134283bc9d83432b1956 Mon Sep 17 00:00:00 2001
 From: Scam
  <44c96d97d4bda5bbcbd62565b0b19bb2e895e1fad5d9e9116f267909f1dae78e@meshllm.communities.buzz.xyz>
 Date: Sat, 29 Aug 2026 08:35:38 +1000
-Subject: [PATCH 31/32] skippy: fix Qwen4Exp activation frame staging
+Subject: [PATCH 34/56] skippy: fix Qwen4Exp activation frame staging
 
 ---
  src/skippy/activation.cpp      |  5 ++++-
@@ -28,10 +28,10 @@ index 43cba21f3..a598963a7 100644
          }
      }
 diff --git a/src/skippy/execution-batch.cpp b/src/skippy/execution-batch.cpp
-index eaab6d31f..0124f2f6d 100644
+index 01a22dccf..451f5c816 100644
 --- a/src/skippy/execution-batch.cpp
 +++ b/src/skippy/execution-batch.cpp
-@@ -410,6 +410,14 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -425,6 +425,14 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
      const int32_t n_embd_inp = llama_model_n_embd_inp(first->stage_model->model);
      const int32_t n_pos_per_embd = first->stage_model->model->hparams.n_pos_per_embd();
      const bool activation_input = skippy_is_filtered(first) && first->stage_model->config.layer_start > 0;
@@ -46,7 +46,7 @@ index eaab6d31f..0124f2f6d 100644
      const bool request_logits = first->stage_model->config.include_output;
      const bool request_embeddings = skippy_emits_activation_frame(first);
  
-@@ -473,10 +481,14 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -488,10 +496,14 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
      }
  
      std::vector<float> embd_storage;
@@ -61,7 +61,7 @@ index eaab6d31f..0124f2f6d 100644
          if ((batch_input_flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
              glm_dsa_input_top_k_storage.resize(request_count*batch_input_top_k);
          }
-@@ -487,6 +499,15 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -502,6 +514,15 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
              if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
                  skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "batched activation decode does not support Gemma3n AltUp sidebands yet");
                  return SKIPPY_STATUS_UNSUPPORTED;
@@ -77,7 +77,7 @@ index eaab6d31f..0124f2f6d 100644
              } else if (n_embd_inp == n_embd) {
                  std::memcpy(dst, input_payload, hidden_bytes_per_request);
              } else {
-@@ -538,12 +559,8 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -553,12 +574,8 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
      };
  
      skippy_activation_tokens_scope activation_tokens_scope(token_ids, request_count);

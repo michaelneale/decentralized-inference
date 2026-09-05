@@ -1,7 +1,7 @@
-From aed2113335677e1cac9f6beccd9efef9b26ff1b2 Mon Sep 17 00:00:00 2001
+From 3c4897560faf4c891895a1035c7a973c23948cfa Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 26 Aug 2026 05:32:28 +1000
-Subject: [PATCH 18/32] fixup: resolve leftover upstream-merge breakage in
+Subject: [PATCH 18/56] fixup: resolve leftover upstream-merge breakage in
  metal kargs, mtmd resize algo, common_json port
 
 ---
@@ -33,10 +33,10 @@ index 305b9d081..8aa563bef 100644
  static skippy_error * skippy_common_make_error(enum skippy_status status, const char * message) {
      skippy_error * error = new skippy_error{};
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index c8057a232..a018165de 100644
+index b8ece6c9c..f0a2b8ede 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -992,18 +992,24 @@ typedef struct {
+@@ -1005,18 +1005,24 @@ typedef struct {
      uint64_t nb1;
      uint64_t nb2;
      uint64_t nb3;
@@ -69,7 +69,7 @@ index c8057a232..a018165de 100644
  
  typedef struct {
      int32_t  ne00t;
-@@ -1214,49 +1220,6 @@ typedef struct {
+@@ -1238,49 +1244,6 @@ typedef struct {
      int64_t val;
  } ggml_metal_kargs_memset;
  
@@ -120,10 +120,10 @@ index c8057a232..a018165de 100644
      int32_t  n_tokens;
      int32_t  n_iter;
 diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
-index 2d01ad73c..4d641d197 100644
+index 02ba50614..11762d619 100644
 --- a/tools/mtmd/clip.cpp
 +++ b/tools/mtmd/clip.cpp
-@@ -1417,7 +1417,7 @@ struct clip_model_loader {
+@@ -1421,7 +1421,7 @@ struct clip_model_loader {
                  case PROJECTOR_TYPE_INKLING:
                      {
                          if (is_vision) {

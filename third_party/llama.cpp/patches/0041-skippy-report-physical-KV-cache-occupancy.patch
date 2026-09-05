@@ -1,29 +1,15 @@
-From 6dc2063aa7a37ed1baca62481fdc2aeda12d4f61 Mon Sep 17 00:00:00 2001
+From 7d5e97ca1a876d3cc6565ec4af65765912b910a1 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sun, 30 Aug 2026 05:37:40 +1000
-Subject: [PATCH] skippy: report physical KV cache occupancy
+Subject: [PATCH 41/56] skippy: report physical KV cache occupancy
 
 ---
- include/skippy/common.h |  2 +-
- include/skippy/state.h  |  6 ++++++
- src/llama-kv-cache.cpp  |  8 ++++++++
- src/llama-kv-cache.h    |  1 +
- src/skippy/state.cpp    | 66 ++++++++++++++++++++++++++++++++++++++++++++++++++
- 5 files changed, 82 insertions(+), 1 deletion(-)
+ include/skippy/state.h |  6 ++++
+ src/llama-kv-cache.cpp |  8 +++++
+ src/llama-kv-cache.h   |  1 +
+ src/skippy/state.cpp   | 66 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 81 insertions(+)
 
-diff --git a/include/skippy/common.h b/include/skippy/common.h
-index af927f835..c9d92c28f 100644
---- a/include/skippy/common.h
-+++ b/include/skippy/common.h
-@@ -34,7 +34,7 @@ extern "C" {
- 
- #define SKIPPY_ABI_VERSION_MAJOR 0
- #define SKIPPY_ABI_VERSION_MINOR 1
--#define SKIPPY_ABI_VERSION_PATCH 42
-+#define SKIPPY_ABI_VERSION_PATCH 43
- 
- #if defined(_MSC_VER)
- #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
 diff --git a/include/skippy/state.h b/include/skippy/state.h
 index 1c77c5450..aa698c124 100644
 --- a/include/skippy/state.h
@@ -42,10 +28,10 @@ index 1c77c5450..aa698c124 100644
  LLAMA_API enum skippy_status skippy_session_drop_sequence(
          struct skippy_session * session,
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 0a363e9c9..e0ddb4044 100644
+index 9572a7a5e..e2be1f11d 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1464,6 +1464,14 @@ const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
+@@ -1463,6 +1463,14 @@ const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
      return v_cells[seq_to_stream[seq_id]];
  }
  
@@ -73,10 +59,11 @@ index 39d313ae3..15fad3e20 100644
  
      bool get_has_shift() const;
 diff --git a/src/skippy/state.cpp b/src/skippy/state.cpp
-index a2292fef8..99b724ca0 100644
+index a2292fef8..620ee3578 100644
 --- a/src/skippy/state.cpp
 +++ b/src/skippy/state.cpp
-@@ -7,6 +7,9 @@
+@@ -6,7 +6,10 @@
+ 
  #include "llama-kv-cache.h"
  #include "llama-kv-cache-dsa.h"
 +#include "llama-kv-cache-dsa-iswa.h"
@@ -155,4 +142,5 @@ index a2292fef8..99b724ca0 100644
 +
  } // extern "C"
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

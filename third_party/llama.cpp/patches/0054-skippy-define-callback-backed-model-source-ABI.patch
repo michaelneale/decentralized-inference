@@ -1,14 +1,14 @@
-From be04d1874f141252d8c4b2ae955e0b61fec5b1e7 Mon Sep 17 00:00:00 2001
+From 70f45b133c8abad149429c6aedd559c31bbd5b37 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 3 Sep 2026 11:02:36 +1000
-Subject: [PATCH 52/53] skippy: define callback-backed model source ABI
+Subject: [PATCH 54/56] skippy: define callback-backed model source ABI
 
 ---
  include/skippy.h              |  1 +
  include/skippy/common.h       |  3 +-
- include/skippy/model_source.h | 84 ++++++++++++++++++++++++++++++++++++++++++
+ include/skippy/model_source.h | 84 +++++++++++++++++++++++++++++++++++
  src/skippy/abi.cpp            |  3 +-
- 4 files changed, 87 insertions(+), 2 deletions(-)
+ 4 files changed, 89 insertions(+), 2 deletions(-)
  create mode 100644 include/skippy/model_source.h
 
 diff --git a/include/skippy.h b/include/skippy.h
@@ -24,10 +24,10 @@ index 2d245cb54..f5218b8a7 100644
  #include "skippy/sampling.h"
  #include "skippy/speculative_decoding.h"
 diff --git a/include/skippy/common.h b/include/skippy/common.h
-index 68a1dee71..da3f72a51 100644
+index 389f02f47..afa554bc6 100644
 --- a/include/skippy/common.h
 +++ b/include/skippy/common.h
-@@ -34,7 +34,7 @@ extern "C" {
+@@ -46,7 +46,7 @@ extern "C" {
  
  #define SKIPPY_ABI_VERSION_MAJOR 0
  #define SKIPPY_ABI_VERSION_MINOR 1
@@ -36,7 +36,7 @@ index 68a1dee71..da3f72a51 100644
  
  #if defined(_MSC_VER)
  #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
-@@ -74,6 +74,7 @@ enum skippy_feature {
+@@ -86,6 +86,7 @@ enum skippy_feature {
      SKIPPY_FEATURE_INKLING_MTP_MM         = 1 << 27,
      SKIPPY_FEATURE_ITERATION_BATCH        = 1 << 28,
      SKIPPY_FEATURE_ACTIVATION_BOUNDARY     = 1 << 29,
@@ -46,7 +46,7 @@ index 68a1dee71..da3f72a51 100644
  enum skippy_status {
 diff --git a/include/skippy/model_source.h b/include/skippy/model_source.h
 new file mode 100644
-index 000000000..1fd597f5c
+index 000000000..5d77f4804
 --- /dev/null
 +++ b/include/skippy/model_source.h
 @@ -0,0 +1,84 @@
@@ -149,4 +149,5 @@ index 1c3574149..cba77a7af 100644
  
  void skippy_error_free(struct skippy_error * error) {
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

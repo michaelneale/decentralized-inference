@@ -1,20 +1,20 @@
-From 063eb2c7d128cc1428f3f7838f6584bc230f578a Mon Sep 17 00:00:00 2001
+From 5f82062ed159f9194d55a5b805350eabb9842ae6 Mon Sep 17 00:00:00 2001
 From: Jimmy
  <1fe240cd1a8cf775f6f3060f115e5a303181f3abf28ad4cb0c2515f4a02b36a8@meshllm.communities.buzz.xyz>
 Date: Sat, 29 Aug 2026 02:13:55 +1000
-Subject: [PATCH 29/32] skippy: scope Qwen4Exp PLE tables to owning stages
+Subject: [PATCH 31/56] skippy: scope Qwen4Exp PLE tables to owning stages
 
 Co-authored-by: michaelneale <14976+michaelneale@users.noreply.github.com>
 
 Signed-off-by: michaelneale <14976+michaelneale@users.noreply.github.com>
 ---
  src/llama-model-loader.cpp   | 22 ++++++++++++++++++----
- src/models/qwen4exp.cpp      | 26 ++++++++++++++++++++++++--
+ src/models/qwen4exp.cpp      | 29 ++++++++++++++++++++++++++---
  src/skippy/model_package.cpp | 35 +++++++++++++++++++++++++++++++++--
- 3 files changed, 75 insertions(+), 8 deletions(-)
+ 3 files changed, 77 insertions(+), 9 deletions(-)
 
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 4eac8bb40..8ade72322 100644
+index 1dcfb890f..3b91fbad6 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -1116,6 +1116,19 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
@@ -37,7 +37,7 @@ index 4eac8bb40..8ade72322 100644
  static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hparams, ggml_tensor * tensor, ggml_op op, const buft_list_t * buft_list) {
      GGML_ASSERT(!buft_list->empty());
      for (const auto & cur : *buft_list) {
-@@ -1193,6 +1206,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1234,6 +1247,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              return false;
          }
  
@@ -47,7 +47,7 @@ index 4eac8bb40..8ade72322 100644
          bool keep = true;
          switch (info.layer) {
              case LLM_TENSOR_LAYER_INPUT:
-@@ -1223,11 +1239,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1264,11 +1280,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                     (tn.tensor == LLM_TENSOR_ALTUP_PROJ && g_skippy_filter.include_embeddings) ||
                     (tn.tensor == LLM_TENSOR_ALTUP_UNEMBD_PROJ && g_skippy_filter.include_output);
          }
@@ -62,13 +62,15 @@ index 4eac8bb40..8ade72322 100644
          }
          if (!keep &&
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 0820ca16f..6a9769dfc 100644
+index 9f6e4f671..a2c313ed8 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -124,8 +124,21 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
+@@ -166,8 +166,22 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
          output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, TENSOR_DUPLICATED);
      }
  
+-    // flat [ple_head_dim, n_rows] gather target
+-    if (hparams.ple_n_heads > 0) {
 +    const llama_model_loader_stage_filter load_filter = llama_model_loader_get_stage_filter();
 +    bool stage_contains_ple = !load_filter.enabled;
 +    if (load_filter.enabled) {
@@ -82,13 +84,13 @@ index 0820ca16f..6a9769dfc 100644
 +        }
 +    }
 +
-     // flat [ple_head_dim, n_rows] gather target; n_rows is padded, so read it back
--    if (hparams.ple_n_heads > 0) {
++    // flat [ple_head_dim, n_rows] gather target; a stage that owns no PLE layer
++    // skips the table entirely so it is not retained by the stage load
 +    if (hparams.ple_n_heads > 0 && stage_contains_ple) {
-         const std::string ple_name = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight").str();
-         const auto & ple_w = ml.require_weight(ple_name.c_str());
-         const int64_t ple_rows = ple_w.tensor->ne[1];
-@@ -328,8 +341,17 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+         // the head ranges are what the gather indexes, so they set the minimum row count
+         int64_t ple_rows = 0;
+         for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
+@@ -376,8 +390,17 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
      ggml_tensor * inp_pos     = build_inp_pos();
      ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
  

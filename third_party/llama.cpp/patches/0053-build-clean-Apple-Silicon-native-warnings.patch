@@ -1,8 +1,8 @@
-From 27003be3218d7701a723fa879d7ff8330b1bfeb6 Mon Sep 17 00:00:00 2001
+From fc10abb2dfbeb637ae03e70e602ceaa295710ea1 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Thu, 3 Sep 2026 09:02:08 +1000
-Subject: [PATCH] build: clean Apple Silicon native warnings
+Subject: [PATCH 53/56] build: clean Apple Silicon native warnings
 
 ---
  ggml/src/ggml-metal/ggml-metal-device.m | 4 +++-
@@ -10,10 +10,10 @@ Subject: [PATCH] build: clean Apple Silicon native warnings
  2 files changed, 3 insertions(+), 4 deletions(-)
 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index c2dbfc6ad..2f9acd002 100644
+index 5335c8d8d..dd3e88be6 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -1346,7 +1346,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1414,7 +1414,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
  #endif
  
                  dev->props.use_shared_buffers = dev->props.has_unified_memory;
@@ -22,7 +22,7 @@ index c2dbfc6ad..2f9acd002 100644
                  // In case of eGPU, shared memory may be preferable.
                  dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
  #endif
-@@ -1406,12 +1406,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1474,12 +1474,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                          }
                      }
  
@@ -38,7 +38,7 @@ index c2dbfc6ad..2f9acd002 100644
                      for (int i = MTLGPUFamilyMetal3_GGML + 5; i >= MTLGPUFamilyMetal3_GGML; --i) {
                          if ([dev->mtl_device supportsFamily:i]) {
 diff --git a/src/models/inkling.cpp b/src/models/inkling.cpp
-index 5dba09c1d..619bc3e73 100644
+index 8ee5ed2b7..e442e398d 100644
 --- a/src/models/inkling.cpp
 +++ b/src/models/inkling.cpp
 @@ -254,9 +254,6 @@ llama_model_inkling::graph::graph(const llama_model & model, const llm_graph_par
@@ -52,5 +52,5 @@ index 5dba09c1d..619bc3e73 100644
      bool needs_rel_idx_local  = false;
      bool needs_rel_idx_global = false;
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

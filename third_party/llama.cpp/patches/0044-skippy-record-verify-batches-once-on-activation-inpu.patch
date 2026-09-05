@@ -1,7 +1,8 @@
-From f7b4211b767bcf63a6dd4286629b5d7c18f17cc2 Mon Sep 17 00:00:00 2001
+From 030e0e916df4e3ca78bf59afe75d23ad0a8d4fbc Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 1 Sep 2026 20:04:15 +1000
-Subject: [PATCH] skippy: record verify batches once on activation-input stages
+Subject: [PATCH 44/56] skippy: record verify batches once on activation-input
+ stages
 
 Sampled verification exposes each input to the sampler exactly once and
 in causal order as its row is sampled. The token-batch path rewinds the
@@ -48,5 +49,5 @@ index 58da7bc25..beecb2204 100644
  }
  
 -- 
-2.50.1 (Apple Git-155)
+2.55.0
 

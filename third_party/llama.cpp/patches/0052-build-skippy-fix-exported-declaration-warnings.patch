@@ -1,8 +1,8 @@
-From c7dac9e0e74b2c856b54317fced6bb3a5cc9a4aa Mon Sep 17 00:00:00 2001
+From 49e66b1c2870fe89d11c6847214cbb46e315ed71 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Thu, 3 Sep 2026 08:48:28 +1000
-Subject: [PATCH] build(skippy): fix exported declaration warnings
+Subject: [PATCH 52/56] build(skippy): fix exported declaration warnings
 
 ---
  common/CMakeLists.txt                 |  1 +
@@ -193,5 +193,5 @@ index 5b885bf68..54753a161 100644
  extern "C" LLAMA_API void * skippy_model_chat_templates_get_or_init(
          struct skippy_model * model,
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

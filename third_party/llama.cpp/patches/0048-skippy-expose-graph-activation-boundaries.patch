@@ -1,7 +1,7 @@
-From 1b82b29f90184fa89722e085867927a3324788ce Mon Sep 17 00:00:00 2001
+From 2e1d5149a0a207dd4739c6aa8f5a02fb7c76c199 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 1 Sep 2026 21:32:42 +1000
-Subject: [PATCH] skippy: expose graph activation boundaries
+Subject: [PATCH 48/56] skippy: expose graph activation boundaries
 
 ---
  include/skippy/activation.h      | 16 ++++++
@@ -100,7 +100,7 @@ index ba62f60cf..f63a3418f 100644
  LLAMA_API enum skippy_status skippy_session_create(
          struct skippy_model * model,
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 756d09a14..6526dd382 100644
+index 186238c72..c1b0fb822 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -12,6 +12,7 @@
@@ -111,7 +111,7 @@ index 756d09a14..6526dd382 100644
  
  #include <cinttypes>
  #include <cmath>
-@@ -2448,6 +2449,32 @@ llm_graph_result * llama_context::get_gf_res_prev() const {
+@@ -2451,6 +2452,32 @@ llm_graph_result * llama_context::get_gf_res_prev() const {
      return static_cast<llm_graph_result *>(gf_res_prev.get());
  }
  
@@ -144,7 +144,7 @@ index 756d09a14..6526dd382 100644
  ggml_cgraph * llama_context::graph_reserve(
          uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only, size_t * sizes) {
      LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
-@@ -2482,6 +2509,68 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -2485,6 +2512,68 @@ ggml_cgraph * llama_context::graph_reserve(
  
      auto * gf = model.build_graph(gparams);
  
@@ -247,10 +247,10 @@ index 20c121b24..9e883575f 100644
      ggml_backend_buffer_ptr buf_output;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 33d933c3f..64e9134f6 100644
+index 072572e2b..e4918b865 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1564,6 +1564,8 @@ void llm_graph_result::reset() {
+@@ -1565,6 +1565,8 @@ void llm_graph_result::reset() {
      t_skippy_rwkv7_v_first = nullptr;
      t_skippy_gemma3n_altup = nullptr;
      t_skippy_glm_dsa_top_k = nullptr;
@@ -260,7 +260,7 @@ index 33d933c3f..64e9134f6 100644
      t_layer_inp.resize(LLAMA_MAX_LAYERS + 1);
      std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 3a00c0e93..572d833ab 100644
+index 32a215ddd..5674bdcf1 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -1061,6 +1061,12 @@ public:
@@ -306,10 +306,10 @@ index 8e712f757..800a69b1b 100644
          ggml_build_forward_expand(gf, cur);
          return;
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 6a9769dfc..683f96c8e 100644
+index a2c313ed8..ed1c96858 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -319,6 +319,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -368,6 +368,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
          cb(inp_hc->values, "hc_stage_input", -1);
          ggml_set_input(inp_hc->values);
          inpL = inp_hc->values;
@@ -317,7 +317,7 @@ index 6a9769dfc..683f96c8e 100644
          res->add_input(std::move(inp_hc));
      } else {
          inpL = build_inp_embd(model.tok_embd);
-@@ -422,6 +423,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -471,6 +472,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
  
      if (stage_filtered && !stage_filter.include_output) {
          cb(res_hc, "stage_boundary", il_end - 1);
@@ -451,7 +451,7 @@ index 2828ffe38..4ccf2c4a2 100644
  
  } // extern "C"
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 166f2f7b7..0202e5a1c 100644
+index 33c54cf42..04f26b31a 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
 @@ -51,6 +51,7 @@
@@ -462,7 +462,7 @@ index 166f2f7b7..0202e5a1c 100644
  #include "skippy/sampling_internal.h"
  #include "skippy/speculative_internal.h"
  #include "skippy/model_loading_internal.h"
-@@ -696,6 +697,58 @@ static enum skippy_status skippy_finish_model_open(
+@@ -579,6 +580,58 @@ static enum skippy_status skippy_finish_model_open(
          return SKIPPY_STATUS_RUNTIME_ERROR;
      }
  
@@ -537,5 +537,5 @@ index 5180bfa24..a82b64408 100644
      std::mutex lane_mutex;
      std::vector<bool> lane_in_use;
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

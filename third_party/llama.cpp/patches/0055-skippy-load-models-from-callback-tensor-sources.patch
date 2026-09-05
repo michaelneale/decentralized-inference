@@ -1,7 +1,7 @@
-From e3eafdc0fcdba05639260afc14fc4ca4b296910f Mon Sep 17 00:00:00 2001
+From f5c1d12940d5ecdea27f94e67186d5e01ee2dbf1 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 3 Sep 2026 11:02:36 +1000
-Subject: [PATCH 53/53] skippy: load models from callback tensor sources
+Subject: [PATCH 55/56] skippy: load models from callback tensor sources
 
 ---
  src/CMakeLists.txt                  |   2 +-
@@ -15,7 +15,7 @@ Subject: [PATCH 53/53] skippy: load models from callback tensor sources
  create mode 100644 src/skippy/model_source.cpp
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index f25a38e24..9db23247e 100644
+index d07bb1a23..68df79aa4 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -46,6 +46,7 @@ add_library(llama
@@ -26,7 +26,7 @@ index f25a38e24..9db23247e 100644
              skippy/session.cpp
              skippy/verification.cpp
              skippy/abi.cpp
-@@ -146,4 +147,3 @@ if (APPLE)
+@@ -143,4 +144,3 @@ if (APPLE)
      find_library(SKIPPY_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
      target_link_libraries(llama PRIVATE ${SKIPPY_ACCELERATE_FRAMEWORK})
  endif()
@@ -49,10 +49,10 @@ index 92a759b7a..b296384dc 100644
  // All tensors should be quantizable (use llama_quant_tensor_allows_quantization to filter).
  // result_types: caller-allocated array of n_tensors elements, filled with assigned types.
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 2d4993f3e..fdf138dd1 100644
+index 2f4675f13..b74628e68 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1434,6 +1434,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1479,6 +1479,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          const int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
          if (tid != -1) {
              type = gguf_get_tensor_type(metadata, tid);
@@ -64,7 +64,7 @@ index 2d4993f3e..fdf138dd1 100644
          }
  
          // for tensors that are not required some of the dimensions can be invalid:
-@@ -1463,7 +1468,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1508,7 +1513,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          ggml_set_name(&t_meta, tn.str().c_str());
  
          ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
@@ -76,7 +76,7 @@ index 2d4993f3e..fdf138dd1 100644
          ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
          ggml_set_name(ret, tn.str().c_str());
 diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
-index 6eb900794..79aacf2d3 100644
+index b23dbea1b..e7cb08315 100644
 --- a/src/llama-quant.cpp
 +++ b/src/llama-quant.cpp
 @@ -400,6 +400,7 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
@@ -87,7 +87,7 @@ index 6eb900794..79aacf2d3 100644
              case GGML_TYPE_Q2_0:
              case GGML_TYPE_Q2_K:
              case GGML_TYPE_Q3_K:
-@@ -1439,6 +1440,13 @@ bool llama_quant_tensor_allows_quantization(
+@@ -1455,6 +1456,13 @@ bool llama_quant_tensor_allows_quantization(
      return tensor_allows_quantization(qs->params, qs->model.arch, tensor);
  }
  
@@ -101,7 +101,7 @@ index 6eb900794..79aacf2d3 100644
  void llama_quant_compute_types(
          quantize_state_impl * qs,
          llama_ftype ftype,
-@@ -1455,7 +1463,7 @@ void llama_quant_compute_types(
+@@ -1471,7 +1479,7 @@ void llama_quant_compute_types(
      qs->i_ffn_gate          = 0;
      qs->i_ffn_up            = 0;
      qs->n_fallback          = 0;
@@ -111,7 +111,7 @@ index 6eb900794..79aacf2d3 100644
  
      // build metadata from tensor names
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 15ac94ac7..2e1f48ba6 100644
+index b573780a4..c622b9819 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
 @@ -477,7 +477,7 @@ struct skippy_runtime_config skippy_runtime_config_default(void) {
@@ -123,7 +123,7 @@ index 15ac94ac7..2e1f48ba6 100644
          llama_model * model,
          const struct skippy_runtime_config * config,
          skippy_runtime_event_scope * event_scope,
-@@ -950,6 +950,7 @@ enum skippy_status skippy_model_open_from_parts_impl(
+@@ -833,6 +833,7 @@ enum skippy_status skippy_model_open_from_parts_impl(
  
      return skippy_finish_model_open(model, config, &event_scope, out_model, out_error);
  }
@@ -621,4 +621,5 @@ index 000000000..b0e475ee6
 +    }
 +}
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

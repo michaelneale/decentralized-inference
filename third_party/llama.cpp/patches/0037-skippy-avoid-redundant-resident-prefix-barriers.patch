@@ -1,7 +1,7 @@
-From 2b0b559cf1e57d8c723750e28c406a556692e454 Mon Sep 17 00:00:00 2001
+From 94e6cf8d5151e4030306f7b3096013e79afabcb9 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 29 Aug 2026 11:27:34 +1000
-Subject: [PATCH] skippy: avoid redundant resident prefix barriers
+Subject: [PATCH 37/56] skippy: avoid redundant resident prefix barriers
 
 ---
  src/skippy/state.cpp | 4 ----
@@ -44,5 +44,5 @@ index 7270d2ea2..3a8763869 100644
  }
  
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

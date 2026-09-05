@@ -1,8 +1,8 @@
-From 11075272839ac3c4d7fc650e97dcba4001b978a6 Mon Sep 17 00:00:00 2001
+From 0a42aa3db98251d25663e4ef33fa23e02cb5a263 Mon Sep 17 00:00:00 2001
 From: Jimmy
  <1fe240cd1a8cf775f6f3060f115e5a303181f3abf28ad4cb0c2515f4a02b36a8@meshllm.communities.buzz.xyz>
 Date: Sat, 29 Aug 2026 01:06:43 +1000
-Subject: [PATCH 27/32] skippy: stage Qwen4Exp hyper-connected residuals
+Subject: [PATCH 29/56] skippy: stage Qwen4Exp hyper-connected residuals
 
 Carry Qwen4Exp's hyper-connected residual through an explicit wide graph input, retain token sidebands for PLE history, and limit graph execution to the selected layer range.
 
@@ -24,7 +24,7 @@ Signed-off-by: Jimmy <1fe240cd1a8cf775f6f3060f115e5a303181f3abf28ad4cb0c2515f4a0
  create mode 100644 tests/test-skippy-activation-layout.cpp
 
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index df0c3019b..33d933c3f 100644
+index 3e8bba3c6..072572e2b 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -28,6 +28,7 @@ static thread_local skippy_graph_filter g_skippy_graph_filter;
@@ -83,7 +83,7 @@ index df0c3019b..33d933c3f 100644
      const skippy_activation_tokens & stage_tokens = skippy_graph_get_activation_tokens();
      GGML_ASSERT(stage_tokens.tokens != nullptr);
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 15fc4fa83..3a00c0e93 100644
+index 2d3b07930..32a215ddd 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -72,6 +72,13 @@ struct skippy_activation_gemma3n_altup {
@@ -133,10 +133,10 @@ index 15fc4fa83..3a00c0e93 100644
  public:
      llm_graph_input_stage_tokens() = default;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 4e7bca8ea..4eac8bb40 100644
+index efaf09452..1dcfb890f 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -1223,6 +1223,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1264,6 +1264,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                     (tn.tensor == LLM_TENSOR_ALTUP_PROJ && g_skippy_filter.include_embeddings) ||
                     (tn.tensor == LLM_TENSOR_ALTUP_UNEMBD_PROJ && g_skippy_filter.include_output);
          }
@@ -151,10 +151,10 @@ index 4e7bca8ea..4eac8bb40 100644
              llm_kv.arch == LLM_ARCH_NEMOTRON_H_MOE &&
              hparams.n_layer_nextn > 0 &&
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index abf6a0502..0820ca16f 100644
+index 1484c9b07..9f6e4f671 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -294,9 +294,24 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -342,9 +342,24 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
      int sections[4];
      std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
  
@@ -182,7 +182,7 @@ index abf6a0502..0820ca16f 100644
  
      auto * inp = build_inp_mem_hybrid();
  
-@@ -311,7 +326,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -359,7 +374,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
      }
  
      ggml_tensor * inp_pos     = build_inp_pos();
@@ -191,7 +191,7 @@ index abf6a0502..0820ca16f 100644
  
      ggml_tensor * ple_emb = nullptr;
      if (hparams.ple_n_heads > 0) {
-@@ -320,13 +335,19 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -368,13 +383,19 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
          ggml_build_forward_expand(gf, ple_emb);
      }
  
@@ -217,7 +217,7 @@ index abf6a0502..0820ca16f 100644
          res->t_layer_inp[il] = res_hc;
  
          if (hparams.is_ple(il)) {
-@@ -349,7 +370,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -397,7 +418,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
              cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
          }
  
@@ -226,7 +226,7 @@ index abf6a0502..0820ca16f 100644
              // everything below is per token, so drop the rows that produce no output
              cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
              inject = ggml_get_rows(ctx0, inject, inp_out_ids);
-@@ -377,6 +398,13 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -425,6 +446,13 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
          cb(res_hc, "l_last", il);
      }
  
@@ -346,10 +346,10 @@ index 440db0aef..dd66056ad 100644
      skippy_glm_dsa_top_k_scope(
              const skippy_activation_desc * desc,
 diff --git a/src/skippy/execution-batch.cpp b/src/skippy/execution-batch.cpp
-index 2d771832a..eaab6d31f 100644
+index c6637b4b3..01a22dccf 100644
 --- a/src/skippy/execution-batch.cpp
 +++ b/src/skippy/execution-batch.cpp
-@@ -63,6 +63,14 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -62,6 +62,14 @@ enum skippy_status skippy_iteration_batch_sampled(
      }
  
      const bool activation_input = skippy_is_filtered(first) && first->stage_model->config.layer_start > 0;
@@ -364,7 +364,7 @@ index 2d771832a..eaab6d31f 100644
      const bool request_logits = first->stage_model->config.include_output;
      const bool request_embeddings = skippy_emits_activation_frame(first);
      size_t total_token_count = 0;
-@@ -160,9 +168,13 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -169,9 +177,13 @@ enum skippy_status skippy_iteration_batch_sampled(
      const int32_t n_tokens = static_cast<int32_t>(total_token_count);
      std::vector<llama_token> token_storage(total_token_count);
      std::vector<float> embd_storage;
@@ -378,7 +378,7 @@ index 2d771832a..eaab6d31f 100644
          if ((batch_input_flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
              glm_dsa_input_top_k_storage.resize(
                      total_token_count * static_cast<size_t>(batch_input_top_k) * batch_input_streams);
-@@ -187,7 +199,7 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -196,7 +208,7 @@ enum skippy_status skippy_iteration_batch_sampled(
                  float * destination = embd_storage.data() + (offset + token_index) * static_cast<size_t>(n_embd_inp);
                  std::memcpy(
                          destination,
@@ -387,7 +387,7 @@ index 2d771832a..eaab6d31f 100644
                          static_cast<size_t>(n_embd) * sizeof(float));
                  if (n_embd_inp > n_embd) {
                      std::memset(
-@@ -196,6 +208,12 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -205,6 +217,12 @@ enum skippy_status skippy_iteration_batch_sampled(
                              static_cast<size_t>(n_embd_inp - n_embd) * sizeof(float));
                  }
              }
@@ -400,7 +400,7 @@ index 2d771832a..eaab6d31f 100644
              if (!glm_dsa_input_top_k_storage.empty()) {
                  const size_t sideband_values = request.token_count * static_cast<size_t>(batch_input_top_k) * batch_input_streams;
                  const int32_t * source = reinterpret_cast<const int32_t *>(
-@@ -237,6 +255,11 @@ enum skippy_status skippy_iteration_batch_sampled(
+@@ -246,6 +264,11 @@ enum skippy_status skippy_iteration_batch_sampled(
      };
  
      skippy_activation_tokens_scope activation_tokens_scope(token_storage.data(), total_token_count);
@@ -412,7 +412,7 @@ index 2d771832a..eaab6d31f 100644
      const llama_pos batch_pos_start = pos_storage.empty() ? first->n_past : pos_storage[0];
      skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
              glm_dsa_input_top_k_storage.empty() ? nullptr : glm_dsa_input_top_k_storage.data(),
-@@ -515,6 +538,15 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+@@ -530,6 +553,15 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
      };
  
      skippy_activation_tokens_scope activation_tokens_scope(token_ids, request_count);
@@ -429,7 +429,7 @@ index 2d771832a..eaab6d31f 100644
      skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
              glm_dsa_input_top_k_storage.empty() ? nullptr : glm_dsa_input_top_k_storage.data(),
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 7420978ae..376e9b09f 100644
+index 86fcc259a..47ddeeef1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -156,6 +156,8 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)

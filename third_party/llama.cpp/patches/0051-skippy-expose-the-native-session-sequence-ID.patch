@@ -1,22 +1,23 @@
-From 4f7c1c95a7e1b9c3d2f6e8a0b4c6d8e0f2a4b6c8 Mon Sep 17 00:00:00 2001
+From 96be6451420bf1c9e9e8b59c8496e49eef842f43 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 2 Sep 2026 10:00:00 +1000
-Subject: [PATCH] skippy: expose the native session sequence ID
+Subject: [PATCH 51/56] skippy: expose the native session sequence ID
 
 Multimodal mtmd evaluation writes llama.cpp KV cells directly. It must use
 the sequence claimed by the Skippy session, rather than the default sequence
 zero, so cleanup and subsequent requests operate on the same lane.
 ---
  include/skippy/common.h  | 2 +-
- include/skippy/runtime.h | 3 +++
+ include/skippy/runtime.h | 4 ++++
  src/skippy/session.cpp   | 5 +++++
- 3 files changed, 9 insertions(+), 1 deletion(-)
+ 3 files changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/include/skippy/common.h b/include/skippy/common.h
-index e0024ede2..425aea03a 100644
+index 4729ae67b..68a1dee71 100644
 --- a/include/skippy/common.h
 +++ b/include/skippy/common.h
-@@ -35,6 +35,6 @@ extern "C" {
+@@ -34,7 +34,7 @@ extern "C" {
+ 
  #define SKIPPY_ABI_VERSION_MAJOR 0
  #define SKIPPY_ABI_VERSION_MINOR 1
 -#define SKIPPY_ABI_VERSION_PATCH 47
@@ -25,10 +26,10 @@ index e0024ede2..425aea03a 100644
  #if defined(_MSC_VER)
  #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
 diff --git a/include/skippy/runtime.h b/include/skippy/runtime.h
-index ba62f60cf..096fe75f0 100644
+index c0425211a..4c66e6772 100644
 --- a/include/skippy/runtime.h
 +++ b/include/skippy/runtime.h
-@@ -187,6 +187,10 @@ LLAMA_API int32_t skippy_session_position(
+@@ -205,6 +205,10 @@ LLAMA_API int32_t skippy_session_position(
  LLAMA_API int32_t skippy_session_batch_size(
          const struct skippy_session * session);
  
@@ -43,7 +44,7 @@ diff --git a/src/skippy/session.cpp b/src/skippy/session.cpp
 index aae665f53..09beb4f11 100644
 --- a/src/skippy/session.cpp
 +++ b/src/skippy/session.cpp
-@@ -184,6 +184,11 @@ int32_t skippy_session_position(
+@@ -183,6 +183,11 @@ int32_t skippy_session_position(
      return session != nullptr ? session->n_past : -1;
  }
  
@@ -55,6 +56,6 @@ index aae665f53..09beb4f11 100644
  int32_t skippy_session_batch_size(
          const struct skippy_session * session) {
      return session != nullptr && session->ctx != nullptr ? llama_n_batch(session->ctx) : 0;
- }
 -- 
-2.50.1 (Apple Git-155)
+2.55.0
+

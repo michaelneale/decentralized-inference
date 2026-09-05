@@ -1,7 +1,7 @@
-From dcc8fa3fb4376cbdea08d2e2ea4a69dd724f301f Mon Sep 17 00:00:00 2001
+From 5c5d0bc79411916494222149ab4cbd03a3dd5b1b Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 26 Aug 2026 15:20:36 +1000
-Subject: [PATCH 25/32] skippy: allow standalone NextN-only nemotron MTP draft
+Subject: [PATCH 26/56] skippy: allow standalone NextN-only nemotron MTP draft
  models
 
 A NextN-only draft GGUF (converted with convert_hf_to_gguf.py --mtp)
@@ -58,10 +58,10 @@ index 3dc30c95c..ce1cec84f 100644
      cb(cur, "result_output", -1);
  
 diff --git a/src/models/nemotron-h.cpp b/src/models/nemotron-h.cpp
-index 41f78b874..165541bbd 100644
+index 3f101dd03..c0045311b 100644
 --- a/src/models/nemotron-h.cpp
 +++ b/src/models/nemotron-h.cpp
-@@ -53,14 +53,16 @@ void llama_model_nemotron_h::load_arch_tensors(llama_model_loader & ml) {
+@@ -62,14 +62,16 @@ void llama_model_nemotron_h::load_arch_tensors(llama_model_loader & ml) {
      const int64_t moe_n_embd = hparams.moe_latent_size > 0 ? hparams.moe_latent_size : n_embd;
  
      // embeddings

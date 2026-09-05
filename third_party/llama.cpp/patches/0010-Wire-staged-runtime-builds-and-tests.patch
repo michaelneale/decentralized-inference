@@ -1,7 +1,7 @@
-From 6ba1d0ce7e05173abc5f286d2b2d8d42cfe9b39f Mon Sep 17 00:00:00 2001
+From bd91eeb31d7fd320796910cb874be88fec5d04c4 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 16:02:20 +1000
-Subject: [PATCH 10/32] Wire staged runtime builds and tests
+Subject: [PATCH 10/56] Wire staged runtime builds and tests
 
 ---
  .scratch_port/analyze.py  |  96 ++++++++++++++++++

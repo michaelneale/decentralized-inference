@@ -1,7 +1,7 @@
-From 955040775049a693f532142ea8e1291bc4f8c402 Mon Sep 17 00:00:00 2001
+From c209d42fab84b34ad9e520efe8d0652e8f8f018c Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 29 Aug 2026 01:31:34 -0700
-Subject: [PATCH] skippy: account retained tensors during staged loads
+Subject: [PATCH 47/56] skippy: account retained tensors during staged loads
 
 ---
  src/CMakeLists.txt                            |  46 ++++
@@ -12,10 +12,10 @@ Subject: [PATCH] skippy: account retained tensors during staged loads
  create mode 100644 tests/test-skippy-model-loader-accounting.cpp
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 894741717..f25a38e24 100644
+index 3d364d6e5..d07bb1a23 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -89,6 +89,52 @@ if (LLAMA_STAGE_BUILD_TESTS)
+@@ -86,6 +86,52 @@ if (LLAMA_STAGE_BUILD_TESTS)
      add_test(
          NAME skippy_hardware_application_probe
          COMMAND skippy-hardware-application-probe)
@@ -69,7 +69,7 @@ index 894741717..f25a38e24 100644
  
  if (BUILD_SHARED_LIBS)
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 8ade72322..2d4993f3e 100644
+index 3b91fbad6..2f4675f13 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -9,6 +9,7 @@
@@ -80,7 +80,7 @@ index 8ade72322..2d4993f3e 100644
  #include <cstdint>
  #include <cstring>
  #include <future>
-@@ -1270,7 +1271,6 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1311,7 +1312,6 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                          nbytes);
  
                  if (requested_tensor_exists && first_filtered_request) {
@@ -88,7 +88,7 @@ index 8ade72322..2d4993f3e 100644
                      if (!(flags & TENSOR_DUPLICATED)) {
                          n_created++;
                      }
-@@ -1321,7 +1321,6 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1362,7 +1362,6 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              const size_t nbytes = ggml_nbytes(t_meta);
              LLAMA_LOG_WARN("model has unused tensor %s (size = %zu bytes) -- ignoring\n", tn.str().c_str(), nbytes);
  
@@ -96,7 +96,7 @@ index 8ade72322..2d4993f3e 100644
              n_created++;
  
              return nullptr;
-@@ -1530,14 +1529,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1568,14 +1567,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          }
      }
  
@@ -112,7 +112,7 @@ index 8ade72322..2d4993f3e 100644
          n_created++;
      }
  
-@@ -1595,9 +1590,28 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1633,9 +1628,28 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
          }
      }
  
@@ -144,15 +144,15 @@ index 8ade72322..2d4993f3e 100644
      }
  }
  
-@@ -1658,6 +1672,7 @@ bool llama_model_loader::load_all_data(
+@@ -1696,6 +1710,7 @@ bool llama_model_loader::load_all_data(
          return true;
      }
      GGML_ASSERT(size_data != 0 && "call init_mappings() first");
 +    const size_t size_done_before = size_done;
  
-     std::vector<no_init<uint8_t>> read_buf;
      std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
-@@ -1768,7 +1783,10 @@ bool llama_model_loader::load_all_data(
+ 
+@@ -1823,7 +1838,10 @@ bool llama_model_loader::load_all_data(
          }
  
          if (progress_callback) {
@@ -164,7 +164,7 @@ index 8ade72322..2d4993f3e 100644
                  return false;
              }
          }
-@@ -1881,6 +1899,7 @@ bool llama_model_loader::load_all_data(
+@@ -1941,6 +1959,7 @@ bool llama_model_loader::load_all_data(
          }
  
          size_done += n_size;
@@ -172,7 +172,7 @@ index 8ade72322..2d4993f3e 100644
      }
  
      // free temporary resources used for async uploads
-@@ -1907,7 +1926,7 @@ bool llama_model_loader::load_all_data(
+@@ -1967,7 +1986,7 @@ bool llama_model_loader::load_all_data(
      }
  
      // check if this is the last call and do final cleanup
@@ -182,7 +182,7 @@ index 8ade72322..2d4993f3e 100644
          if (use_mmap) {
              for (uint32_t idx = 0; idx < mappings.size(); idx++) {
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 376e9b09f..ed156f339 100644
+index 47ddeeef1..c8a131e40 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -217,6 +217,22 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
@@ -475,5 +475,5 @@ index 000000000..c8ad5f1b2
 +    return EXIT_SUCCESS;
 +}
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

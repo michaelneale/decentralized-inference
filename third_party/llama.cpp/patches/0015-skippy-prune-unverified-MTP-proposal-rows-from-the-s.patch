@@ -1,7 +1,7 @@
-From 4b3a781bc45230dd79f63e9320360147c1048aec Mon Sep 17 00:00:00 2001
+From aebb61726bbd72c3a21add533372281658ec5b19 Mon Sep 17 00:00:00 2001
 From: Michael Neale <14976+michaelneale@users.noreply.github.com>
 Date: Tue, 18 Aug 2026 20:41:42 +1000
-Subject: [PATCH 15/32] skippy: prune unverified MTP proposal rows from the
+Subject: [PATCH 15/56] skippy: prune unverified MTP proposal rows from the
  sidecar cache
 
 A multi-token proposal against a sidecar KV cache of its own writes one

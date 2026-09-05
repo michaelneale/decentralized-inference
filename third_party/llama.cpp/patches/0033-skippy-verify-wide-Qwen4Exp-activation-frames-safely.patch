@@ -1,8 +1,8 @@
-From e6427a2bdd6c05aae1a2bdcd4d28d4134add0ad2 Mon Sep 17 00:00:00 2001
+From cd6c5b7c7e1994c0d00fd65ccaddc69a7c263951 Mon Sep 17 00:00:00 2001
 From: Jimmy
  <1fe240cd1a8cf775f6f3060f115e5a303181f3abf28ad4cb0c2515f4a02b36a8@meshllm.communities.buzz.xyz>
 Date: Sat, 29 Aug 2026 02:05:03 +1000
-Subject: [PATCH 30/32] skippy: verify wide Qwen4Exp activation frames safely
+Subject: [PATCH 33/56] skippy: verify wide Qwen4Exp activation frames safely
 
 Co-authored-by: michaelneale <14976+michaelneale@users.noreply.github.com>
 

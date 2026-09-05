@@ -1,8 +1,8 @@
-From 5958112ee6413a338f6b2d2922134385e4e84f38 Mon Sep 17 00:00:00 2001
+From 9d9c91bc9deb9fe4a8ed6b92282fb3f2e5d1d296 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Wed, 2 Sep 2026 12:07:43 +1000
-Subject: [PATCH] fix(skippy): harden C API defaults and sampling
+Subject: [PATCH 49/56] fix(skippy): harden C API defaults and sampling
 
 ---
  include/skippy/common.h                       |  2 +-
@@ -41,7 +41,7 @@ index f63a3418f..c0425211a 100644
  #define SKIPPY_TRISTATE_AUTO  (-1)
  /** @brief Sentinel for `skippy_runtime_config` tri-state fields: force false. */
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 0202e5a1c..673df1212 100644
+index 04f26b31a..9dd911adf 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
 @@ -467,6 +467,16 @@ static bool skippy_resolve_tristate(int32_t tristate, bool derived_default) {
@@ -169,5 +169,5 @@ index be29b2ff8..cce5baa4f 100644
          session->sampling_backend_enabled = false;
          // The detached chain has already been backend-initialized and
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

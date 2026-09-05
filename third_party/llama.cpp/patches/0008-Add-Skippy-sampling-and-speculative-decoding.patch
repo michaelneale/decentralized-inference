@@ -1,17 +1,17 @@
-From 5d986a73ec0432c375d9b9a2799a3bdd350fe7e2 Mon Sep 17 00:00:00 2001
+From 0e86fc9720438b0be15fd3c58f401b1b296c5cba Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 16:02:20 +1000
-Subject: [PATCH 08/32] Add Skippy sampling and speculative decoding
+Subject: [PATCH 08/56] Add Skippy sampling and speculative decoding
 
 ---
- common/ngram-cache.cpp                | 153 ++++++-
- include/skippy/sampling.h             |  33 ++
+ common/ngram-cache.cpp                | 153 +++++-
+ include/skippy/sampling.h             |  35 ++
  include/skippy/speculative_decoding.h |  60 +++
- src/skippy/sampling.cpp               | 629 ++++++++++++++++++++++++++
+ src/skippy/sampling.cpp               | 672 ++++++++++++++++++++++++++
  src/skippy/sampling_internal.h        |  42 ++
- src/skippy/speculative_decoding.cpp   | 524 +++++++++++++++++++++
+ src/skippy/speculative_decoding.cpp   | 524 ++++++++++++++++++++
  src/skippy/speculative_internal.h     |  28 ++
- 7 files changed, 1464 insertions(+), 5 deletions(-)
+ 7 files changed, 1509 insertions(+), 5 deletions(-)
  create mode 100644 include/skippy/sampling.h
  create mode 100644 include/skippy/speculative_decoding.h
  create mode 100644 src/skippy/sampling.cpp
@@ -330,7 +330,7 @@ index 000000000..67fc99716
 +#endif // SKIPPY_SPECULATIVE_DECODING_H
 diff --git a/src/skippy/sampling.cpp b/src/skippy/sampling.cpp
 new file mode 100644
-index 000000000..8440e5b97
+index 000000000..9a3a1c769
 --- /dev/null
 +++ b/src/skippy/sampling.cpp
 @@ -0,0 +1,672 @@
@@ -1620,3 +1620,4 @@ index 000000000..db0055657
 +        skippy_error ** out_error);
 -- 
 2.55.0
+
