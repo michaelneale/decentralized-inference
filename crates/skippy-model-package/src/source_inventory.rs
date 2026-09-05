@@ -33,8 +33,7 @@ impl SourceInventory {
             .primary_file
             .as_deref()
             .context("source primary file is required")?;
-        let paths = resolve_gguf_shard_paths(&input.model_path)?;
-        let files = local_artifact_files(&input.model_path, primary)?;
+        let inventory = Self::read_local(&input.model_path, primary)?;
         let expected: BTreeSet<_> = input
             .source_identity
             .files
@@ -46,9 +45,44 @@ impl SourceInventory {
             "duplicate source file identity"
         );
         ensure!(
-            files.iter().map(|f| &f.path).collect::<BTreeSet<_>>() == expected,
+            inventory
+                .shards
+                .iter()
+                .map(|s| &s.source_file.path)
+                .collect::<BTreeSet<_>>()
+                == expected,
             "resolved source file inventory does not match complete GGUF shard set"
         );
+        for shard in &inventory.shards {
+            let declared = input
+                .source_identity
+                .files
+                .iter()
+                .find(|f| f.path == shard.source_file.path)
+                .context("source identity missing a resolved file")?;
+            ensure!(
+                declared
+                    .size_bytes
+                    .is_none_or(|size| size == shard.source_file.byte_size),
+                "source size mismatch for {:?}",
+                shard.source_file.path
+            );
+            ensure!(
+                declared
+                    .sha256
+                    .as_ref()
+                    .is_none_or(|digest| digest == &shard.source_file.sha256),
+                "source checksum mismatch for {:?}",
+                shard.source_file.path
+            );
+        }
+        Ok(inventory)
+    }
+
+    /// Capture expected evidence from local source files, never from a package.
+    pub(crate) fn read_local(model_path: &Path, primary: &str) -> Result<Self> {
+        let paths = resolve_gguf_shard_paths(model_path)?;
+        let files = local_artifact_files(model_path, primary)?;
         let mut shards = Vec::new();
         let mut names = BTreeSet::new();
         for (index, (path, file)) in paths.into_iter().zip(files).enumerate() {
@@ -62,27 +96,6 @@ impl SourceInventory {
                 );
             }
             let sha256 = file_sha256(&path)?;
-            let declared = input
-                .source_identity
-                .files
-                .iter()
-                .find(|f| f.path == file.path)
-                .context("source identity missing a resolved file")?;
-            ensure!(
-                declared
-                    .size_bytes
-                    .is_none_or(|size| size == directory.artifact_bytes),
-                "source size mismatch for {:?}",
-                file.path
-            );
-            ensure!(
-                declared
-                    .sha256
-                    .as_ref()
-                    .is_none_or(|digest| digest == &sha256),
-                "source checksum mismatch for {:?}",
-                file.path
-            );
             shards.push(SourceShard {
                 path,
                 artifact_id,

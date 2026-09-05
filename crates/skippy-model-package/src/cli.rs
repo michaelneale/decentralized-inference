@@ -64,6 +64,18 @@ pub(crate) enum Command {
         #[arg(long)]
         resume_existing_artifacts: bool,
     },
+    /// Verify byte-preserving v2 packages against independent local source files.
+    VerifyPackageV2 {
+        package: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        /// Logical source primary filename, if different from the local filename.
+        #[arg(long)]
+        source_file: Option<String>,
+        /// Independent originals for all declared projector sidecars.
+        #[arg(long = "source-projector")]
+        source_projectors: Vec<PathBuf>,
+    },
     Validate {
         full: PathBuf,
         slices: Vec<PathBuf>,

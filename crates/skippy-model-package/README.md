@@ -96,6 +96,44 @@ existing slice/v1 contracts; they are not v2 certification or serving paths.
 Runtime admission, metadata-graph certification and atomic serving cutover remain
 separate integration work. Do not publish these packages for the current v1 runtime.
 
+### Standalone v2 verification
+
+```bash
+skippy-model-package verify-package-v2 ./model-package \
+  --source ./original/model.gguf
+
+# If the original logical primary filename differs from its local filename:
+skippy-model-package verify-package-v2 ./model-package \
+  --source ./download.gguf --source-file subdir/model.gguf \
+  --source-projector ./original/mmproj.gguf
+```
+
+This read-only command requires independent local source files outside the package
+and resolves the complete GGUF shard set from `--source`. `--source-file` supplies
+only its logical identity; expected tensors and hashes always come from the source
+files, never the manifest. Every declared projector requires an independent
+`--source-projector` (repeatable; matched by content, not argument order). It does
+not download missing originals or fall back to package files as source evidence.
+Symlink escapes and source/artifact hard-link identity are rejected.
+
+Verification checks v2 schema and package identity, every artifact size/SHA-256,
+source-file completeness, model metadata, and exact catalog identity, dtype,
+dimensions, offsets, native stored lengths, alignment and integrity. It reopens
+artifacts and compares them with the frozen independent directories. Missing or
+substituted tensors, inconsistent source identities, duplicate artifacts/sidecars,
+unproven alias claims, v1 manifests and corrupt/truncated files fail with nonzero
+exit status. Success prints JSON with the package ID, `source_completeness_verified`
+and checked source/artifact/tensor/projector counts; it does not modify the package.
+
+This unit verifies the writer's **byte-preserving whole-shard representation**.
+Repacked/transformed containers, tensor-only digests, non-projector sidecars and
+shared-offset aliases are not supported. Uploaded artifacts must be restored
+locally before verification. Caller-supplied source provenance remains a trust
+boundary: matching bytes do not authenticate a repository/revision label or prove
+that a caller-provided source is the intended model. Success is not metadata-graph,
+runtime-admission or inference certification; legacy `validate-package` and
+`preflight` are unchanged.
+
 Local paths are only accepted for package creation when the caller supplies
 explicit provenance:
 

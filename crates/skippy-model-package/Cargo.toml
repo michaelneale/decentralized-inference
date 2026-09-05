@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+same-file = "1.0.6"
 clap.workspace = true
 skippy-ffi = { path = "../skippy-ffi", default-features = false }
 skippy-model = { path = "../skippy-model" }
