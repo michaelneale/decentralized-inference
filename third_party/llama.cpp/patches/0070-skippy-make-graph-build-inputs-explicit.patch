@@ -1,0 +1,3736 @@
+From 103e1b26d8c348d213f027e65ce0207663eb27e3 Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 22:16:21 +1000
+Subject: [PATCH] skippy: make graph build inputs explicit
+
+Replace the seven graph-build thread-local descriptors with one value snapshot passed from stage configuration through context, decode, graph parameters, graph context, graph result, and input population. Graph reuse refreshes payload pointers while topology changes invalidate reuse.
+
+Add focused nested, sequential, reset, topology, and concurrent isolation coverage.
+---
+ src/CMakeLists.txt                      |  24 ++
+ src/llama-context.cpp                   | 131 +++++++---
+ src/llama-context.h                     |  29 ++-
+ src/llama-graph.cpp                     | 164 +++++-------
+ src/llama-graph.h                       |  74 ++++--
+ src/llama-model.cpp                     |  17 +-
+ src/llama-model.h                       |   5 +-
+ src/models/afmoe.cpp                    |   2 +-
+ src/models/apertus.cpp                  |   2 +-
+ src/models/arcee.cpp                    |   2 +-
+ src/models/arctic.cpp                   |   2 +-
+ src/models/arwkv7.cpp                   |   2 +-
+ src/models/baichuan.cpp                 |   2 +-
+ src/models/bailingmoe.cpp               |   2 +-
+ src/models/bailingmoe2.cpp              |   2 +-
+ src/models/bitnet.cpp                   |   2 +-
+ src/models/bloom.cpp                    |   2 +-
+ src/models/chatglm.cpp                  |   2 +-
+ src/models/codeshell.cpp                |   2 +-
+ src/models/cohere2.cpp                  |   2 +-
+ src/models/command-r.cpp                |   2 +-
+ src/models/dbrx.cpp                     |   2 +-
+ src/models/deci.cpp                     |   2 +-
+ src/models/deepseek2.cpp                |   2 +-
+ src/models/dots1.cpp                    |   2 +-
+ src/models/dream.cpp                    |   2 +-
+ src/models/ernie4-5-moe.cpp             |   2 +-
+ src/models/ernie4-5.cpp                 |   2 +-
+ src/models/exaone-moe.cpp               |   2 +-
+ src/models/exaone.cpp                   |   2 +-
+ src/models/exaone4.cpp                  |   2 +-
+ src/models/falcon-h1.cpp                |   2 +-
+ src/models/falcon.cpp                   |   2 +-
+ src/models/gemma.cpp                    |   2 +-
+ src/models/gemma2.cpp                   |   2 +-
+ src/models/gemma3.cpp                   |   2 +-
+ src/models/gemma3n.cpp                  |   6 +-
+ src/models/gemma4.cpp                   |   6 +-
+ src/models/glm4-moe.cpp                 |   2 +-
+ src/models/glm4.cpp                     |   2 +-
+ src/models/gpt2.cpp                     |   2 +-
+ src/models/gptneox.cpp                  |   2 +-
+ src/models/granite-hybrid.cpp           |   2 +-
+ src/models/granite.cpp                  |   2 +-
+ src/models/grok.cpp                     |   2 +-
+ src/models/grovemoe.cpp                 |   2 +-
+ src/models/hunyuan-moe.cpp              |   2 +-
+ src/models/hunyuan-vl.cpp               |   2 +-
+ src/models/inkling.cpp                  |   2 +-
+ src/models/internlm2.cpp                |   2 +-
+ src/models/jais.cpp                     |   2 +-
+ src/models/jais2.cpp                    |   2 +-
+ src/models/jamba.cpp                    |   2 +-
+ src/models/kimi-linear.cpp              |   2 +-
+ src/models/laguna.cpp                   |   2 +-
+ src/models/lfm2.cpp                     |   2 +-
+ src/models/llada-moe.cpp                |   2 +-
+ src/models/llada.cpp                    |   2 +-
+ src/models/llama.cpp                    |   2 +-
+ src/models/llama4.cpp                   |   2 +-
+ src/models/maincoder.cpp                |   2 +-
+ src/models/mamba.cpp                    |   2 +-
+ src/models/mimo2.cpp                    |   2 +-
+ src/models/minicpm3.cpp                 |   2 +-
+ src/models/minimax-m2.cpp               |   2 +-
+ src/models/mistral3.cpp                 |   2 +-
+ src/models/mpt.cpp                      |   2 +-
+ src/models/nemotron-h.cpp               |   2 +-
+ src/models/nemotron.cpp                 |   2 +-
+ src/models/olmo.cpp                     |   2 +-
+ src/models/olmo2.cpp                    |   2 +-
+ src/models/olmoe.cpp                    |   2 +-
+ src/models/openai-moe.cpp               |   2 +-
+ src/models/openelm.cpp                  |   2 +-
+ src/models/orion.cpp                    |   2 +-
+ src/models/phi2.cpp                     |   2 +-
+ src/models/phi3.cpp                     |   2 +-
+ src/models/plamo.cpp                    |   2 +-
+ src/models/plamo2.cpp                   |   2 +-
+ src/models/plamo3.cpp                   |   2 +-
+ src/models/plm.cpp                      |   2 +-
+ src/models/qwen.cpp                     |   2 +-
+ src/models/qwen2.cpp                    |   2 +-
+ src/models/qwen2moe.cpp                 |   2 +-
+ src/models/qwen2vl.cpp                  |   2 +-
+ src/models/qwen3.cpp                    |   2 +-
+ src/models/qwen35.cpp                   |   2 +-
+ src/models/qwen35moe.cpp                |   2 +-
+ src/models/qwen3moe.cpp                 |   2 +-
+ src/models/qwen3next.cpp                |   2 +-
+ src/models/qwen3vl.cpp                  |   2 +-
+ src/models/qwen3vlmoe.cpp               |   2 +-
+ src/models/qwen4exp.cpp                 |   2 +-
+ src/models/refact.cpp                   |   2 +-
+ src/models/rnd1.cpp                     |   2 +-
+ src/models/rwkv6.cpp                    |   2 +-
+ src/models/rwkv6qwen2.cpp               |   2 +-
+ src/models/rwkv7.cpp                    |   2 +-
+ src/models/seed-oss.cpp                 |   2 +-
+ src/models/smallthinker.cpp             |   2 +-
+ src/models/smollm3.cpp                  |   2 +-
+ src/models/stablelm.cpp                 |   2 +-
+ src/models/starcoder.cpp                |   2 +-
+ src/models/starcoder2.cpp               |   2 +-
+ src/models/step35.cpp                   |   2 +-
+ src/models/xverse.cpp                   |   2 +-
+ src/skippy/activation.cpp               |  47 ++--
+ src/skippy/activation_layout.cpp        |   2 -
+ src/skippy/activation_scopes.h          | 160 ------------
+ src/skippy/execution-batch.cpp          |  35 +--
+ src/skippy/execution-single.cpp         |   7 +-
+ src/skippy/execution_internal.h         |   4 +-
+ src/skippy/graph_build_inputs.h         | 134 ++++++++++
+ src/skippy/graph_filter_scope.h         |  44 ----
+ src/skippy/model_lifecycle.cpp          |   1 -
+ src/skippy/model_load_config.cpp        |   1 -
+ src/skippy/model_loading.cpp            |  11 +-
+ src/skippy/session.cpp                  |  12 -
+ src/skippy/speculative_decoding.cpp     |  54 ++--
+ src/skippy/tests/graph_build_inputs.cpp | 320 ++++++++++++++++++++++++
+ src/skippy/verification.cpp             |   2 -
+ 121 files changed, 915 insertions(+), 569 deletions(-)
+ delete mode 100644 src/skippy/activation_scopes.h
+ create mode 100644 src/skippy/graph_build_inputs.h
+ delete mode 100644 src/skippy/graph_filter_scope.h
+ create mode 100644 src/skippy/tests/graph_build_inputs.cpp
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index b00856eed..249a08ba6 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -127,6 +127,30 @@ if (LLAMA_STAGE_BUILD_TESTS)
+         NAME skippy_stage_slice_plan
+         COMMAND skippy-stage-slice-plan)
+ 
++    add_executable(skippy-graph-build-inputs
++        skippy/tests/graph_build_inputs.cpp)
++    target_include_directories(skippy-graph-build-inputs PRIVATE .)
++    target_compile_features(skippy-graph-build-inputs PRIVATE cxx_std_17)
++    target_link_libraries(skippy-graph-build-inputs PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-graph-build-inputs)
++
++    add_test(
++        NAME skippy_graph_build_inputs
++        COMMAND skippy-graph-build-inputs
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/dream-dense.gguf")
++    set_tests_properties(skippy_graph_build_inputs PROPERTIES
++        FIXTURES_REQUIRED "skippy-model-loader-fixtures;skippy-graph-build-input-fixtures")
++
++    add_test(
++        NAME skippy_generate_graph_build_input_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch dream
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_graph_build_input_fixture PROPERTIES
++        FIXTURES_SETUP skippy-graph-build-input-fixtures)
++
+     add_test(
+         NAME skippy_generate_gemma_fixture
+         COMMAND skippy-model-fixture-generator
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index accfa6808..c02084a9d 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -12,7 +12,7 @@
+ #include "llama-ext.h"
+ #include "llama-sampler.h"
+ #include "llama.h"
+-#include "skippy/graph_filter_scope.h"
++#include "skippy/graph_build_inputs.h"
+ 
+ #include <cinttypes>
+ #include <cmath>
+@@ -83,8 +83,10 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
+ 
+ llama_context::llama_context(
+         const llama_model & model,
+-              llama_context_params params) :
++              llama_context_params params,
++        const skippy_graph_build_inputs & graph_build_inputs) :
+     model(model),
++    graph_build_inputs(graph_build_inputs),
+     cvec(std::make_unique<llama_adapter_cvec>()),
+     loras(std::make_unique<llama_adapter_loras>()),
+     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
+@@ -407,7 +409,7 @@ llama_context::llama_context(
+             /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
+         };
+ 
+-        memory.reset(model.create_memory(params_mem, cparams));
++        memory.reset(model.create_memory(params_mem, cparams, graph_build_inputs.filter));
+     }
+ 
+     // init backends
+@@ -516,7 +518,10 @@ llama_context::~llama_context() {
+     ggml_opt_free(opt_ctx);
+ }
+ 
+-void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
++void llama_context::resolve_fused_ops(
++        const llama_memory_context_i * mctx,
++        uint32_t n_seqs,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     const char * func = __func__;
+ 
+     if (model.arch == LLM_ARCH_GLM_DSA) {
+@@ -541,7 +546,7 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
+ 
+         const uint32_t n_tokens_probe = probe.n_tokens_per_seq*n_seqs;
+ 
+-        auto * gf = graph_reserve(n_tokens_probe, n_seqs, n_tokens_probe, mctx, true);
++        auto * gf = graph_reserve(n_tokens_probe, n_seqs, n_tokens_probe, mctx, true, nullptr, graph_build_inputs);
+         if (!gf) {
+             throw std::runtime_error(std::string("failed to reserve graph for ") + probe.name + " check");
+         }
+@@ -610,6 +615,10 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
+ }
+ 
+ void llama_context::sched_reserve() {
++    sched_reserve(graph_build_inputs);
++}
++
++void llama_context::sched_reserve(const skippy_graph_build_inputs & graph_build_inputs) {
+     if (!sched_need_reserve) {
+         return;
+     }
+@@ -648,7 +657,7 @@ void llama_context::sched_reserve() {
+ 
+     LLAMA_LOG_DEBUG("%s: worst-case: n_tokens = %d, n_seqs = %d, n_outputs = %d\n", __func__, n_tokens, n_seqs, n_outputs);
+ 
+-    resolve_fused_ops(mctx.get(), n_seqs);
++    resolve_fused_ops(mctx.get(), n_seqs, graph_build_inputs);
+ 
+     // reserve worst-case graph
+     int n_splits_pp = -1;
+@@ -662,13 +671,14 @@ void llama_context::sched_reserve() {
+     // reserve pp (prompt processing) graph first so that buffers are only allocated once
+     {
+         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
+-                model.hparams.no_alloc, model.hparams.no_alloc ? backend_buf_exp_size.data() : nullptr);
++                model.hparams.no_alloc, model.hparams.no_alloc ? backend_buf_exp_size.data() : nullptr,
++                graph_build_inputs);
+         if (!gf) {
+             if (cparams.pipeline_parallel) {
+                 LLAMA_LOG_WARN("%s: compute buffer allocation failed, retrying without pipeline parallelism\n", __func__);
+                 cparams.pipeline_parallel = false;
+                 sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, false, cparams.op_offload));
+-                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get());
++                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), false, nullptr, graph_build_inputs);
+             }
+             if (!gf) {
+                 throw std::runtime_error("failed to allocate compute pp buffers");
+@@ -681,7 +691,7 @@ void llama_context::sched_reserve() {
+ 
+     // reserve with tg (token generation) graph to get the number of splits and nodes
+     {
+-        auto * gf = graph_reserve(n_seqs, n_seqs, n_seqs, mctx.get(), model.hparams.no_alloc);
++        auto * gf = graph_reserve(n_seqs, n_seqs, n_seqs, mctx.get(), model.hparams.no_alloc, nullptr, graph_build_inputs);
+         if (!gf) {
+             throw std::runtime_error("failed to allocate compute tg buffers");
+         }
+@@ -699,10 +709,10 @@ void llama_context::sched_reserve() {
+             case LLM_ARCH_MINIMAX_01:
+                 // the `inp_diag_decay` tensor size scales with `n_seq_tokens^2` which
+                 // makes `n_seqs == 1` use more memory for the compute graph compared to `n_seqs > 1`
+-                gf = graph_reserve(n_tokens, 1,      n_outputs_pp, mctx.get(), model.hparams.no_alloc);
++                gf = graph_reserve(n_tokens, 1,      n_outputs_pp, mctx.get(), model.hparams.no_alloc, nullptr, graph_build_inputs);
+                 break;
+             default:
+-                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), model.hparams.no_alloc);
++                gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(), model.hparams.no_alloc, nullptr, graph_build_inputs);
+         };
+ 
+         if (!gf) {
+@@ -783,6 +793,10 @@ const llama_cparams & llama_context::get_cparams() const {
+     return cparams;
+ }
+ 
++const skippy_graph_build_inputs & llama_context::get_graph_build_inputs() const {
++    return graph_build_inputs;
++}
++
+ ggml_backend_sched_t llama_context::get_sched() const {
+     return sched.get();
+ }
+@@ -820,6 +834,12 @@ llama_memory_t llama_context::get_memory() const {
+ }
+ 
+ bool llama_context::memory_update(bool optimize) {
++    return memory_update(optimize, graph_build_inputs);
++}
++
++bool llama_context::memory_update(
++        bool optimize,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     if (!memory) {
+         return false;
+     }
+@@ -866,7 +886,7 @@ bool llama_context::memory_update(bool optimize) {
+ 
+         const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
+ 
+-        auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_max, mctx.get());
++        auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_max, mctx.get(), false, nullptr, graph_build_inputs);
+         if (!gf) {
+             LLAMA_LOG_ERROR("%s: failed to reserve graph after the memory update\n", __func__);
+         }
+@@ -1361,7 +1381,12 @@ bool llama_context::set_adapter_cvec(
+     return res;
+ }
+ 
+-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
++llm_graph_result * llama_context::process_ubatch(
++        const llama_ubatch & ubatch,
++        llm_graph_type gtype,
++        llama_memory_context_i * mctx,
++        ggml_status & ret,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     if (mctx && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+         ret = GGML_STATUS_FAILED;
+@@ -1373,7 +1398,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+ 
+     // the new graph parameters
+     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
+-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
++    const auto gparams = graph_params(res, ubatch, mctx, gtype, graph_build_inputs);
+ 
+     if (!graph_reuse_disable && res->can_reuse(gparams)) {
+         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
+@@ -1416,7 +1441,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //const auto t_start_us = ggml_time_us();
+ 
+         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
+-        res->set_inputs(&ubatch);
++        res->set_inputs(&ubatch, graph_build_inputs);
+ 
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+@@ -1434,6 +1459,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+ }
+ 
+ int llama_context::encode(const llama_batch & batch_inp) {
++    return encode(batch_inp, graph_build_inputs);
++}
++
++int llama_context::encode(
++        const llama_batch & batch_inp,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     // MTP hook batches carry both token (next-token id) and embd (h_nextn row),
+     // so accept either present rather than requiring exactly one.
+     GGML_ASSERT(batch_inp.token || batch_inp.embd);
+@@ -1475,7 +1506,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
+     }
+     embd_seq.clear();
+ 
+-    sched_reserve();
++    sched_reserve(graph_build_inputs);
+ 
+     n_queued_tokens += n_tokens;
+ 
+@@ -1499,7 +1530,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
+     cparams.causal_attn = false;
+ 
+     ggml_status status;
+-    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status);
++    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, graph_build_inputs);
+ 
+     cparams.causal_attn = causal_attn_org;
+ 
+@@ -1690,13 +1721,19 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
+ }
+ 
+ int llama_context::decode(const llama_batch & batch_inp) {
++    return decode(batch_inp, graph_build_inputs);
++}
++
++int llama_context::decode(
++        const llama_batch & batch_inp,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     // MTP hook batches carry both token (next-token id) and embd (h_nextn row),
+     // so accept either present rather than requiring exactly one.
+     GGML_ASSERT(batch_inp.token || batch_inp.embd);
+ 
+     if (!memory) {
+         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
+-        return encode(batch_inp);
++        return encode(batch_inp, graph_build_inputs);
+     }
+ 
+     if (batch_inp.n_tokens == 0) {
+@@ -1778,12 +1815,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
+     embd_seq.clear();
+     output_swaps.clear();
+ 
+-    sched_reserve();
++    sched_reserve(graph_build_inputs);
+ 
+     bool did_optimize = false;
+ 
+     // handle any pending shifts/copies
+-    memory_update(false);
++    memory_update(false, graph_build_inputs);
+ 
+     llama_memory_context_ptr mctx;
+ 
+@@ -1808,7 +1845,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
+                     if (!did_optimize) {
+                         did_optimize = true;
+ 
+-                        if (memory_update(true)) {
++                        if (memory_update(true, graph_build_inputs)) {
+                             LLAMA_LOG_DEBUG("%s: retrying batch size %d after cache optimization\n", __func__, balloc->get_n_tokens());
+ 
+                             continue;
+@@ -1860,7 +1897,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
+ 
+         ggml_status status;
+ 
+-        const auto * res = process_ubatch(ubatch, ctx_type_to_graph_type(cparams.ctx_type), mctx.get(), status);
++        const auto * res = process_ubatch(
++                ubatch,
++                ctx_type_to_graph_type(cparams.ctx_type),
++                mctx.get(),
++                status,
++                graph_build_inputs);
+ 
+         if (!res) {
+             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the memory module
+@@ -2476,7 +2518,13 @@ bool llama_context::get_input_activation_boundary(
+ }
+ 
+ ggml_cgraph * llama_context::graph_reserve(
+-        uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only, size_t * sizes) {
++        uint32_t n_tokens,
++        uint32_t n_seqs,
++        uint32_t n_outputs,
++        const llama_memory_context_i * mctx,
++        bool split_only,
++        size_t * sizes,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
+     GGML_ASSERT(n_outputs >= 1);
+ 
+@@ -2503,7 +2551,12 @@ ggml_cgraph * llama_context::graph_reserve(
+ 
+     auto * res = gf_res_reserve.get();
+ 
+-    const auto gparams = graph_params(res, ubatch, mctx, ctx_type_to_graph_type(cparams.ctx_type));
++    const auto gparams = graph_params(
++            res,
++            ubatch,
++            mctx,
++            ctx_type_to_graph_type(cparams.ctx_type),
++            graph_build_inputs);
+ 
+     res->reset();
+ 
+@@ -2530,7 +2583,7 @@ ggml_cgraph * llama_context::graph_reserve(
+         return bytes_per_token > 0;
+     };
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = graph_build_inputs.filter;
+     if (stage_filter.enabled && stage_filter.layer_start > 0) {
+         const ggml_tensor * boundary = res->get_skippy_activation_input();
+         uint64_t elements_per_token = 0;
+@@ -2593,7 +2646,8 @@ llm_graph_params llama_context::graph_params(
+                         llm_graph_result * res,
+                       const llama_ubatch & ubatch,
+             const llama_memory_context_i * mctx,
+-                          llm_graph_type   gtype) const {
++                          llm_graph_type   gtype,
++            const skippy_graph_build_inputs & graph_build_inputs) const {
+     return {
+         /*.arch        =*/ model.arch,
+         /*.hparams     =*/ model.hparams,
+@@ -2607,6 +2661,7 @@ llm_graph_params llama_context::graph_params(
+         /*.mctx        =*/ mctx,
+         /*.cross       =*/ &cross,
+         /*.samplers    =*/ sampling.samplers,
++        /*.build_inputs=*/ graph_build_inputs,
+         /*.n_outputs   =*/ n_outputs,
+         /*.cb          =*/ graph_get_cb(),
+         /*.res         =*/ res,
+@@ -3622,7 +3677,8 @@ void llama_context::opt_epoch_iter(
+ 
+             auto * res = gf_res_prev.get();
+ 
+-            const auto gparams = graph_params(res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type));
++            const auto gparams = graph_params(
++                    res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type), graph_build_inputs);
+ 
+             res->reset();
+ 
+@@ -3761,9 +3817,10 @@ llama_context_params llama_context_default_params() {
+     return result;
+ }
+ 
+-llama_context * llama_init_from_model(
+-                 llama_model * model,
+-        llama_context_params   params) {
++llama_context * llama_init_from_model_with_graph_inputs(
++        llama_model * model,
++        llama_context_params params,
++        const skippy_graph_build_inputs & graph_build_inputs) {
+     if (!model) {
+         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
+         return nullptr;
+@@ -3836,7 +3893,7 @@ llama_context * llama_init_from_model(
+     }
+ 
+     try {
+-        auto * ctx = new llama_context(*model, params);
++        auto * ctx = new llama_context(*model, params, graph_build_inputs);
+         return ctx;
+     } catch (const std::exception & err) {
+         LLAMA_LOG_ERROR("%s: failed to initialize the context: %s\n", __func__, err.what());
+@@ -3845,6 +3902,12 @@ llama_context * llama_init_from_model(
+     return nullptr;
+ }
+ 
++llama_context * llama_init_from_model(
++        llama_model * model,
++        llama_context_params params) {
++    return llama_init_from_model_with_graph_inputs(model, params, {});
++}
++
+ // deprecated
+ llama_context * llama_new_context_with_model(
+                  llama_model * model,
+@@ -4063,7 +4126,8 @@ struct ggml_cgraph * llama_graph_reserve(
+     if (memory) {
+         mctx = memory->init_full();
+     }
+-    return ctx->graph_reserve(n_tokens, n_seqs, n_outputs, mctx.get());
++    return ctx->graph_reserve(
++            n_tokens, n_seqs, n_outputs, mctx.get(), false, nullptr, ctx->get_graph_build_inputs());
+ }
+ 
+ // llama adapter API
+@@ -4328,7 +4392,8 @@ int32_t llama_encode(
+ int32_t llama_decode(
+         llama_context * ctx,
+           llama_batch   batch) {
+-    const int ret = ctx->decode(batch);
++    const skippy_graph_build_inputs graph_build_inputs = skippy_external_decode_build_inputs(ctx);
++    const int ret = ctx->decode(batch, graph_build_inputs);
+     if (ret == 0) {
+         (void) skippy_external_decode_observe(ctx, batch);
+     }
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 9e883575f..c3e237ca5 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -21,6 +21,11 @@ class llama_io_read_i;
+ class llama_io_write_i;
+ 
+ int skippy_external_decode_observe(llama_context * ctx, const llama_batch & batch);
++skippy_graph_build_inputs skippy_external_decode_build_inputs(llama_context * ctx);
++llama_context * llama_init_from_model_with_graph_inputs(
++        llama_model * model,
++        llama_context_params params,
++        const skippy_graph_build_inputs & graph_build_inputs);
+ 
+ // "memory" as in abstract memory for the context
+ struct llama_memory_i;
+@@ -45,7 +50,8 @@ struct llama_context {
+     // init scheduler and compute buffers, reserve worst-case graphs
+     llama_context(
+             const llama_model & model,
+-                  llama_context_params params);
++                  llama_context_params params,
++            const skippy_graph_build_inputs & graph_build_inputs = {});
+ 
+     ~llama_context();
+ 
+@@ -56,11 +62,13 @@ struct llama_context {
+     //   - changing attention type
+     //   - etc.
+     void sched_reserve();
++    void sched_reserve(const skippy_graph_build_inputs & graph_build_inputs);
+ 
+     void synchronize();
+ 
+     const llama_model   & get_model()   const;
+     const llama_cparams & get_cparams() const;
++    const skippy_graph_build_inputs & get_graph_build_inputs() const;
+ 
+     ggml_backend_sched_t get_sched() const;
+ 
+@@ -77,6 +85,7 @@ struct llama_context {
+ 
+     // return true if the memory was updated
+     bool memory_update(bool optimize);
++    bool memory_update(bool optimize, const skippy_graph_build_inputs & graph_build_inputs);
+ 
+     enum llama_pooling_type pooling_type() const;
+ 
+@@ -140,10 +149,13 @@ struct llama_context {
+                 const llama_ubatch & ubatch,
+                     llm_graph_type   gtype,
+             llama_memory_context_i * mctx,
+-                       ggml_status & ret);
++                       ggml_status & ret,
++            const skippy_graph_build_inputs & graph_build_inputs = {});
+ 
+     int encode(const llama_batch & batch_inp);
++    int encode(const llama_batch & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
+     int decode(const llama_batch & batch_inp);
++    int decode(const llama_batch & batch_inp, const skippy_graph_build_inputs & graph_build_inputs);
+ 
+     //
+     // state save/load
+@@ -252,7 +264,8 @@ public:
+ 
+     // reserve a graph with a dummy ubatch of the specified size
+     ggml_cgraph * graph_reserve(
+-        uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false, size_t * sizes = nullptr);
++        uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false, size_t * sizes = nullptr,
++        const skippy_graph_build_inputs & graph_build_inputs = {});
+ 
+     bool get_activation_boundary(enum ggml_type & type, uint64_t & elements_per_token, uint64_t & bytes_per_token) const;
+     bool get_input_activation_boundary(enum ggml_type & type, uint64_t & elements_per_token, uint64_t & bytes_per_token) const;
+@@ -264,13 +277,17 @@ private:
+                         llm_graph_result * res,
+                       const llama_ubatch & ubatch,
+             const llama_memory_context_i * mctx,
+-                          llm_graph_type   gtype) const;
++                          llm_graph_type   gtype,
++            const skippy_graph_build_inputs & graph_build_inputs = {}) const;
+ 
+     llm_graph_cb graph_get_cb() const;
+ 
+     // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
+     // that differs from the layer it belongs to (usually due to missing backend support)
+-    void resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs);
++    void resolve_fused_ops(
++            const llama_memory_context_i * mctx,
++            uint32_t n_seqs,
++            const skippy_graph_build_inputs & graph_build_inputs);
+ 
+     // TODO: read/write lora adapters and cvec
+     size_t state_write_data(llama_io_write_i & io);
+@@ -287,6 +304,8 @@ private:
+ 
+     llama_cparams cparams;
+ 
++    const skippy_graph_build_inputs graph_build_inputs;
++
+     llama_adapter_cvec_ptr  cvec;
+     llama_adapter_loras_ptr loras;
+ 
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index c18212350..a9ef9d1d0 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -24,96 +24,39 @@
+ #include <string>
+ #include <unordered_set>
+ 
+-static thread_local skippy_graph_filter g_skippy_graph_filter;
+-static thread_local skippy_activation_tokens g_skippy_activation_tokens;
+-static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
+-static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
+-static thread_local skippy_activation_qwen4exp_hc g_skippy_qwen4exp_hc;
+-static thread_local skippy_activation_glm_dsa_top_k g_skippy_glm_dsa_top_k;
+-static thread_local skippy_activation_mtp_embeddings g_skippy_mtp_embeddings;
+-
+-void skippy_graph_set_filter(const skippy_graph_filter & filter) {
+-    g_skippy_graph_filter = filter;
+-}
+-
+-void skippy_graph_clear_filter() {
+-    g_skippy_graph_filter = {};
+-}
+-
+-const skippy_graph_filter & skippy_graph_get_filter() {
+-    return g_skippy_graph_filter;
+-}
+-
+-void skippy_graph_set_activation_tokens(const skippy_activation_tokens & tokens) {
+-    g_skippy_activation_tokens = tokens;
+-}
+-
+-void skippy_graph_clear_activation_tokens() {
+-    g_skippy_activation_tokens = {};
+-}
+-
+-const skippy_activation_tokens & skippy_graph_get_activation_tokens() {
+-    return g_skippy_activation_tokens;
+-}
+-
+-void skippy_graph_set_rwkv7_v_first(const skippy_activation_rwkv7_v_first & values) {
+-    g_skippy_rwkv7_v_first = values;
+-}
+-
+-void skippy_graph_clear_rwkv7_v_first() {
+-    g_skippy_rwkv7_v_first = {};
+-}
+-
+-const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first() {
+-    return g_skippy_rwkv7_v_first;
+-}
+-
+-void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values) {
+-    g_skippy_gemma3n_altup = values;
+-}
+-
+-void skippy_graph_clear_gemma3n_altup() {
+-    g_skippy_gemma3n_altup = {};
+-}
+-
+-const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup() {
+-    return g_skippy_gemma3n_altup;
+-}
+-
+-void skippy_graph_set_qwen4exp_hc(const skippy_activation_qwen4exp_hc & values) {
+-    g_skippy_qwen4exp_hc = values;
+-}
+-
+-void skippy_graph_clear_qwen4exp_hc() {
+-    g_skippy_qwen4exp_hc = {};
+-}
+-
+-const skippy_activation_qwen4exp_hc & skippy_graph_get_qwen4exp_hc() {
+-    return g_skippy_qwen4exp_hc;
+-}
+-
+-void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values) {
+-    g_skippy_glm_dsa_top_k = values;
+-}
+-
+-void skippy_graph_clear_glm_dsa_top_k() {
+-    g_skippy_glm_dsa_top_k = {};
+-}
+-
+-const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k() {
+-    return g_skippy_glm_dsa_top_k;
+-}
+-
+-void skippy_graph_set_mtp_embeddings(const skippy_activation_mtp_embeddings & values) {
+-    g_skippy_mtp_embeddings = values;
+-}
+-
+-void skippy_graph_clear_mtp_embeddings() {
+-    g_skippy_mtp_embeddings = {};
+-}
+-
+-const skippy_activation_mtp_embeddings & skippy_graph_get_mtp_embeddings() {
+-    return g_skippy_mtp_embeddings;
++bool skippy_graph_build_inputs::topology_equal(const skippy_graph_build_inputs & other) const {
++    return filter.enabled == other.filter.enabled &&
++           filter.layer_start == other.filter.layer_start &&
++           filter.layer_end == other.filter.layer_end &&
++           filter.include_embeddings == other.filter.include_embeddings &&
++           filter.include_output == other.filter.include_output &&
++           filter.glm_dsa_policy_profile == other.filter.glm_dsa_policy_profile &&
++           filter.glm_dsa_policy_flags == other.filter.glm_dsa_policy_flags &&
++           filter.glm_dsa_short_prefill_max_tokens == other.filter.glm_dsa_short_prefill_max_tokens &&
++           filter.glm_dsa_direct_sparse_decode_max_top_k == other.filter.glm_dsa_direct_sparse_decode_max_top_k &&
++           filter.glm_dsa_dense_sparse_mask_max_bytes == other.filter.glm_dsa_dense_sparse_mask_max_bytes &&
++           filter.glm_dsa_compact_flash_min_kv == other.filter.glm_dsa_compact_flash_min_kv &&
++           filter.glm_dsa_phase_hint == other.filter.glm_dsa_phase_hint &&
++           (activation_tokens.tokens != nullptr) == (other.activation_tokens.tokens != nullptr) &&
++           activation_tokens.token_count == other.activation_tokens.token_count &&
++           (rwkv7_v_first.values != nullptr) == (other.rwkv7_v_first.values != nullptr) &&
++           rwkv7_v_first.token_count == other.rwkv7_v_first.token_count &&
++           rwkv7_v_first.n_embd == other.rwkv7_v_first.n_embd &&
++           (gemma3n_altup.values != nullptr) == (other.gemma3n_altup.values != nullptr) &&
++           gemma3n_altup.token_count == other.gemma3n_altup.token_count &&
++           gemma3n_altup.n_embd == other.gemma3n_altup.n_embd &&
++           gemma3n_altup.n_altup == other.gemma3n_altup.n_altup &&
++           (qwen4exp_hc.values != nullptr) == (other.qwen4exp_hc.values != nullptr) &&
++           qwen4exp_hc.token_count == other.qwen4exp_hc.token_count &&
++           qwen4exp_hc.n_embd == other.qwen4exp_hc.n_embd &&
++           qwen4exp_hc.n_hc == other.qwen4exp_hc.n_hc &&
++           (glm_dsa_top_k.values != nullptr) == (other.glm_dsa_top_k.values != nullptr) &&
++           glm_dsa_top_k.token_count == other.glm_dsa_top_k.token_count &&
++           glm_dsa_top_k.n_top_k == other.glm_dsa_top_k.n_top_k &&
++           glm_dsa_top_k.n_stream == other.glm_dsa_top_k.n_stream &&
++           (mtp_embeddings.values != nullptr) == (other.mtp_embeddings.values != nullptr) &&
++           mtp_embeddings.token_count == other.mtp_embeddings.token_count &&
++           mtp_embeddings.n_embd == other.mtp_embeddings.n_embd;
+ }
+ 
+ // dedup helpers
+@@ -185,7 +128,6 @@ bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
+ 
+ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
+     const int64_t n_tokens = ubatch->n_tokens;
+-    const skippy_activation_mtp_embeddings & mtp_embeddings = skippy_graph_get_mtp_embeddings();
+ 
+     if (ubatch->token) {
+         ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+@@ -217,6 +159,10 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
+     }
+ }
+ 
++void llm_graph_input_embd_h::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    mtp_embeddings = inputs.mtp_embeddings;
++}
++
+ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
+     bool res = true;
+ 
+@@ -228,7 +174,6 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
+ }
+ 
+ void llm_graph_input_qwen4exp_hc::set_input(const llama_ubatch * ubatch) {
+-    const skippy_activation_qwen4exp_hc & sideband = skippy_graph_get_qwen4exp_hc();
+     GGML_ASSERT(sideband.values != nullptr);
+     GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+     GGML_ASSERT(sideband.n_embd == n_embd);
+@@ -241,6 +186,10 @@ void llm_graph_input_qwen4exp_hc::set_input(const llama_ubatch * ubatch) {
+             sideband.token_count*n_embd*n_hc*ggml_element_size(values));
+ }
+ 
++void llm_graph_input_qwen4exp_hc::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    sideband = inputs.qwen4exp_hc;
++}
++
+ bool llm_graph_input_qwen4exp_hc::can_reuse(const llm_graph_params & params) {
+     return values &&
+            values->ne[0] == n_embd &&
+@@ -249,19 +198,21 @@ bool llm_graph_input_qwen4exp_hc::can_reuse(const llm_graph_params & params) {
+ }
+ 
+ void llm_graph_input_stage_tokens::set_input(const llama_ubatch * ubatch) {
+-    const skippy_activation_tokens & stage_tokens = skippy_graph_get_activation_tokens();
+     GGML_ASSERT(stage_tokens.tokens != nullptr);
+     GGML_ASSERT(stage_tokens.token_count == ubatch->n_tokens);
+ 
+     ggml_backend_tensor_set(tokens, stage_tokens.tokens, 0, stage_tokens.token_count*ggml_element_size(tokens));
+ }
+ 
++void llm_graph_input_stage_tokens::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    stage_tokens = inputs.activation_tokens;
++}
++
+ bool llm_graph_input_stage_tokens::can_reuse(const llm_graph_params & params) {
+     return tokens && tokens->ne[0] == params.ubatch.n_tokens;
+ }
+ 
+ void llm_graph_input_rwkv7_v_first::set_input(const llama_ubatch * ubatch) {
+-    const skippy_activation_rwkv7_v_first & sideband = skippy_graph_get_rwkv7_v_first();
+     GGML_ASSERT(sideband.values != nullptr);
+     GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+     GGML_ASSERT(sideband.n_embd == n_embd);
+@@ -269,12 +220,15 @@ void llm_graph_input_rwkv7_v_first::set_input(const llama_ubatch * ubatch) {
+     ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_embd*ggml_element_size(values));
+ }
+ 
++void llm_graph_input_rwkv7_v_first::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    sideband = inputs.rwkv7_v_first;
++}
++
+ bool llm_graph_input_rwkv7_v_first::can_reuse(const llm_graph_params & params) {
+     return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens;
+ }
+ 
+ void llm_graph_input_gemma3n_altup::set_input(const llama_ubatch * ubatch) {
+-    const skippy_activation_gemma3n_altup & sideband = skippy_graph_get_gemma3n_altup();
+     GGML_ASSERT(sideband.values != nullptr);
+     GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+     GGML_ASSERT(sideband.n_embd == n_embd);
+@@ -283,12 +237,15 @@ void llm_graph_input_gemma3n_altup::set_input(const llama_ubatch * ubatch) {
+     ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_embd*n_altup*ggml_element_size(values));
+ }
+ 
++void llm_graph_input_gemma3n_altup::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    sideband = inputs.gemma3n_altup;
++}
++
+ bool llm_graph_input_gemma3n_altup::can_reuse(const llm_graph_params & params) {
+     return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens && values->ne[2] == n_altup;
+ }
+ 
+ void llm_graph_input_glm_dsa_top_k::set_input(const llama_ubatch * ubatch) {
+-    const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
+     GGML_ASSERT(sideband.values != nullptr);
+     GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+     GGML_ASSERT(sideband.n_top_k == n_top_k);
+@@ -297,6 +254,10 @@ void llm_graph_input_glm_dsa_top_k::set_input(const llama_ubatch * ubatch) {
+     ggml_backend_tensor_set(values, sideband.values, 0, sideband.token_count*n_top_k*ggml_element_size(values));
+ }
+ 
++void llm_graph_input_glm_dsa_top_k::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    sideband = inputs.glm_dsa_top_k;
++}
++
+ bool llm_graph_input_glm_dsa_top_k::can_reuse(const llm_graph_params & params) {
+     const auto * mctx = static_cast<const llama_kv_cache_dsa_context *>(params.mctx);
+     const int64_t params_n_stream = params.cparams.kv_unified ? 1 : params.ubatch.n_seqs_unq;
+@@ -1581,6 +1542,7 @@ void llm_graph_result::reset() {
+     fused_nodes.clear();
+     block_boundaries.clear();
+     state_effects.clear();
++    build_inputs = {};
+     request_input_bindings.clear();
+     request_input_ordinals.clear();
+ 
+@@ -1597,8 +1559,14 @@ void llm_graph_result::reset() {
+     gf = ggml_new_graph_custom(ctx_compute.get(), max_nodes, false);
+ }
+ 
++void llm_graph_result::set_inputs(const llama_ubatch * ubatch, const skippy_graph_build_inputs & build_inputs) {
++    this->build_inputs = build_inputs;
++    set_inputs(ubatch);
++}
++
+ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
+     for (auto & input : inputs) {
++        input->set_build_inputs(build_inputs);
+         input->set_input(ubatch);
+     }
+ }
+@@ -1699,6 +1667,7 @@ void llm_graph_result::add_fused_node(llm_graph_fused_node result) {
+ 
+ void llm_graph_result::set_params(const llm_graph_params & params) {
+     this->params = params;
++    build_inputs = params.build_inputs;
+ }
+ 
+ //
+@@ -1744,6 +1713,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+     cross            (params.cross),
+     samplers         (params.samplers),
+     cb_func          (params.cb),
++    build_inputs     (params.build_inputs),
+     res              (params.res),
+     ctx0             (res->get_ctx()),
+     gf               (res->get_gf()) {
+@@ -2696,7 +2666,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
+ 
+     res->t_inp_embd = cur;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool skippy_mid_stage_input = stage_filter.enabled && stage_filter.layer_start > 0;
+ 
+     // For Granite architecture
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 5938e5ef3..368c4798c 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -98,27 +98,17 @@ struct skippy_activation_mtp_embeddings {
+     llama_pos pos_start = 0;
+ };
+ 
+-void skippy_graph_set_filter(const skippy_graph_filter & filter);
+-void skippy_graph_clear_filter();
+-const skippy_graph_filter & skippy_graph_get_filter();
+-void skippy_graph_set_activation_tokens(const skippy_activation_tokens & tokens);
+-void skippy_graph_clear_activation_tokens();
+-const skippy_activation_tokens & skippy_graph_get_activation_tokens();
+-void skippy_graph_set_rwkv7_v_first(const skippy_activation_rwkv7_v_first & values);
+-void skippy_graph_clear_rwkv7_v_first();
+-const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first();
+-void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values);
+-void skippy_graph_clear_gemma3n_altup();
+-const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup();
+-void skippy_graph_set_qwen4exp_hc(const skippy_activation_qwen4exp_hc & values);
+-void skippy_graph_clear_qwen4exp_hc();
+-const skippy_activation_qwen4exp_hc & skippy_graph_get_qwen4exp_hc();
+-void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values);
+-void skippy_graph_clear_glm_dsa_top_k();
+-const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k();
+-void skippy_graph_set_mtp_embeddings(const skippy_activation_mtp_embeddings & values);
+-void skippy_graph_clear_mtp_embeddings();
+-const skippy_activation_mtp_embeddings & skippy_graph_get_mtp_embeddings();
++struct skippy_graph_build_inputs {
++    skippy_graph_filter filter;
++    skippy_activation_tokens activation_tokens;
++    skippy_activation_rwkv7_v_first rwkv7_v_first;
++    skippy_activation_gemma3n_altup gemma3n_altup;
++    skippy_activation_qwen4exp_hc qwen4exp_hc;
++    skippy_activation_glm_dsa_top_k glm_dsa_top_k;
++    skippy_activation_mtp_embeddings mtp_embeddings;
++
++    bool topology_equal(const skippy_graph_build_inputs & other) const;
++};
+ 
+ // certain models (typically multi-modal) can produce different types of graphs
+ enum llm_graph_type {
+@@ -194,6 +184,10 @@ public:
+ 
+     virtual ~llm_graph_input_i() = default;
+ 
++    virtual void set_build_inputs(const skippy_graph_build_inputs & inputs) {
++        GGML_UNUSED(inputs);
++    }
++
+     virtual void set_input(const llama_ubatch * ubatch) = 0;
+ 
+     // return true if the resulting input tensors using the provided graph parameters would be
+@@ -234,6 +228,8 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * tokens = nullptr; // I32 [n_batch]
+@@ -241,6 +237,9 @@ public:
+     ggml_tensor * h      = nullptr; // F32 [n_embd, n_batch]
+ 
+     const int64_t n_embd = 0;
++
++private:
++    skippy_activation_mtp_embeddings mtp_embeddings;
+ };
+ 
+ class llm_graph_input_qwen4exp_hc : public llm_graph_input_i {
+@@ -250,12 +249,17 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * values = nullptr; // F32 [n_embd, n_hc, n_batch]
+ 
+     const int64_t n_embd;
+     const int64_t n_hc;
++
++private:
++    skippy_activation_qwen4exp_hc sideband;
+ };
+ 
+ class llm_graph_input_stage_tokens : public llm_graph_input_i {
+@@ -265,9 +269,14 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * tokens = nullptr; // I32 [n_batch]
++
++private:
++    skippy_activation_tokens stage_tokens;
+ };
+ 
+ class llm_graph_input_rwkv7_v_first : public llm_graph_input_i {
+@@ -277,12 +286,15 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * values = nullptr; // F32 [n_embd, n_batch]
+ 
+ private:
+     int64_t n_embd;
++    skippy_activation_rwkv7_v_first sideband;
+ };
+ 
+ class llm_graph_input_gemma3n_altup : public llm_graph_input_i {
+@@ -292,6 +304,8 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * values = nullptr; // F32 [n_embd, n_batch, n_altup]
+@@ -299,6 +313,7 @@ public:
+ private:
+     int64_t n_embd;
+     int64_t n_altup;
++    skippy_activation_gemma3n_altup sideband;
+ };
+ 
+ class llm_graph_input_glm_dsa_top_k : public llm_graph_input_i {
+@@ -308,6 +323,8 @@ public:
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override;
++
+     bool can_reuse(const llm_graph_params & params) override;
+ 
+     ggml_tensor * values = nullptr; // runtime layout: I32 [n_top_k, n_batch, 1, n_stream]
+@@ -315,6 +332,7 @@ public:
+ private:
+     int64_t n_top_k;
+     int64_t n_stream;
++    skippy_activation_glm_dsa_top_k sideband;
+ };
+ 
+ class llm_graph_input_pos : public llm_graph_input_i {
+@@ -950,6 +968,8 @@ struct llm_graph_params {
+ 
+     std::map<llama_seq_id, llama_sampler *> samplers;
+ 
++    skippy_graph_build_inputs build_inputs;
++
+     static bool samplers_equal(
+           const std::map<llama_seq_id, llama_sampler *> & lhs,
+           const std::map<llama_seq_id, llama_sampler *> & rhs) {
+@@ -1009,6 +1029,10 @@ struct llm_graph_params {
+             return false;
+         }
+ 
++        if (!build_inputs.topology_equal(other.build_inputs)) {
++            return false;
++        }
++
+         if (!samplers_equal(samplers, other.samplers)) {
+             return false;
+         }
+@@ -1081,6 +1105,8 @@ public:
+ 
+     void reset();
+ 
++    void set_inputs(const llama_ubatch * ubatch, const skippy_graph_build_inputs & build_inputs);
++
+     void set_inputs(const llama_ubatch * ubatch);
+     void set_outputs(const llm_graph_params & params);
+ 
+@@ -1101,6 +1127,8 @@ public:
+ 
+     const std::vector<skippy_state_effect> & get_state_effects() const { return state_effects; }
+ 
++    const skippy_graph_build_inputs & get_build_inputs() const { return build_inputs; }
++
+     const std::vector<skippy_request_input_binding> & get_request_input_bindings() const { return request_input_bindings; }
+ 
+     void set_params(const llm_graph_params & params);
+@@ -1129,6 +1157,8 @@ public:
+     std::vector<llm_graph_fused_node> fused_nodes;
+     std::vector<skippy_block_boundary> block_boundaries;
+     std::vector<skippy_state_effect> state_effects;
++
++    skippy_graph_build_inputs build_inputs;
+     std::vector<skippy_request_input_binding> request_input_bindings;
+     std::map<std::string, uint32_t> request_input_ordinals;
+ 
+@@ -1216,6 +1246,8 @@ struct llm_graph_context {
+ 
+     const llm_graph_cb & cb_func;
+ 
++    const skippy_graph_build_inputs build_inputs;
++
+     llm_graph_result * res;
+ 
+     ggml_context * ctx0 = nullptr;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 550dd6c15..a58f50580 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2220,8 +2220,8 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
+ 
+ static llama_memory_i::layer_filter_cb skippy_stage_memory_filter(
+         llama_memory_i::layer_filter_cb filter,
+-        enum llama_context_type ctx_type) {
+-    const skippy_graph_filter stage_filter = skippy_graph_get_filter();
++        enum llama_context_type ctx_type,
++        const skippy_graph_filter & stage_filter) {
+     if (!stage_filter.enabled || ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+         return filter;
+     }
+@@ -2234,7 +2234,10 @@ static llama_memory_i::layer_filter_cb skippy_stage_memory_filter(
+     };
+ }
+ 
+-llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
++llama_memory_i * llama_model::create_memory(
++        const llama_memory_params & params,
++        const llama_cparams & cparams,
++        const skippy_graph_filter & stage_filter) const {
+     llama_memory_i * res;
+ 
+     switch (arch) {
+@@ -2452,7 +2455,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                             std::max((uint32_t) 1, cparams.n_seq_max),
+                             cparams.n_seq_max,
+                             cparams.n_rs_seq,
+-                            skippy_stage_memory_filter(nullptr, params.ctx_type));
++                            skippy_stage_memory_filter(nullptr, params.ctx_type, stage_filter));
+                 } else if (llm_arch_is_hybrid(arch) && !mtp_on_hybrid_qwen && !mtp_on_hybrid_nemotron) {
+                     // The main difference between hybrid architectures is the
+                     // layer filters, so pick the right one here
+@@ -2510,8 +2513,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                     if (!filter_recr) {
+                         filter_recr = [&](uint32_t il) { return hparams.is_recr(il); };
+                     }
+-                    filter_attn = skippy_stage_memory_filter(std::move(filter_attn), params.ctx_type);
+-                    filter_recr = skippy_stage_memory_filter(std::move(filter_recr), params.ctx_type);
++                    filter_attn = skippy_stage_memory_filter(std::move(filter_attn), params.ctx_type, stage_filter);
++                    filter_recr = skippy_stage_memory_filter(std::move(filter_recr), params.ctx_type, stage_filter);
+ 
+                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+                         // Use hybrid-iswa for hybrid models with SWA
+@@ -2605,7 +2608,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                         }
+                     }
+ 
+-                    filter = skippy_stage_memory_filter(std::move(filter), params.ctx_type);
++                    filter = skippy_stage_memory_filter(std::move(filter), params.ctx_type, stage_filter);
+ 
+                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
+                         GGML_ASSERT(hparams.is_swa_any());
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 468de3e56..fdc3e1753 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -758,7 +758,10 @@ struct llama_model {
+ 
+     ggml_tensor * get_rope_factors(const llama_cparams & cparams, int il) const;
+ 
+-    llama_memory_i * create_memory(const llama_memory_params & params, const llama_cparams & cparams) const;
++    llama_memory_i * create_memory(
++            const llama_memory_params & params,
++            const llama_cparams & cparams,
++            const skippy_graph_filter & stage_filter) const;
+ 
+     ggml_cgraph * build_graph(const llm_graph_params & params) const;
+ 
+diff --git a/src/models/afmoe.cpp b/src/models/afmoe.cpp
+index b388e586a..7484df933 100644
+--- a/src/models/afmoe.cpp
++++ b/src/models/afmoe.cpp
+@@ -113,7 +113,7 @@ llama_model_afmoe::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/apertus.cpp b/src/models/apertus.cpp
+index 88f6799e6..1f1809845 100644
+--- a/src/models/apertus.cpp
++++ b/src/models/apertus.cpp
+@@ -66,7 +66,7 @@ llama_model_apertus::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/arcee.cpp b/src/models/arcee.cpp
+index 7711f805e..c3bc0d444 100644
+--- a/src/models/arcee.cpp
++++ b/src/models/arcee.cpp
+@@ -54,7 +54,7 @@ llama_model_arcee::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/arctic.cpp b/src/models/arctic.cpp
+index a2b3e6cf8..a0a158ce6 100644
+--- a/src/models/arctic.cpp
++++ b/src/models/arctic.cpp
+@@ -62,7 +62,7 @@ llama_model_arctic::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/arwkv7.cpp b/src/models/arwkv7.cpp
+index 85c073c93..a89de063a 100644
+--- a/src/models/arwkv7.cpp
++++ b/src/models/arwkv7.cpp
+@@ -124,7 +124,7 @@ llama_model_arwkv7::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * inpL;
+     ggml_tensor * v_first = nullptr;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/baichuan.cpp b/src/models/baichuan.cpp
+index 8e9dc3028..9ef02b7e4 100644
+--- a/src/models/baichuan.cpp
++++ b/src/models/baichuan.cpp
+@@ -52,7 +52,7 @@ llama_model_baichuan::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/bailingmoe.cpp b/src/models/bailingmoe.cpp
+index 3fa8e41d0..05b8f45e1 100644
+--- a/src/models/bailingmoe.cpp
++++ b/src/models/bailingmoe.cpp
+@@ -63,7 +63,7 @@ llama_model_bailingmoe::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/bailingmoe2.cpp b/src/models/bailingmoe2.cpp
+index 2d95fc677..3f865b0e0 100644
+--- a/src/models/bailingmoe2.cpp
++++ b/src/models/bailingmoe2.cpp
+@@ -99,7 +99,7 @@ llama_model_bailingmoe2::graph::graph(const llama_model & model, const llm_graph
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/bitnet.cpp b/src/models/bitnet.cpp
+index 20faa0697..022a3fbca 100644
+--- a/src/models/bitnet.cpp
++++ b/src/models/bitnet.cpp
+@@ -57,7 +57,7 @@ llama_model_bitnet::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/bloom.cpp b/src/models/bloom.cpp
+index 021ea67a6..9ff8b9c43 100644
+--- a/src/models/bloom.cpp
++++ b/src/models/bloom.cpp
+@@ -70,7 +70,7 @@ llama_model_bloom::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/chatglm.cpp b/src/models/chatglm.cpp
+index ad6ea6e76..84552ed5c 100644
+--- a/src/models/chatglm.cpp
++++ b/src/models/chatglm.cpp
+@@ -63,7 +63,7 @@ llama_model_chatglm::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/codeshell.cpp b/src/models/codeshell.cpp
+index bc7cc8865..a93fd3372 100644
+--- a/src/models/codeshell.cpp
++++ b/src/models/codeshell.cpp
+@@ -59,7 +59,7 @@ llama_model_codeshell::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/cohere2.cpp b/src/models/cohere2.cpp
+index 1223aae3f..2df9f86e2 100644
+--- a/src/models/cohere2.cpp
++++ b/src/models/cohere2.cpp
+@@ -59,7 +59,7 @@ llama_model_cohere2::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/command-r.cpp b/src/models/command-r.cpp
+index 260012552..a8f557f18 100644
+--- a/src/models/command-r.cpp
++++ b/src/models/command-r.cpp
+@@ -54,7 +54,7 @@ llama_model_command_r::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/dbrx.cpp b/src/models/dbrx.cpp
+index f2d5238f4..188c08e4b 100644
+--- a/src/models/dbrx.cpp
++++ b/src/models/dbrx.cpp
+@@ -53,7 +53,7 @@ llama_model_dbrx::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/deci.cpp b/src/models/deci.cpp
+index d732efe45..7c5293e07 100644
+--- a/src/models/deci.cpp
++++ b/src/models/deci.cpp
+@@ -86,7 +86,7 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/deepseek2.cpp b/src/models/deepseek2.cpp
+index 221584fcc..047e4cc5f 100644
+--- a/src/models/deepseek2.cpp
++++ b/src/models/deepseek2.cpp
+@@ -191,7 +191,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * inpL;
+ 
+     const int effective_n_layers = n_layer;
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ?
+diff --git a/src/models/dots1.cpp b/src/models/dots1.cpp
+index ea7e03b0c..74320a12d 100644
+--- a/src/models/dots1.cpp
++++ b/src/models/dots1.cpp
+@@ -81,7 +81,7 @@ llama_model_dots1::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/dream.cpp b/src/models/dream.cpp
+index b8902bb7b..1e578ab17 100644
+--- a/src/models/dream.cpp
++++ b/src/models/dream.cpp
+@@ -60,7 +60,7 @@ llama_model_dream::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/ernie4-5-moe.cpp b/src/models/ernie4-5-moe.cpp
+index 66ec33e4c..add7f352d 100644
+--- a/src/models/ernie4-5-moe.cpp
++++ b/src/models/ernie4-5-moe.cpp
+@@ -14,7 +14,7 @@ llama_model_ernie4_5_moe::graph::graph(const llama_model & model, const llm_grap
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/ernie4-5.cpp b/src/models/ernie4-5.cpp
+index fff2c2476..2f03cbb5c 100644
+--- a/src/models/ernie4-5.cpp
++++ b/src/models/ernie4-5.cpp
+@@ -83,7 +83,7 @@ llama_model_ernie4_5::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/exaone-moe.cpp b/src/models/exaone-moe.cpp
+index f5946ddfc..8190ea285 100644
+--- a/src/models/exaone-moe.cpp
++++ b/src/models/exaone-moe.cpp
+@@ -120,7 +120,7 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/exaone.cpp b/src/models/exaone.cpp
+index 22daba948..677f5de8f 100644
+--- a/src/models/exaone.cpp
++++ b/src/models/exaone.cpp
+@@ -53,7 +53,7 @@ llama_model_exaone::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/exaone4.cpp b/src/models/exaone4.cpp
+index 7a97959b1..0794505c9 100644
+--- a/src/models/exaone4.cpp
++++ b/src/models/exaone4.cpp
+@@ -94,7 +94,7 @@ llama_model_exaone4::graph<iswa>::graph(const llama_model & model, const llm_gra
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/falcon-h1.cpp b/src/models/falcon-h1.cpp
+index 1222a5d49..98b2000ae 100644
+--- a/src/models/falcon-h1.cpp
++++ b/src/models/falcon-h1.cpp
+@@ -116,7 +116,7 @@ llama_model_falcon_h1::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/falcon.cpp b/src/models/falcon.cpp
+index 00f3bd4f9..1f310a80c 100644
+--- a/src/models/falcon.cpp
++++ b/src/models/falcon.cpp
+@@ -56,7 +56,7 @@ llama_model_falcon::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/gemma.cpp b/src/models/gemma.cpp
+index a072b17fa..b87c0f301 100644
+--- a/src/models/gemma.cpp
++++ b/src/models/gemma.cpp
+@@ -44,7 +44,7 @@ llama_model_gemma::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/gemma2.cpp b/src/models/gemma2.cpp
+index 7e1154a92..4489fd529 100644
+--- a/src/models/gemma2.cpp
++++ b/src/models/gemma2.cpp
+@@ -65,7 +65,7 @@ llama_model_gemma2::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/gemma3.cpp b/src/models/gemma3.cpp
+index de94cdb53..0852ed522 100644
+--- a/src/models/gemma3.cpp
++++ b/src/models/gemma3.cpp
+@@ -87,7 +87,7 @@ llama_model_gemma3::graph<iswa>::graph(const llama_model & model, const llm_grap
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/gemma3n.cpp b/src/models/gemma3n.cpp
+index 800a69b1b..e3d4dceef 100644
+--- a/src/models/gemma3n.cpp
++++ b/src/models/gemma3n.cpp
+@@ -98,7 +98,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+@@ -113,7 +113,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
+         res->t_skippy_activation_input = inpL;
+         res->add_input(std::move(inp));
+ 
+-        const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
++        const skippy_activation_tokens & activation_tokens = build_inputs.activation_tokens;
+         const bool use_activation_token_sideband =
+             activation_tokens.tokens != nullptr &&
+             activation_tokens.token_count == ubatch.n_tokens &&
+@@ -368,7 +368,7 @@ ggml_tensor * llama_model_gemma3n::graph::build_inp_per_layer() {
+     auto inp = std::make_unique<llm_graph_input_embd>(n_embd);
+     ggml_tensor * inp_per_layer;
+     float tok_embd_scale = sqrtf((float) n_embd_altup);
+-    const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
++    const skippy_activation_tokens & activation_tokens = build_inputs.activation_tokens;
+     const bool use_activation_token_sideband =
+         activation_tokens.tokens != nullptr &&
+         activation_tokens.token_count == ubatch.n_tokens;
+diff --git a/src/models/gemma4.cpp b/src/models/gemma4.cpp
+index 4d37f766a..bb0e441e3 100644
+--- a/src/models/gemma4.cpp
++++ b/src/models/gemma4.cpp
+@@ -150,7 +150,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+@@ -172,7 +172,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * inp_per_layer = nullptr;
+     if (model.per_layer_tok_embd) {
+         ggml_tensor * inp_per_layer_proj = inpL;
+-        const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
++        const skippy_activation_tokens & activation_tokens = build_inputs.activation_tokens;
+         const bool use_activation_token_sideband =
+             stage_filtered && il_start > 0 &&
+             activation_tokens.tokens != nullptr &&
+@@ -449,7 +449,7 @@ ggml_tensor * llama_model_gemma4::graph::build_inp_per_layer() {
+ 
+     ggml_tensor * inp_per_layer;
+     float tok_embd_scale = sqrtf((float) n_embd_per_layer);
+-    const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
++    const skippy_activation_tokens & activation_tokens = build_inputs.activation_tokens;
+     const bool use_activation_token_sideband =
+         activation_tokens.tokens != nullptr &&
+         activation_tokens.token_count == ubatch.n_tokens;
+diff --git a/src/models/glm4-moe.cpp b/src/models/glm4-moe.cpp
+index e323f4e7e..7a6f34624 100644
+--- a/src/models/glm4-moe.cpp
++++ b/src/models/glm4-moe.cpp
+@@ -303,7 +303,7 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? std::min<int>(stage_filter.layer_start, static_cast<int>(n_layer)) : 0;
+     const int il_end   = stage_filtered ? std::min<int>(stage_filter.layer_end,   static_cast<int>(n_layer)) : n_layer;
+diff --git a/src/models/glm4.cpp b/src/models/glm4.cpp
+index c4e951a1e..4dd4734d5 100644
+--- a/src/models/glm4.cpp
++++ b/src/models/glm4.cpp
+@@ -83,7 +83,7 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
+     // Only process up to last layer (skip final NextN layer)
+     // Final layer tensors are loaded but not processed in forward pass
+     const int n_transformer_layers = n_layer;
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? std::min(stage_filter.layer_end, n_transformer_layers) : n_transformer_layers;
+diff --git a/src/models/gpt2.cpp b/src/models/gpt2.cpp
+index cf3c658a9..3cd036def 100644
+--- a/src/models/gpt2.cpp
++++ b/src/models/gpt2.cpp
+@@ -64,7 +64,7 @@ llama_model_gpt2::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * pos;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/gptneox.cpp b/src/models/gptneox.cpp
+index d5e4a7205..03bc57252 100644
+--- a/src/models/gptneox.cpp
++++ b/src/models/gptneox.cpp
+@@ -92,7 +92,7 @@ llama_model_gptneox::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/granite-hybrid.cpp b/src/models/granite-hybrid.cpp
+index 21f64441f..e47e4de90 100644
+--- a/src/models/granite-hybrid.cpp
++++ b/src/models/granite-hybrid.cpp
+@@ -140,7 +140,7 @@ llama_model_granite_hybrid::graph::graph(const llama_model & model, const llm_gr
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/granite.cpp b/src/models/granite.cpp
+index fee708146..99592170c 100644
+--- a/src/models/granite.cpp
++++ b/src/models/granite.cpp
+@@ -124,7 +124,7 @@ llama_model_granite::graph::graph(
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/grok.cpp b/src/models/grok.cpp
+index 53f683914..592b17014 100644
+--- a/src/models/grok.cpp
++++ b/src/models/grok.cpp
+@@ -92,7 +92,7 @@ llama_model_grok::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/grovemoe.cpp b/src/models/grovemoe.cpp
+index 12fce2051..4a7eeb86d 100644
+--- a/src/models/grovemoe.cpp
++++ b/src/models/grovemoe.cpp
+@@ -75,7 +75,7 @@ llama_model_grovemoe::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/hunyuan-moe.cpp b/src/models/hunyuan-moe.cpp
+index 3abe5aef4..2faf466e9 100644
+--- a/src/models/hunyuan-moe.cpp
++++ b/src/models/hunyuan-moe.cpp
+@@ -62,7 +62,7 @@ llama_model_hunyuan_moe::graph::graph(const llama_model & model, const llm_graph
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/hunyuan-vl.cpp b/src/models/hunyuan-vl.cpp
+index cbf767f7a..5c6760586 100644
+--- a/src/models/hunyuan-vl.cpp
++++ b/src/models/hunyuan-vl.cpp
+@@ -71,7 +71,7 @@ llama_model_hunyuan_vl::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/inkling.cpp b/src/models/inkling.cpp
+index 619bc3e73..fbfdeff30 100644
+--- a/src/models/inkling.cpp
++++ b/src/models/inkling.cpp
+@@ -219,7 +219,7 @@ std::unique_ptr<llm_graph_context> llama_model_inkling::build_arch_graph(const l
+ llama_model_inkling::graph::graph(const llama_model & model, const llm_graph_params & params) :
+     llm_graph_context(params) {
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const bool is_mtp = params.gtype == LLM_GRAPH_TYPE_DECODER_MTP;
+     const int mtp_il = n_layer + cparams.nextn_layer_offset;
+diff --git a/src/models/internlm2.cpp b/src/models/internlm2.cpp
+index c44bc35fa..f2b2dcfea 100644
+--- a/src/models/internlm2.cpp
++++ b/src/models/internlm2.cpp
+@@ -47,7 +47,7 @@ llama_model_internlm2::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/jais.cpp b/src/models/jais.cpp
+index 1c77c02b1..dc5f0bb7f 100644
+--- a/src/models/jais.cpp
++++ b/src/models/jais.cpp
+@@ -60,7 +60,7 @@ llama_model_jais::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/jais2.cpp b/src/models/jais2.cpp
+index cd71d5dbc..1254475ad 100644
+--- a/src/models/jais2.cpp
++++ b/src/models/jais2.cpp
+@@ -66,7 +66,7 @@ llama_model_jais2::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/jamba.cpp b/src/models/jamba.cpp
+index 2b69aabab..a38274e28 100644
+--- a/src/models/jamba.cpp
++++ b/src/models/jamba.cpp
+@@ -111,7 +111,7 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/kimi-linear.cpp b/src/models/kimi-linear.cpp
+index 2426dfa0f..304c62e06 100644
+--- a/src/models/kimi-linear.cpp
++++ b/src/models/kimi-linear.cpp
+@@ -236,7 +236,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/laguna.cpp b/src/models/laguna.cpp
+index e23087c68..d9697a9b5 100644
+--- a/src/models/laguna.cpp
++++ b/src/models/laguna.cpp
+@@ -158,7 +158,7 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/lfm2.cpp b/src/models/lfm2.cpp
+index ebfa186e0..1c6ab7018 100644
+--- a/src/models/lfm2.cpp
++++ b/src/models/lfm2.cpp
+@@ -233,7 +233,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+     };
+ 
+     // actual graph construction starts here
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/llada-moe.cpp b/src/models/llada-moe.cpp
+index 6debd1303..ac26c49fb 100644
+--- a/src/models/llada-moe.cpp
++++ b/src/models/llada-moe.cpp
+@@ -60,7 +60,7 @@ llama_model_llada_moe::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/llada.cpp b/src/models/llada.cpp
+index 47e2f9dfc..a9ffb9c66 100644
+--- a/src/models/llada.cpp
++++ b/src/models/llada.cpp
+@@ -78,7 +78,7 @@ llama_model_llada::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/llama.cpp b/src/models/llama.cpp
+index 23864f0dd..77658a81e 100644
+--- a/src/models/llama.cpp
++++ b/src/models/llama.cpp
+@@ -105,7 +105,7 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/llama4.cpp b/src/models/llama4.cpp
+index 1f3f1c358..9896aa5e8 100644
+--- a/src/models/llama4.cpp
++++ b/src/models/llama4.cpp
+@@ -113,7 +113,7 @@ llama_model_llama4::graph<iswa>::graph(const llama_model & model, const llm_grap
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/maincoder.cpp b/src/models/maincoder.cpp
+index 631e4057f..5a424f2d8 100644
+--- a/src/models/maincoder.cpp
++++ b/src/models/maincoder.cpp
+@@ -53,7 +53,7 @@ llama_model_maincoder::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/mamba.cpp b/src/models/mamba.cpp
+index 50d4523f0..75d0684d5 100644
+--- a/src/models/mamba.cpp
++++ b/src/models/mamba.cpp
+@@ -88,7 +88,7 @@ llama_model_mamba::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/mimo2.cpp b/src/models/mimo2.cpp
+index 04eaa2173..87c4fdbd5 100644
+--- a/src/models/mimo2.cpp
++++ b/src/models/mimo2.cpp
+@@ -84,7 +84,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
+ 
+     const float v_scale = hparams.f_attn_value_scale;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/minicpm3.cpp b/src/models/minicpm3.cpp
+index f218063b3..88af0f840 100644
+--- a/src/models/minicpm3.cpp
++++ b/src/models/minicpm3.cpp
+@@ -75,7 +75,7 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/minimax-m2.cpp b/src/models/minimax-m2.cpp
+index fe667d549..08eee51ef 100644
+--- a/src/models/minimax-m2.cpp
++++ b/src/models/minimax-m2.cpp
+@@ -53,7 +53,7 @@ llama_model_minimax_m2::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/mistral3.cpp b/src/models/mistral3.cpp
+index 4203192b7..0d0c0e1d9 100644
+--- a/src/models/mistral3.cpp
++++ b/src/models/mistral3.cpp
+@@ -99,7 +99,7 @@ llama_model_mistral3::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/mpt.cpp b/src/models/mpt.cpp
+index 3b008a5db..a279359a5 100644
+--- a/src/models/mpt.cpp
++++ b/src/models/mpt.cpp
+@@ -73,7 +73,7 @@ llama_model_mpt::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * pos;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/nemotron-h.cpp b/src/models/nemotron-h.cpp
+index 3243cdfa7..fa7d846c3 100644
+--- a/src/models/nemotron-h.cpp
++++ b/src/models/nemotron-h.cpp
+@@ -178,7 +178,7 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? std::min<int>(stage_filter.layer_start, static_cast<int>(n_layer)) : 0;
+     const int il_end   = stage_filtered ? std::min<int>(stage_filter.layer_end,   static_cast<int>(n_layer)) : n_layer;
+diff --git a/src/models/nemotron.cpp b/src/models/nemotron.cpp
+index 5b91df3d8..7761a8666 100644
+--- a/src/models/nemotron.cpp
++++ b/src/models/nemotron.cpp
+@@ -56,7 +56,7 @@ llama_model_nemotron::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/olmo.cpp b/src/models/olmo.cpp
+index 162cb4bc9..3a8d3ab84 100644
+--- a/src/models/olmo.cpp
++++ b/src/models/olmo.cpp
+@@ -49,7 +49,7 @@ llama_model_olmo::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/olmo2.cpp b/src/models/olmo2.cpp
+index 38b3de364..15f43375c 100644
+--- a/src/models/olmo2.cpp
++++ b/src/models/olmo2.cpp
+@@ -71,7 +71,7 @@ llama_model_olmo2::graph<iswa>::graph(const llama_model & model, const llm_graph
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/olmoe.cpp b/src/models/olmoe.cpp
+index 4c6c4ef81..d74628351 100644
+--- a/src/models/olmoe.cpp
++++ b/src/models/olmoe.cpp
+@@ -59,7 +59,7 @@ llama_model_olmoe::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/openai-moe.cpp b/src/models/openai-moe.cpp
+index 8c4d7bed5..3b6d29c78 100644
+--- a/src/models/openai-moe.cpp
++++ b/src/models/openai-moe.cpp
+@@ -65,7 +65,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/openelm.cpp b/src/models/openelm.cpp
+index 33ca072f0..7fe6005c8 100644
+--- a/src/models/openelm.cpp
++++ b/src/models/openelm.cpp
+@@ -54,7 +54,7 @@ llama_model_openelm::graph::graph(const llama_model & model, const llm_graph_par
+ 
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/orion.cpp b/src/models/orion.cpp
+index 99609dbe9..3e35d2929 100644
+--- a/src/models/orion.cpp
++++ b/src/models/orion.cpp
+@@ -49,7 +49,7 @@ llama_model_orion::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/phi2.cpp b/src/models/phi2.cpp
+index f82e0c74a..83f0d2c20 100644
+--- a/src/models/phi2.cpp
++++ b/src/models/phi2.cpp
+@@ -54,7 +54,7 @@ llama_model_phi2::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * ffn_output;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/phi3.cpp b/src/models/phi3.cpp
+index 6d3026905..718126e62 100644
+--- a/src/models/phi3.cpp
++++ b/src/models/phi3.cpp
+@@ -73,7 +73,7 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/plamo.cpp b/src/models/plamo.cpp
+index fbc65bfac..a94a8358d 100644
+--- a/src/models/plamo.cpp
++++ b/src/models/plamo.cpp
+@@ -45,7 +45,7 @@ llama_model_plamo::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/plamo2.cpp b/src/models/plamo2.cpp
+index 42d6cfac1..651b07408 100644
+--- a/src/models/plamo2.cpp
++++ b/src/models/plamo2.cpp
+@@ -113,7 +113,7 @@ llama_model_plamo2::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * inpL;
+ 
+     // {n_embd, n_tokens}
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/plamo3.cpp b/src/models/plamo3.cpp
+index 1c9d04ad9..44038bcdb 100644
+--- a/src/models/plamo3.cpp
++++ b/src/models/plamo3.cpp
+@@ -74,7 +74,7 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
+     const int64_t head_dim_v = hparams.n_embd_head_v();
+ 
+     ggml_tensor * cur;
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/plm.cpp b/src/models/plm.cpp
+index 21268045a..3ae4385c7 100644
+--- a/src/models/plm.cpp
++++ b/src/models/plm.cpp
+@@ -57,7 +57,7 @@ llama_model_plm::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * inpL;
+ 
+     // {n_embd, n_tokens}
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen.cpp b/src/models/qwen.cpp
+index becc84eee..929abb387 100644
+--- a/src/models/qwen.cpp
++++ b/src/models/qwen.cpp
+@@ -48,7 +48,7 @@ llama_model_qwen::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen2.cpp b/src/models/qwen2.cpp
+index 6362851e7..1f5a2a0f9 100644
+--- a/src/models/qwen2.cpp
++++ b/src/models/qwen2.cpp
+@@ -59,7 +59,7 @@ llama_model_qwen2::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen2moe.cpp b/src/models/qwen2moe.cpp
+index 9f02cec3a..3fe7875e3 100644
+--- a/src/models/qwen2moe.cpp
++++ b/src/models/qwen2moe.cpp
+@@ -74,7 +74,7 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen2vl.cpp b/src/models/qwen2vl.cpp
+index d5f8ba3ac..747cd1387 100644
+--- a/src/models/qwen2vl.cpp
++++ b/src/models/qwen2vl.cpp
+@@ -48,7 +48,7 @@ llama_model_qwen2vl::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index 9991ce56b..bce53fa43 100644
+--- a/src/models/qwen3.cpp
++++ b/src/models/qwen3.cpp
+@@ -59,7 +59,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index e50b80219..7535be893 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -146,7 +146,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? std::min<int>(stage_filter.layer_start, static_cast<int>(n_layer)) : 0;
+     const int il_end   = stage_filtered ? std::min<int>(stage_filter.layer_end,   static_cast<int>(n_layer)) : n_layer;
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index 99d667f56..0d17c8e67 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -169,7 +169,7 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? std::min<int>(stage_filter.layer_start, static_cast<int>(n_layer)) : 0;
+     const int il_end   = stage_filtered ? std::min<int>(stage_filter.layer_end,   static_cast<int>(n_layer)) : n_layer;
+diff --git a/src/models/qwen3moe.cpp b/src/models/qwen3moe.cpp
+index ba08a4e1d..961b3c4cf 100644
+--- a/src/models/qwen3moe.cpp
++++ b/src/models/qwen3moe.cpp
+@@ -68,7 +68,7 @@ llama_model_qwen3moe::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen3next.cpp b/src/models/qwen3next.cpp
+index 8c925a863..b1594bb4b 100644
+--- a/src/models/qwen3next.cpp
++++ b/src/models/qwen3next.cpp
+@@ -112,7 +112,7 @@ llama_model_qwen3next::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen3vl.cpp b/src/models/qwen3vl.cpp
+index c6b48fd13..d4c0ba61b 100644
+--- a/src/models/qwen3vl.cpp
++++ b/src/models/qwen3vl.cpp
+@@ -68,7 +68,7 @@ llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen3vlmoe.cpp b/src/models/qwen3vlmoe.cpp
+index 33c961a41..268484764 100644
+--- a/src/models/qwen3vlmoe.cpp
++++ b/src/models/qwen3vlmoe.cpp
+@@ -73,7 +73,7 @@ llama_model_qwen3vlmoe::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index 683f96c8e..b52d7d7e6 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -307,7 +307,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+     int sections[4];
+     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/refact.cpp b/src/models/refact.cpp
+index 0226a7fdf..0d7a8b033 100644
+--- a/src/models/refact.cpp
++++ b/src/models/refact.cpp
+@@ -84,7 +84,7 @@ llama_model_refact::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/rnd1.cpp b/src/models/rnd1.cpp
+index 8d39e03bb..ff4c05191 100644
+--- a/src/models/rnd1.cpp
++++ b/src/models/rnd1.cpp
+@@ -71,7 +71,7 @@ llama_model_rnd1::graph::graph(const llama_model & model, const llm_graph_params
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/rwkv6.cpp b/src/models/rwkv6.cpp
+index bb9471ea5..e571c8770 100644
+--- a/src/models/rwkv6.cpp
++++ b/src/models/rwkv6.cpp
+@@ -98,7 +98,7 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/rwkv6qwen2.cpp b/src/models/rwkv6qwen2.cpp
+index ba530ccfb..9ef71181c 100644
+--- a/src/models/rwkv6qwen2.cpp
++++ b/src/models/rwkv6qwen2.cpp
+@@ -87,7 +87,7 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/rwkv7.cpp b/src/models/rwkv7.cpp
+index 5c4991177..387eeaa86 100644
+--- a/src/models/rwkv7.cpp
++++ b/src/models/rwkv7.cpp
+@@ -129,7 +129,7 @@ llama_model_rwkv7::graph::graph(const llama_model & model, const llm_graph_param
+     ggml_tensor * inpL;
+     ggml_tensor * v_first = nullptr;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/seed-oss.cpp b/src/models/seed-oss.cpp
+index c49415551..b8fc12779 100644
+--- a/src/models/seed-oss.cpp
++++ b/src/models/seed-oss.cpp
+@@ -55,7 +55,7 @@ llama_model_seed_oss::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/smallthinker.cpp b/src/models/smallthinker.cpp
+index 6a7c16032..745d6f1de 100644
+--- a/src/models/smallthinker.cpp
++++ b/src/models/smallthinker.cpp
+@@ -83,7 +83,7 @@ llama_model_smallthinker::graph<iswa>::graph(const llama_model & model, const ll
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/smollm3.cpp b/src/models/smollm3.cpp
+index 9fa28f8fc..666e37c97 100644
+--- a/src/models/smollm3.cpp
++++ b/src/models/smollm3.cpp
+@@ -52,7 +52,7 @@ llama_model_smollm3::graph::graph(const llama_model & model, const llm_graph_par
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/stablelm.cpp b/src/models/stablelm.cpp
+index 767cb1dac..5ef312979 100644
+--- a/src/models/stablelm.cpp
++++ b/src/models/stablelm.cpp
+@@ -56,7 +56,7 @@ llama_model_stablelm::graph::graph(const llama_model & model, const llm_graph_pa
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/starcoder.cpp b/src/models/starcoder.cpp
+index 25445567b..ab1dd7449 100644
+--- a/src/models/starcoder.cpp
++++ b/src/models/starcoder.cpp
+@@ -65,7 +65,7 @@ llama_model_starcoder::graph::graph(const llama_model & model, const llm_graph_p
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/starcoder2.cpp b/src/models/starcoder2.cpp
+index af2bc1128..8b8714615 100644
+--- a/src/models/starcoder2.cpp
++++ b/src/models/starcoder2.cpp
+@@ -65,7 +65,7 @@ llama_model_starcoder2::graph::graph(const llama_model & model, const llm_graph_
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/step35.cpp b/src/models/step35.cpp
+index 3b264d9e1..c5b4aa337 100644
+--- a/src/models/step35.cpp
++++ b/src/models/step35.cpp
+@@ -196,7 +196,7 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/models/xverse.cpp b/src/models/xverse.cpp
+index 0aada2095..7e7fb920c 100644
+--- a/src/models/xverse.cpp
++++ b/src/models/xverse.cpp
+@@ -47,7 +47,7 @@ llama_model_xverse::graph::graph(const llama_model & model, const llm_graph_para
+     ggml_tensor * cur;
+     ggml_tensor * inpL;
+ 
+-    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
+     const bool stage_filtered = stage_filter.enabled;
+     const int il_start = stage_filtered ? stage_filter.layer_start : 0;
+     const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
+diff --git a/src/skippy/activation.cpp b/src/skippy/activation.cpp
+index 889278d71..3df7204be 100644
+--- a/src/skippy/activation.cpp
++++ b/src/skippy/activation.cpp
+@@ -1,10 +1,9 @@
+ #include "skippy.h"
+ #include "skippy/activation_internal.h"
+-#include "skippy/activation_scopes.h"
++#include "skippy/graph_build_inputs.h"
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+@@ -353,7 +352,8 @@ enum skippy_status skippy_decode_batch(
+         llama_batch batch,
+         size_t token_count,
+         int32_t glm_dsa_phase_hint,
+-        struct skippy_error ** out_error) {
++        struct skippy_error ** out_error,
++        const skippy_graph_build_inputs * graph_build_inputs) {
+     if (session == nullptr || session->ctx == nullptr || token_count == 0) {
+         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "session and at least one token are required");
+         return SKIPPY_STATUS_INVALID_ARGUMENT;
+@@ -362,17 +362,20 @@ enum skippy_status skippy_decode_batch(
+     if (usable_status != SKIPPY_STATUS_OK) {
+         return usable_status;
+     }
+-    skippy_graph_filter_scope graph_filter_scope(&session->stage_model->config, glm_dsa_phase_hint);
++    skippy_graph_build_inputs inputs = graph_build_inputs != nullptr ? *graph_build_inputs : skippy_graph_build_inputs{};
++    inputs.filter = skippy_graph_build_inputs_from_config(
++            &session->stage_model->config,
++            glm_dsa_phase_hint).filter;
+     const char * phase_log = getenv("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS");
+     if (phase_log != nullptr && atoi(phase_log) != 0) {
+         LLAMA_LOG_INFO(
+                 "skippy: glm_dsa_phase_hint requested=%d active=%d tokens=%zu\n",
+                 glm_dsa_phase_hint,
+-                skippy_graph_get_filter().glm_dsa_phase_hint,
++                inputs.filter.glm_dsa_phase_hint,
+                 token_count);
+     }
+     skippy_glm_dsa_op_timing_begin(session, token_count);
+-    const int32_t rc = llama_decode(session->ctx, batch);
++    const int32_t rc = session->ctx->decode(batch, inputs);
+     skippy_glm_dsa_op_timing_end(session);
+     if (rc != 0) {
+         // llama.cpp's own diagnostics go to its log callback, which stage
+@@ -708,19 +711,22 @@ enum skippy_status skippy_decode_activation_frame(
+         /*logits   =*/ logits_storage.data(),
+     };
+ 
+-    skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
++    skippy_graph_build_inputs graph_build_inputs;
++    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, token_count);
+     const int32_t qwen4exp_hc = qwen4exp_activation_input
+         ? static_cast<int32_t>(session->stage_model->model->hparams.dsv4_hc_mult)
+         : 0;
+-    skippy_qwen4exp_hc_scope qwen4exp_hc_scope(
++    skippy_graph_build_inputs_set_qwen4exp_hc(
++            graph_build_inputs,
+             qwen4exp_activation_input ? input_payload : nullptr,
+             static_cast<uint32_t>(token_count),
+             n_embd,
+             qwen4exp_hc);
+-    skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
+-    skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
++    skippy_graph_build_inputs_set_rwkv7_v_first(graph_build_inputs, input_desc, input_payload, hidden_bytes, n_embd);
++    skippy_graph_build_inputs_set_gemma3n_altup(graph_build_inputs, input_desc, input_payload, n_embd, n_altup);
+     const llama_pos token_start = pos_storage.empty() ? session->n_past : pos_storage[0];
+-    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
++    skippy_graph_build_inputs_set_glm_dsa_top_k(
++            graph_build_inputs,
+             input_desc,
+             input_payload,
+             hidden_bytes,
+@@ -732,7 +738,8 @@ enum skippy_status skippy_decode_activation_frame(
+             batch,
+             token_count,
+             glm_dsa_phase_hint,
+-            out_error);
++            out_error,
++            &graph_build_inputs);
+     const float * mtp_input_embeddings =
+             (input_desc->flags & SKIPPY_ACTIVATION_FLAG_INKLING_MTP_EMBD) != 0 ?
+             reinterpret_cast<const float *>(static_cast<const uint8_t *>(input_payload) + hidden_bytes) : nullptr;
+@@ -813,19 +820,22 @@ enum skippy_status skippy_verify_activation_frame(
+         batch.logits[i] = 1;
+     }
+ 
+-    skippy_activation_tokens_scope activation_tokens_scope(token_ids, token_count);
++    skippy_graph_build_inputs graph_build_inputs;
++    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, token_count);
+     const int32_t qwen4exp_hc = qwen4exp_activation_input
+         ? static_cast<int32_t>(session->stage_model->model->hparams.dsv4_hc_mult)
+         : 0;
+-    skippy_qwen4exp_hc_scope qwen4exp_hc_scope(
++    skippy_graph_build_inputs_set_qwen4exp_hc(
++            graph_build_inputs,
+             qwen4exp_activation_input ? input_payload : nullptr,
+             static_cast<uint32_t>(token_count),
+             n_embd,
+             qwen4exp_hc);
+-    skippy_rwkv7_v_first_scope rwkv7_v_first_scope(input_desc, input_payload, hidden_bytes, n_embd);
+-    skippy_gemma3n_altup_scope gemma3n_altup_scope(input_desc, input_payload, n_embd, n_altup);
++    skippy_graph_build_inputs_set_rwkv7_v_first(graph_build_inputs, input_desc, input_payload, hidden_bytes, n_embd);
++    skippy_graph_build_inputs_set_gemma3n_altup(graph_build_inputs, input_desc, input_payload, n_embd, n_altup);
+     const llama_pos token_start = session->n_past;
+-    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
++    skippy_graph_build_inputs_set_glm_dsa_top_k(
++            graph_build_inputs,
+             input_desc,
+             input_payload,
+             hidden_bytes,
+@@ -837,7 +847,8 @@ enum skippy_status skippy_verify_activation_frame(
+             batch,
+             token_count,
+             SKIPPY_GLM_DSA_PHASE_HINT_VERIFY,
+-            out_error);
++            out_error,
++            &graph_build_inputs);
+     if (!alias_input_payload) {
+         llama_batch_free(batch);
+     }
+diff --git a/src/skippy/activation_layout.cpp b/src/skippy/activation_layout.cpp
+index a40ebf8e2..ceabdab46 100644
+--- a/src/skippy/activation_layout.cpp
++++ b/src/skippy/activation_layout.cpp
+@@ -1,10 +1,8 @@
+ #include "skippy.h"
+ #include "skippy/activation_internal.h"
+-#include "skippy/activation_scopes.h"
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+diff --git a/src/skippy/activation_scopes.h b/src/skippy/activation_scopes.h
+deleted file mode 100644
+index dd66056ad..000000000
+--- a/src/skippy/activation_scopes.h
++++ /dev/null
+@@ -1,160 +0,0 @@
+-#pragma once
+-
+-#include "skippy/activation.h"
+-
+-#include "llama-graph.h"
+-
+-#include <cstddef>
+-#include <cstdint>
+-#include <limits>
+-
+-struct skippy_activation_tokens_scope {
+-    skippy_activation_tokens_scope(const llama_token * tokens, size_t token_count) {
+-        if (tokens != nullptr && token_count > 0 && token_count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+-            skippy_activation_tokens stage_tokens;
+-            stage_tokens.tokens = tokens;
+-            stage_tokens.token_count = static_cast<uint32_t>(token_count);
+-            skippy_graph_set_activation_tokens(stage_tokens);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_activation_tokens_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_activation_tokens();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+-struct skippy_rwkv7_v_first_scope {
+-    skippy_rwkv7_v_first_scope(
+-            const skippy_activation_desc * desc,
+-            const void * payload,
+-            size_t hidden_bytes,
+-            int32_t n_embd) {
+-        if (desc != nullptr &&
+-            payload != nullptr &&
+-            (desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0 &&
+-            desc->payload_bytes >= hidden_bytes) {
+-            skippy_activation_rwkv7_v_first sideband;
+-            sideband.values = reinterpret_cast<const float *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
+-            sideband.token_count = desc->token_count;
+-            sideband.n_embd = static_cast<uint32_t>(n_embd);
+-            skippy_graph_set_rwkv7_v_first(sideband);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_rwkv7_v_first_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_rwkv7_v_first();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+-struct skippy_gemma3n_altup_scope {
+-    skippy_gemma3n_altup_scope(
+-            const skippy_activation_desc * desc,
+-            const void * payload,
+-            int32_t n_embd,
+-            int32_t n_altup) {
+-        if (desc != nullptr &&
+-            payload != nullptr &&
+-            (desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
+-            skippy_activation_gemma3n_altup sideband;
+-            sideband.values = reinterpret_cast<const float *>(payload);
+-            sideband.token_count = desc->token_count;
+-            sideband.n_embd = static_cast<uint32_t>(n_embd);
+-            sideband.n_altup = static_cast<uint32_t>(n_altup);
+-            skippy_graph_set_gemma3n_altup(sideband);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_gemma3n_altup_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_gemma3n_altup();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+-struct skippy_qwen4exp_hc_scope {
+-    skippy_qwen4exp_hc_scope(
+-            const void * payload,
+-            uint32_t token_count,
+-            int32_t n_embd,
+-            int32_t n_hc) {
+-        if (payload != nullptr && token_count > 0 && n_embd > 0 && n_hc > 0) {
+-            skippy_activation_qwen4exp_hc activation;
+-            activation.values = static_cast<const float *>(payload);
+-            activation.token_count = token_count;
+-            activation.n_embd = static_cast<uint32_t>(n_embd);
+-            activation.n_hc = static_cast<uint32_t>(n_hc);
+-            skippy_graph_set_qwen4exp_hc(activation);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_qwen4exp_hc_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_qwen4exp_hc();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+-struct skippy_glm_dsa_top_k_scope {
+-    skippy_glm_dsa_top_k_scope(
+-            const skippy_activation_desc * desc,
+-            const void * payload,
+-            size_t hidden_bytes,
+-            uint32_t n_top_k,
+-            uint32_t n_stream,
+-            llama_pos pos_start) {
+-        if (desc != nullptr &&
+-            payload != nullptr &&
+-            (desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
+-            skippy_activation_glm_dsa_top_k sideband;
+-            sideband.values = reinterpret_cast<const int32_t *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
+-            sideband.token_count = desc->token_count;
+-            sideband.n_top_k = n_top_k;
+-            sideband.n_stream = n_stream;
+-            sideband.pos_start = pos_start;
+-            skippy_graph_set_glm_dsa_top_k(sideband);
+-            enabled = true;
+-        }
+-    }
+-
+-    skippy_glm_dsa_top_k_scope(
+-            const int32_t * values,
+-            uint32_t token_count,
+-            uint32_t n_top_k,
+-            uint32_t n_stream,
+-            llama_pos pos_start) {
+-        if (values != nullptr && token_count > 0 && n_top_k > 0 && n_stream > 0) {
+-            skippy_activation_glm_dsa_top_k sideband;
+-            sideband.values = values;
+-            sideband.token_count = token_count;
+-            sideband.n_top_k = n_top_k;
+-            sideband.n_stream = n_stream;
+-            sideband.pos_start = pos_start;
+-            skippy_graph_set_glm_dsa_top_k(sideband);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_glm_dsa_top_k_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_glm_dsa_top_k();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+diff --git a/src/skippy/execution-batch.cpp b/src/skippy/execution-batch.cpp
+index 678a40692..e6a7a1c79 100644
+--- a/src/skippy/execution-batch.cpp
++++ b/src/skippy/execution-batch.cpp
+@@ -1,10 +1,9 @@
+ #include "skippy.h"
+ #include "skippy/activation_internal.h"
+-#include "skippy/activation_scopes.h"
++#include "skippy/graph_build_inputs.h"
+ #include "skippy/errors.h"
+ #include "skippy/execution_internal.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy/runtime_support.h"
+ #include "skippy/runtime_types.h"
+ #include "skippy/sampling_internal.h"
+@@ -263,23 +262,25 @@ enum skippy_status skippy_iteration_batch_sampled(
+         /*logits   =*/ logits_storage.data(),
+     };
+ 
+-    skippy_activation_tokens_scope activation_tokens_scope(token_storage.data(), total_token_count);
+-    skippy_qwen4exp_hc_scope qwen4exp_hc_scope(
++    skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
++            &first->stage_model->config,
++            SKIPPY_GLM_DSA_PHASE_HINT_AUTO);
++    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_storage.data(), total_token_count);
++    skippy_graph_build_inputs_set_qwen4exp_hc(
++            graph_build_inputs,
+             qwen4exp_hc_storage.empty() ? nullptr : qwen4exp_hc_storage.data(),
+             static_cast<uint32_t>(total_token_count),
+             n_embd,
+             qwen4exp_hc);
+     const llama_pos batch_pos_start = pos_storage.empty() ? first->n_past : pos_storage[0];
+-    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
++    skippy_graph_build_inputs_set_glm_dsa_top_k(
++            graph_build_inputs,
+             glm_dsa_input_top_k_storage.empty() ? nullptr : glm_dsa_input_top_k_storage.data(),
+             static_cast<uint32_t>(total_token_count),
+             batch_input_top_k,
+             batch_input_streams,
+             batch_pos_start);
+-    skippy_graph_filter_scope graph_filter_scope(
+-            &first->stage_model->config,
+-            SKIPPY_GLM_DSA_PHASE_HINT_AUTO);
+-    const int32_t rc = llama_decode(first->ctx, batch);
++    const int32_t rc = first->ctx->decode(batch, graph_build_inputs);
+     if (rc != 0) {
+         skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed for scheduler iteration");
+         return SKIPPY_STATUS_RUNTIME_ERROR;
+@@ -574,23 +575,25 @@ enum skippy_status skippy_decode_step_frame_batch_sampled(
+         /*logits   =*/ logits_storage.data(),
+     };
+ 
+-    skippy_activation_tokens_scope activation_tokens_scope(token_ids, request_count);
+-    skippy_qwen4exp_hc_scope qwen4exp_hc_scope(
++    skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
++            &first->stage_model->config,
++            SKIPPY_GLM_DSA_PHASE_HINT_DECODE);
++    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, request_count);
++    skippy_graph_build_inputs_set_qwen4exp_hc(
++            graph_build_inputs,
+             qwen4exp_hc_storage.empty() ? nullptr : qwen4exp_hc_storage.data(),
+             static_cast<uint32_t>(request_count),
+             n_embd,
+             qwen4exp_hc);
+     const llama_pos batch_pos_start = pos_storage.empty() ? first->n_past : pos_storage[0];
+-    skippy_glm_dsa_top_k_scope glm_dsa_top_k_scope(
++    skippy_graph_build_inputs_set_glm_dsa_top_k(
++            graph_build_inputs,
+             glm_dsa_input_top_k_storage.empty() ? nullptr : glm_dsa_input_top_k_storage.data(),
+             static_cast<uint32_t>(request_count),
+             batch_input_top_k,
+             1,
+             batch_pos_start);
+-    skippy_graph_filter_scope graph_filter_scope(
+-            &first->stage_model->config,
+-            SKIPPY_GLM_DSA_PHASE_HINT_DECODE);
+-    const int32_t rc = llama_decode(first->ctx, batch);
++    const int32_t rc = first->ctx->decode(batch, graph_build_inputs);
+     if (rc != 0) {
+         skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed");
+         return SKIPPY_STATUS_RUNTIME_ERROR;
+diff --git a/src/skippy/execution-single.cpp b/src/skippy/execution-single.cpp
+index 0ce65471f..c0153bf77 100644
+--- a/src/skippy/execution-single.cpp
++++ b/src/skippy/execution-single.cpp
+@@ -1,10 +1,9 @@
+ #include "skippy.h"
+ #include "skippy/activation_internal.h"
+-#include "skippy/activation_scopes.h"
++#include "skippy/graph_build_inputs.h"
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+@@ -217,10 +216,10 @@ enum skippy_status skippy_decode_batch_sampled(
+         batch.logits[i] = 1;
+     }
+ 
+-    skippy_graph_filter_scope graph_filter_scope(
++    const skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
+             &first->stage_model->config,
+             SKIPPY_GLM_DSA_PHASE_HINT_DECODE);
+-    const int32_t rc = llama_decode(first->ctx, batch);
++    const int32_t rc = first->ctx->decode(batch, graph_build_inputs);
+     if (rc != 0) {
+         llama_batch_free(batch);
+         skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed");
+diff --git a/src/skippy/execution_internal.h b/src/skippy/execution_internal.h
+index 3614168eb..1d59e00d3 100644
+--- a/src/skippy/execution_internal.h
++++ b/src/skippy/execution_internal.h
+@@ -8,6 +8,7 @@
+ #include <cstdint>
+ 
+ struct skippy_session;
++struct skippy_graph_build_inputs;
+ 
+ bool skippy_is_filtered(const skippy_session * session);
+ enum skippy_status skippy_decode_batch(
+@@ -15,4 +16,5 @@ enum skippy_status skippy_decode_batch(
+         llama_batch batch,
+         size_t token_count,
+         int32_t glm_dsa_phase_hint,
+-        skippy_error ** out_error);
++        skippy_error ** out_error,
++        const skippy_graph_build_inputs * graph_build_inputs = nullptr);
+diff --git a/src/skippy/graph_build_inputs.h b/src/skippy/graph_build_inputs.h
+new file mode 100644
+index 000000000..8d0712c96
+--- /dev/null
++++ b/src/skippy/graph_build_inputs.h
+@@ -0,0 +1,134 @@
++#pragma once
++
++#include "skippy/activation.h"
++#include "skippy/runtime.h"
++
++#include "llama-graph.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++
++inline skippy_graph_build_inputs skippy_graph_build_inputs_from_config(
++        const skippy_runtime_config * config,
++        int32_t glm_dsa_phase_hint = SKIPPY_GLM_DSA_PHASE_HINT_AUTO) {
++    skippy_graph_build_inputs inputs;
++    const bool has_phase_hint = glm_dsa_phase_hint != SKIPPY_GLM_DSA_PHASE_HINT_AUTO;
++    if ((config != nullptr && (config->filter_tensors_on_load || config->glm_dsa_policy_profile != 0)) ||
++            has_phase_hint) {
++        inputs.filter.enabled = config != nullptr && config->filter_tensors_on_load;
++        if (config != nullptr) {
++            inputs.filter.layer_start = config->layer_start;
++            inputs.filter.layer_end = config->layer_end;
++            inputs.filter.include_embeddings = config->include_embeddings;
++            inputs.filter.include_output = config->include_output;
++            inputs.filter.glm_dsa_policy_profile = config->glm_dsa_policy_profile;
++            inputs.filter.glm_dsa_policy_flags = config->glm_dsa_policy_flags;
++            inputs.filter.glm_dsa_short_prefill_max_tokens = config->glm_dsa_short_prefill_max_tokens;
++            inputs.filter.glm_dsa_direct_sparse_decode_max_top_k = config->glm_dsa_direct_sparse_decode_max_top_k;
++            inputs.filter.glm_dsa_dense_sparse_mask_max_bytes = config->glm_dsa_dense_sparse_mask_max_bytes;
++            inputs.filter.glm_dsa_compact_flash_min_kv = config->glm_dsa_compact_flash_min_kv;
++        }
++        inputs.filter.glm_dsa_phase_hint = glm_dsa_phase_hint;
++    }
++    return inputs;
++}
++
++inline void skippy_graph_build_inputs_set_activation_tokens(
++        skippy_graph_build_inputs & inputs,
++        const llama_token * tokens,
++        size_t token_count) {
++    if (tokens != nullptr && token_count > 0 && token_count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
++        inputs.activation_tokens.tokens = tokens;
++        inputs.activation_tokens.token_count = static_cast<uint32_t>(token_count);
++    }
++}
++
++inline void skippy_graph_build_inputs_set_rwkv7_v_first(
++        skippy_graph_build_inputs & inputs,
++        const skippy_activation_desc * desc,
++        const void * payload,
++        size_t hidden_bytes,
++        int32_t n_embd) {
++    if (desc != nullptr && payload != nullptr &&
++            (desc->flags & SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST) != 0 &&
++            desc->payload_bytes >= hidden_bytes) {
++        inputs.rwkv7_v_first.values = reinterpret_cast<const float *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
++        inputs.rwkv7_v_first.token_count = desc->token_count;
++        inputs.rwkv7_v_first.n_embd = static_cast<uint32_t>(n_embd);
++    }
++}
++
++inline void skippy_graph_build_inputs_set_gemma3n_altup(
++        skippy_graph_build_inputs & inputs,
++        const skippy_activation_desc * desc,
++        const void * payload,
++        int32_t n_embd,
++        int32_t n_altup) {
++    if (desc != nullptr && payload != nullptr &&
++            (desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
++        inputs.gemma3n_altup.values = reinterpret_cast<const float *>(payload);
++        inputs.gemma3n_altup.token_count = desc->token_count;
++        inputs.gemma3n_altup.n_embd = static_cast<uint32_t>(n_embd);
++        inputs.gemma3n_altup.n_altup = static_cast<uint32_t>(n_altup);
++    }
++}
++
++inline void skippy_graph_build_inputs_set_qwen4exp_hc(
++        skippy_graph_build_inputs & inputs,
++        const void * payload,
++        uint32_t token_count,
++        int32_t n_embd,
++        int32_t n_hc) {
++    if (payload != nullptr && token_count > 0 && n_embd > 0 && n_hc > 0) {
++        inputs.qwen4exp_hc.values = static_cast<const float *>(payload);
++        inputs.qwen4exp_hc.token_count = token_count;
++        inputs.qwen4exp_hc.n_embd = static_cast<uint32_t>(n_embd);
++        inputs.qwen4exp_hc.n_hc = static_cast<uint32_t>(n_hc);
++    }
++}
++
++inline void skippy_graph_build_inputs_set_glm_dsa_top_k(
++        skippy_graph_build_inputs & inputs,
++        const skippy_activation_desc * desc,
++        const void * payload,
++        size_t hidden_bytes,
++        uint32_t n_top_k,
++        uint32_t n_stream,
++        llama_pos pos_start) {
++    if (desc != nullptr && payload != nullptr &&
++            (desc->flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
++        inputs.glm_dsa_top_k.values = reinterpret_cast<const int32_t *>(static_cast<const uint8_t *>(payload) + hidden_bytes);
++        inputs.glm_dsa_top_k.token_count = desc->token_count;
++        inputs.glm_dsa_top_k.n_top_k = n_top_k;
++        inputs.glm_dsa_top_k.n_stream = n_stream;
++        inputs.glm_dsa_top_k.pos_start = pos_start;
++    }
++}
++
++inline void skippy_graph_build_inputs_set_glm_dsa_top_k(
++        skippy_graph_build_inputs & inputs,
++        const int32_t * values,
++        uint32_t token_count,
++        uint32_t n_top_k,
++        uint32_t n_stream,
++        llama_pos pos_start) {
++    if (values != nullptr && token_count > 0 && n_top_k > 0 && n_stream > 0) {
++        inputs.glm_dsa_top_k.values = values;
++        inputs.glm_dsa_top_k.token_count = token_count;
++        inputs.glm_dsa_top_k.n_top_k = n_top_k;
++        inputs.glm_dsa_top_k.n_stream = n_stream;
++        inputs.glm_dsa_top_k.pos_start = pos_start;
++    }
++}
++
++inline void skippy_graph_build_inputs_set_mtp_embeddings(
++        skippy_graph_build_inputs & inputs,
++        const float * values,
++        uint32_t token_count,
++        uint32_t n_embd,
++        llama_pos pos_start) {
++    if (values != nullptr) {
++        inputs.mtp_embeddings = { values, token_count, n_embd, pos_start };
++    }
++}
+diff --git a/src/skippy/graph_filter_scope.h b/src/skippy/graph_filter_scope.h
+deleted file mode 100644
+index 581be3ffd..000000000
+--- a/src/skippy/graph_filter_scope.h
++++ /dev/null
+@@ -1,44 +0,0 @@
+-#pragma once
+-
+-#include "skippy/runtime.h"
+-
+-#include "llama-graph.h"
+-
+-#include <cstdint>
+-
+-struct skippy_graph_filter_scope {
+-    explicit skippy_graph_filter_scope(
+-            const skippy_runtime_config * config,
+-            int32_t glm_dsa_phase_hint = SKIPPY_GLM_DSA_PHASE_HINT_AUTO) {
+-        const bool has_phase_hint = glm_dsa_phase_hint != SKIPPY_GLM_DSA_PHASE_HINT_AUTO;
+-        if ((config != nullptr && (config->filter_tensors_on_load || config->glm_dsa_policy_profile != 0)) ||
+-                has_phase_hint) {
+-            skippy_graph_filter filter;
+-            if (config != nullptr) {
+-                filter.enabled = config->filter_tensors_on_load;
+-                filter.layer_start = config->layer_start;
+-                filter.layer_end = config->layer_end;
+-                filter.include_embeddings = config->include_embeddings;
+-                filter.include_output = config->include_output;
+-                filter.glm_dsa_policy_profile = config->glm_dsa_policy_profile;
+-                filter.glm_dsa_policy_flags = config->glm_dsa_policy_flags;
+-                filter.glm_dsa_short_prefill_max_tokens = config->glm_dsa_short_prefill_max_tokens;
+-                filter.glm_dsa_direct_sparse_decode_max_top_k = config->glm_dsa_direct_sparse_decode_max_top_k;
+-                filter.glm_dsa_dense_sparse_mask_max_bytes = config->glm_dsa_dense_sparse_mask_max_bytes;
+-                filter.glm_dsa_compact_flash_min_kv = config->glm_dsa_compact_flash_min_kv;
+-            }
+-            filter.glm_dsa_phase_hint = glm_dsa_phase_hint;
+-            skippy_graph_set_filter(filter);
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_graph_filter_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_filter();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+diff --git a/src/skippy/model_lifecycle.cpp b/src/skippy/model_lifecycle.cpp
+index 4ccf2c4a2..fa28e31d4 100644
+--- a/src/skippy/model_lifecycle.cpp
++++ b/src/skippy/model_lifecycle.cpp
+@@ -2,7 +2,6 @@
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+diff --git a/src/skippy/model_load_config.cpp b/src/skippy/model_load_config.cpp
+index 594caf75e..a6ec5b2eb 100644
+--- a/src/skippy/model_load_config.cpp
++++ b/src/skippy/model_load_config.cpp
+@@ -2,7 +2,6 @@
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
+index c622b9819..8cfc8e9bd 100644
+--- a/src/skippy/model_loading.cpp
++++ b/src/skippy/model_loading.cpp
+@@ -2,7 +2,7 @@
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
++#include "skippy/graph_build_inputs.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+@@ -577,8 +577,8 @@ enum skippy_status skippy_finish_model_open(
+         params.kv_unified = true;
+     }
+ 
+-    skippy_graph_filter_scope graph_filter_scope(config);
+-    stage_model->ctx = llama_init_from_model(model, params);
++    const skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(config);
++    stage_model->ctx = llama_init_from_model_with_graph_inputs(model, params, graph_build_inputs);
+     if (stage_model->ctx == nullptr) {
+         const char * message = "failed to create llama context";
+         if (event_scope != nullptr) {
+@@ -646,10 +646,7 @@ enum skippy_status skippy_finish_model_open(
+         llama_context_params mtp_params = params;
+         mtp_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+         mtp_params.embeddings = false;
+-        {
+-            skippy_graph_filter_scope graph_filter_scope(config);
+-            stage_model->mtp_ctx = llama_init_from_model(model, mtp_params);
+-        }
++        stage_model->mtp_ctx = llama_init_from_model_with_graph_inputs(model, mtp_params, graph_build_inputs);
+         if (stage_model->mtp_ctx != nullptr) {
+             llama_set_embeddings_nextn(stage_model->ctx, true, false);
+             llama_set_embeddings_nextn(stage_model->mtp_ctx, true, false);
+diff --git a/src/skippy/session.cpp b/src/skippy/session.cpp
+index 09beb4f11..d9ab0c72b 100644
+--- a/src/skippy/session.cpp
++++ b/src/skippy/session.cpp
+@@ -2,7 +2,6 @@
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+@@ -207,16 +206,6 @@ enum skippy_status skippy_session_begin_external_decode(
+     session->external_mtp_embeddings_available = false;
+     session->external_mtp_embeddings.clear();
+ 
+-    const skippy_runtime_config & config = session->stage_model->config;
+-    if (config.filter_tensors_on_load) {
+-        skippy_graph_filter filter;
+-        filter.enabled = true;
+-        filter.layer_start = config.layer_start;
+-        filter.layer_end = config.layer_end;
+-        filter.include_embeddings = config.include_embeddings;
+-        filter.include_output = config.include_output;
+-        skippy_graph_set_filter(filter);
+-    }
+     g_skippy_external_decode_session = session;
+ 
+     return skippy_success(out_error);
+@@ -233,7 +222,6 @@ enum skippy_status skippy_session_end_external_decode(
+         g_skippy_external_decode_session = nullptr;
+     }
+     skippy_mark_context_work_pending(session->stage_model);
+-    skippy_graph_clear_filter();
+     return skippy_success(out_error);
+ }
+ 
+diff --git a/src/skippy/speculative_decoding.cpp b/src/skippy/speculative_decoding.cpp
+index 00ad16493..88b3ba0a0 100644
+--- a/src/skippy/speculative_decoding.cpp
++++ b/src/skippy/speculative_decoding.cpp
+@@ -1,7 +1,7 @@
+ #include "skippy/speculative_decoding.h"
+ #include "skippy/environment.h"
+ #include "skippy/errors.h"
+-#include "skippy/graph_filter_scope.h"
++#include "skippy/graph_build_inputs.h"
+ #include "skippy/runtime_support.h"
+ #include "skippy/runtime_types.h"
+ #include "skippy/sampling_internal.h"
+@@ -107,27 +107,6 @@ static bool skippy_mtp_shares_target_memory(
+     return llama_get_model(mtp_ctx)->arch != LLM_ARCH_INKLING;
+ }
+ 
+-struct skippy_mtp_embeddings_scope {
+-    skippy_mtp_embeddings_scope(
+-            const float * values,
+-            uint32_t token_count,
+-            uint32_t n_embd,
+-            llama_pos pos_start) {
+-        if (values != nullptr) {
+-            skippy_graph_set_mtp_embeddings({ values, token_count, n_embd, pos_start });
+-            enabled = true;
+-        }
+-    }
+-
+-    ~skippy_mtp_embeddings_scope() {
+-        if (enabled) {
+-            skippy_graph_clear_mtp_embeddings();
+-        }
+-    }
+-
+-    bool enabled = false;
+-};
+-
+ enum skippy_status skippy_mtp_sync_target_inputs(
+         skippy_session * session,
+         const llama_token * token_ids,
+@@ -270,7 +249,10 @@ enum skippy_status skippy_mtp_sync_target_inputs(
+         const uint32_t sync_depth_count = chain_heads ? mtp_depth_scope.depth_count : 1;
+         const float * mtp_embeddings = input_embeddings != nullptr ?
+                 input_embeddings + first_index*static_cast<size_t>(n_embd) : nullptr;
+-        skippy_mtp_embeddings_scope mtp_embeddings_scope(
++        skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
++                &session->stage_model->config);
++        skippy_graph_build_inputs_set_mtp_embeddings(
++                graph_build_inputs,
+                 mtp_embeddings,
+                 static_cast<uint32_t>(n_decode),
+                 static_cast<uint32_t>(n_embd),
+@@ -283,10 +265,7 @@ enum skippy_status skippy_mtp_sync_target_inputs(
+                 mtp_depth_scope.select(depth);
+             }
+ 
+-            {
+-                skippy_graph_filter_scope graph_filter_scope(&session->stage_model->config);
+-                rc = llama_decode(mtp_ctx, batch);
+-            }
++            rc = mtp_ctx->decode(batch, graph_build_inputs);
+             if (rc != 0) {
+                 session->mtp_prefix_valid = false;
+             }
+@@ -382,6 +361,14 @@ int skippy_external_decode_observe(llama_context * ctx, const llama_batch & batc
+     return -1;
+ }
+ 
++skippy_graph_build_inputs skippy_external_decode_build_inputs(llama_context * ctx) {
++    skippy_session * session = g_skippy_external_decode_session;
++    if (session == nullptr || ctx != session->ctx || session->stage_model == nullptr) {
++        return {};
++    }
++    return skippy_graph_build_inputs_from_config(&session->stage_model->config);
++}
++
+ enum skippy_status skippy_mtp_propose_next(
+         skippy_session * session,
+         llama_token predicted_token,
+@@ -460,11 +447,9 @@ enum skippy_status skippy_mtp_propose_next(
+             }
+             mtp_depth_scope.select(depth);
+             const int64_t t_start_us = ggml_time_us();
+-            int32_t rc = 0;
+-            {
+-                skippy_graph_filter_scope graph_filter_scope(&session->stage_model->config);
+-                rc = llama_decode(mtp_ctx, batch);
+-            }
++            const skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
++                    &session->stage_model->config);
++            const int32_t rc = mtp_ctx->decode(batch, graph_build_inputs);
+             elapsed_us += ggml_time_us() - t_start_us;
+             if (rc != 0) {
+                 std::free(batch.token);
+@@ -525,8 +510,9 @@ enum skippy_status skippy_mtp_propose_next(
+             };
+ 
+             const int64_t t_start_us = ggml_time_us();
+-            skippy_graph_filter_scope graph_filter_scope(&session->stage_model->config);
+-            const int32_t rc = llama_decode(mtp_ctx, batch);
++            const skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(
++                    &session->stage_model->config);
++            const int32_t rc = mtp_ctx->decode(batch, graph_build_inputs);
+             elapsed_us += ggml_time_us() - t_start_us;
+             if (rc != 0) {
+                 skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "llama_decode failed for MTP sidecar proposal");
+diff --git a/src/skippy/tests/graph_build_inputs.cpp b/src/skippy/tests/graph_build_inputs.cpp
+new file mode 100644
+index 000000000..bfea3d5ca
+--- /dev/null
++++ b/src/skippy/tests/graph_build_inputs.cpp
+@@ -0,0 +1,320 @@
++#include "llama-context.h"
++#include "llama-graph.h"
++#include "llama-memory.h"
++#include "llama-model.h"
++#include "llama.h"
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <thread>
++#include <vector>
++
++class recording_input final : public llm_graph_input_i {
++public:
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override {
++        observed = inputs;
++        set_count++;
++    }
++
++    void set_input(const llama_ubatch *) override {
++        input_count++;
++    }
++
++    skippy_graph_build_inputs observed;
++    uint32_t set_count = 0;
++    uint32_t input_count = 0;
++};
++
++static skippy_graph_build_inputs make_inputs(uint32_t id) {
++    skippy_graph_build_inputs inputs;
++    inputs.filter.enabled = true;
++    inputs.filter.layer_start = static_cast<int32_t>(id);
++    inputs.filter.layer_end = static_cast<int32_t>(id + 3);
++    inputs.filter.include_embeddings = id % 2 == 0;
++    inputs.filter.include_output = id % 3 == 0;
++    inputs.filter.glm_dsa_policy_profile = static_cast<int32_t>(id + 10);
++    inputs.filter.glm_dsa_policy_flags = id + 20;
++    inputs.filter.glm_dsa_short_prefill_max_tokens = static_cast<int32_t>(id + 30);
++    inputs.filter.glm_dsa_direct_sparse_decode_max_top_k = static_cast<int32_t>(id + 40);
++    inputs.filter.glm_dsa_dense_sparse_mask_max_bytes = id + 50;
++    inputs.filter.glm_dsa_compact_flash_min_kv = static_cast<int32_t>(id + 60);
++    inputs.filter.glm_dsa_phase_hint = static_cast<int32_t>(id % 4);
++    inputs.activation_tokens.tokens = reinterpret_cast<const llama_token *>(static_cast<uintptr_t>(id + 1));
++    inputs.activation_tokens.token_count = id + 2;
++    inputs.rwkv7_v_first.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 3));
++    inputs.rwkv7_v_first.token_count = id + 4;
++    inputs.rwkv7_v_first.n_embd = id + 5;
++    inputs.gemma3n_altup.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 6));
++    inputs.gemma3n_altup.token_count = id + 7;
++    inputs.gemma3n_altup.n_embd = id + 8;
++    inputs.gemma3n_altup.n_altup = id + 9;
++    inputs.qwen4exp_hc.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 10));
++    inputs.qwen4exp_hc.token_count = id + 11;
++    inputs.qwen4exp_hc.n_embd = id + 12;
++    inputs.qwen4exp_hc.n_hc = id + 13;
++    inputs.glm_dsa_top_k.values = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(id + 14));
++    inputs.glm_dsa_top_k.token_count = id + 15;
++    inputs.glm_dsa_top_k.n_top_k = id + 16;
++    inputs.glm_dsa_top_k.n_stream = id + 17;
++    inputs.glm_dsa_top_k.pos_start = static_cast<llama_pos>(id + 18);
++    inputs.mtp_embeddings.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 19));
++    inputs.mtp_embeddings.token_count = id + 20;
++    inputs.mtp_embeddings.n_embd = id + 21;
++    inputs.mtp_embeddings.pos_start = static_cast<llama_pos>(id + 22);
++    return inputs;
++}
++
++static bool matches(const skippy_graph_build_inputs & inputs, uint32_t id) {
++    const auto expected = make_inputs(id);
++    return inputs.filter.enabled == expected.filter.enabled &&
++           inputs.filter.layer_start == expected.filter.layer_start &&
++           inputs.filter.layer_end == expected.filter.layer_end &&
++           inputs.activation_tokens.tokens == expected.activation_tokens.tokens &&
++           inputs.activation_tokens.token_count == expected.activation_tokens.token_count &&
++           inputs.rwkv7_v_first.values == expected.rwkv7_v_first.values &&
++           inputs.gemma3n_altup.values == expected.gemma3n_altup.values &&
++           inputs.qwen4exp_hc.values == expected.qwen4exp_hc.values &&
++           inputs.glm_dsa_top_k.values == expected.glm_dsa_top_k.values &&
++           inputs.mtp_embeddings.values == expected.mtp_embeddings.values;
++}
++
++static int check_sequential_and_nested_lifetimes() {
++    llm_graph_result outer(64);
++    auto outer_input = std::make_unique<recording_input>();
++    auto * outer_observer = outer_input.get();
++    outer.add_input(std::move(outer_input));
++    outer.set_inputs(nullptr, make_inputs(7));
++    if (!matches(outer.get_build_inputs(), 7) || !matches(outer_observer->observed, 7)) {
++        return 1;
++    }
++
++    {
++        llm_graph_result inner(64);
++        inner.set_inputs(nullptr, make_inputs(23));
++        if (!matches(inner.get_build_inputs(), 23) || !matches(outer.get_build_inputs(), 7)) {
++            return 2;
++        }
++    }
++
++    outer.set_inputs(nullptr, make_inputs(11));
++    if (!matches(outer.get_build_inputs(), 11) || !matches(outer_observer->observed, 11) ||
++            outer_observer->set_count != 2 || outer_observer->input_count != 2) {
++        return 3;
++    }
++
++    outer.reset();
++    if (outer.get_build_inputs().filter.enabled || outer.get_build_inputs().activation_tokens.tokens != nullptr) {
++        return 4;
++    }
++    return 0;
++}
++
++static int check_topology_reuse_guards() {
++    auto base = make_inputs(31);
++    auto changed_pointer = base;
++    changed_pointer.activation_tokens.tokens = reinterpret_cast<const llama_token *>(static_cast<uintptr_t>(999));
++    if (!base.topology_equal(changed_pointer)) {
++        return 5;
++    }
++
++    auto changed_filter = base;
++    changed_filter.filter.layer_end++;
++    if (base.topology_equal(changed_filter)) {
++        return 6;
++    }
++
++    auto removed_sideband = base;
++    removed_sideband.glm_dsa_top_k.values = nullptr;
++    if (base.topology_equal(removed_sideband)) {
++        return 7;
++    }
++
++    auto changed_shape = base;
++    changed_shape.mtp_embeddings.n_embd++;
++    if (base.topology_equal(changed_shape)) {
++        return 8;
++    }
++    return 0;
++}
++
++static int check_concurrent_builds() {
++    constexpr uint32_t thread_count = 12;
++    constexpr uint32_t iterations = 200;
++    std::atomic<uint32_t> ready { 0 };
++    std::atomic<bool> start { false };
++    std::atomic<bool> failed { false };
++    std::vector<std::thread> threads;
++    threads.reserve(thread_count);
++
++    for (uint32_t thread_id = 0; thread_id < thread_count; ++thread_id) {
++        threads.emplace_back([&, thread_id] {
++            llm_graph_result result(64);
++            auto input = std::make_unique<recording_input>();
++            auto * observer = input.get();
++            result.add_input(std::move(input));
++            ready.fetch_add(1, std::memory_order_release);
++            while (!start.load(std::memory_order_acquire)) {
++                std::this_thread::yield();
++            }
++            for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
++                const uint32_t id = thread_id*iterations + iteration + 1;
++                result.set_inputs(nullptr, make_inputs(id));
++                if (!matches(result.get_build_inputs(), id) || !matches(observer->observed, id)) {
++                    failed.store(true, std::memory_order_release);
++                    return;
++                }
++            }
++        });
++    }
++
++    while (ready.load(std::memory_order_acquire) != thread_count) {
++        std::this_thread::yield();
++    }
++    start.store(true, std::memory_order_release);
++    for (auto & thread : threads) {
++        thread.join();
++    }
++    return failed.load(std::memory_order_acquire) ? 9 : 0;
++}
++
++static skippy_graph_build_inputs make_stage_inputs(
++        int32_t layer_start,
++        int32_t layer_end,
++        bool include_embeddings,
++        bool include_output) {
++    skippy_graph_build_inputs inputs;
++    inputs.filter.enabled = true;
++    inputs.filter.layer_start = layer_start;
++    inputs.filter.layer_end = layer_end;
++    inputs.filter.include_embeddings = include_embeddings;
++    inputs.filter.include_output = include_output;
++    return inputs;
++}
++
++static llama_context_params make_context_params(uint32_t n_seq_max) {
++    llama_context_params params = llama_context_default_params();
++    params.n_ctx = 32;
++    params.n_batch = 8;
++    params.n_ubatch = 8;
++    params.n_seq_max = n_seq_max;
++    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    return params;
++}
++
++static llama_model * load_model(const char * path) {
++    llama_model_params params = llama_model_default_params();
++    params.n_gpu_layers = 0;
++    return llama_model_load_from_file(path, params);
++}
++
++static int check_sched_reserve_and_memory_update(const char * model_path) {
++    llama_model * model = load_model(model_path);
++    if (model == nullptr || llama_model_n_layer(model) < 2) {
++        llama_model_free(model);
++        return 10;
++    }
++
++    const auto startup = make_stage_inputs(0, llama_model_n_layer(model), true, true);
++    const auto reserve_inputs = make_stage_inputs(0, 1, true, false);
++    const auto update_inputs = make_stage_inputs(1, 2, false, true);
++    if (startup.topology_equal(reserve_inputs) || startup.topology_equal(update_inputs)) {
++        llama_model_free(model);
++        return 11;
++    }
++
++    llama_context * context = llama_init_from_model_with_graph_inputs(
++            model, make_context_params(2), startup);
++    if (context == nullptr) {
++        llama_model_free(model);
++        return 12;
++    }
++
++    context->set_causal_attn(false);
++    context->sched_reserve(reserve_inputs);
++    const auto * reserve_result = context->get_gf_res_reserve();
++    if (!reserve_result->get_build_inputs().topology_equal(reserve_inputs) ||
++            reserve_result->get_block_boundaries().size() != 2) {
++        llama_free(context);
++        llama_model_free(model);
++        return 13;
++    }
++
++    llama_memory_t memory = llama_get_memory(context);
++    if (memory == nullptr) {
++        llama_free(context);
++        llama_model_free(model);
++        return 14;
++    }
++    memory->seq_cp(0, 1, -1, -1);
++    if (!context->memory_update(false, update_inputs)) {
++        llama_free(context);
++        llama_model_free(model);
++        return 15;
++    }
++    const auto * update_result = context->get_gf_res_reserve();
++    if (!update_result->get_build_inputs().topology_equal(update_inputs) ||
++            update_result->get_block_boundaries().size() != 2) {
++        llama_free(context);
++        llama_model_free(model);
++        return 16;
++    }
++
++    llama_free(context);
++    llama_model_free(model);
++    return 0;
++}
++
++static int check_decode_encode_fallback(const char * model_path) {
++    llama_model * model = load_model(model_path);
++    if (model == nullptr) {
++        return 17;
++    }
++    const skippy_graph_build_inputs startup;
++    const auto per_call = make_stage_inputs(0, llama_model_n_layer(model), true, true);
++    llama_context * context = llama_init_from_model_with_graph_inputs(
++            model, make_context_params(1), startup);
++    if (context == nullptr || llama_get_memory(context) != nullptr) {
++        llama_free(context);
++        llama_model_free(model);
++        return 18;
++    }
++
++    llama_token token = 1;
++    llama_batch batch = llama_batch_get_one(&token, 1);
++    context->set_causal_attn(!context->get_cparams().causal_attn);
++    const int rc = context->decode(batch, per_call);
++    if (rc != 0 ||
++            !context->get_gf_res_reserve()->get_build_inputs().topology_equal(per_call) ||
++            !context->get_gf_res_prev()->get_build_inputs().topology_equal(per_call)) {
++        llama_free(context);
++        llama_model_free(model);
++        return 19;
++    }
++
++    llama_free(context);
++    llama_model_free(model);
++    return 0;
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 3) {
++        return 64;
++    }
++    if (const int rc = check_sequential_and_nested_lifetimes()) {
++        return rc;
++    }
++    if (const int rc = check_topology_reuse_guards()) {
++        return rc;
++    }
++    if (const int rc = check_concurrent_builds()) {
++        return rc;
++    }
++    llama_backend_init();
++    int rc = check_sched_reserve_and_memory_update(argv[1]);
++    if (rc == 0) {
++        rc = check_decode_encode_fallback(argv[2]);
++    }
++    llama_backend_free();
++    return rc;
++}
+diff --git a/src/skippy/verification.cpp b/src/skippy/verification.cpp
+index cce5baa4f..b91d87021 100644
+--- a/src/skippy/verification.cpp
++++ b/src/skippy/verification.cpp
+@@ -1,10 +1,8 @@
+ #include "skippy.h"
+ #include "skippy/activation_internal.h"
+-#include "skippy/activation_scopes.h"
+ #include "skippy/errors.h"
+ #include "skippy/environment.h"
+ #include "skippy/glm_dsa.h"
+-#include "skippy/graph_filter_scope.h"
+ #include "skippy-verify-checkpoint.h"
+ #include "skippy/devices.h"
+ 
+-- 
+2.54.0 (Apple Git-157)
+
