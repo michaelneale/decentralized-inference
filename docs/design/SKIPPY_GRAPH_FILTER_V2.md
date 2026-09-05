@@ -455,13 +455,18 @@ model-package v2 sources where those paths are supported.
 
 ### Mic Studio full-registry acceptance gate
 
-Final acceptance requires an explicit `manual-full` llama canary run on the
-trusted Mic Studio `family-certify` runner. The accepted model count is not a
-number copied into this document: it is the complete set of certified model
-profiles generated from `ci/model-artifacts/registry.json` into
-`ci/llama-canary/family-certified.json` at the candidate commit. That set is 33
-profiles when this plan is written, and it may grow before implementation
-lands.
+Extend the existing `.github/workflows/llama-upstream-canary.yml`; do not create
+a second graph-filter canary workflow, roster, or orchestration path. The
+existing `ci/model-artifacts/registry.json` source and generated
+`ci/llama-canary/family-certified.json` policy remain authoritative. This is a
+harness, matrix, and reconciliation expansion inside the existing canary.
+
+Final acceptance requires a green full-registry `manual-full` or `llama-bump`
+execution on the trusted Mic Studio `family-certify` runner at the candidate
+commit. The accepted model count is not a number copied into this document: it
+is the complete set of certified model profiles generated from the authoritative
+registry at that commit. That set is 33 profiles when this plan is written, and
+it may grow before implementation lands.
 
 The acceptance plan must be immutable and digest-bound to the candidate source
 commit, package-v2 corpus, llama.cpp pin, generated family policy, frozen
@@ -493,8 +498,10 @@ changed through a separately reviewed product decision.
 Upload the plan, plan digest, runner identity, immutable model manifests,
 package-v2 manifests, frozen support matrix, per-cut outcomes,
 dependency-closure comparisons, boundary descriptors, and logs even when the
-run fails. The bounded nightly cadence remains useful for routine detection,
-but it cannot substitute for this full-registry Mic Studio acceptance run.
+run fails. The existing four-profile `nightly` cadence remains a fast routine
+regression signal with its current bounded scope; it is not release or cutover
+acceptance and cannot substitute for a full `manual-full` or `llama-bump` Mic
+Studio run.
 
 ### Required repository validation
 
@@ -522,7 +529,7 @@ boundary identity/schema.
 | A. Native graph contract and partitioner | Workstreams 2–4: end-to-end feasibility proof, block/effect/alias annotations, guarded profiles, complete frontier liveness, and the pure partitioner | Critical path. Keep annotations and slicing under one design owner until their contract is proven. |
 | B. Package v2 and conversion | Workstream 1: catalog/schema, writer/reader, independent source-inventory proof, integrity checks, and malformed-package tests | Schema work can begin with A and implementation can proceed independently after the minimal catalog contract is agreed. |
 | C. Realization and host admission | Workstream 5 plus the native ABI portion of Workstream 6: selected-weight allocation, runtime contract checks, realized descriptor/FFI, neighboring-stage validation, and readiness | May scaffold against contract fixtures; integration requires A and B. Native reports local facts and the host validates composed topology. |
-| D. Independent acceptance harness | Workstreams 0 and 8: frozen support baseline, complete Mic Studio roster, plan/execution reconciliation, unsplit oracle, multi-stage/state/negative tests, and resource evidence | Baseline and harness work can start with A. Final acceptance consumes A, B, C, and E where required. The expected-support set must remain independent of planner rejection results. |
+| D. Independent acceptance harness | Workstreams 0 and 8: frozen support baseline, expansion of the existing canary harness, complete Mic Studio roster, plan/execution reconciliation, unsplit oracle, multi-stage/state/negative tests, and resource evidence | Baseline and harness work can start with A. Final acceptance consumes A, B, C, and E where required. The expected-support set must remain independent of planner rejection results, and no second canary orchestration or roster is introduced. |
 | E. Boundary transport | Network portion of Workstream 6: generation-7 representability, typed bundles, semantic ids, shape constraints, bounded framing, and negotiation | Proceeds after boundary-contract agreement and coordinates with existing activation-plane work. Required before cutover for any baseline obligation that needs it. |
 
 The integration owner owns Workstream 7, serializes shared llama.cpp patch-queue
@@ -542,7 +549,8 @@ Deliver as reviewable, independently gated changes rather than one giant patch:
 5. Lane C integrates exact realization, native reporting, and host admission.
 6. Run shadow diagnostics without treating old behavior as the oracle.
 7. Complete cross-family execution rollout, every-cut certification, and the
-   full Mic Studio acceptance run.
+   existing canary's full `manual-full`/`llama-bump` Mic Studio acceptance
+   path.
 8. Rebuild or independently certify and convert the production package corpus.
 9. Land Lane E before cutover when any frozen baseline boundary requires it.
 10. The integration owner deletes the old stage filter and family policy, then
@@ -654,6 +662,9 @@ Approval is requested for these decisions:
       cross-family every-cut gate passes.
 - [ ] Acceptance reconciles an independently frozen support matrix so the new
       planner cannot pass by rejecting previously supported models or cuts.
+- [ ] The existing llama canary and registry remain the sole orchestration and
+      roster; full `manual-full`/`llama-bump` runs block release and cutover,
+      while the bounded nightly cadence remains non-acceptance coverage.
 - [ ] The work is split across lanes A–E with one integration owner and three
       shared contracts.
 
