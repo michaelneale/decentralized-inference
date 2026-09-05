@@ -422,6 +422,11 @@ no release in which v1 and v2 serving paths coexist.
    - stage-range branches and stage-boundary early returns from model builders;
    - development shadow mode, v1 package acceptance, and every runtime selector
      for the old path.
+9. Recreate the durable llama.cpp patch queue from the pinned upstream before
+   cutover. Fold transitional corrections into their capability-owning patches,
+   remove obsolete filter and diagnostic patches, preserve unique contiguous
+   numbering, and prove a fresh replay. Do not append a terminal cleanup patch
+   that leaves the obsolete implementation in earlier queue history.
 
 Rollback is an explicit deployment rollback to the previous binary and v1
 package corpus. It is not a runtime toggle, mixed-fleet compatibility promise,
@@ -884,6 +889,9 @@ Approval is requested for these decisions:
       before cutover if a frozen baseline obligation requires it.
 - [ ] Old split logic is deleted only after shadow comparison and the full
       cross-family every-cut gate passes.
+- [ ] The final llama.cpp patch queue is recreated from the pinned upstream,
+      contains no obsolete stage-filter implementation, and passes a fresh
+      full replay and validation run.
 - [ ] Acceptance reconciles an independently frozen support matrix so the new
       planner cannot pass by rejecting previously supported models or cuts.
 - [ ] The existing llama canary and registry remain the sole orchestration and
