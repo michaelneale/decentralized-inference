@@ -12,6 +12,7 @@ mod materialization;
 pub(crate) mod metal_pipeline_cache;
 mod package;
 mod resolver;
+pub(crate) mod runtime_events;
 mod stage;
 mod topology;
 
@@ -583,7 +584,9 @@ fn embedded_openai_args_from(
         telemetry,
         hook_policy,
         generation_receipt: serving_hooks.generation_receipt(),
+        generation_lifecycle: serving_hooks.generation_lifecycle(),
         linear_proposal_ingress: serving_hooks.linear_proposal_ingress(),
+        kv_lifecycle_observer: serving_hooks.kv_lifecycle_observer(),
         openai_guardrails: None,
     })
 }
@@ -592,15 +595,30 @@ fn resolve_serving_hooks(
     factory: Option<&SharedModelServingHooksFactory>,
     runtime: &SkippyRuntimeHandle,
 ) -> Result<ModelServingHooks> {
-    let Some(factory) = factory else {
-        return Ok(ModelServingHooks::default());
+    let runtime_event_sink: Arc<dyn skippy_server::frontend::GenerationLifecycleIngress> =
+        Arc::new(runtime_events::SkippyGenerationRuntimeEventAdapter::new());
+    let kv_observer: Arc<dyn skippy_server::kv_integration::KvLifecycleObserver> =
+        Arc::new(runtime_events::SkippyKvRuntimeEventObserver::new());
+    let hooks = match factory {
+        None => lifecycle_only_serving_hooks(runtime_event_sink),
+        Some(factory) => {
+            let tokenizer = runtime
+                .tokenizer_capability()
+                .context("loaded Skippy runtime cannot provide its tokenizer capability")?;
+            factory
+                .create(tokenizer, Some(runtime_event_sink))
+                .context("product-neutral serving hook factory rejected the loaded model")?
+        }
     };
-    let tokenizer = runtime
-        .tokenizer_capability()
-        .context("loaded Skippy runtime cannot provide its tokenizer capability")?;
-    factory
-        .create(tokenizer)
-        .context("product-neutral serving hook factory rejected the loaded model")
+    Ok(hooks.with_kv_lifecycle_observer(kv_observer))
+}
+
+fn lifecycle_only_serving_hooks(
+    runtime_event_sink: Arc<dyn skippy_server::frontend::GenerationLifecycleIngress>,
+) -> ModelServingHooks {
+    ModelServingHooks::default().with_generation_lifecycle(
+        skippy_server::frontend::GenerationLifecycleConfig::from_ingress(runtime_event_sink),
+    )
 }
 
 struct NativeSkippyStartupAudit {
@@ -667,6 +685,8 @@ impl SkippyModelHandle {
                 .as_ref()
                 .and_then(|args| args.native_mtp_draft_model_path.as_deref()),
         );
+        let session_observer: Arc<dyn skippy_server::runtime_state::SessionLifecycleObserver> =
+            Arc::new(runtime_events::SkippySessionRuntimeEventObserver::new());
         let runtime = SkippyRuntimeHandle::load(EmbeddedRuntimeOptions {
             config: stage_config.clone(),
             topology: None,
@@ -676,6 +696,8 @@ impl SkippyModelHandle {
             metrics_otlp_grpc: options.telemetry.metrics_otlp_grpc.clone(),
             telemetry_queue_capacity: options.telemetry.queue_capacity,
             telemetry_level: options.telemetry.level,
+            operation_id: None,
+            session_lifecycle_observer: Some(session_observer),
         })
         .with_context(|| {
             format!(
@@ -748,6 +770,17 @@ impl SkippyModelHandle {
                 .as_ref()
                 .and_then(|args| args.native_mtp_draft_model_path.as_deref()),
         );
+        // Task 9: minted at this host call site (not inside skippy-server
+        // or skippy-runtime) so the identity is host-assigned at the point
+        // the host initiates a model-open-with-events call. Full
+        // correlation with this call's `LoadOperation` child reservation
+        // (in `runtime/model_lifecycle/events.rs`) would require threading
+        // that `ChildOperationId` through `LocalRuntimeModelStartSpec` and
+        // `SkippyModelLoadOptions` -- not done this round, see
+        // decisions.md for why.
+        let operation_id = skippy_runtime::next_operation_id();
+        let session_observer: Arc<dyn skippy_server::runtime_state::SessionLifecycleObserver> =
+            Arc::new(runtime_events::SkippySessionRuntimeEventObserver::new());
         let runtime = SkippyRuntimeHandle::load_with_open_events(
             EmbeddedRuntimeOptions {
                 config: stage_config.clone(),
@@ -758,6 +791,8 @@ impl SkippyModelHandle {
                 metrics_otlp_grpc: options.telemetry.metrics_otlp_grpc.clone(),
                 telemetry_queue_capacity: options.telemetry.queue_capacity,
                 telemetry_level: options.telemetry.level,
+                operation_id: Some(operation_id),
+                session_lifecycle_observer: Some(session_observer),
             },
             model_open_event_reporter,
         )
@@ -854,6 +889,8 @@ impl SkippyModelHandle {
             config.native_mtp_enabled,
             embedded_args.native_mtp_draft_model_path.as_deref(),
         );
+        let session_observer: Arc<dyn skippy_server::runtime_state::SessionLifecycleObserver> =
+            Arc::new(runtime_events::SkippySessionRuntimeEventObserver::new());
         Self::load_stage0_runtime_options_with_openai_args(
             EmbeddedRuntimeOptions {
                 config,
@@ -864,6 +901,8 @@ impl SkippyModelHandle {
                 metrics_otlp_grpc: telemetry.metrics_otlp_grpc.clone(),
                 telemetry_queue_capacity: telemetry.queue_capacity,
                 telemetry_level: telemetry.level,
+                operation_id: None,
+                session_lifecycle_observer: Some(session_observer),
             },
             embedded_args,
             hook_policy,
@@ -1074,8 +1113,9 @@ impl SkippyModelHandle {
             .runtime
             .tokenizer_capability()
             .context("loaded Skippy runtime cannot provide its stage-0 tokenizer capability")?;
-        let lifecycle_observer =
-            crate::logging_runtime_state().and_then(|state| state.openai_lifecycle_observer());
+        let lifecycle_observer = crate::network::openai::runtime_events::compose_lifecycle_observer(
+            crate::logging_runtime_state().and_then(|state| state.openai_lifecycle_observer()),
+        );
         let server = skippy_server::start_openai_backend_with_tokenizer_and_lifecycle_observer(
             bind_addr,
             self.backend(),
@@ -1424,6 +1464,16 @@ mod tests {
     use serde_json::json;
     use skippy_server::runtime_state::RuntimeSessionStats;
     use skippy_server::telemetry::TelemetryStats;
+
+    #[test]
+    fn lifecycle_only_hooks_leave_exact_receipts_unset() {
+        let ingress: Arc<dyn skippy_server::frontend::GenerationLifecycleIngress> =
+            Arc::new(runtime_events::SkippyGenerationRuntimeEventAdapter::new());
+        let hooks = lifecycle_only_serving_hooks(ingress);
+
+        assert!(hooks.generation_lifecycle().is_some());
+        assert!(hooks.generation_receipt().is_none());
+    }
 
     #[test]
     fn benchmark_wire_delay_accepts_finite_non_negative_values() {

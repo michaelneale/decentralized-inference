@@ -1,0 +1,61 @@
+{
+  "$schema_note": "Rust and TypeScript both consume this file for /api/runtime/events/v1 wire encoding. Consumed by mesh-llm-host-runtime's api::routes::runtime_events::runtime_event_api_tests round-trip test.",
+  "version": 1,
+  "event_names": [
+    "runtime_state",
+    "runtime_event",
+    "runtime_health",
+    "runtime_replay_gap"
+  ],
+  "required_envelope_keys": [
+    "version",
+    "cursor",
+    "process_instance_id",
+    "sequence",
+    "rebuild_generation"
+  ],
+  "per_event_required_keys": {
+    "runtime_state": ["state"],
+    "runtime_event": ["event"],
+    "runtime_health": ["health"],
+    "runtime_replay_gap": ["requested_cursor", "reason"]
+  },
+  "state_top_level_keys": [
+    "node",
+    "models",
+    "stages",
+    "sessions",
+    "requests",
+    "devices",
+    "cache"
+  ],
+  "event_projected_key_allowlist": [
+    "category",
+    "kind",
+    "producer",
+    "severity",
+    "wall_clock_unix_ns",
+    "process_monotonic_ns",
+    "native_monotonic_ns",
+    "native_sequence",
+    "summary",
+    "scope",
+    "state",
+    "progress",
+    "outcome",
+    "reason_code",
+    "duration_ms",
+    "numeric_summaries",
+    "operation"
+  ],
+  "replay_gap_reasons": ["stale_instance", "evicted"],
+  "keepalive_frame": ": keepalive\n\n",
+  "frame_grammar": "id: <cursor>\\nevent: <name>\\ndata: <single-line canonical JSON>\\n\\n",
+  "sample_frames_note": "Task 7 (`.omo/plans/event-system-fixes.md`): one byte-exact canonical sample per frame type, generated from fixed deterministic inputs (see mesh-llm-host-runtime's runtime_event_api_tests::sample_frames_fixture_is_byte_exact_for_every_frame_type, which is the Rust round-trip test consuming this key) and parsed identically by use-runtime-events-v1.test.tsx on the TypeScript side.",
+  "sample_frames": {
+    "runtime_state": "id: rt1:0195f000-0000-7000-8000-000000000001:0\nevent: runtime_state\ndata: {\"version\":1,\"cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:0\",\"process_instance_id\":\"0195f000-0000-7000-8000-000000000001\",\"sequence\":0,\"rebuild_generation\":0,\"state\":{\"node\":{\"rebuild_generation\":0,\"tracked_operation_count\":0},\"models\":[],\"stages\":[],\"sessions\":{\"active_count\":0,\"recent\":[]},\"requests\":[],\"devices\":[],\"cache\":{}}}\n\n",
+    "runtime_event": "id: rt1:0195f000-0000-7000-8000-000000000001:1\nevent: runtime_event\ndata: {\"version\":1,\"cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:1\",\"process_instance_id\":\"0195f000-0000-7000-8000-000000000001\",\"sequence\":1,\"rebuild_generation\":0,\"event\":{\"category\":\"request\",\"kind\":\"request_completed\",\"producer\":\"rust\",\"severity\":\"info\",\"operation\":{\"root\":\"0195f000-0000-7000-8000-0000000000aa\",\"child\":\"0195f000-0000-7000-8000-0000000000bb\"},\"scope\":{\"request_id\":\"0195f000-0000-7000-8000-0000000000aa\"},\"outcome\":\"success\"}}\n\n",
+    "runtime_health": "id: rt1:0195f000-0000-7000-8000-000000000001:0\nevent: runtime_health\ndata: {\"version\":1,\"cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:0\",\"process_instance_id\":\"0195f000-0000-7000-8000-000000000001\",\"sequence\":0,\"rebuild_generation\":0,\"health\":{\"version\":0,\"rebuild_generation\":0,\"reservation_exhausted\":0,\"terminal_delivery_failed\":0,\"dropped_progress\":0,\"dropped_diagnostic\":0,\"replay_evicted\":0,\"subscriber_disconnected\":0,\"shutdown_degraded\":0,\"reducer_rejected\":0,\"state_transition_rejected\":0,\"cancelled_reservation_rejected\":0,\"state_degraded\":false,\"rebuild_required\":false,\"bounds\":{\"reservation_table_capacity\":3136,\"state_transition_lane_depth\":4096,\"diagnostic_lane_depth\":2048,\"wake_list_depth\":3136,\"replay_max_frames\":4096,\"subscriber_lag_max_frames\":1024,\"max_concurrent_subscribers\":32},\"ingress_p99_us\":null}}\n\n",
+    "runtime_replay_gap": "id: rt1:0195f000-0000-7000-8000-000000000001:20\nevent: runtime_replay_gap\ndata: {\"version\":1,\"cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:20\",\"process_instance_id\":\"0195f000-0000-7000-8000-000000000001\",\"sequence\":20,\"rebuild_generation\":0,\"requested_cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:5\",\"reason\":\"evicted\",\"oldest_available_cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:10\",\"latest_cursor\":\"rt1:0195f000-0000-7000-8000-000000000001:20\"}\n\n"
+  }
+}

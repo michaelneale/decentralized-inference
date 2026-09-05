@@ -8,7 +8,8 @@ use mesh_llm_config::{
     PluginDisabledWritePolicy, PluginNumericControl, PluginObjectPropertySchema,
     PluginOptionsSource, PluginSchemaAvailability, PluginSettingConstraint, PluginSettingSchema,
     PluginTextFormat, PluginValueKind, PluginValueSchema, SUPPORTED_PLUGIN_CONFIG_SCHEMA_VERSION,
-    config_path, validate_config_diagnostics_with_plugin_schemas,
+    apply_env_overrides, config_path, parse_config_toml_structural,
+    validate_config_diagnostics_with_plugin_schemas,
 };
 use mesh_llm_plugin_manager::{
     InstalledPluginConditionOperator, InstalledPluginConditionValue,
@@ -55,8 +56,9 @@ fn validate_config_file(override_path: Option<&Path>) -> Result<ConfigFileValida
     }
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read config {}", path.display()))?;
-    let config: MeshConfig =
-        toml::from_str(&raw).with_context(|| format!("Invalid config {}", path.display()))?;
+    let mut config: MeshConfig = parse_config_toml_structural(&raw)
+        .with_context(|| format!("Invalid config {}", path.display()))?;
+    apply_env_overrides(&mut config)?;
     let diagnostics =
         validate_config_diagnostics_with_plugin_schemas(&config, Some(&raw), plugin_schema);
     Ok(ConfigFileValidation { path, diagnostics })
@@ -670,6 +672,43 @@ mod tests {
             signatures_from_report(&report),
             expected_signatures(INVALID_FIXTURE)
         );
+    }
+
+    #[test]
+    fn config_validate_file_reports_diagnostics_for_semantically_invalid_file_without_hard_erroring()
+     {
+        let (_dir, path) = write_fixture_file(INVALID_FIXTURE);
+
+        let validation = validate_config_file(Some(path.as_path())).expect(
+            "a semantically invalid but structurally valid config file must deserialize and \
+             report diagnostics through validate_config_file, never hard-error \
+             (regression guard for e4a759975, which routed this path through the \
+             hard-failing mesh_llm_config::load_config)",
+        );
+
+        assert!(
+            !validation.diagnostics.is_empty(),
+            "the invalid fixture must produce a non-empty diagnostics list"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn config_validate_file_still_rejects_invalid_lifecycle_log_parser_env_override() {
+        let (_dir, path) = write_fixture_file(VALID_FIXTURE);
+
+        let result = mesh_llm_config::with_env_override_for_test(
+            "MESH_LLM_LIFECYCLE_LOG_PARSER",
+            "not-a-real-mode",
+            || validate_config_file(Some(path.as_path())),
+        );
+
+        let err = result.expect_err(
+            "an invalid MESH_LLM_LIFECYCLE_LOG_PARSER value must still fail \
+             `mesh-llm config validate` (Task 17's env-override contract), even though \
+             validate_config_file no longer hard-errors on semantic diagnostics",
+        );
+        assert!(format!("{err:#}").contains("MESH_LLM_LIFECYCLE_LOG_PARSER"));
     }
 
     fn plugin_settings_path(plugin_name: &str) -> ConfigPath {

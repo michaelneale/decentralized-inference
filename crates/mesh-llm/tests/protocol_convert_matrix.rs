@@ -114,6 +114,7 @@ fn minimal_config() -> NodeConfigSnapshot {
         plugins: vec![],
         config_toml: None,
         mesh_requirements: None,
+        lifecycle_log_parser: None,
     }
 }
 

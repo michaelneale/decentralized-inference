@@ -535,6 +535,8 @@ pub struct NodeConfigSnapshot {
     /// round-trip this so \[mesh_requirements\] is not silently dropped.
     #[prost(message, optional, tag = "6")]
     pub mesh_requirements: ::core::option::Option<MeshRequirements>,
+    #[prost(string, optional, tag = "7")]
+    pub lifecycle_log_parser: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NodeGpuConfig {

@@ -42,6 +42,7 @@ fn blocking_plugin_cannot_extend_the_decode_deadline() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     let driver = Arc::clone(&ingress.driver);
@@ -92,6 +93,7 @@ fn slow_commit_abstains_before_plugin_dispatch_and_later_positions_recover() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     ingress
@@ -185,6 +187,7 @@ fn worker_reports_pre_dispatch_deadlines_without_running_the_callback() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     driver
@@ -225,6 +228,7 @@ fn late_candidate_is_reported_and_not_forwarded_to_the_decode() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     wait_for_event(observations.events.as_ref(), "begin");
@@ -257,6 +261,7 @@ fn dropped_proposal_reply_discards_an_on_time_candidate() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     wait_for_event(observations.events.as_ref(), "begin");
@@ -308,6 +313,7 @@ fn lifecycle_ingress_shares_plugin_queue_order_with_proposals() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     ingress
@@ -344,6 +350,7 @@ fn proposal_requires_lifecycle_commits_before_lookup() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         })
         .unwrap();
     active
@@ -388,6 +395,7 @@ fn blocking_commit_cannot_extend_the_proposal_deadline() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     ingress
@@ -447,6 +455,7 @@ fn accepted_proposal_commits_report_and_later_lifecycle_commands_are_ordered_by_
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     wait_for_event(events.as_ref(), "begin");
@@ -591,6 +600,7 @@ fn lifecycle_callback_failure_is_observed_without_poisoning_the_driver() {
             session_id: 9,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
 
@@ -628,6 +638,69 @@ fn generation_abort_bypasses_unhealthy_driver_gate() {
 
     drop(ingress);
     drop(driver);
+    assert_eq!(abort_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn receipt_unavailable_recovers_and_cleans_an_active_generation() {
+    let (active, observations, abort_count) = fake_active_with_observations(Duration::ZERO);
+    let driver = Arc::new(PluginDriver::spawn(active).unwrap());
+    let ingress = NativeLifecycleIngress {
+        driver: Arc::clone(&driver),
+    };
+    ingress
+        .try_submit(GenerationLifecycleObservation::Started(GenerationStart {
+            request_id: 7,
+            session_id: 9,
+            agent_session_id: None,
+            prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
+        }))
+        .unwrap();
+    wait_for_event(observations.as_ref(), "begin");
+
+    let response = driver
+        .propose(LinearProposalQuery::new(
+            7,
+            9,
+            1,
+            1,
+            0,
+            8,
+            Instant::now() + Duration::from_millis(100),
+        ))
+        .unwrap();
+    assert!(
+        response.proposal.is_ok(),
+        "an active generation should accept a proposal query before recovery"
+    );
+
+    ingress.receipt_unavailable(&GenerationAbort {
+        request_id: 7,
+        session_id: 9,
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while abort_count.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the abort callback"
+        );
+        thread::yield_now();
+    }
+
+    let response = driver
+        .propose(LinearProposalQuery::new(
+            7,
+            9,
+            1,
+            1,
+            0,
+            8,
+            Instant::now() + Duration::from_millis(100),
+        ))
+        .unwrap();
+    assert!(response.proposal.is_err());
     assert_eq!(abort_count.load(Ordering::SeqCst), 1);
 }
 
@@ -674,6 +747,7 @@ fn dropping_the_driver_drains_its_backlog_and_shuts_the_plugin_down() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     for generated_token_count in 1..=20 {
@@ -766,6 +840,7 @@ fn a_late_candidate_delivers_its_discard_to_the_plugin() {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         }))
         .unwrap();
     wait_for_event(observations.events.as_ref(), "begin");

@@ -14,6 +14,7 @@ use mesh_llm_events::logging::identifiers::RequestId;
 #[cfg(test)]
 use mesh_llm_events::logging::events::LifecycleEvent;
 
+use super::openai_lifecycle::MAX_TRACKED_REQUESTS;
 use super::{LifecycleGuard, LoggingService, RequestSummaryMetadata};
 
 #[cfg(test)]
@@ -26,8 +27,6 @@ mod remote_attribution;
 
 pub(crate) use proxy_attempts::{ProxyAttemptFinish, RawMeshProxyAttempt};
 pub(crate) use remote_attribution::{RawMeshRemoteAttributionLease, RawMeshRemoteSuppressionLease};
-
-const MAX_TRACKED_REQUESTS: usize = 1_024;
 
 #[cfg(test)]
 const MAX_RAW_MESH_LIFECYCLE_OWNERS: usize = MAX_TRACKED_REQUESTS;

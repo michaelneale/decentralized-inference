@@ -533,6 +533,9 @@ impl RuntimeState {
         session.trim_session(token_count)?;
         self.session_token_counts
             .insert(session_id.to_string(), token_count);
+        self.notify_session_lifecycle(super::lifecycle::SessionLifecycleEvent::SessionTrimmed {
+            token_count,
+        });
         Ok(())
     }
 
@@ -563,6 +566,15 @@ impl RuntimeState {
                 self.create_lane_session()
             })?;
             self.sessions.insert(session_id.to_string(), lane_session);
+            // Every active session must have a tracked position from the
+            // moment it activates (both a fresh and a reused idle lane start
+            // at native position 0), so `canonical_session_position` is
+            // defined even for a generation that completes before its first
+            // prefill/decode call -- see the KV-disabled repro this fixes
+            // (`session ... has no tracked position`).
+            self.session_token_counts
+                .entry(session_id.to_string())
+                .or_insert(0);
         }
         Ok(&mut self
             .sessions

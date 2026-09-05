@@ -967,6 +967,7 @@ mod tests {
                             | "owner_control.advertise_addr"
                             | "runtime.debug"
                             | "runtime.listen_all"
+                            | "runtime.lifecycle_log_parser"
                             | "telemetry.prompt_shape_metrics"
                             | "defaults.hardware.device"
                             | "defaults.hardware.mmproj"

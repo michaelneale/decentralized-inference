@@ -439,12 +439,14 @@ mod tests {
             generation_token_budget: Arc::new(GenerationTokenBudget::new(128)),
             hook_policy: None,
             generation_receipt: None,
+            generation_lifecycle: None,
             linear_proposal_ingress: Some(config),
             kv: None,
             iteration_scheduler,
         };
         let sampling = SamplingConfig::default();
-        let ids = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false);
+        let ids =
+            OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false, None);
         let prompt_token_ids = [1, 2];
         let request = LocalGeneration {
             prompt_token_ids: &prompt_token_ids,

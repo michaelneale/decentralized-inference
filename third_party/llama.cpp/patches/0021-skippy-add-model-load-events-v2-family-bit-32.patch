@@ -1,0 +1,149 @@
+From 55d85c716735eb1d14500064d1135141a05f0434 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 14:51:31 -0400
+Subject: [PATCH] skippy: add model-load-events-v2 family (bit 32)
+
+---
+ include/skippy/common.h             |  1 +
+ include/skippy/events.h             | 21 +++++++++++++++++++++
+ src/CMakeLists.txt                  |  3 ++-
+ src/skippy/abi.cpp                  |  3 ++-
+ src/skippy/events.cpp               | 13 +++++++++++++
+ src/skippy/tests/runtime_events.cpp | 14 ++++++++++++++
+ 6 files changed, 53 insertions(+), 2 deletions(-)
+
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index 98d69de67..e9eed11a7 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -99,6 +99,7 @@ enum skippy_feature {
+ // styles. `skippy_abi_features()` already returns `uint64_t`, so callers
+ // combine these with the enum bits identically either way.
+ #define SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER ((uint64_t)1 << 31)
++#define SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2   ((uint64_t)1 << 32)
+ 
+ enum skippy_status {
+     SKIPPY_STATUS_OK                      = 0,
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+index 97d451269..69e2f04b2 100644
+--- a/include/skippy/events.h
++++ b/include/skippy/events.h
+@@ -33,6 +33,15 @@ enum {
+     SKIPPY_RUNTIME_EVENT_KIND_BACKEND_DEVICE_SELECTED  = 3,
+     SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_FINISHED      = 4,
+     SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_FAILED_HANDLED = 5,
++
++    // SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 (coarse load-phase facts, category
++    // MODEL_OPEN). Kept in the shared kind space so a MODEL_OPEN-category
++    // event's `kind` is decodable without a second enum lookup per category.
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED       = 100,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_MEMORY_ALLOCATED    = 101,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_TENSORS_OFFLOADED   = 102,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_TOKENIZER_READY     = 103,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_AUX_COMPONENT_READY = 104,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_emitter_kind;
+@@ -136,6 +145,18 @@ LLAMA_API enum skippy_status skippy_set_runtime_event_reporter(
+  */
+ LLAMA_API void skippy_clear_runtime_event_reporter(void);
+ 
++/**
++ * @brief Emits SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 category MODEL_OPEN
++ * events through the global reporter. No-op if no reporter is installed.
++ */
++LLAMA_API void skippy_emit_model_load_event_v2(
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1,
++        const char * detail_ptr,
++        uint64_t detail_len);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 1066937b5..2ab35e564 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -116,7 +116,8 @@ if (LLAMA_STAGE_BUILD_TESTS)
+             replacement_waits_for_previous_callback
+             clear_is_quiescent
+             struct_size_extension
+-            concurrent_dispatch)
++            concurrent_dispatch
++            model_load_events_v2_dispatch)
+         add_test(
+             NAME skippy_runtime_event_${SKIPPY_EVENT_TEST_CASE}
+             COMMAND skippy-runtime-events-test ${SKIPPY_EVENT_TEST_CASE})
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+index 21dcbecb9..456126ad1 100644
+--- a/src/skippy/abi.cpp
++++ b/src/skippy/abi.cpp
+@@ -40,7 +40,8 @@ uint64_t skippy_abi_features(void) {
+            SKIPPY_FEATURE_ITERATION_BATCH |
+            SKIPPY_FEATURE_ACTIVATION_BOUNDARY |
+            SKIPPY_FEATURE_MODEL_SOURCE |
+-           SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER;
++           SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER |
++           SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2;
+ }
+ 
+ void skippy_error_free(struct skippy_error * error) {
+diff --git a/src/skippy/events.cpp b/src/skippy/events.cpp
+index fdb633a16..2999e0ea5 100644
+--- a/src/skippy/events.cpp
++++ b/src/skippy/events.cpp
+@@ -170,3 +170,16 @@ void skippy_clear_runtime_event_reporter(void) {
+     std::lock_guard<std::mutex> lifecycle_lock(s.lifecycle_mutex);
+     quiesce(s);
+ }
++
++void skippy_emit_model_load_event_v2(
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1,
++        const char * detail_ptr,
++        uint64_t detail_len) {
++    skippy::events::dispatch(
++        SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN, kind, model_id, 0, 0,
++        SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, numeric_summary_1, 0, 0,
++        detail_ptr, detail_len);
++}
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index 666a5a52c..039615df3 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -219,6 +219,19 @@ int test_concurrent_dispatch() {
+     return 0;
+ }
+ 
++int test_model_load_events_v2_dispatch() {
++    capture c;
++    install(c);
++    skippy_emit_model_load_event_v2(
++        SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED, 42, 7, 0, nullptr, 0);
++    CHECK(c.count.load() == 1);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN);
++    CHECK(c.last_kind.load() == SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED);
++    CHECK(c.last_numeric_summary_0.load() == 7);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char ** argv) {
+@@ -233,6 +246,7 @@ int main(int argc, char ** argv) {
+     if (name == "clear_is_quiescent") return test_clear_is_quiescent();
+     if (name == "struct_size_extension") return test_struct_size_extension();
+     if (name == "concurrent_dispatch") return test_concurrent_dispatch();
++    if (name == "model_load_events_v2_dispatch") return test_model_load_events_v2_dispatch();
+     std::fprintf(stderr, "unknown test: %s\n", name.c_str());
+     return 2;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

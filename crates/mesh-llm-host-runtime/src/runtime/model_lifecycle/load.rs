@@ -198,6 +198,7 @@ struct RuntimeModelLaunchSuccess {
     capacity_reservation: RuntimeCapacityReservation,
     launch_started: Instant,
     load_started: Instant,
+    load_op: LoadOperation,
 }
 
 fn configured_runtime_model_path(
@@ -313,7 +314,19 @@ async fn finish_runtime_model_load(
         capacity_reservation,
         launch_started,
         load_started,
+        load_op,
     } = success;
+    // §8.3 "backend or device selected": known now that native load
+    // succeeded, before consuming `load_op`.
+    load_op.backend_device_selected(&loaded_name, &handle.backend);
+    // Native load already succeeded (this function only runs on the launch
+    // success path). Resolves the loading-family terminal only; public
+    // availability is decided separately, below, once Rust serving surfaces
+    // (routing, instance registry, dashboard) are actually usable.
+    let availability = load_op.native_load_completed(&loaded_name);
+    // §8.4 "Rust backend initialization started": Rust is about to begin
+    // registering serving surfaces below.
+    availability.rust_backend_initialization_started(&loaded_name);
     let survey_loaded_model = ctx.survey_telemetry.model(survey::SurveyModelSpec {
         model: &loaded_name,
         configured_model_selector: config_model_id.as_deref(),
@@ -409,6 +422,7 @@ async fn finish_runtime_model_load(
         "ready",
         load_started,
     );
+    availability.model_available(&loaded_name);
     api::RuntimeLoadResponse {
         model_ref: requested_model,
         model: loaded_name,
@@ -434,6 +448,10 @@ pub(crate) async fn run_auto_load_runtime_model(
     )?;
     let load_started = Instant::now();
     let instance_id = next_runtime_instance_id(ctx.next_runtime_instance_sequence);
+    // Reservation acquired before any load work begins, per plan task 9. A
+    // dropped `load_op` on an early `?` failure below synthesizes its own
+    // terminal through the engine's guard-drop mechanism.
+    let mut load_op = LoadOperation::begin(&spec);
     record_runtime_operational_event_with_context(
         RuntimeOperationalEvent::ModelLoadStarted,
         runtime_model_audit_context(None, &instance_id).outcome("started"),
@@ -457,6 +475,9 @@ pub(crate) async fn run_auto_load_runtime_model(
         load_started,
     )
     .await?;
+    // §8.2 "model resolution completed": the model's source is now known
+    // (local path or remote catalog ref), before any native load work.
+    load_op.resolution_completed(&runtime_model_name);
     let requested_model = spec.clone();
     let model_bytes = plan_runtime_model_bytes(&model_path, &requested_model).await;
     let ctx_size_override = runtime_model_ctx_size_override(ctx.options, model_overrides);
@@ -476,7 +497,12 @@ pub(crate) async fn run_auto_load_runtime_model(
         runtime_model_audit_context(Some(&runtime_model_name), &instance_id),
         load_started,
     ) {
-        Ok(reservation) => reservation,
+        Ok(reservation) => {
+            // §8.4 "model capacity changed": local capacity is now
+            // reserved for this load.
+            load_op.capacity_changed(&runtime_model_name);
+            reservation
+        }
         Err(error) => {
             super::unload::unregister_local_source_policy_if_unused(
                 ctx,
@@ -521,6 +547,12 @@ pub(crate) async fn run_auto_load_runtime_model(
             survey_telemetry: ctx.survey_telemetry.clone(),
         },
         &runtime_model_name,
+        // D2 fix (event-system-fixes deferral): correlates every native
+        // `ModelOpenProgress` tick under this SAME load operation's root
+        // (`load_op.progress_ingress`), rather than a fresh, uncorrelated
+        // one. `&self` borrow only -- `load_op` itself is still needed
+        // below on both the success and failure paths.
+        load_op.progress_ingress(),
     )
     .await
     {
@@ -553,6 +585,7 @@ pub(crate) async fn run_auto_load_runtime_model(
                 "failed",
                 load_started,
             );
+            load_op.load_failed(&runtime_model_name);
             return Err(err);
         }
     };
@@ -570,6 +603,7 @@ pub(crate) async fn run_auto_load_runtime_model(
             capacity_reservation,
             launch_started,
             load_started,
+            load_op,
         },
     )
     .await)

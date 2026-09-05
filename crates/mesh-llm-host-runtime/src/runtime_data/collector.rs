@@ -3,6 +3,9 @@
 //! Keep mutation local, drop locks before publish, and let readers observe
 //! shared snapshots through this boundary.
 
+use super::event_cutover::{
+    FieldId, ShadowHealth, field_of_dirty, merge_legacy_publish, should_apply_legacy_write,
+};
 use super::inventory::{
     InventoryScanCoordinator, InventoryScanDisposition, InventoryScanError, InventoryScanOutcome,
     InventoryScanResult, replace_local_instances_snapshot, replace_local_inventory_snapshot,
@@ -47,11 +50,40 @@ struct RuntimeDataSharedState {
     snapshots: RwLock<RuntimeDataSnapshots>,
     subscriptions: RuntimeDataSubscriptions,
     inventory_scan: Mutex<InventoryScanCoordinator>,
+    event_cutover_health: ShadowHealth,
+    #[cfg(test)]
+    shadow_test_hook: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeDataCollector {
     shared: Arc<RuntimeDataSharedState>,
+}
+
+enum LegacyShadowSnapshot {
+    Status(bool),
+    Inventory(HashSet<String>),
+}
+
+#[cfg(test)]
+impl RuntimeDataSharedState {
+    fn set_shadow_test_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .shadow_test_hook
+            .lock()
+            .expect("runtime data shadow test hook lock poisoned") = Some(Box::new(hook));
+    }
+
+    fn run_shadow_test_hook(&self) {
+        let hook = self
+            .shadow_test_hook
+            .lock()
+            .expect("runtime data shadow test hook lock poisoned")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 impl RuntimeDataCollector {
@@ -496,24 +528,99 @@ impl RuntimeDataCollector {
         })
     }
 
+    /// Generation-tagged field-level merge gate for the collector's
+    /// publish path (task 5). A legacy whole-snapshot write for a field
+    /// still at `Legacy` generation applies exactly as before. A field
+    /// that has cut over to `Reducer` generation never runs `update` at
+    /// all: the legacy write is ignored (never merged and reverted) and
+    /// counted as stale, and the reducer projection remains authoritative.
+    /// Every field is `Legacy` today (see `event_cutover::CUTOVER_MATRIX`),
+    /// so this preserves existing behavior exactly while being the real
+    /// integration point once a producer task lands a reducer projection.
+    ///
+    /// After a `Status`/`Inventory` write, also runs the task 6 shadow
+    /// comparison (`record_shadow_divergence`) against the reducer's own
+    /// domain projection -- observability only, never a cutover trigger.
     fn update_snapshots<F>(&self, dirty: RuntimeDataDirty, update: F) -> bool
     where
         F: FnOnce(&mut RuntimeDataSnapshots) -> bool,
     {
-        let changed = {
+        let field = field_of_dirty(dirty);
+        if let Some(field) = field
+            && !should_apply_legacy_write(field, &self.shared.event_cutover_health)
+        {
+            return false;
+        }
+
+        let (changed, legacy_shadow) = {
             let mut snapshots = self
                 .shared
                 .snapshots
                 .write()
                 .expect("runtime data snapshots lock poisoned");
-            update(&mut snapshots)
+            let changed = update(&mut snapshots);
+            let legacy_shadow = field.and_then(|field| match field {
+                FieldId::Status => Some(LegacyShadowSnapshot::Status(
+                    snapshots.runtime_status.llama_ready,
+                )),
+                FieldId::Inventory => Some(LegacyShadowSnapshot::Inventory(
+                    snapshots.local_inventory.model_names.clone(),
+                )),
+                FieldId::Routing | FieldId::Processes | FieldId::Plugins | FieldId::Runtime => None,
+            });
+            (changed, legacy_shadow)
         };
+
+        #[cfg(test)]
+        self.shared.run_shadow_test_hook();
+
+        if let Some(legacy_shadow) = legacy_shadow {
+            self.record_shadow_divergence(legacy_shadow);
+        }
 
         if changed {
             self.shared.subscriptions.publish(dirty);
         }
 
         changed
+    }
+
+    /// Task 6 (`.omo/plans/event-system-fixes.md`, defect D14): compare the
+    /// just-written legacy value against the reducer's own domain
+    /// projection for the two fields task 6 gives a real reducer
+    /// projection to compare against -- `Status` (does the reducer also
+    /// think a model is available, matching `llama_ready`?) and
+    /// `Inventory` (does the reducer's known model-id set match the legacy
+    /// local-inventory model-name set?). `merge_legacy_publish` records a
+    /// divergence but its returned winner is discarded: every
+    /// `CUTOVER_MATRIX` row stays `Legacy`, so the legacy value already
+    /// written above remains authoritative regardless of this comparison.
+    /// A `None` reducer projection (no engine installed, e.g.
+    /// `--local-model-only` before the engine starts) is a silent no-op,
+    /// matching `merge_legacy_publish`'s own `Option` contract.
+    fn record_shadow_divergence(&self, legacy_shadow: LegacyShadowSnapshot) {
+        match legacy_shadow {
+            LegacyShadowSnapshot::Status(legacy) => {
+                let reducer_available = crate::runtime_events::runtime_event_engine()
+                    .map(|engine| engine.reducer_snapshot().domain().has_available_model());
+                let _ = merge_legacy_publish(
+                    FieldId::Status,
+                    legacy,
+                    reducer_available.as_ref(),
+                    &self.shared.event_cutover_health,
+                );
+            }
+            LegacyShadowSnapshot::Inventory(legacy) => {
+                let reducer_models = crate::runtime_events::runtime_event_engine()
+                    .map(|engine| engine.reducer_snapshot().domain().model_id_set());
+                let _ = merge_legacy_publish(
+                    FieldId::Inventory,
+                    legacy,
+                    reducer_models.as_ref(),
+                    &self.shared.event_cutover_health,
+                );
+            }
+        }
     }
 }
 
@@ -1329,5 +1436,81 @@ fn http_route_stats(
         node_count,
         active_nodes,
         mesh_vram_gb,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeDataCollector;
+    use crate::models::LocalModelInventorySnapshot;
+    use crate::runtime_data::RuntimeDataDirty;
+    use crate::runtime_events::engine::RuntimeEventEngine;
+    use std::collections::HashSet;
+
+    /// The shadow value must be copied while the legacy snapshot write still
+    /// owns the write lock. The hook represents a concurrent legacy publisher
+    /// that runs after that lock is released but before the first publisher's
+    /// reducer comparison; rereading the snapshot at that point would compare
+    /// the wrong write.
+    #[test]
+    #[serial_test::serial(runtime_event_engine_state)]
+    fn shadow_compare_uses_the_snapshot_from_its_own_write() {
+        crate::runtime_events::clear_runtime_event_engine();
+        let engine = RuntimeEventEngine::new();
+        crate::runtime_events::install_runtime_event_engine(engine.clone());
+
+        let collector = RuntimeDataCollector::new();
+        let concurrent_collector = collector.clone();
+        collector.shared.set_shadow_test_hook(move || {
+            concurrent_collector.update_runtime_status(RuntimeDataDirty::STATUS, |status| {
+                status.llama_ready = false;
+                true
+            });
+        });
+
+        let before = engine.health().snapshot().event_cutover_divergence;
+        assert!(
+            collector.update_runtime_status(RuntimeDataDirty::STATUS, |status| {
+                status.llama_ready = true;
+                true
+            })
+        );
+
+        assert_eq!(
+            engine.health().snapshot().event_cutover_divergence,
+            before + 1,
+            "the first writer's true value must be compared even after a concurrent writer replaces it"
+        );
+        assert!(
+            !collector.runtime_status_snapshot().llama_ready,
+            "the concurrent writer should still be visible in the final legacy snapshot"
+        );
+
+        let concurrent_collector = collector.clone();
+        collector.shared.set_shadow_test_hook(move || {
+            concurrent_collector.replace_local_inventory_snapshot(LocalModelInventorySnapshot {
+                model_names: HashSet::new(),
+                ..LocalModelInventorySnapshot::default()
+            });
+        });
+        let before = engine.health().snapshot().event_cutover_divergence;
+        assert!(
+            collector.replace_local_inventory_snapshot(LocalModelInventorySnapshot {
+                model_names: HashSet::from(["first".to_string()]),
+                ..LocalModelInventorySnapshot::default()
+            })
+        );
+
+        assert_eq!(
+            engine.health().snapshot().event_cutover_divergence,
+            before + 1,
+            "the first inventory writer's model set must be compared after a concurrent replacement"
+        );
+        assert_eq!(
+            collector.local_inventory_snapshot().model_names,
+            HashSet::new()
+        );
+
+        crate::runtime_events::clear_runtime_event_engine();
     }
 }

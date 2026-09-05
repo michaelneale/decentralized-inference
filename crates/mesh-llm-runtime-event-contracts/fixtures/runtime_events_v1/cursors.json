@@ -1,0 +1,26 @@
+{
+  "$schema_note": "Canonical rt1 cursor grammar examples shared by Rust and TypeScript cursor parsers.",
+  "grammar": "rt1:<process-instance-uuid>:<sequence-decimal>",
+  "valid": [
+    "rt1:0195f000-0000-7000-8000-000000000001:0",
+    "rt1:0195f000-0000-7000-8000-000000000001:42",
+    "rt1:ffffffff-ffff-7fff-bfff-ffffffffffff:18446744073709551615"
+  ],
+  "invalid": [
+    "rt1:0195f000-0000-7000-8000-000000000001:",
+    "rt1:0195f000-0000-7000-8000-000000000001:01",
+    "rt1:0195f000-0000-7000-8000-000000000001:-1",
+    "rt1:0195f000-0000-7000-8000-000000000001:1.0",
+    "rt1:0195F000-0000-7000-8000-000000000001:1",
+    "rt1:{0195f000-0000-7000-8000-000000000001}:1",
+    "rt1:not-a-uuid:1",
+    "rt2:0195f000-0000-7000-8000-000000000001:1",
+    "rt1:0195f000-0000-7000-8000-000000000001",
+    ""
+  ],
+  "transport": {
+    "sources": ["Last-Event-ID header", "?cursor= query parameter"],
+    "precedence": "header wins when both are present and valid",
+    "each_source_validated_independently": true
+  }
+}

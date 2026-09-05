@@ -16,6 +16,7 @@ members = [
     "crates/mesh-llm-release-footer",
     "crates/mesh-llm-routing",
     "crates/mesh-llm-runtime-install",
+    "crates/mesh-llm-runtime-event-contracts",
     "crates/mesh-llm-sdk",
     "crates/mesh-llm-guardrails",
     "crates/mesh-llm-system",

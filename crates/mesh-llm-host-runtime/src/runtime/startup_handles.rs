@@ -388,7 +388,12 @@ where
     };
 
     make_start_spec.capacity_budget_bytes = Some(reservation.capacity_budget_bytes());
-    let start_result = start_runtime_local_model(make_start_spec, model_ref).await;
+    // Startup-time loads have no `LoadOperation` reservation of their own
+    // (event-system-fixes deferral D2 scopes `ModelLoadProgress` to the
+    // runtime-load path via `LoadOperation::progress_ingress`) -- degrade
+    // to no progress reporting here rather than fabricate an uncorrelated
+    // root.
+    let start_result = start_runtime_local_model(make_start_spec, model_ref, None).await;
     drop(startup_load_guard);
 
     match start_result {
@@ -929,6 +934,7 @@ impl StartupReadyReporter {
         };
         let _ = emit_event(event);
         record_runtime_operational_event(RuntimeOperationalEvent::Ready);
+        super::node_lifecycle_events::emit_node_accepting_requests();
         let _ = schedule_ready_prompt();
     }
 }

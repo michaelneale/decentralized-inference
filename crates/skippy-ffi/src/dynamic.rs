@@ -343,6 +343,52 @@ impl Symbols {
         }
         None
     }
+
+    /// Whether `name` resolves in any loaded library, without binding a
+    /// typed function pointer. Used for capability probing where the caller
+    /// only needs to know a symbol exists, not call it directly.
+    fn symbol_exists(&self, name: &[u8]) -> bool {
+        for library in self._libraries.iter().rev() {
+            if unsafe { library.get::<*const c_void>(name) }.is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Reports whether `name` (a NUL-terminated symbol name) resolves in the
+/// loaded native runtime libraries. Used by capability probing to confirm a
+/// family's required symbols before trusting its advertised feature bit.
+///
+/// # Panics
+///
+/// Panics if no native runtime library has been loaded yet (same contract as
+/// every other function in this module).
+pub fn symbol_present(name: &[u8]) -> bool {
+    symbols().symbol_exists(name)
+}
+
+type SkippySetRuntimeEventReporterFn =
+    unsafe extern "C" fn(reporter: *const SkippyRuntimeEventReporterV1) -> Status;
+type SkippyClearRuntimeEventReporterFn = unsafe extern "C" fn();
+
+pub fn skippy_set_runtime_event_reporter_fn() -> Option<SkippySetRuntimeEventReporterFn> {
+    static CACHE: OnceLock<Option<SkippySetRuntimeEventReporterFn>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        symbols().lookup_optional::<SkippySetRuntimeEventReporterFn>(
+            b"skippy_set_runtime_event_reporter\0",
+        )
+    })
+}
+
+pub fn skippy_clear_runtime_event_reporter_fn() -> Option<SkippyClearRuntimeEventReporterFn> {
+    static CACHE: OnceLock<Option<SkippyClearRuntimeEventReporterFn>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        symbols().lookup_optional::<SkippyClearRuntimeEventReporterFn>(
+            b"skippy_clear_runtime_event_reporter\0",
+        )
+    })
 }
 
 pub fn skippy_abi_features_optional() -> Option<SkippyAbiFeaturesFn> {

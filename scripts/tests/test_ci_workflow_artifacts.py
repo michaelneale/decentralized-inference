@@ -139,7 +139,15 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn('MESH_LLM_SKIP_UI: "1"', smoke)
         self.assertIn("uses: ./.github/actions/restore-sccache-seed", smoke)
         self.assertEqual(smoke.count("cargo test --locked"), 1)
+        self.assertIn("set -euo pipefail", smoke)
         self.assertIn("--lib --no-run --message-format=json", smoke)
+        self.assertIn('if .reason == "compiler-message" then', smoke)
+        self.assertIn(
+            "(.message.rendered // empty) | stderr | empty",
+            smoke,
+        )
+        self.assertIn('elif .reason == "compiler-artifact" and', smoke)
+        self.assertIn("tail -n 1", smoke)
         self.assertIn(f'test_name="{test_name}"', smoke)
         self.assertIn('grep -Fqx "$test_name: test"', smoke)
         self.assertIn(

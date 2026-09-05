@@ -3,6 +3,7 @@ pub use skippy_ffi::Status;
 pub(crate) use skippy_ffi::TensorRole;
 
 mod activation;
+mod capability_probe;
 mod checkpoint;
 mod config;
 mod devices;
@@ -13,14 +14,17 @@ mod logging;
 mod media;
 mod native;
 mod native_mtp;
+mod native_test_evidence;
 mod ngram;
 pub mod package;
 mod path_cstring;
+mod runtime_event_reporter;
 mod runtime_events;
 mod session;
 mod types;
 
 pub use activation::{DecodeFrameBatchRequest, IterationBatchPhase, IterationBatchRequest};
+pub use capability_probe::{CapabilityReport, probe_capabilities};
 pub use checkpoint::{CheckpointQuantization, is_safetensors_checkpoint};
 pub use config::{
     FlashAttentionType, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GlmDsaPolicy,
@@ -31,17 +35,20 @@ pub use devices::{BackendDevice, BackendDeviceType, backend_devices};
 pub(crate) use error::ensure_ok;
 pub use gguf_writer::{ModelInfo, SlicePlan, write_gguf_from_parts};
 pub use logging::{
-    LLAMA_LOG_LEVEL_DEBUG, NativeLogEvent, disable_verbose_native_logs, enable_verbose_native_logs,
+    LLAMA_LOG_LEVEL_DEBUG, NativeLogEvent, NativeLogParserMode, NativeLogParserPolicy,
+    configure_native_log_parser, disable_verbose_native_logs, enable_verbose_native_logs,
     redirect_native_logs_to_file, register_filtered_native_logs, restore_native_logs,
     set_filtered_native_logs_enabled, suppress_native_logs, unregister_filtered_native_logs,
     write_native_log_note,
 };
 pub use native::{StageModel, StageModelReader};
 pub use native_mtp::NativeMtpDraft;
+pub use native_test_evidence::write_evidence_marker;
 pub use ngram::{Cache as NgramCache, NGRAM_CACHE_MAX_NGRAM};
+pub use runtime_event_reporter::{clear_runtime_event_reporter, install_runtime_event_reporter};
 pub use runtime_events::{
-    RuntimeEvent, RuntimeEventCategory, RuntimeEventEmitterKind, RuntimeEventFailureCode,
-    RuntimeEventKind, RuntimeEventProgressUnit,
+    OperationId, RuntimeEvent, RuntimeEventCategory, RuntimeEventEmitterKind,
+    RuntimeEventFailureCode, RuntimeEventKind, RuntimeEventProgressUnit, next_operation_id,
 };
 pub use session::{DecodeBatchRequest, StageSession};
 pub use skippy_ffi::LoadMode as RuntimeLoadMode;

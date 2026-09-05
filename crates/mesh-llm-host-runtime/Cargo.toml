@@ -29,6 +29,7 @@ mesh-llm-build-info.workspace = true
 mesh-mixture-of-agents = { path = "../mesh-mixture-of-agents", version = "0.76.0-rc9"  }
 mesh-llm-config = { path = "../mesh-llm-config", version = "0.76.0-rc9"  }
 mesh-llm-events = { path = "../mesh-llm-events", version = "0.76.0-rc9"  }
+mesh-llm-runtime-event-contracts = { path = "../mesh-llm-runtime-event-contracts", version = "0.76.0-rc9"  }
 mesh-llm-log-store = { path = "../mesh-llm-log-store", version = "0.76.0-rc9"  }
 mesh-llm-plugin = { path = "../mesh-llm-plugin", version = "0.76.0-rc9"  }
 mesh-llm-plugin-manager = { path = "../mesh-llm-plugin-manager", version = "0.76.0-rc9"  }
@@ -124,6 +125,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 serial_test = "4"
+skippy-server = { path = "../skippy-server", version = "0.76.0-rc9", features = ["test-support"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["metrics", "testing"] }
 mesh-client = { package = "mesh-llm-client", path = "../mesh-client", version = "0.76.0-rc9"  }
 # Used by the gated-relay regression test to spawn an in-process iroh-relay

@@ -1,5 +1,6 @@
 // Trial execution and lifecycle management.
 
+use super::streaming;
 use super::trial_config;
 use super::{
     TuneBenchmarkCandidate, TuneBenchmarkRunRequest, TuneBenchmarkTimingStats, TuneBenchmarkTrial,
@@ -35,6 +36,8 @@ pub(crate) fn run_trial(
             completion_tokens: None,
             elapsed_ms: None,
             decode_tok_s: None,
+            ttft_ms: None,
+            decode_only_tok_s: None,
             timings: None,
             log_path: None,
             error: Some(error.to_string()),
@@ -120,8 +123,8 @@ pub(crate) fn run_trial_inner(
         );
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         timings.request_ms = Some(elapsed_ms);
-        let response = match response_result {
-            Ok(response) => response,
+        let outcome = match response_result {
+            Ok(outcome) => outcome,
             Err(error) => {
                 return Ok(finish_failed_trial(
                     candidate,
@@ -132,18 +135,7 @@ pub(crate) fn run_trial_inner(
                 ));
             }
         };
-        let completion_tokens = match response_completion_tokens(&response) {
-            Some(tokens) => tokens,
-            None => {
-                return Ok(finish_failed_trial(
-                    candidate,
-                    &log_path,
-                    &mut timings,
-                    &mut child,
-                    anyhow::anyhow!("chat completion response did not include completion_tokens"),
-                ));
-            }
-        };
+        let completion_tokens = outcome.completion_tokens;
         if completion_tokens == 0 {
             return Ok(finish_failed_trial(
                 candidate,
@@ -154,6 +146,8 @@ pub(crate) fn run_trial_inner(
             ));
         }
         let decode_tok_s = completion_tokens as f64 / (elapsed_ms / 1000.0);
+        let decode_only_tok_s =
+            streaming::decode_only_tok_s(completion_tokens, elapsed_ms, outcome.ttft_ms);
         record_shutdown(&mut child, &mut timings);
 
         return Ok(TuneBenchmarkTrial {
@@ -162,6 +156,8 @@ pub(crate) fn run_trial_inner(
             completion_tokens: Some(completion_tokens),
             elapsed_ms: Some(elapsed_ms),
             decode_tok_s: Some(decode_tok_s),
+            ttft_ms: outcome.ttft_ms,
+            decode_only_tok_s,
             timings: Some(timings.snapshot()),
             log_path: Some(log_path.display().to_string()),
             error: None,
@@ -235,6 +231,8 @@ pub(crate) fn failed_trial_with_evidence(
         completion_tokens: None,
         elapsed_ms: timings.request_ms,
         decode_tok_s: None,
+        ttft_ms: None,
+        decode_only_tok_s: None,
         timings: Some(timings),
         log_path: Some(log_path.display().to_string()),
         error: Some(error.to_string()),
@@ -403,12 +401,14 @@ pub(crate) fn send_chat_request_with_watchdog(
     prompt: &str,
     max_tokens: u32,
     timeout: std::time::Duration,
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<streaming::TrialChatOutcome> {
     let client = client.clone();
     let prompt = prompt.to_string();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = sender.send(send_chat_request(&client, port, &prompt, max_tokens));
+        let _ = sender.send(streaming::send_chat_request(
+            &client, port, &prompt, max_tokens,
+        ));
     });
 
     match receiver.recv_timeout(timeout.max(std::time::Duration::from_secs(1))) {
@@ -424,31 +424,6 @@ pub(crate) fn send_chat_request_with_watchdog(
             anyhow::bail!("chat completion worker exited without a response")
         }
     }
-}
-
-pub(crate) fn send_chat_request(
-    client: &reqwest::blocking::Client,
-    port: u16,
-    prompt: &str,
-    max_tokens: u32,
-) -> anyhow::Result<serde_json::Value> {
-    let response = client
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .json(&serde_json::json!({
-            "model": "auto",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.0,
-            "stream": false
-        }))
-        .send()?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text()?;
-        anyhow::bail!("chat completion failed with HTTP {status}: {body}");
-    }
-    let body: serde_json::Value = response.json()?;
-    Ok(body)
 }
 
 fn should_retry_with_new_ports(
@@ -467,10 +442,6 @@ fn error_string_is_port_bind_error(value: &str) -> bool {
     PORT_BIND_ERROR_HINTS
         .iter()
         .any(|hint| lower.contains(hint))
-}
-
-pub(crate) fn response_completion_tokens(response: &serde_json::Value) -> Option<u64> {
-    response.get("usage")?.get("completion_tokens")?.as_u64()
 }
 
 pub(crate) fn create_trial_dir(

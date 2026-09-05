@@ -20,6 +20,13 @@ use tokio::sync::Notify;
 
 mod logging_metrics;
 
+// Event-system telemetry ownership: new instruments for task 16 (aggregate
+// privacy-safe runtime-event health metrics) live in this sibling module
+// rather than growing this already-large file further. See
+// `runtime_events.rs`'s module doc for the metrics-only/no-ID v1 decision
+// and the existing-Skippy-telemetry scope exclusion.
+pub(super) mod runtime_events;
+
 #[cfg(test)]
 #[path = "survey_exact_head_tests.rs"]
 mod survey_exact_head_tests;

@@ -1,4 +1,4 @@
-use crate::{ConfigEditor, MeshConfig, validate_config};
+use crate::{ConfigEditor, ConfigValueSource, MeshConfig, validate_config};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
@@ -7,8 +7,8 @@ pub fn config_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_path_buf());
     }
-    if let Ok(path) = std::env::var("MESH_LLM_CONFIG") {
-        return Ok(PathBuf::from(path));
+    if let Some(path) = crate::env_overrides::config_path_override() {
+        return Ok(path);
     }
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     Ok(home.join(".mesh-llm").join("config.toml"))
@@ -16,17 +16,44 @@ pub fn config_path(override_path: Option<&Path>) -> Result<PathBuf> {
 
 pub fn load_config(override_path: Option<&Path>) -> Result<MeshConfig> {
     let path = config_path(override_path)?;
-    if !path.exists() {
-        return Ok(MeshConfig::default());
-    }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read config {}", path.display()))?;
-    parse_config_toml(&raw).with_context(|| format!("Invalid config {}", path.display()))
+    let mut config = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read config {}", path.display()))?;
+        parse_config_toml(&raw).with_context(|| format!("Invalid config {}", path.display()))?
+    } else {
+        MeshConfig::default()
+    };
+    crate::env_overrides::apply_env_overrides(&mut config)?;
+    Ok(config)
 }
 
 pub fn parse_config_toml(raw: &str) -> Result<MeshConfig> {
-    let config: MeshConfig = toml::from_str(raw).context("failed to parse config TOML")?;
+    let config = parse_config_toml_structural(raw)?;
     validate_config(&config)?;
+    Ok(config)
+}
+
+/// Structurally deserializes `raw` into a `MeshConfig`, performing the same
+/// config-source tagging as `parse_config_toml` (e.g.
+/// `runtime.lifecycle_log_parser_source`), but WITHOUT enforcing semantic
+/// validation.
+///
+/// This exists for callers like `mesh-llm config validate` that want to
+/// report semantic diagnostics themselves (so an operator sees the full
+/// diagnostics list for a broken file) rather than hard-failing on the first
+/// error the way `parse_config_toml` / `load_config` do for production config
+/// loading, where refusing to boot on an invalid config is the correct
+/// behavior.
+pub fn parse_config_toml_structural(raw: &str) -> Result<MeshConfig> {
+    let document: toml::Value = toml::from_str(raw).context("failed to parse config TOML")?;
+    let has_lifecycle_log_parser = document
+        .get("runtime")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|runtime| runtime.contains_key("lifecycle_log_parser"));
+    let mut config: MeshConfig = document.try_into().context("failed to parse config TOML")?;
+    if has_lifecycle_log_parser {
+        config.runtime.lifecycle_log_parser_source = ConfigValueSource::Config;
+    }
     Ok(config)
 }
 

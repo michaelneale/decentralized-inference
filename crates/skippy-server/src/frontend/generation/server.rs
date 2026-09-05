@@ -3,6 +3,7 @@ use crate::binary_transport::WireCondition;
 use crate::cli::ServeOpenAiArgs;
 use crate::config::load_json;
 use crate::config::validate_config;
+use crate::frontend::GenerationLifecycleConfig;
 use crate::frontend::GenerationReceiptConfig;
 use crate::frontend::LinearProposalIngressConfig;
 use crate::frontend::OpenAiGuardrailsConfig;
@@ -139,9 +140,12 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         )
         .context("prewarm OpenAI runtime sessions")?;
     }
-    let kv =
-        KvStageIntegration::from_loaded_model(&config, loaded_model_state_kind(Some(&runtime)))?
-            .map(Arc::new);
+    let kv = KvStageIntegration::from_loaded_model(
+        &config,
+        loaded_model_state_kind(Some(&runtime)),
+        None,
+    )?
+    .map(Arc::new);
     let ctx_size = usize::try_from(config.ctx_size).unwrap_or(usize::MAX);
     let iteration_scheduler = IterationScheduler::new(
         runtime.clone(),
@@ -182,6 +186,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
         hook_policy: None,
         generation_receipt: None,
+        generation_lifecycle: None,
         linear_proposal_ingress: None,
         kv,
         iteration_scheduler,
@@ -241,8 +246,10 @@ pub struct EmbeddedOpenAiArgs {
     pub telemetry: Telemetry,
     pub hook_policy: Option<Arc<dyn OpenAiHookPolicy>>,
     pub generation_receipt: Option<GenerationReceiptConfig>,
+    pub generation_lifecycle: Option<GenerationLifecycleConfig>,
     pub linear_proposal_ingress: Option<LinearProposalIngressConfig>,
     pub openai_guardrails: Option<OpenAiGuardrailsConfig>,
+    pub kv_lifecycle_observer: Option<Arc<dyn crate::kv_integration::KvLifecycleObserver>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -497,6 +504,7 @@ fn embedded_openai_backend_with_scheduler(
     let kv = KvStageIntegration::from_loaded_model(
         &args.config,
         loaded_model_state_kind(Some(&args.runtime)),
+        args.kv_lifecycle_observer.clone(),
     )?
     .map(Arc::new);
     let ctx_size = usize::try_from(args.config.ctx_size).unwrap_or(usize::MAX);
@@ -541,6 +549,7 @@ fn embedded_openai_backend_with_scheduler(
         generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
         hook_policy: args.hook_policy,
         generation_receipt: args.generation_receipt,
+        generation_lifecycle: args.generation_lifecycle,
         linear_proposal_ingress: args.linear_proposal_ingress,
         kv,
         iteration_scheduler,
@@ -676,6 +685,11 @@ mod tests {
     use super::{
         resolve_adaptive_generation_min_concurrency, validate_generation_receipt_topology,
     };
+    use crate::frontend::CompositeGenerationLifecycleIngress;
+    use crate::frontend::GenerationLifecycleConfig;
+    use crate::frontend::GenerationReceiptConfig;
+    use crate::serving_hooks::ModelServingHooks;
+    use std::sync::Arc;
 
     #[test]
     fn generation_receipts_require_local_single_stage_topology() {
@@ -684,6 +698,40 @@ mod tests {
         assert!(validate_generation_receipt_topology(true, true, false).is_err());
         assert!(validate_generation_receipt_topology(true, false, true).is_err());
         assert!(validate_generation_receipt_topology(true, true, true).is_err());
+    }
+
+    #[test]
+    fn lifecycle_only_hooks_do_not_enable_split_receipt_validation() {
+        let hooks = ModelServingHooks::default().with_generation_lifecycle(
+            GenerationLifecycleConfig::from_ingress(Arc::new(
+                CompositeGenerationLifecycleIngress::new(Vec::new()),
+            )),
+        );
+
+        assert!(hooks.generation_receipt().is_none());
+        assert!(
+            validate_generation_receipt_topology(hooks.generation_receipt().is_some(), true, true,)
+                .is_ok()
+        );
+
+        let exact_hooks = ModelServingHooks::default().with_generation_receipt(
+            GenerationReceiptConfig::from_lifecycle_ingress(Arc::new(
+                CompositeGenerationLifecycleIngress::new(Vec::new()),
+            ))
+            .with_full_state_digest(true),
+        );
+        let exact_config = exact_hooks
+            .generation_receipt()
+            .expect("exact receipt config");
+        assert!(exact_config.exports_full_state());
+        assert!(
+            validate_generation_receipt_topology(
+                exact_hooks.generation_receipt().is_some(),
+                true,
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]

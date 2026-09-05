@@ -163,6 +163,8 @@ fn model_skippy_config<'a>(
 pub(super) async fn load_split_runtime_generation(
     spec: SplitGenerationLoadSpec<'_>,
 ) -> Result<SplitRuntimeGenerationHandle> {
+    let topology_op =
+        super::topology_events::TopologyAssemblyOperation::begin(&spec.generation.topology_id);
     let mut cleanup_on_error = false;
     let result = Box::pin(load_split_runtime_generation_inner(
         &spec,
@@ -181,6 +183,12 @@ pub(super) async fn load_split_runtime_generation(
             "cleaning up split runtime generation after failed load"
         );
         stop_split_generation(spec.node, spec.generation, spec.generation.generation).await;
+    }
+    match &result {
+        Ok(_) => topology_op.ready(),
+        Err(_) => {
+            topology_op.unavailable(mesh_llm_runtime_event_contracts::ReasonCode::StageUnavailable)
+        }
     }
     result
 }
@@ -293,7 +301,14 @@ pub(super) async fn load_split_runtime_generation_inner(
             settings.embedded_openai.clone(),
             Some(skippy::MeshAutoHookPolicy::new(node_for_hook)),
             skippy_telemetry,
-            Some(skippy_native_model_open_event_reporter(reporter_model_ref)),
+            // Split downstream loads have no `LoadOperation` reservation of
+            // their own (event-system-fixes deferral D2 scopes
+            // `ModelLoadProgress` to the single-node runtime-load path) --
+            // degrade rather than fabricate an uncorrelated root.
+            Some(skippy_native_model_open_event_reporter(
+                reporter_model_ref,
+                None,
+            )),
             skippy::SkippyOpenAiGuardrailOptions::new(Some(openai_guardrails), guardrail_telemetry),
             serving_hooks_factory,
         )
@@ -614,6 +629,11 @@ pub(super) async fn load_downstream_split_runtime_stages(
             endpoint: ready.status.bind_addr.clone(),
             node_id: Some(stage.node_id),
         });
+        super::topology_events::emit_stage_connection_established(
+            &spec.generation.topology_id,
+            &stage.stage_id,
+            stage.stage_index,
+        );
         ready_by_stage.insert(stage.stage_id.clone(), ready.status);
     }
 

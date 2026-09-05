@@ -42,8 +42,9 @@ pub(super) use super::local_split::{
 };
 pub(super) fn skippy_native_model_open_event_reporter(
     model_name: String,
+    progress_ingress: Option<crate::runtime_events::engine::ScopedIngress>,
 ) -> skippy::NativeModelOpenEventReporter {
-    native_runtime_events::skippy_native_model_open_event_reporter(model_name)
+    native_runtime_events::skippy_native_model_open_event_reporter(model_name, progress_ingress)
 }
 
 pub(super) type OpenAiGuardrailPolicyHandle = openai_frontend::GuardrailPolicyHandle;
@@ -551,6 +552,7 @@ pub(super) async fn remove_serving_assignment(node: &mesh::Node, model_name: &st
 pub(super) async fn start_runtime_local_model(
     spec: LocalRuntimeModelStartSpec<'_>,
     runtime_model_name: &str,
+    progress_ingress: Option<crate::runtime_events::engine::ScopedIngress>,
 ) -> Result<(
     String,
     LocalRuntimeModelHandle,
@@ -611,6 +613,7 @@ pub(super) async fn start_runtime_local_model(
             http_bind_addr,
         },
         runtime_model_name,
+        progress_ingress,
     )
     .await
 }
@@ -618,6 +621,7 @@ pub(super) async fn start_runtime_local_model(
 pub(super) async fn start_local_openai_model(
     spec: LocalOpenAiModelStartSpec<'_>,
     runtime_model_name: &str,
+    progress_ingress: Option<crate::runtime_events::engine::ScopedIngress>,
 ) -> Result<(
     String,
     LocalRuntimeModelHandle,
@@ -713,15 +717,31 @@ pub(super) async fn start_local_openai_model(
     });
 
     if let Some(package) = package {
-        start_local_package_v2_model(spec, model_name, package, plan, compact_meta.as_ref()).await
+        start_local_package_v2_model(
+            spec,
+            model_name,
+            progress_ingress,
+            package,
+            plan,
+            compact_meta.as_ref(),
+        )
+        .await
     } else {
-        start_local_skippy_model(spec, model_name, plan, compact_meta.as_ref()).await
+        start_local_skippy_model(
+            spec,
+            model_name,
+            progress_ingress,
+            plan,
+            compact_meta.as_ref(),
+        )
+        .await
     }
 }
 
 async fn start_local_skippy_model(
     spec: LocalOpenAiModelStartSpec<'_>,
     model_name: String,
+    progress_ingress: Option<crate::runtime_events::engine::ScopedIngress>,
     plan: RuntimeResourcePlan,
     compact_meta: Option<&models::gguf::GgufCompactMeta>,
 ) -> Result<(
@@ -784,7 +804,10 @@ async fn start_local_skippy_model(
         skippy::SkippyModelHandle::load_with_hooks_and_open_events(
             options,
             hook_policy,
-            Some(skippy_native_model_open_event_reporter(reporter_model_name)),
+            Some(skippy_native_model_open_event_reporter(
+                reporter_model_name,
+                progress_ingress,
+            )),
             guardrail_telemetry,
         )
     })
@@ -818,6 +841,7 @@ async fn start_local_skippy_model(
 async fn start_local_package_v2_model(
     spec: LocalOpenAiModelStartSpec<'_>,
     model_name: String,
+    progress_ingress: Option<crate::runtime_events::engine::ScopedIngress>,
     package: skippy::SkippyPackageIdentity,
     plan: RuntimeResourcePlan,
     compact_meta: Option<&models::gguf::GgufCompactMeta>,
@@ -945,7 +969,10 @@ async fn start_local_package_v2_model(
             embedded_openai,
             hook_policy,
             skippy_telemetry,
-            Some(skippy_native_model_open_event_reporter(reporter_model_ref)),
+            Some(skippy_native_model_open_event_reporter(
+                reporter_model_ref,
+                progress_ingress,
+            )),
             skippy::SkippyOpenAiGuardrailOptions::new(Some(openai_guardrails), guardrail_telemetry),
             spec.serving_hooks_factory,
         )

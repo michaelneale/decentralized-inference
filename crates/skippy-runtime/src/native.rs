@@ -133,7 +133,8 @@ impl StageModel {
     fn open_path_with_optional_event_reporter(
         path: impl AsRef<Path>,
         config: &RuntimeConfig,
-        event_reporter: Option<&mut dyn FnMut(RuntimeEvent)>,
+        operation_id: runtime_events::OperationId,
+        event_reporter: Option<&mut (dyn FnMut(RuntimeEvent) + Send)>,
     ) -> Result<Self> {
         let path = path.as_ref();
         if crate::checkpoint::is_safetensors_checkpoint(path) {
@@ -169,6 +170,7 @@ impl StageModel {
         let raw_config = config.as_raw()?;
         #[cfg(not(test))]
         let (raw, status, error) = runtime_events::run_model_open(
+            operation_id,
             |out_model, out_error| unsafe {
                 skippy_ffi::skippy_model_open(path.as_ptr(), &raw_config.raw, out_model, out_error)
             },
@@ -190,6 +192,7 @@ impl StageModel {
         let (raw, status, error) = {
             debug_assert!(event_reporter.is_none());
             runtime_events::run_model_open(
+                operation_id,
                 |out_model, out_error| unsafe {
                     skippy_ffi::skippy_model_open(
                         path.as_ptr(),
@@ -213,7 +216,8 @@ impl StageModel {
     fn open_parts_with_optional_event_reporter(
         paths: &[impl AsRef<Path>],
         config: &RuntimeConfig,
-        event_reporter: Option<&mut dyn FnMut(RuntimeEvent)>,
+        operation_id: runtime_events::OperationId,
+        event_reporter: Option<&mut (dyn FnMut(RuntimeEvent) + Send)>,
     ) -> Result<Self> {
         if paths.is_empty() {
             return Err(anyhow!("at least one GGUF part path is required"));
@@ -252,6 +256,7 @@ impl StageModel {
         let raw_config = config.as_raw()?;
         #[cfg(not(test))]
         let (raw, status, error) = runtime_events::run_model_open(
+            operation_id,
             |out_model, out_error| unsafe {
                 skippy_ffi::skippy_model_open_from_parts(
                     path_ptrs.as_ptr(),
@@ -281,6 +286,7 @@ impl StageModel {
         let (raw, status, error) = {
             debug_assert!(event_reporter.is_none());
             runtime_events::run_model_open(
+                operation_id,
                 |out_model, out_error| unsafe {
                     skippy_ffi::skippy_model_open_from_parts(
                         path_ptrs.as_ptr(),
@@ -305,7 +311,12 @@ impl StageModel {
     }
 
     pub fn open(path: impl AsRef<Path>, config: &RuntimeConfig) -> Result<Self> {
-        Self::open_path_with_optional_event_reporter(path, config, None)
+        Self::open_path_with_optional_event_reporter(
+            path,
+            config,
+            runtime_events::next_operation_id(),
+            None,
+        )
     }
 
     /// Opens an official Hugging Face SafeTensors checkpoint without writing an
@@ -324,38 +335,59 @@ impl StageModel {
         )
     }
 
+    /// `operation_id` correlates every event this call emits with its
+    /// caller's own operation identity (task 9: caller-supplied, not minted
+    /// inside this crate -- see [`runtime_events::OperationId`]'s doc).
     pub fn open_with_events(
         path: impl AsRef<Path>,
         config: &RuntimeConfig,
-        event_reporter: &mut dyn FnMut(RuntimeEvent),
+        operation_id: runtime_events::OperationId,
+        event_reporter: &mut (dyn FnMut(RuntimeEvent) + Send),
     ) -> Result<Self> {
         #[cfg(test)]
         {
             let _ = event_reporter;
-            Self::open_path_with_optional_event_reporter(path, config, None)
+            Self::open_path_with_optional_event_reporter(path, config, operation_id, None)
         }
 
         #[cfg(not(test))]
-        Self::open_path_with_optional_event_reporter(path, config, Some(event_reporter))
+        Self::open_path_with_optional_event_reporter(
+            path,
+            config,
+            operation_id,
+            Some(event_reporter),
+        )
     }
 
     pub fn open_from_parts(paths: &[impl AsRef<Path>], config: &RuntimeConfig) -> Result<Self> {
-        Self::open_parts_with_optional_event_reporter(paths, config, None)
+        Self::open_parts_with_optional_event_reporter(
+            paths,
+            config,
+            runtime_events::next_operation_id(),
+            None,
+        )
     }
 
+    /// See [`Self::open_with_events`]'s `operation_id` doc.
     pub fn open_from_parts_with_events(
         paths: &[impl AsRef<Path>],
         config: &RuntimeConfig,
-        event_reporter: &mut dyn FnMut(RuntimeEvent),
+        operation_id: runtime_events::OperationId,
+        event_reporter: &mut (dyn FnMut(RuntimeEvent) + Send),
     ) -> Result<Self> {
         #[cfg(test)]
         {
             let _ = event_reporter;
-            Self::open_parts_with_optional_event_reporter(paths, config, None)
+            Self::open_parts_with_optional_event_reporter(paths, config, operation_id, None)
         }
 
         #[cfg(not(test))]
-        Self::open_parts_with_optional_event_reporter(paths, config, Some(event_reporter))
+        Self::open_parts_with_optional_event_reporter(
+            paths,
+            config,
+            operation_id,
+            Some(event_reporter),
+        )
     }
 
     pub fn attach_mtp_draft_model(

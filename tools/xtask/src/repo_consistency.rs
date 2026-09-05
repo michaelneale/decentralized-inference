@@ -242,8 +242,70 @@ pub(crate) fn check_ci_crate_lists_command() -> DynResult<()> {
     workflow_checks::check_ci_script_workspace_members(&repo_root)?;
     workflow_checks::check_ci_crate_test_coverage_files(&repo_root)?;
     check_attestation_default_version(&repo_root)?;
+    check_runtime_event_abi_mirror(&repo_root)?;
     println!("repo consistency checks passed: ci-crate-lists");
     Ok(())
+}
+
+/// `mesh-llm-runtime-event-contracts` (a publishable dependency-leaf crate)
+/// mirrors the raw ABI struct `skippy_ffi::abi::SkippyRuntimeEventV1` in its
+/// own test fixture `RawNativeEventV1Fixture` rather than reading
+/// `skippy-ffi`'s source directly, because a published crate tarball
+/// contains only its own package root (see
+/// `publish_consistency::check_publish_literal_includes`). This check keeps
+/// that mirror honest by comparing both structs' field names, in
+/// declaration order, from this dev-only cross-crate-aware binary.
+fn check_runtime_event_abi_mirror(repo_root: &Path) -> DynResult<()> {
+    let abi_relative = Path::new("crates/skippy-ffi/src/abi.rs");
+    let abi_source = fs::read_to_string(repo_root.join(abi_relative))?;
+    let abi_fields = struct_field_names(&abi_source, "pub struct SkippyRuntimeEventV1 {")
+        .map_err(|error| format!("{}: {error}", abi_relative.display()))?;
+
+    let mirror_relative = Path::new("crates/mesh-llm-runtime-event-contracts/src/tests/native.rs");
+    let mirror_source = fs::read_to_string(repo_root.join(mirror_relative))?;
+    let mirror_fields = struct_field_names(&mirror_source, "struct RawNativeEventV1Fixture {")
+        .map_err(|error| format!("{}: {error}", mirror_relative.display()))?;
+
+    ensure_eq(
+        &abi_fields.join(", "),
+        &mirror_fields.join(", "),
+        "skippy-ffi SkippyRuntimeEventV1 fields mirrored by mesh-llm-runtime-event-contracts RawNativeEventV1Fixture",
+    )
+}
+
+/// Extracts field names, in declaration order, from a `struct <Name> { ... }`
+/// body located by `decl_marker` (e.g. `"struct Foo {"` or
+/// `"pub struct Foo {"`). Matches loosely (optional `pub ` prefix, skips
+/// blank/comment lines, splits on the first `:`) so it works for both
+/// FFI-exported and plain internal structs without requiring the source to
+/// actually parse as Rust.
+fn struct_field_names(source: &str, decl_marker: &str) -> DynResult<Vec<String>> {
+    let body = source
+        .split_once(decl_marker)
+        .ok_or_else(|| format!("missing `{decl_marker}` declaration"))?
+        .1
+        .split_once("\n}")
+        .ok_or_else(|| format!("`{decl_marker}` declaration should close"))?
+        .0;
+
+    let fields = body
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let trimmed = trimmed.strip_prefix("pub ").unwrap_or(trimmed);
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                return None;
+            }
+            trimmed
+                .split_once(':')
+                .map(|(name, _)| name.trim().to_string())
+        })
+        .collect::<Vec<_>>();
+
+    if fields.is_empty() {
+        return Err(format!("no fields found for `{decl_marker}`").into());
+    }
+    Ok(fields)
 }
 
 pub(crate) fn check_publish_crates_command() -> DynResult<()> {
@@ -365,8 +427,30 @@ fn command_flag_values(command: &str, flag: &str) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::test_all_test_targets;
+    use super::{struct_field_names, test_all_test_targets};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn struct_field_names_extracts_pub_fields_in_order() {
+        let source =
+            "#[repr(C)]\npub struct Foo {\n    pub a: u32,\n    // a comment\n    pub b: u64,\n}\n";
+        let fields = struct_field_names(source, "pub struct Foo {").unwrap();
+        assert_eq!(fields, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn struct_field_names_extracts_private_fields_in_order() {
+        let source = "struct Bar {\n    a: u32,\n    b: Vec<u8>,\n}\n";
+        let fields = struct_field_names(source, "struct Bar {").unwrap();
+        assert_eq!(fields, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn struct_field_names_errors_on_missing_declaration() {
+        let error =
+            struct_field_names("struct Other {\n    a: u32,\n}\n", "struct Bar {").unwrap_err();
+        assert!(error.to_string().contains("missing `struct Bar {`"));
+    }
 
     #[test]
     fn test_all_targets_are_parsed_from_commands() {

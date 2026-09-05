@@ -123,7 +123,11 @@ fn built_in_schema_uses_explicit_path_and_url_value_kinds() {
 
 #[test]
 fn startup_runtime_settings_require_process_restart() {
-    for path in ["runtime.debug", "runtime.listen_all"] {
+    for path in [
+        "runtime.debug",
+        "runtime.listen_all",
+        "runtime.lifecycle_log_parser",
+    ] {
         let setting = schema_setting(path);
 
         assert_eq!(

@@ -23,4 +23,5 @@ url = "2"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+serial_test = "4"
 tempfile = "3"

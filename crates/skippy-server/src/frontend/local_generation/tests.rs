@@ -190,6 +190,7 @@ fn recurrent_test_backend(
         generation_token_budget: Arc::new(GenerationTokenBudget::new(token_budget)),
         hook_policy: None,
         generation_receipt: None,
+        generation_lifecycle: None,
         linear_proposal_ingress: None,
         kv: Some(kv),
         iteration_scheduler,
@@ -241,6 +242,7 @@ fn local_generation_signal_window_uses_configured_value() {
         generation_token_budget: Arc::new(GenerationTokenBudget::new(4096)),
         hook_policy: None,
         generation_receipt: None,
+        generation_lifecycle: None,
         linear_proposal_ingress: None,
         kv: None,
         iteration_scheduler,
@@ -305,6 +307,7 @@ fn recurrent_post_decode_checkpoint_reuses_a_growing_prompt() -> Result<()> {
         OpenAiCacheHints::default(),
         Some("recurrent-cache-test"),
         true,
+        None,
     );
     let mut first_output = Vec::new();
     let first_stats = backend.generate_local_tokens(
@@ -343,6 +346,7 @@ fn recurrent_post_decode_checkpoint_reuses_a_growing_prompt() -> Result<()> {
         OpenAiCacheHints::default(),
         Some("recurrent-cache-test"),
         true,
+        None,
     );
     let second_stats = backend.generate_local_tokens(
         LocalGeneration {
@@ -593,6 +597,7 @@ fn local_generation_eventually_delivers_receipts_and_cleanup_survives_sink_error
         generation_token_budget: Arc::new(GenerationTokenBudget::new(128)),
         hook_policy: None,
         generation_receipt: Some(GenerationReceiptConfig::new(sink.clone())),
+        generation_lifecycle: None,
         linear_proposal_ingress: None,
         kv: None,
         iteration_scheduler,
@@ -602,7 +607,7 @@ fn local_generation_eventually_delivers_receipts_and_cleanup_survives_sink_error
     // above one token so the test exercises a fresh runtime session before
     // its batch size is queried.
     let prompt_token_ids = [1, 2];
-    let ids = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false);
+    let ids = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false, None);
     let mut emitted = Vec::new();
     backend.generate_local_tokens(
         LocalGeneration {
@@ -657,7 +662,8 @@ fn local_generation_eventually_delivers_receipts_and_cleanup_survives_sink_error
     );
 
     sink.fail.store(true, Ordering::Relaxed);
-    let failing_ids = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false);
+    let failing_ids =
+        OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false, None);
     backend.generate_local_tokens(
         LocalGeneration {
             prompt_token_ids: &prompt_token_ids,

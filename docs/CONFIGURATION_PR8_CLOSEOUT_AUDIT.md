@@ -47,7 +47,8 @@ schema row or stale manifest row from passing review:
 `logging.webhook.enabled`, `logging.webhook.url`, `logging.webhook.max_attempts`,
 `logging.webhook.timeout_secs`, `logging.webhook.dead_letter_retention_secs`,
 `runtime.debug`, `runtime.listen_all`, `runtime.mode`,
-`runtime.startup_failure_policy`, `runtime.drain_timeout_secs`,
+`runtime.startup_failure_policy`, `runtime.lifecycle_log_parser`,
+`runtime.drain_timeout_secs`,
 `runtime.drain_timeout_max_secs`, `runtime.activity.enabled`,
 `runtime.activity.idle_after_secs`, `runtime.activity.poll_interval_secs`,
 `runtime.activity.resume_debounce_secs`, `runtime.activity.response`,
@@ -146,6 +147,7 @@ schema row or stale manifest row from passing review:
 | Model value sent through routed chat completion | `advanced.server.alias` | The public alias is the served routing identity. Duplicate effective aliases are rejected during config validation, including aliases inherited from defaults. |
 | Adapter endpoint environment | `plugin.<name>.url` | HTTP(S) URLs are passed to locally launched adapters. TCP control has no authenticated peer identity and is rejected statically and at runtime. |
 | Continue-or-abort host startup decision after plugin failure | `plugin.<name>.startup.optional` | One originating policy bit. The decision covers resolution, process spawn, TCP connect, initialize parsing, and rollback of prior required plugins. |
+| Native lifecycle log parser policy in host startup | `runtime.lifecycle_log_parser` | `mesh-llm-config` normalizes the config and environment selection; `runtime/run_auto.rs` derives the capability-aware native-log parser policy and configures the loaded runtime. Protocol conversion preserves the optional mode for peer configuration, covered by `protocol::tests::config::lifecycle_log_parser_proto_roundtrip_preserves_mode` and `mesh_config_proto_legacy_payload_preserves_disabled_parser_source`. |
 
 ## Closeout defects
 

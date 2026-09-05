@@ -1,5 +1,6 @@
 mod authoring;
 mod diagnostic;
+mod env_overrides;
 mod hardware_validation;
 mod model;
 mod model_validation;
@@ -19,6 +20,14 @@ pub use authoring::{
     ConfigEditor, ConfigSchemaBuilder, ConfigSettingSchemaBuilder, LocalServingNodeConfig,
     ModelConfigEditor, ModelDefaultsEditor, PluginConfigEditor, built_in_config_schema,
 };
+pub use env_overrides::{
+    CONFIG_OVERRIDE_ENV_NAMES, ConfigValueSource, EventSystemTrialMode,
+    LifecycleLogParserSelection, MESH_LLM_BENCHMARK_TUNE_TRIAL_ENV, MESH_LLM_CONFIG_ENV,
+    MESH_LLM_EVENT_SYSTEM_TRIAL_MODE_ENV, MESH_LLM_LIFECYCLE_LOG_PARSER_ENV, apply_env_overrides,
+    benchmark_tune_trial_enabled, event_system_progress_diagnostic_bypass_enabled,
+    event_system_trial_mode, resolve_benchmark_tune_trial_gate, resolve_event_system_trial_mode,
+    resolve_lifecycle_log_parser_override, with_env_override_for_test,
+};
 pub use model::*;
 pub use plugin_validation::control_behavior::{
     PluginConditionOperator, PluginConditionValue, PluginConditionalDisable, PluginConflictRule,
@@ -31,7 +40,10 @@ pub use plugin_validation::{
     PluginSettingConstraint, PluginSettingSchema, PluginValueKind, PluginValueSchema,
     SUPPORTED_PLUGIN_CONFIG_SCHEMA_VERSION,
 };
-pub use store::{ConfigStore, config_path, config_to_toml, load_config, parse_config_toml};
+pub use store::{
+    ConfigStore, config_path, config_to_toml, load_config, parse_config_toml,
+    parse_config_toml_structural,
+};
 pub use validate::{
     ConfigDiagnostic, ConfigDiagnosticCode, ConfigDiagnosticSchemaSource, ConfigDiagnosticSeverity,
     ConfigDiagnosticSource, alias_diagnostic, built_in_support_diagnostic,
@@ -48,13 +60,83 @@ pub use wiring_validation::wiring_manifest_diagnostics;
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigStore, GpuAssignment, LocalServingNodeConfig, MeshConfig, SpeculativeConfig,
-        built_in_config_schema, canonicalize_built_in_config_identifier, parse_config_toml,
-        validate_config,
+        ConfigStore, ConfigValueSource, GpuAssignment, LifecycleLogParserMode,
+        LocalServingNodeConfig, MeshConfig, SpeculativeConfig, built_in_config_schema,
+        canonicalize_built_in_config_identifier, parse_config_toml,
+        resolve_lifecycle_log_parser_override, validate_config,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn lifecycle_log_parser_defaults_to_auto() {
+        let config = parse_config_toml("").expect("empty config should parse");
+
+        assert_eq!(
+            config.runtime.lifecycle_log_parser,
+            LifecycleLogParserMode::Auto
+        );
+        assert_eq!(
+            config.runtime.lifecycle_log_parser_source,
+            ConfigValueSource::Default
+        );
+    }
+
+    #[test]
+    fn lifecycle_log_parser_tracks_explicit_toml_source() {
+        let config = parse_config_toml("[runtime]\nlifecycle_log_parser = \"disabled\"\n")
+            .expect("closed enum should parse");
+
+        assert_eq!(
+            config.runtime.lifecycle_log_parser,
+            LifecycleLogParserMode::Disabled
+        );
+        assert_eq!(
+            config.runtime.lifecycle_log_parser_source,
+            ConfigValueSource::Config
+        );
+    }
+
+    #[test]
+    fn lifecycle_log_parser_env_override_has_highest_precedence() {
+        let selection = resolve_lifecycle_log_parser_override(
+            LifecycleLogParserMode::Disabled,
+            ConfigValueSource::Config,
+            Some(std::ffi::OsStr::new("enabled")),
+        )
+        .expect("valid environment override should parse");
+
+        assert_eq!(selection.mode, LifecycleLogParserMode::Enabled);
+        assert_eq!(selection.source, ConfigValueSource::Env);
+    }
+
+    #[test]
+    fn lifecycle_log_parser_without_env_preserves_default_source() {
+        let selection = resolve_lifecycle_log_parser_override(
+            LifecycleLogParserMode::Auto,
+            ConfigValueSource::Default,
+            None,
+        )
+        .expect("absent environment override should preserve selection");
+
+        assert_eq!(selection.mode, LifecycleLogParserMode::Auto);
+        assert_eq!(selection.source, ConfigValueSource::Default);
+    }
+
+    #[test]
+    fn lifecycle_log_parser_rejects_invalid_environment_override_without_value_echo() {
+        let error = resolve_lifecycle_log_parser_override(
+            LifecycleLogParserMode::Auto,
+            ConfigValueSource::Default,
+            Some(std::ffi::OsStr::new("secret-invalid-value")),
+        )
+        .expect_err("invalid environment override must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("MESH_LLM_LIFECYCLE_LOG_PARSER"));
+        assert!(!message.contains("secret-invalid-value"));
+    }
 
     #[test]
     fn config_store_loads_missing_file_as_default() {
@@ -789,6 +871,7 @@ gpu_id = "pci:0000:65:00.0"
         let ignored = [
             "extra",
             "gpu_id_from_legacy_shim",
+            "lifecycle_log_parser_source",
             "models",
             "plugins",
             "settings",

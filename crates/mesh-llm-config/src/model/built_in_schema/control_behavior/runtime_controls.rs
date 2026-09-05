@@ -73,7 +73,9 @@ pub(super) fn apply_runtime_controls_behavior(setting: &mut ConfigSettingSchema,
         "plugin.<plugin-name>.startup.optional" | "plugin.<plugin-name>.startup.lazy_start" => {
             set_static_options(setting)
         }
-        "runtime.mode" | "runtime.startup_failure_policy" => set_static_options(setting),
+        "runtime.mode" | "runtime.startup_failure_policy" | "runtime.lifecycle_log_parser" => {
+            set_static_options(setting)
+        }
         "runtime.drain_timeout_secs" => {
             set_numeric(setting, Some(1.0), Some(3600.0), Some(1.0), Some("sec"));
             push_range_constraint(

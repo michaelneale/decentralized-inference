@@ -86,6 +86,7 @@ pub(super) fn method_route_label(method: &str, path: &str) -> &'static str {
         ("GET", "/api/models") => "management_get_models",
         ("GET", "/api/events") => "management_get_events",
         ("GET", "/api/runtime/events") => "management_get_runtime_events",
+        ("GET", "/api/runtime/events/v1") => "management_get_runtime_events_v1",
         ("GET", _) => "management_get_other",
         ("POST", _) => "management_post",
         ("PUT", _) => "management_put",
@@ -303,6 +304,18 @@ mod tests {
         assert_eq!(
             method_route_label("PATCH", "/api/plugins/demo/web-ui/config"),
             "management_patch"
+        );
+    }
+
+    #[test]
+    fn runtime_events_v1_route_has_its_own_label_distinct_from_the_legacy_route() {
+        assert_eq!(
+            method_route_label("GET", "/api/runtime/events/v1"),
+            "management_get_runtime_events_v1"
+        );
+        assert_eq!(
+            method_route_label("GET", "/api/runtime/events"),
+            "management_get_runtime_events"
         );
     }
 }

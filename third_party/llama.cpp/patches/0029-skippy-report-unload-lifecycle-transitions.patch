@@ -1,0 +1,77 @@
+From 8320d6e8d4944c77be7d517633111833bfb04400 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 15:45:36 -0400
+Subject: [PATCH] skippy: report unload lifecycle transitions
+
+---
+ src/skippy/model_lifecycle.cpp      |  9 +++++++++
+ src/skippy/tests/runtime_events.cpp | 12 ++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/src/skippy/model_lifecycle.cpp b/src/skippy/model_lifecycle.cpp
+index fa28e31d4..caa9fcd6d 100644
+--- a/src/skippy/model_lifecycle.cpp
++++ b/src/skippy/model_lifecycle.cpp
+@@ -99,6 +99,11 @@ enum skippy_status skippy_model_free(
+         struct skippy_model * model,
+         struct skippy_error ** out_error) {
+     if (model != nullptr) {
++        const uint64_t native_model_id = reinterpret_cast<uint64_t>(model);
++        skippy_emit_unload_event(
++                SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_STARTED,
++                native_model_id,
++                0);
+         if (model->mtp_ctx != nullptr) {
+             llama_free(model->mtp_ctx);
+         }
+@@ -112,6 +117,10 @@ enum skippy_status skippy_model_free(
+             model->chat_templates_free(model->chat_templates);
+         }
+         llama_model_free(model->model);
++        skippy_emit_unload_event(
++                SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED,
++                native_model_id,
++                0);
+         delete model;
+     }
+     return skippy_success(out_error);
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index a05806558..f9b57cb93 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -34,6 +34,8 @@ struct production_capture {
+     std::atomic<int> diagnostic_events{0};
+     std::atomic<int> kv_initialized_events{0};
+     std::atomic<int> kv_cleared_events{0};
++    std::atomic<int> unload_started_events{0};
++    std::atomic<int> unload_completed_events{0};
+     std::atomic<int> last_kind{0};
+ };
+ 
+@@ -73,6 +75,14 @@ void production_callback(const struct skippy_runtime_event_v1 * event, void * us
+     if (event->kind == SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CLEARED) {
+         c->kv_cleared_events.fetch_add(1);
+     }
++    if (event->category == SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD &&
++        event->kind == SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_STARTED) {
++        c->unload_started_events.fetch_add(1);
++    }
++    if (event->category == SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD &&
++        event->kind == SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED) {
++        c->unload_completed_events.fetch_add(1);
++    }
+ }
+ 
+ void blocking_callback(const struct skippy_runtime_event_v1 *, void * user_data) {
+@@ -289,6 +299,8 @@ int test_native_model_load_production(const char * fixture_path) {
+     CHECK(global.kv_cleared_events.load() > 0);
+     CHECK(skippy_session_free(session, &error) == SKIPPY_STATUS_OK);
+     CHECK(skippy_model_free(model, &error) == SKIPPY_STATUS_OK);
++    CHECK(global.unload_started_events.load() == 1);
++    CHECK(global.unload_completed_events.load() == 1);
+     if (error != nullptr) {
+         skippy_error_free(error);
+         error = nullptr;
+-- 
+2.50.1 (Apple Git-155)
+

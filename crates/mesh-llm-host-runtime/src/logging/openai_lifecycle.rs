@@ -27,7 +27,13 @@ use super::{
 };
 
 /// Fixed upper bound for requests owned by one embedded frontend observer.
-const MAX_TRACKED_REQUESTS: usize = 1_024;
+///
+/// `pub(crate)` (review defect D12) so `logging::raw_mesh_lifecycle` and
+/// `network::openai::runtime_events` import this single definition instead
+/// of each carrying their own copy; pinned against
+/// `runtime_events::config::REQUEST_ROOT_BOUND` by the `request_root_bound`
+/// contract test in this module's `tests` block.
+pub(crate) const MAX_TRACKED_REQUESTS: usize = 1_024;
 
 /// The host-owned lifecycle attachment for one parsed OpenAI ingress request.
 ///
@@ -1406,6 +1412,26 @@ mod tests {
                 .registry_ref()
                 .get_active(&overflow.as_uuid().to_string())
                 .is_none()
+        );
+    }
+
+    /// Review defect D12: pins `runtime_events::config::REQUEST_ROOT_BOUND`
+    /// to this module's `MAX_TRACKED_REQUESTS` so the runtime-event
+    /// reservation sizing cannot silently desynchronize from the logging
+    /// request-tracking bound. Imports both constants through their real
+    /// crate-visible paths (not `super::*`) so the test also proves
+    /// `MAX_TRACKED_REQUESTS` is reachable crate-wide, matching how
+    /// `logging::raw_mesh_lifecycle` and `network::openai::runtime_events`
+    /// consume it.
+    #[test]
+    fn request_root_bound() {
+        use crate::logging::MAX_TRACKED_REQUESTS;
+        use crate::runtime_events::config::REQUEST_ROOT_BOUND;
+
+        assert_eq!(
+            REQUEST_ROOT_BOUND, MAX_TRACKED_REQUESTS,
+            "runtime_events::config::REQUEST_ROOT_BOUND must stay pinned to \
+             logging::openai_lifecycle::MAX_TRACKED_REQUESTS"
         );
     }
 }

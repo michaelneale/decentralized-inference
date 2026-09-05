@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use crate::runtime_state::RuntimeState;
 
 use super::{
-    KvStageIntegration, PrefillKvIdentity, RadixResidentEntry, ResidentPrefixRecord,
-    ResidentPrefixRestore, ResidentSequencePool, StagePrefixCachePayload, lock_resident_sequences,
+    KvLifecycleEvent, KvStageIntegration, PrefillKvIdentity, RadixResidentEntry,
+    ResidentPrefixRecord, ResidentPrefixRestore, ResidentSequencePool, StagePrefixCachePayload,
+    lock_resident_sequences,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -180,6 +181,9 @@ impl KvStageIntegration {
             self.outstanding_resident_capacity_demand(runtime);
         let request_tokens = request_tokens.max(inflight_outstanding_tokens);
         if capacity_tokens == 0 {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CapacityApproachingLimit {
+                admission_deficit_tokens: request_tokens,
+            });
             return Ok(ResidentCapacityDecision {
                 enabled: true,
                 capacity_known: false,
@@ -315,6 +319,17 @@ impl KvStageIntegration {
             .saturating_add(minimum_free)
             .saturating_sub(capacity_tokens);
         decision.admitted = decision.admission_deficit_tokens == 0;
+        if decision.evicted_entries > 0 {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CacheEviction {
+                evicted_entries: decision.evicted_entries,
+                evicted_tokens: decision.evicted_tokens,
+            });
+        }
+        if !decision.admitted {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CapacityApproachingLimit {
+                admission_deficit_tokens: decision.admission_deficit_tokens,
+            });
+        }
         self.verify_resident_ownership(radix.stats().resident_entries, sequences.stats().0)?;
         Ok(decision)
     }
@@ -330,11 +345,19 @@ impl KvStageIntegration {
             .radix
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let radix_hit = radix.peek_resident(&identity.namespace, &identity.token_ids)?;
+        let Some(radix_hit) = radix.peek_resident(&identity.namespace, &identity.token_ids) else {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CacheLookupMiss);
+            return None;
+        };
         if !self.meets_shared_prefix_min_tokens(radix_hit.matched_tokens) {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CacheLookupMiss);
             return None;
         }
         let entries = radix.stats().resident_entries;
+        self.notify_kv_lifecycle(KvLifecycleEvent::CacheLookupHit {
+            matched_tokens: radix_hit.matched_tokens,
+            resident_entries: entries,
+        });
         Some(ResidentPrefixRestore {
             page_id: radix_hit.value.page_id,
             token_count: radix_hit.matched_tokens,
@@ -399,16 +422,21 @@ impl KvStageIntegration {
                 &token_ids[..token_count],
             );
             restore?;
+            let resident_entries = self
+                .radix
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stats()
+                .resident_entries;
+            self.notify_kv_lifecycle(KvLifecycleEvent::PrefixRestored {
+                restored_tokens: token_count,
+                resident_entries,
+            });
             return Ok(Some(ResidentPrefixRestore {
                 page_id,
                 token_count,
                 seq_id: radix_hit.value.seq_id,
-                entries: self
-                    .radix
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .stats()
-                    .resident_entries,
+                entries: resident_entries,
             }));
         }
         Ok(None)
@@ -443,6 +471,12 @@ impl KvStageIntegration {
             evicted_tokens = evicted_tokens.saturating_add(removed.value.token_count);
         }
         self.verify_resident_ownership(radix.stats().resident_entries, sequences.stats().0)?;
+        if evicted_entries > 0 {
+            self.notify_kv_lifecycle(KvLifecycleEvent::CacheEviction {
+                evicted_entries,
+                evicted_tokens,
+            });
+        }
         Ok(ResidentPrefixEviction {
             target_tokens,
             evicted_entries,
@@ -748,6 +782,19 @@ fn resident_index_over_capacity(
 #[cfg(test)]
 mod proactive_eviction_tests {
     use super::*;
+    use crate::kv_integration::KvLifecycleObserver;
+    use skippy_protocol::{StageConfig, StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload};
+    use skippy_runtime::ModelStateKind;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<KvLifecycleEvent>>);
+
+    impl KvLifecycleObserver for RecordingObserver {
+        fn observe(&self, event: KvLifecycleEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
 
     #[test]
     fn logical_checkpoint_depth_does_not_trigger_physical_kv_eviction() {
@@ -765,6 +812,66 @@ mod proactive_eviction_tests {
         };
 
         assert!(!resident_index_over_capacity(config, stats, 8_000));
+    }
+
+    #[test]
+    fn admitted_capacity_eviction_reports_the_removed_entries() {
+        let config = StageConfig {
+            ctx_size: 10,
+            lane_count: 1,
+            kv_cache: Some(StageKvCacheConfig {
+                mode: StageKvCacheMode::LookupRecord,
+                payload: StageKvCachePayload::ResidentKv,
+                max_entries: 4,
+                max_bytes: 0,
+                min_tokens: 1,
+                shared_prefix_stride_tokens: 1,
+                shared_prefix_record_limit: 1,
+            }),
+            ..StageConfig::default()
+        };
+        let observer = Arc::new(RecordingObserver::default());
+        let integration =
+            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Dense), None)
+                .unwrap()
+                .expect("resident cache should be enabled")
+                .with_kv_lifecycle_observer(observer.clone());
+        let seq_id = lock_resident_sequences(&integration.resident_sequences)
+            .allocate()
+            .unwrap();
+        integration
+            .radix
+            .lock()
+            .unwrap()
+            .insert_resident(
+                "stage",
+                &[1, 2, 3, 4, 5, 6, 7, 8],
+                8,
+                RadixResidentEntry {
+                    page_id: "page".to_string(),
+                    seq_id,
+                    token_count: 8,
+                    recompute_cost: 8,
+                },
+            )
+            .unwrap();
+
+        let mut runtime =
+            crate::runtime_state::RuntimeState::new_modelless_with_capacity_for_test(1, 10);
+        let decision = integration
+            .admit_resident_capacity(&mut runtime, "session", 5, 0, 0, None)
+            .unwrap();
+
+        assert!(decision.admitted);
+        assert_eq!(decision.evicted_entries, 1);
+        assert_eq!(decision.evicted_tokens, 8);
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![KvLifecycleEvent::CacheEviction {
+                evicted_entries: 1,
+                evicted_tokens: 8,
+            }]
+        );
     }
 
     #[test]

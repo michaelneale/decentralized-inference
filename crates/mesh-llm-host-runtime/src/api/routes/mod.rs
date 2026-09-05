@@ -15,6 +15,7 @@ pub(crate) mod runtime;
 mod runtime_activity;
 pub(crate) mod runtime_control_state;
 mod runtime_control_state_sources;
+pub(crate) mod runtime_events;
 mod search;
 
 use super::MeshApi;
@@ -68,6 +69,10 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 }
                 ("POST", "/api/runtime/pick-directory") => {
                     path_picker::handle(stream).await?;
+                    Ok(true)
+                }
+                ("GET", "/api/runtime/events/v1") => {
+                    runtime_events::handle(stream, state, path, raw_request).await?;
                     Ok(true)
                 }
                 ("GET", "/api/status")

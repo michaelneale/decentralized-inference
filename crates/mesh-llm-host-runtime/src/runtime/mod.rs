@@ -16,6 +16,7 @@ mod local_package;
 mod local_split;
 mod model_lifecycle;
 pub(crate) mod model_reconciliation;
+mod node_lifecycle_events;
 mod operational_logging;
 mod options;
 mod plugin_host_role;

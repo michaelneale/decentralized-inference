@@ -46,8 +46,8 @@ pub(crate) use metrics::{
     LoggingWebhookDeliveryOutcome,
 };
 pub(crate) use openai_lifecycle::{
-    OpenAiArtifactCapture, OpenAiLifecycleAttachment, OpenAiRouteAttempt, OpenAiRouteObserver,
-    OpenAiStreamArtifactCapture,
+    MAX_TRACKED_REQUESTS, OpenAiArtifactCapture, OpenAiLifecycleAttachment, OpenAiRouteAttempt,
+    OpenAiRouteObserver, OpenAiStreamArtifactCapture,
 };
 pub use persistence::LogStoreSink;
 pub(crate) use raw_mesh_lifecycle::{

@@ -12,5 +12,6 @@ pub(crate) use response::send_503;
 pub(crate) mod response_adapter;
 mod response_quality;
 mod routing_rank;
+pub(crate) mod runtime_events;
 mod tool_call_ids;
 pub(crate) mod transport;

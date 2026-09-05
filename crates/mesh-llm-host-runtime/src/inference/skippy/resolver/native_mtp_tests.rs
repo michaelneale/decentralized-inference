@@ -74,6 +74,9 @@ impl skippy_server::serving_hooks::ModelServingHooksFactory for RecordingNativeH
     fn create(
         &self,
         _tokenizer: skippy_server::TokenizerCapability,
+        _extra_generation_sink: Option<
+            Arc<dyn skippy_server::frontend::GenerationLifecycleIngress>,
+        >,
     ) -> Result<skippy_server::serving_hooks::ModelServingHooks> {
         let source: Arc<dyn skippy_server::LinearProposalIngress> = self.ingress.clone();
         let ingress = skippy_server::frontend::LinearProposalIngressConfig::new(

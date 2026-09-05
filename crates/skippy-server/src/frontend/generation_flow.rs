@@ -14,6 +14,7 @@ use crate::frontend::generation::StageOpenAiBackend;
 use crate::frontend::generation::TextGenerationCollector;
 use crate::frontend::generation::TokenControl;
 use crate::frontend::generation::emulation_generation_active;
+use crate::frontend::generation_receipt::GenerationLifecycleState;
 use crate::frontend::generation_receipt::complete_generation_before_cleanup;
 use crate::frontend::local_generation::LocalGenerationReceiptFinalization;
 use crate::frontend::request::wire_sampling_config;
@@ -140,6 +141,20 @@ impl StageOpenAiBackend {
             .map(|_| self.tokenize(&prompt.text))
             .transpose()?
             .map(Arc::<[i32]>::from);
+        let lifecycle_prompt_token_ids = self
+            .generation_lifecycle
+            .as_ref()
+            .map(|_| self.tokenize(&prompt.text))
+            .transpose()?
+            .unwrap_or_default();
+        let mut lifecycle = GenerationLifecycleState::new(
+            self.generation_lifecycle.as_ref(),
+            ids.request_id,
+            ids.session_id,
+            ids.agent_session_id.clone(),
+            ids.frontend_request_id,
+            &lifecycle_prompt_token_ids,
+        );
         let stop_value_storage =
             generation_stop_values(stop, prompt.chat_parse_metadata.as_deref());
         let stop_values = stop_value_storage
@@ -318,6 +333,7 @@ impl StageOpenAiBackend {
                         session_id: ids.session_id,
                         agent_session_id: ids.agent_session_id.clone(),
                         prompt_token_ids: Arc::clone(prompt_token_ids),
+                        frontend_request_id: ids.frontend_request_id,
                     });
                     receipt_started = true;
                 }
@@ -366,10 +382,12 @@ impl StageOpenAiBackend {
                             token_ids: vec![current].into_boxed_slice(),
                         });
                     }
+                    lifecycle.commit(current, ids.request_started_at.elapsed());
                     if collector.push_token(current)? == TokenControl::Stop {
                         if let Some(observation) = receipt_observation.as_mut() {
                             observation.mark_callback_stop();
                         }
+                        lifecycle.mark_callback_stop();
                         decoded_tokens += 1;
                         break;
                     }
@@ -496,10 +514,13 @@ impl StageOpenAiBackend {
             },
         );
         let generation_succeeded = result.is_ok();
+        if receipt_cancelled {
+            lifecycle.mark_cancelled();
+        }
         complete_generation_before_cleanup(
             result,
             || {
-                if receipt_started {
+                let receipt_result = if receipt_started {
                     self.finalize_generation_receipt(
                         LocalGenerationReceiptFinalization {
                             session_label: &session_id,
@@ -510,12 +531,15 @@ impl StageOpenAiBackend {
                             observation: receipt_observation,
                             cancelled: receipt_cancelled,
                             model_generation_elapsed: receipt_model_generation_elapsed,
+                            frontend_request_id: ids.frontend_request_id,
                         },
                         generation_succeeded,
                     )
                 } else {
                     Ok(())
-                }
+                };
+                lifecycle.finish(generation_succeeded);
+                receipt_result
             },
             || session_cleanup.cleanup(),
         )?;
@@ -547,7 +571,21 @@ impl StageOpenAiBackend {
             .map(|_| self.tokenize(&request.prompt.text))
             .transpose()?
             .map(Arc::<[i32]>::from);
+        let lifecycle_prompt_token_ids = self
+            .generation_lifecycle
+            .as_ref()
+            .map(|_| self.tokenize(&request.prompt.text))
+            .transpose()?
+            .unwrap_or_default();
         let mut lane = request.lane_pool.checkout(&request.ids)?;
+        let mut lifecycle = GenerationLifecycleState::new(
+            self.generation_lifecycle.as_ref(),
+            request.ids.request_id,
+            request.ids.session_id,
+            request.ids.agent_session_id.clone(),
+            request.ids.frontend_request_id,
+            &lifecycle_prompt_token_ids,
+        );
         if let (Some(config), Some(prompt_token_ids)) = (
             self.generation_receipt.as_ref(),
             receipt_prompt_token_ids.as_ref(),
@@ -557,6 +595,7 @@ impl StageOpenAiBackend {
                 session_id,
                 agent_session_id: request.ids.agent_session_id.clone(),
                 prompt_token_ids: Arc::clone(prompt_token_ids),
+                frontend_request_id: request.ids.frontend_request_id,
             });
         }
 
@@ -797,10 +836,12 @@ impl StageOpenAiBackend {
                         token_ids: vec![current].into_boxed_slice(),
                     });
                 }
+                lifecycle.commit(current, request.ids.request_started_at.elapsed());
                 if collector.push_token(current)? == TokenControl::Stop {
                     if let Some(observation) = receipt_observation.as_mut() {
                         observation.mark_callback_stop();
                     }
+                    lifecycle.mark_callback_stop();
                     decoded_tokens += 1;
                     break;
                 }
@@ -957,6 +998,10 @@ impl StageOpenAiBackend {
         })();
 
         let generation_succeeded = result.is_ok();
+        if receipt_cancelled {
+            lifecycle.mark_cancelled();
+        }
+        lifecycle.finish(generation_succeeded);
         let receipt_result = self.finalize_generation_receipt(
             LocalGenerationReceiptFinalization {
                 session_label: &session_key,
@@ -967,6 +1012,7 @@ impl StageOpenAiBackend {
                 observation: receipt_observation,
                 cancelled: receipt_cancelled,
                 model_generation_elapsed: receipt_model_generation_elapsed,
+                frontend_request_id: request.ids.frontend_request_id,
             },
             generation_succeeded,
         );

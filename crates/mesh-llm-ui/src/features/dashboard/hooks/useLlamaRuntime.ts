@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { LlamaRuntimePayload } from '@/features/app-shell/lib/status-types'
+import { useRuntimeEventsV1 } from '@/features/network/api/use-runtime-events-v1'
 
 const LLAMA_RUNTIME_REFRESH_MS = 2_500
 const LLAMA_RUNTIME_RECONNECT_MS = 1_000
@@ -11,24 +12,35 @@ type LlamaRuntimeState = {
   error: string | null
 }
 
+/**
+ * Dashboard twin of `@/features/network/api/use-llama-runtime`: the v1 runtime
+ * event stream is the live signal, `/api/runtime/llama` stays authoritative,
+ * and the legacy `/api/runtime/events` EventSource opens only once v1 has
+ * resolved to a documented fallback. Both hooks share the one v1 consumer, so
+ * the console never opens a third runtime-event connection.
+ */
 export function useLlamaRuntime(enabled: boolean) {
   const [state, setState] = useState<LlamaRuntimeState>({
     data: null,
     loading: false,
     error: null
   })
+  const runtimeEvents = useRuntimeEventsV1({ enabled })
+  const legacyStreamEnabled = runtimeEvents.mode === 'fallback'
+  const reloadRef = useRef<() => void>(() => undefined)
 
   useEffect(() => {
     if (!enabled) {
+      reloadRef.current = () => undefined
       setState({ data: null, loading: false, error: null })
-      return
+      return undefined
     }
 
     let cancelled = false
     let controller: AbortController | null = null
-    let runtimeEvents: EventSource | null = null
+    let runtimeEventSource: EventSource | null = null
     let reconnectTimer: number | null = null
-    let fallbackInterval: number | null = null
+    let refreshInterval: number | null = null
 
     const clearReconnectTimer = () => {
       if (reconnectTimer !== null) {
@@ -37,20 +49,20 @@ export function useLlamaRuntime(enabled: boolean) {
       }
     }
 
-    const clearFallbackInterval = () => {
-      if (fallbackInterval !== null) {
-        window.clearInterval(fallbackInterval)
-        fallbackInterval = null
+    const clearRefreshInterval = () => {
+      if (refreshInterval !== null) {
+        window.clearInterval(refreshInterval)
+        refreshInterval = null
       }
     }
 
     const closeRuntimeEvents = () => {
-      if (!runtimeEvents) return
-      runtimeEvents.onopen = null
-      runtimeEvents.onmessage = null
-      runtimeEvents.onerror = null
-      runtimeEvents.close()
-      runtimeEvents = null
+      if (!runtimeEventSource) return
+      runtimeEventSource.onopen = null
+      runtimeEventSource.onmessage = null
+      runtimeEventSource.onerror = null
+      runtimeEventSource.close()
+      runtimeEventSource = null
     }
 
     const abortRuntimeRequest = () => {
@@ -88,30 +100,26 @@ export function useLlamaRuntime(enabled: boolean) {
       }
     }
 
-    const ensureFallbackPolling = () => {
-      if (fallbackInterval !== null) return
-      fallbackInterval = window.setInterval(() => void loadRuntime(), LLAMA_RUNTIME_REFRESH_MS)
-    }
-
-    const stopFallbackPolling = () => {
-      clearFallbackInterval()
+    const ensurePeriodicRefresh = () => {
+      if (refreshInterval !== null) return
+      refreshInterval = window.setInterval(() => void loadRuntime(), LLAMA_RUNTIME_REFRESH_MS)
     }
 
     const scheduleReconnect = () => {
       if (cancelled || reconnectTimer !== null) return
-      ensureFallbackPolling()
+      ensurePeriodicRefresh()
       closeRuntimeEvents()
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null
-        connectRuntimeEvents()
+        connectLegacyRuntimeEvents()
       }, LLAMA_RUNTIME_RECONNECT_MS)
     }
 
-    const connectRuntimeEvents = () => {
-      if (cancelled || runtimeEvents) return
+    const connectLegacyRuntimeEvents = () => {
+      if (cancelled || runtimeEventSource) return
 
       if (typeof EventSource === 'undefined') {
-        ensureFallbackPolling()
+        ensurePeriodicRefresh()
         return
       }
 
@@ -127,11 +135,11 @@ export function useLlamaRuntime(enabled: boolean) {
         return
       }
 
-      runtimeEvents = source
+      runtimeEventSource = source
       source.onopen = () => {
         if (cancelled) return
         abortRuntimeRequest()
-        stopFallbackPolling()
+        clearRefreshInterval()
         setState((current) => ({ ...current, error: null }))
       }
       source.onmessage = (event) => {
@@ -150,16 +158,25 @@ export function useLlamaRuntime(enabled: boolean) {
       }
     }
 
+    reloadRef.current = () => void loadRuntime()
     void loadRuntime()
-    connectRuntimeEvents()
+    if (legacyStreamEnabled) connectLegacyRuntimeEvents()
+    else ensurePeriodicRefresh()
+
     return () => {
       cancelled = true
+      reloadRef.current = () => undefined
       controller?.abort()
       clearReconnectTimer()
-      clearFallbackInterval()
+      clearRefreshInterval()
       closeRuntimeEvents()
     }
-  }, [enabled])
+  }, [enabled, legacyStreamEnabled])
+
+  useEffect(() => {
+    if (!enabled || runtimeEvents.revision === 0) return
+    reloadRef.current()
+  }, [enabled, runtimeEvents.revision])
 
   return state
 }

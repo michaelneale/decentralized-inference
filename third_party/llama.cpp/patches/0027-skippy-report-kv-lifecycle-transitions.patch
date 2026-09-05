@@ -1,0 +1,84 @@
+From e889eead4a21f4c5bd9b029a352977d01e11920e Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 14:29:07 -0400
+Subject: [PATCH] skippy: report KV lifecycle transitions
+
+---
+ src/skippy/session.cpp              | 13 ++++++++++++-
+ src/skippy/tests/runtime_events.cpp | 15 +++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/src/skippy/session.cpp b/src/skippy/session.cpp
+index 45f2e98c0..e3b8b5716 100644
+--- a/src/skippy/session.cpp
++++ b/src/skippy/session.cpp
+@@ -167,7 +167,13 @@ enum skippy_status skippy_session_create(
+         model->lane_resident_prefix_tokens[static_cast<size_t>(seq_id)].clear();
+     }
+     if (llama_memory_t memory = model->ctx->get_memory()) {
+-        llama_memory_seq_rm(memory, seq_id, -1, -1);
++        if (llama_memory_seq_rm(memory, seq_id, -1, -1)) {
++            skippy_emit_kv_event(
++                    SKIPPY_RUNTIME_EVENT_KIND_KV_INITIALIZED,
++                    static_cast<uint64_t>(seq_id),
++                    static_cast<uint64_t>(llama_n_ctx(model->ctx)),
++                    static_cast<uint64_t>(model->lane_count));
++        }
+     }
+     return skippy_success(out_error);
+ }
+@@ -349,6 +355,11 @@ enum skippy_status skippy_session_reset(
+     skippy_mtp_clear_session_state(session);
+     session->reset_required = false;
+     session->verify_checkpoints.clear();
++    skippy_emit_kv_event(
++            SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CLEARED,
++            static_cast<uint64_t>(session->seq_id),
++            static_cast<uint64_t>(std::max(session->n_past, 0)),
++            0);
+     return skippy_success(out_error);
+ }
+ 
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index 6b9e52bf0..a05806558 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -32,6 +32,8 @@ struct capture {
+ struct production_capture {
+     std::atomic<int> model_load_events{0};
+     std::atomic<int> diagnostic_events{0};
++    std::atomic<int> kv_initialized_events{0};
++    std::atomic<int> kv_cleared_events{0};
+     std::atomic<int> last_kind{0};
+ };
+ 
+@@ -65,6 +67,12 @@ void production_callback(const struct skippy_runtime_event_v1 * event, void * us
+     if (event->category == SKIPPY_RUNTIME_EVENT_CATEGORY_DIAGNOSTIC) {
+         c->diagnostic_events.fetch_add(1);
+     }
++    if (event->kind == SKIPPY_RUNTIME_EVENT_KIND_KV_INITIALIZED) {
++        c->kv_initialized_events.fetch_add(1);
++    }
++    if (event->kind == SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CLEARED) {
++        c->kv_cleared_events.fetch_add(1);
++    }
+ }
+ 
+ void blocking_callback(const struct skippy_runtime_event_v1 *, void * user_data) {
+@@ -273,6 +281,13 @@ int test_native_model_load_production(const char * fixture_path) {
+     CHECK(skippy_model_open(fixture_path, &config, &model, &error) == SKIPPY_STATUS_OK);
+     CHECK(model != nullptr);
+     CHECK(global.model_load_events.load() >= 2);
++    skippy_session * session = nullptr;
++    CHECK(skippy_session_create(model, &session, &error) == SKIPPY_STATUS_OK);
++    CHECK(session != nullptr);
++    CHECK(global.kv_initialized_events.load() > 0);
++    CHECK(skippy_session_reset(session, &error) == SKIPPY_STATUS_OK);
++    CHECK(global.kv_cleared_events.load() > 0);
++    CHECK(skippy_session_free(session, &error) == SKIPPY_STATUS_OK);
+     CHECK(skippy_model_free(model, &error) == SKIPPY_STATUS_OK);
+     if (error != nullptr) {
+         skippy_error_free(error);
+-- 
+2.50.1 (Apple Git-155)
+

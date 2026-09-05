@@ -22,6 +22,9 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 pub use skippy_protocol::FlashAttentionType;
 use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use crate::ConfigValueSource;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct MeshConfig {
@@ -96,6 +99,10 @@ pub struct RuntimeConfig {
     /// How the runtime reacts when a model fails to load during startup.
     #[serde(default)]
     pub startup_failure_policy: runtime::StartupFailurePolicy,
+    #[serde(default)]
+    pub lifecycle_log_parser: LifecycleLogParserMode,
+    #[serde(skip)]
+    pub lifecycle_log_parser_source: ConfigValueSource,
     /// Seconds before forcibly unloading a draining instance (default 30).
     #[serde(default = "default_drain_timeout_secs")]
     pub drain_timeout_secs: u64,
@@ -124,6 +131,8 @@ impl Default for RuntimeConfig {
             listen_all: false,
             mode: runtime::RuntimeMode::default(),
             startup_failure_policy: runtime::StartupFailurePolicy::default(),
+            lifecycle_log_parser: LifecycleLogParserMode::default(),
+            lifecycle_log_parser_source: ConfigValueSource::Default,
             drain_timeout_secs: runtime::DEFAULT_DRAIN_TIMEOUT_SECS,
             drain_timeout_max_secs: runtime::DEFAULT_DRAIN_TIMEOUT_MAX_SECS,
             activity: runtime::RuntimeActivityConfig::default(),
@@ -134,6 +143,38 @@ impl Default for RuntimeConfig {
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MIN_REQUESTS,
             model_target_demand_upgrade_max_age_secs:
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MAX_AGE_SECS,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleLogParserMode {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl FromStr for LifecycleLogParserMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(()),
+        }
+    }
+}
+
+impl LifecycleLogParserMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
         }
     }
 }

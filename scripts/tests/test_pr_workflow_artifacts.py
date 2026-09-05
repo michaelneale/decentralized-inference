@@ -65,9 +65,7 @@ class PrWorkflowArtifactTests(unittest.TestCase):
 
     def test_retained_ci_shim_is_inert(self):
         workflow = self.workflow("ci.yml")
-        self.assertIn("workflow_call:", workflow)
-        self.assertNotIn("pull_request:", workflow)
-        self.assertNotIn("\n  push:\n", workflow)
+        self.assertEqual({"workflow_call"}, workflow_triggers(WORKFLOWS / "ci.yml"))
         self.assertNotIn("uses: ./.github/workflows/ci-", workflow)
         self.assertNotIn("Mesh-LLM/mesh-llm/.github/workflows/ci-", workflow)
 

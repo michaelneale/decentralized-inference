@@ -148,6 +148,24 @@ read it directly:
 | `RUNTIME_EVENTS` | `1 << 24` | `_with_events` model-open entrypoints and runtime-event callbacks |
 | `NATIVE_MTP_N1` | `1 << 25` | Typed, non-frame native MTP draft sideband |
 | `NGRAM_CACHE_DRAFT` | `1 << 26` | Stateful request-local llama.cpp `ngram-cache` proposer |
+| `ACTIVATION_BOUNDARY` | `1 << 29` | Graph activation-boundary negotiation between adjacent stages (main-owned, unrelated to runtime events) |
+| `MODEL_SOURCE` | `1 << 30` | Callback-backed `ModelTensorSourceV1` model source for direct SafeTensors loading (main-owned, unrelated to runtime events) |
+| `RUNTIME_EVENT_REPORTER` | `1 << 31` | `skippy_set_runtime_event_reporter`/`skippy_clear_runtime_event_reporter` process-global reporter |
+| `MODEL_LOAD_EVENTS_V2` | `1 << 32` | `skippy_emit_model_load_event_v2` coarse load-phase/memory/tensor/tokenizer facts |
+| `KV_EVENTS` | `1 << 33` | `skippy_emit_kv_event` KV/cache init, pressure, and capacity facts |
+| `DEVICE_EVENTS` | `1 << 34` | `skippy_emit_device_event` backend/device readiness and resource facts |
+| `DIAGNOSTIC_EVENTS` | `1 << 35` | `skippy_emit_diagnostic_event` warning/failure/invariant facts |
+| `UNLOAD_EVENTS` | `1 << 36` | `skippy_emit_unload_event` unload lifecycle facts |
+
+Each of bits 31-36 is probed independently by `skippy-runtime`'s capability
+probe (`probe_capabilities()`): a family whose bit is unset falls back
+silently, and a family whose bit is set but a required symbol failed to
+resolve is disabled on its own without touching the other families. Bits
+above 36 are treated as reserved to a future build and are reported once as
+a bounded integrity-health record rather than disabling anything, since a
+reserved bit carries no family association. This probing only runs after
+the loader's exact major.minor.patch ABI admission check has already passed
+(`runtime_abi_supported`); it is not itself an ABI compatibility check.
 
 Runtime-event compatibility expectations are narrow on purpose:
 

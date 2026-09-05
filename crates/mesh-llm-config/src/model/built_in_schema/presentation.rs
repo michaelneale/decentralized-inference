@@ -233,6 +233,15 @@ fn process_setting_presentation(rendered: &str) -> Option<SettingPresentation> {
             )
             .hint("toggle"),
         ),
+        "runtime.lifecycle_log_parser" => Some(
+            sp(
+                "Lifecycle log parser",
+                "Use parsed native log summaries only when the loaded runtime lacks the matching structured event family. Enabled forces compatibility output; disabled proves structured coverage.",
+                RUNTIME_POLICY_CATEGORY,
+                5,
+            )
+            .hint("select"),
+        ),
         "owner_control.bind" => Some(sp(
             "Owner-control bind",
             "Local address used by the owner-control listener. Set this to the same port as the advertised control address when overriding owner-control discovery.",

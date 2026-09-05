@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{LineWriter, Write};
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
@@ -26,7 +26,59 @@ static NATIVE_LOG_FILTERED_TX: OnceLock<Mutex<Option<mpsc::UnboundedSender<Nativ
     OnceLock::new();
 
 static NATIVE_LOG_AGGREGATOR: OnceLock<Mutex<NativeLogAggregator>> = OnceLock::new();
-static NATIVE_LOG_FORWARDING_ENABLED: AtomicBool = AtomicBool::new(false);
+static NATIVE_LOG_FORWARDING_MASK: AtomicU8 = AtomicU8::new(0);
+
+const BACKEND_CATEGORY: u8 = 1 << 0;
+const MODEL_CATEGORY: u8 = 1 << 1;
+const MEMORY_CATEGORY: u8 = 1 << 2;
+const KV_CACHE_CATEGORY: u8 = 1 << 3;
+const TOKENIZER_CATEGORY: u8 = 1 << 4;
+const ALL_PRESENTATION_CATEGORIES: u8 =
+    BACKEND_CATEGORY | MODEL_CATEGORY | MEMORY_CATEGORY | KV_CACHE_CATEGORY | TOKENIZER_CATEGORY;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeLogParserMode {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeLogParserPolicy {
+    forwarding_mask: u8,
+}
+
+impl NativeLogParserPolicy {
+    pub fn new(mode: NativeLogParserMode, _capabilities: &crate::CapabilityReport) -> Self {
+        let forwarding_mask = match mode {
+            NativeLogParserMode::Enabled => ALL_PRESENTATION_CATEGORIES,
+            NativeLogParserMode::Disabled => 0,
+            // A bit, a callable symbol, or one observed event proves only
+            // that one native path is observable. It does not prove that
+            // every category in a family has a production transition. Keep
+            // fallback enabled in Auto; callers may explicitly choose
+            // Disabled only after they have a complete, version-specific
+            // coverage proof.
+            NativeLogParserMode::Auto => ALL_PRESENTATION_CATEGORIES,
+        };
+        Self { forwarding_mask }
+    }
+
+    pub fn forwards(self, category: &str) -> bool {
+        category_mask(category).is_some_and(|mask| self.forwarding_mask & mask != 0)
+    }
+}
+
+fn category_mask(category: &str) -> Option<u8> {
+    match category {
+        "backend" => Some(BACKEND_CATEGORY),
+        "model" => Some(MODEL_CATEGORY),
+        "memory" => Some(MEMORY_CATEGORY),
+        "kv_cache" => Some(KV_CACHE_CATEGORY),
+        "tokenizer" => Some(TOKENIZER_CATEGORY),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 static NATIVE_LOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -227,7 +279,16 @@ pub fn unregister_filtered_native_logs() {
 }
 
 pub fn set_filtered_native_logs_enabled(enabled: bool) {
-    NATIVE_LOG_FORWARDING_ENABLED.store(enabled, Ordering::Relaxed);
+    let mask = if enabled {
+        ALL_PRESENTATION_CATEGORIES
+    } else {
+        0
+    };
+    NATIVE_LOG_FORWARDING_MASK.store(mask, Ordering::Relaxed);
+}
+
+pub fn configure_native_log_parser(policy: NativeLogParserPolicy) {
+    NATIVE_LOG_FORWARDING_MASK.store(policy.forwarding_mask, Ordering::Relaxed);
 }
 
 impl NativeLogAggregator {
@@ -636,7 +697,8 @@ pub fn write_native_log_note(note: impl AsRef<str>) {
 }
 
 fn forward_native_log_note(note: String) {
-    if !NATIVE_LOG_FORWARDING_ENABLED.load(Ordering::Relaxed) {
+    let forwarding_mask = NATIVE_LOG_FORWARDING_MASK.load(Ordering::Relaxed);
+    if forwarding_mask & MODEL_CATEGORY == 0 {
         return;
     }
     let event = NativeLogEvent {
@@ -734,7 +796,8 @@ unsafe extern "C" fn write_native_log(_level: c_int, text: *const c_char, _user_
     }
 
     // Also send aggregated messages through the channel when runtime forwarding is enabled.
-    if !NATIVE_LOG_FORWARDING_ENABLED.load(Ordering::Relaxed) {
+    let forwarding_mask = NATIVE_LOG_FORWARDING_MASK.load(Ordering::Relaxed);
+    if forwarding_mask == 0 {
         return;
     }
 
@@ -748,7 +811,9 @@ unsafe extern "C" fn write_native_log(_level: c_int, text: *const c_char, _user_
             && let Some(ref sender) = *guard
         {
             for event in events {
-                let _ = sender.send(event);
+                if category_mask(event.category).is_some_and(|mask| forwarding_mask & mask != 0) {
+                    let _ = sender.send(event);
+                }
             }
         }
     }
@@ -764,6 +829,7 @@ unsafe extern "C" fn discard_native_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skippy_ffi::{FEATURE_DEVICE_EVENTS, FEATURE_KV_EVENTS, FEATURE_MODEL_LOAD_EVENTS_V2};
     use std::{
         env,
         ffi::CString,
@@ -774,6 +840,112 @@ mod tests {
         },
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn parser_mode_runtime_events_keeps_auto_fallback_until_coverage() {
+        let report = crate::CapabilityReport {
+            confirmed: FEATURE_DEVICE_EVENTS | FEATURE_KV_EVENTS,
+            health_messages: Vec::new(),
+        };
+        let policy = NativeLogParserPolicy::new(NativeLogParserMode::Auto, &report);
+
+        assert!(policy.forwards("backend"));
+        assert!(policy.forwards("model"));
+        assert!(policy.forwards("memory"));
+        assert!(policy.forwards("kv_cache"));
+        assert!(policy.forwards("tokenizer"));
+    }
+
+    #[test]
+    fn parser_mode_runtime_events_keeps_model_fallback_until_coverage() {
+        let report = crate::CapabilityReport {
+            confirmed: FEATURE_MODEL_LOAD_EVENTS_V2,
+            health_messages: Vec::new(),
+        };
+        let policy = NativeLogParserPolicy::new(NativeLogParserMode::Auto, &report);
+
+        assert!(policy.forwards("model"));
+        assert!(policy.forwards("memory"));
+        assert!(policy.forwards("tokenizer"));
+        assert!(policy.forwards("backend"));
+        assert!(policy.forwards("kv_cache"));
+    }
+
+    #[test]
+    fn auto_parser_retains_fallback_when_one_family_is_observable() {
+        let _native_log_guard = native_log_test_guard();
+        let report = crate::CapabilityReport {
+            confirmed: FEATURE_DEVICE_EVENTS | FEATURE_KV_EVENTS,
+            health_messages: Vec::new(),
+        };
+        configure_native_log_parser(NativeLogParserPolicy::new(
+            NativeLogParserMode::Auto,
+            &report,
+        ));
+        // Capability bits and a live event from one family do not prove
+        // coverage for the other transitions in that family. Auto therefore
+        // keeps every parser fallback available until a version-specific
+        // complete coverage policy exists.
+        let mask = NATIVE_LOG_FORWARDING_MASK.load(Ordering::Relaxed);
+        assert_ne!(mask & BACKEND_CATEGORY, 0);
+        assert_ne!(mask & MODEL_CATEGORY, 0);
+        assert_ne!(mask & MEMORY_CATEGORY, 0);
+        assert_ne!(mask & KV_CACHE_CATEGORY, 0);
+        assert_ne!(mask & TOKENIZER_CATEGORY, 0);
+        configure_native_log_parser(NativeLogParserPolicy::new(
+            NativeLogParserMode::Disabled,
+            &crate::CapabilityReport::default(),
+        ));
+    }
+
+    #[test]
+    fn parser_mode_runtime_events_enabled_and_disabled_ignore_capabilities() {
+        let report = crate::CapabilityReport {
+            confirmed: u64::MAX,
+            health_messages: Vec::new(),
+        };
+
+        for category in ["backend", "model", "memory", "kv_cache", "tokenizer"] {
+            assert!(
+                NativeLogParserPolicy::new(NativeLogParserMode::Enabled, &report)
+                    .forwards(category)
+            );
+            assert!(
+                !NativeLogParserPolicy::new(NativeLogParserMode::Disabled, &report)
+                    .forwards(category)
+            );
+        }
+    }
+
+    #[test]
+    fn native_log_note_obeys_the_model_category_mask() {
+        let _native_log_guard = native_log_test_guard();
+        let mut receiver = register_filtered_native_logs();
+        struct RestoreForwardingMask(u8);
+
+        impl Drop for RestoreForwardingMask {
+            fn drop(&mut self) {
+                NATIVE_LOG_FORWARDING_MASK.store(self.0, Ordering::Relaxed);
+            }
+        }
+
+        let _mask_guard = RestoreForwardingMask(
+            NATIVE_LOG_FORWARDING_MASK.swap(BACKEND_CATEGORY, Ordering::Relaxed),
+        );
+        write_native_log_note("hidden model note despite backend forwarding");
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        NATIVE_LOG_FORWARDING_MASK.store(MODEL_CATEGORY, Ordering::Relaxed);
+        write_native_log_note("visible model note");
+        let event = receiver
+            .try_recv()
+            .expect("enabled model note should forward");
+        assert_eq!(event.category, "model");
+        assert!(event.message.contains("visible model note"));
+
+        unregister_filtered_native_logs();
+    }
+
     use tokio::sync::mpsc::error::TryRecvError;
 
     mod native_log {

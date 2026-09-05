@@ -330,6 +330,7 @@ async fn spawn_owner_control_test_server() -> OwnerControlTestServer {
                             plugins: Vec::new(),
                             config_toml: None,
                             mesh_requirements: None,
+                            lifecycle_log_parser: None,
                         }),
                         hostname: Some("control-target".to_string()),
                     }),
