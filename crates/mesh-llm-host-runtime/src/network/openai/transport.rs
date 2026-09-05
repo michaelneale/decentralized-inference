@@ -355,6 +355,7 @@ pub async fn handle_mesh_request(
         &node,
         tcp_stream,
         &mut request,
+        &affinity,
         lifecycle.route_observer(),
     )
     .await
@@ -420,6 +421,7 @@ async fn route_mesh_moa_or_passthrough(
     node: &mesh::Node,
     tcp_stream: ClientStream,
     request: &mut BufferedHttpRequest,
+    affinity: &AffinityRouter,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<ClientStream, RouteDispatchOutcome> {
     if request.is_tokenize_request() {
@@ -433,8 +435,11 @@ async fn route_mesh_moa_or_passthrough(
         tcp_stream,
         request,
         moa_model_name.as_deref(),
-        None, // passive path has no local targets table
-        moa_required_tokens,
+        super::moa_gateway::MoaRoutingContext {
+            targets: None, // passive path has no local targets table
+            required_tokens: moa_required_tokens,
+            affinity,
+        },
         route_observer,
     )
     .await

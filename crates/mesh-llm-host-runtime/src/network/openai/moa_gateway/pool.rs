@@ -6,6 +6,7 @@
 //! calls [`assemble_worker_pool`] and [`compute_actor_candidates`] here.
 
 use super::context_selection;
+use super::self_fill::self_fill_from_extra_instances;
 use super::workers::{LocalModelBackend, RemoteModelBackend};
 use crate::inference::election;
 use crate::mesh;
@@ -325,6 +326,7 @@ pub(super) async fn assemble_worker_pool(
     targets: Option<&election::ModelTargets>,
     required_tokens: Option<u32>,
     http: &reqwest::Client,
+    affinity: Option<&crate::network::affinity::AffinityRouter>,
 ) -> (
     Vec<std::sync::Arc<dyn moa::ModelBackend>>,
     Vec<moa::ModelEntry>,
@@ -399,6 +401,7 @@ pub(super) async fn assemble_worker_pool(
             http,
             &mut backends,
             &mut models,
+            affinity,
         )
         .await;
     }
@@ -562,92 +565,6 @@ async fn cap_committee(
     }
     *backends = kept_backends;
     *models = kept_models;
-}
-
-/// Cap on same-model instances added by self-fill. Two is enough to switch a
-/// single-model mesh from solo to a working committee; beyond that the extra
-/// draft's marginal value falls and it is just latency/cost.
-const SELF_FILL_TARGET_WORKERS: usize = 2;
-
-/// When only one model resolved, add extra reachable *nodes* serving that same
-/// model as additional workers, up to [`SELF_FILL_TARGET_WORKERS`].
-///
-/// Only genuinely distinct remote endpoints are added — never the local backend
-/// again and never the same peer twice — so each added worker is real capacity
-/// from a node that joined the mesh. This is what makes a same-model mesh get
-/// MoA at all; without it `build_moa_config` returns None for such a mesh.
-async fn self_fill_from_extra_instances(
-    node: &mesh::Node,
-    targets: Option<&election::ModelTargets>,
-    required_tokens: Option<u32>,
-    http: &reqwest::Client,
-    backends: &mut Vec<std::sync::Arc<dyn moa::ModelBackend>>,
-    models: &mut Vec<moa::ModelEntry>,
-) {
-    let Some(existing) = models.first().cloned() else {
-        return;
-    };
-    let name = existing.name.clone();
-
-    // Rebuild the pool from DISTINCT physical endpoints serving this model:
-    // the local skippy port (if this node serves it and context fits) plus
-    // each distinct remote peer. `hosts_for_model` returns distinct peers, and
-    // the local endpoint is a different physical box from any of them, so no
-    // endpoint can appear twice.
-    //
-    // Iron law: a single physical endpoint must NEVER become a fake 2-worker
-    // committee. If fewer than two distinct endpoints serve the model, leave
-    // the pool as a genuine one-worker Mesh gateway.
-    let mut endpoints: Vec<std::sync::Arc<dyn moa::ModelBackend>> = Vec::new();
-
-    if let Some(port) = targets.and_then(|t| {
-        t.targets.get(&name).and_then(|tv| {
-            tv.iter().find_map(|t| match t {
-                election::InferenceTarget::Local(p) => Some(*p),
-                _ => None,
-            })
-        })
-    }) {
-        let context_length = node.local_model_context_length(&name).await;
-        if context_selection::context_can_satisfy(required_tokens, context_length) {
-            endpoints.push(std::sync::Arc::new(LocalModelBackend {
-                port,
-                http: http.clone(),
-            }));
-        }
-    }
-
-    for peer_id in node.hosts_for_model(&name).await {
-        if endpoints.len() >= SELF_FILL_TARGET_WORKERS {
-            break;
-        }
-        endpoints.push(std::sync::Arc::new(RemoteModelBackend {
-            node: node.clone(),
-            // Self-fill deliberately represents each replica as an independent
-            // sampled worker. Do not let one slot fail over onto another slot
-            // and duplicate that replica's answer.
-            peer_ids: vec![peer_id],
-        }));
-    }
-
-    if endpoints.len() < 2 {
-        return; // single physical endpoint -> stay single-model (iron law)
-    }
-    endpoints.truncate(SELF_FILL_TARGET_WORKERS);
-
-    tracing::info!(
-        "MoA: self-fill formed a {}-worker committee for {name} from distinct endpoints",
-        endpoints.len()
-    );
-    *backends = endpoints;
-    // Every entry is the same model on a different endpoint, so they all carry
-    // the size the original entry resolved.
-    *models = (0..backends.len())
-        .map(|i| moa::ModelEntry {
-            backend_index: i,
-            ..existing.clone()
-        })
-        .collect();
 }
 
 /// Drop small-tier workers when any big-tier worker is present.
