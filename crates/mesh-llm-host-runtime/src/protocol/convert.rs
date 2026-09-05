@@ -276,6 +276,12 @@ fn descriptor_identity_to_proto(
         artifact: identity.artifact.clone(),
         local_file_name: identity.local_file_name.clone(),
         identity_hash: identity.identity_hash.clone(),
+        // `weights_digest` deliberately does NOT cross the gossip wire: it is
+        // a hash of file bytes only THIS node can read, so a peer receiving
+        // it over gossip could never verify it against anything -- it would
+        // be a claim, not a locally-checkable fact. It rides the
+        // `openai.exchange.v1` serving-provenance event instead, straight to
+        // whoever actually served the exchange.
     }
 }
 
@@ -292,6 +298,10 @@ fn proto_identity_to_local(
         artifact: identity.artifact.clone(),
         local_file_name: identity.local_file_name.clone(),
         identity_hash: identity.identity_hash.clone(),
+        // Never carried on the gossip wire (see `descriptor_identity_to_proto`)
+        // -- a descriptor rebuilt from a peer's proto message has no
+        // load-time weights digest to report, honestly `None`.
+        weights_digest: None,
     }
 }
 

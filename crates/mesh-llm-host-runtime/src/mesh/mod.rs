@@ -106,6 +106,7 @@ mod stage_proto;
 mod stage_transport;
 mod stage_transport_bridge;
 mod stun;
+mod weights_digest;
 
 use connection_reservation::*;
 use connections::*;
@@ -177,6 +178,7 @@ pub use stage_transport::{
     StageAssignment, StageEndpoint, StageRuntimeStatus, StageTopologyInstance, TunnelChannels,
 };
 pub(crate) use stage_transport_bridge::{StageTransportBridge, StageTransportBridgeLabel};
+pub(crate) use weights_digest::weights_digest_for_file;
 
 #[cfg(test)]
 use gossip::{apply_transitive_ann, peer_meaningfully_changed};

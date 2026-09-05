@@ -449,6 +449,38 @@ pub(super) async fn set_advertised_model_context(
     node.regossip().await;
 }
 
+/// Record the SHA-256 of the served GGUF's file bytes on this model's served
+/// descriptor, so a downstream `openai.exchange.v1` consumer can attest it on
+/// every exchange this node serves for `model_name`. `None` when the file
+/// could not be hashed (unreadable) -- left absent, never fabricated. This
+/// never touches `identity_hash` (the reference-string hash) -- the two are
+/// different facts and neither replaces the other.
+pub(super) async fn set_local_model_weights_digest(
+    node: &mesh::Node,
+    model_name: &str,
+    weights_digest: Option<String>,
+) {
+    let mut descriptor = node
+        .served_model_descriptors()
+        .await
+        .into_iter()
+        .find(|descriptor| descriptor.identity.model_name == model_name)
+        .unwrap_or_else(|| mesh::ServedModelDescriptor {
+            identity: mesh::ServedModelIdentity {
+                model_name: model_name.to_string(),
+                source_kind: mesh::ModelSourceKind::LocalGguf,
+                local_file_name: Some(format!("{model_name}.gguf")),
+                ..Default::default()
+            },
+            capabilities_known: false,
+            capabilities: models::ModelCapabilities::default(),
+            topology: None,
+            metadata: crate::models::served_model_metadata_for_model(model_name),
+        });
+    descriptor.identity.weights_digest = weights_digest;
+    node.upsert_served_model_descriptor(descriptor).await;
+}
+
 pub(super) async fn withdraw_advertised_model(node: &mesh::Node, model_name: &str, profile: &str) {
     let mut hosted_models = node.hosted_models().await;
     let public_id = if profile.is_empty() {
@@ -578,6 +610,20 @@ pub(super) async fn start_runtime_local_model(
             .await?;
         }
     }
+    // Hash the GGUF's file bytes now, at load -- the one place this node
+    // opens the file for serving. Cached by (path, size, mtime), so a model
+    // already hashed for this exact file state costs nothing here on a later
+    // restart. A layer-package reference or any other non-file path fails the
+    // stat and yields `None` -- honest absence, never a fabricated digest.
+    // Runs on a blocking thread: hashing a large GGUF is real I/O + CPU work,
+    // and must not block the async runtime.
+    let model_path_for_digest = spec.model_path.to_path_buf();
+    let weights_digest =
+        tokio::task::spawn_blocking(move || mesh::weights_digest_for_file(&model_path_for_digest))
+            .await
+            .unwrap_or(None);
+    set_local_model_weights_digest(spec.node, runtime_model_name, weights_digest).await;
+
     let local_capacity_bytes = spec
         .capacity_budget_bytes
         .or_else(|| spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()))
