@@ -947,19 +947,15 @@ fn startup_runtime_plan_auto_splits_when_model_exceeds_local_capacity() {
 }
 
 #[test]
-fn runtime_model_planning_bytes_uses_layer_package_source_model_bytes() {
+fn runtime_model_planning_bytes_rejects_legacy_layer_package() {
     let dir = tempfile::tempdir().unwrap();
     write_test_layer_package(dir.path(), 4_800_000_000);
 
-    let model_bytes = runtime_model_planning_bytes(dir.path()).unwrap();
+    let error = runtime_model_planning_bytes(dir.path())
+        .unwrap_err()
+        .to_string();
 
-    assert_eq!(model_bytes, 4_800_000_000);
-    assert_eq!(
-        startup_runtime_plan(false, 3_000_000_000, model_bytes),
-        StartupRuntimePlan::Split {
-            reason: SplitRuntimeReason::LocalCapacity
-        }
-    );
+    assert!(error.contains("requires package schema 2"), "{error}");
 }
 
 #[tokio::test]
@@ -1397,24 +1393,31 @@ async fn load_split_runtime_generation_stops_candidate_stages_after_partial_load
     });
 
     let mut package = package(40);
-    package.package_ref = "hf://Mesh-LLM/test-split-package".to_string();
     let temp_dir = tempfile::tempdir().unwrap();
     let model_path = temp_dir.path().join("qwen.gguf");
     write_fake_gguf_model(&model_path);
+    package.source_model_path = model_path.clone();
     let compact_meta =
         crate::models::gguf::scan_gguf_compact_meta(&model_path).expect("synthetic GGUF metadata");
     let local_id = node.id();
+    let stages = vec![
+        local_stage(local_id, 0, 0, 12),
+        local_stage(local_id, 1, 12, 24),
+        local_stage(local_id, 2, 24, 40),
+    ];
+    let admissions = stages
+        .iter()
+        .map(|stage| skippy::test_stage_admission(stage.layer_start, stage.layer_end))
+        .collect();
     let generation = SplitTopologyGeneration::new(
         "candidate-topology".into(),
         "candidate-run".into(),
         2,
         vec![SplitParticipant::new(local_id, 24_000_000_000, None)],
-        vec![
-            local_stage(local_id, 0, 0, 12),
-            local_stage(local_id, 1, 12, 24),
-            local_stage(local_id, 2, 24, 40),
-        ],
-    );
+        stages,
+    )
+    .with_admissions(admissions)
+    .unwrap();
     let mesh_config = plugin::MeshConfig::default();
 
     let error = match Box::pin(load_split_runtime_generation(SplitGenerationLoadSpec {

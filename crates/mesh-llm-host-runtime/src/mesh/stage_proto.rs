@@ -1553,7 +1553,9 @@ mod tests {
             swa_full: Some(false),
             cache_idle_slots: Some(3),
         };
-        let mut encoded = skippy_stage_proto::LoadStage::default().encode_to_vec();
+        let mut load = skippy_stage_proto::LoadStage::default();
+        load.admission = Some(crate::inference::skippy::test_stage_admission(0, 1).into());
+        let mut encoded = load.encode_to_vec();
         CompatLoadStage {
             runtime_settings: Some(settings.clone()),
         }
