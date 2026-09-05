@@ -4002,6 +4002,7 @@ dependencies = [
  "skippy-coordinator",
  "skippy-ffi",
  "skippy-model",
+ "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
  "skippy-server",

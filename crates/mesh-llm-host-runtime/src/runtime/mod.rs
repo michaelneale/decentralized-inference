@@ -28,6 +28,7 @@ mod serving_surface;
 mod split_participant_settle;
 mod split_planning;
 mod split_topology_lock;
+pub(crate) mod stage_admission;
 mod startup_handles;
 mod startup_identity;
 mod startup_models;

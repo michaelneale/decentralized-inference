@@ -58,6 +58,7 @@ skippy-ffi = { path = "../skippy-ffi", version = "0.76.0-rc9", default-features 
 skippy-model = { path = "../skippy-model", version = "0.76.0-rc9" }
 skippy-server = { path = "../skippy-server", version = "0.76.0-rc9"  }
 skippy-topology = { path = "../skippy-topology", version = "0.76.0-rc9"  }
+skippy-package-format = { path = "../skippy-package-format", version = "0.76.0-rc9"  }
 iroh = { version = "1.0.3", default-features = false, features = ["metrics", "fast-apple-datapath", "portmapper", "tls-aws-lc-rs"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
