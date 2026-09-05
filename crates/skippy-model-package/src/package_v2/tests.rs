@@ -1,6 +1,8 @@
 use super::*;
 use skippy_model::gguf_catalog::read_gguf_catalog;
 use skippy_package_format::TensorStorage;
+use skippy_package_format::stage_admission::StageAdmissionDescriptor;
+use std::collections::BTreeMap;
 
 use crate::test_gguf::{FixtureTensor, explicit, fixture, tensor};
 
@@ -71,7 +73,7 @@ fn writer_round_trips_all_source_tensors_without_role_selection() {
 }
 
 #[test]
-fn complete_shards_bind_every_file_and_tensor() {
+fn renamed_complete_shards_bind_every_file_and_tensor_exactly() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("model-00001-of-00002.gguf");
     let second = temp.path().join("model-00002-of-00002.gguf");
@@ -86,6 +88,15 @@ fn complete_shards_bind_every_file_and_tensor() {
     assert_eq!(manifest.tensor_catalog.entries.len(), 2);
     assert_eq!(manifest.source_model.sha256, file_sha256(&second).unwrap());
     assert_eq!(manifest.source_model.metadata_artifact_id, "source-00001");
+    assert_eq!(
+        manifest
+            .artifact_catalog
+            .entries
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect::<Vec<_>>(),
+        ["artifacts/source-00000.gguf", "artifacts/source-00001.gguf"]
+    );
     let metadata_artifact = manifest
         .artifact_catalog
         .entries
@@ -100,6 +111,48 @@ fn complete_shards_bind_every_file_and_tensor() {
         .unwrap();
     assert_eq!(metadata_artifact.sha256, primary_file.sha256);
     assert_eq!(metadata_artifact.byte_size, primary_file.byte_size);
+
+    let (_, first_catalog) = crate::source_inventory::inspect(&first, "source-00000").unwrap();
+    let (_, second_catalog) = crate::source_inventory::inspect(&second, "source-00001").unwrap();
+    let expected = first_catalog
+        .entries
+        .iter()
+        .chain(&second_catalog.entries)
+        .map(|tensor| (tensor.id.as_str(), tensor))
+        .collect::<BTreeMap<_, _>>();
+    let resident_tensor_ids = manifest
+        .tensor_catalog
+        .entries
+        .iter()
+        .map(|tensor| tensor.id.clone())
+        .collect::<Vec<_>>();
+    let resolved = manifest
+        .resolve_stage_admission(&StageAdmissionDescriptor {
+            package_id: manifest.package_id.clone(),
+            resident_tensor_ids,
+            sidecars: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(resolved.tensor_bindings.len(), expected.len());
+    for binding in resolved.tensor_bindings {
+        let tensor = expected.get(binding.tensor_id).unwrap();
+        assert_eq!(binding.native_name, tensor.name);
+        assert_eq!(binding.ggml_type, tensor.ggml_type);
+        assert_eq!(binding.dimensions, tensor.dimensions);
+        match &tensor.storage {
+            TensorStorage::Owned {
+                artifact_id,
+                data_offset,
+                stored_length,
+                ..
+            } => {
+                assert_eq!(binding.artifact.id, *artifact_id);
+                assert_eq!(binding.data_offset, *data_offset);
+                assert_eq!(binding.stored_length, *stored_length);
+            }
+            TensorStorage::Alias { .. } => panic!("split fixture does not contain aliases"),
+        }
+    }
 }
 
 #[test]
