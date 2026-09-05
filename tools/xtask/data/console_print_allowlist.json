@@ -3705,6 +3705,10 @@
     {
       "line": 527,
       "macro_name": "eprintln!"
+    },
+    {
+      "line": 1104,
+      "macro_name": "println!"
     }
   ],
   "crates/skippy-model-package/src/glm_dsa_generation_policy.rs": [
@@ -3721,25 +3725,29 @@
   ],
   "crates/skippy-model-package/src/main.rs": [
     {
-      "line": 26,
+      "line": 31,
       "macro_name": "eprintln!"
     },
     {
-      "line": 34,
+      "line": 39,
       "macro_name": "eprintln!"
     },
     {
-      "line": 63,
+      "line": 70,
       "macro_name": "println!"
     },
     {
-      "line": 134,
+      "line": 136,
+      "macro_name": "println!"
+    },
+    {
+      "line": 156,
       "macro_name": "println!"
     }
   ],
-  "crates/skippy-model-package/src/package.rs": [
+  "crates/skippy-model-package/src/package_v2.rs": [
     {
-      "line": 365,
+      "line": 106,
       "macro_name": "println!"
     }
   ],
@@ -3759,11 +3767,11 @@
   ],
   "crates/skippy-model-package/src/tests.rs": [
     {
-      "line": 526,
+      "line": 451,
       "macro_name": "eprintln!"
     },
     {
-      "line": 533,
+      "line": 458,
       "macro_name": "eprintln!"
     }
   ],
