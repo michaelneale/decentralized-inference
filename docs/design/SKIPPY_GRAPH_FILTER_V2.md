@@ -685,6 +685,10 @@ boundaries, not separate architectural authorities: all lanes implement the
 same three early shared contracts—`TensorCatalog`, guarded `StageSlicePlan`, and
 boundary identity/schema.
 
+The lane letters below are a dependency taxonomy, not personal assignment
+labels. Freeze implementation ownership by descriptive surface so a person
+cannot be assigned contradictory lane letters across handoffs.
+
 | Lane | Deliverable | Dependency |
 | --- | --- | --- |
 | A. Native graph contract and partitioner | Workstreams 2–4: end-to-end feasibility proof, block/effect/alias annotations, guarded profiles, complete frontier liveness, and the pure partitioner | Critical path. Keep annotations and slicing under one design owner until their contract is proven. |
@@ -697,17 +701,36 @@ The integration owner owns Workstream 7, serializes shared llama.cpp patch-queue
 changes, and prevents lane-local adapters from becoming competing sources of
 stage policy.
 
+### Proposed named ownership for sign-off
+
+| Owner | Descriptive ownership | Boundary |
+| --- | --- | --- |
+| scama | Package v2, `TensorCatalog`, source-bound offline converter, shared-contract and specification authority, sole integration/release ownership | Does not own native graph/runtime implementation or acceptance-suite implementation. Serializes shared contract and llama.cpp patch-queue changes and performs the atomic cutover. |
+| jy | Native graph/runtime implementation: explicit graph-build input, runtime parity hooks, fail-closed closure/frontier admission, graph partitioner, selected-weight realization, and Granite runtime correction | Does not own package schema/conversion or workflow orchestration. Exposes hooks and evidence consumed by the independent harness. |
+| astrid | Acceptance infrastructure: reusable every-cut parity harness, registry-backed product fixtures, CPU/CUDA/Metal phase runner, recurrent/cache semantics, canary reconciliation, performance/provenance, and boundary-transport qualification | Does not edit native graph/runtime implementation or define package completeness. The harness consumes jy's runtime hooks and independently validates both package and runtime results. |
+
+Boundary transport implementation remains with the existing typed-plane owner.
+Astrid qualifies it and scama integrates it only if the frozen support matrix
+requires it; this project does not start a competing transport implementation.
+
+No implementation or test edits begin until the owner signs off on these
+descriptions and the three shared contracts against one pinned base SHA. After
+approval, create one worktree and branch per owner; never share uncommitted
+source edits across worktrees.
+
 ## Delivery Sequence
 
 Deliver as reviewable, independently gated changes rather than one giant patch:
 
-1. Lane A proves metadata build, actual slice, selected-weight binding, prompt
-   prefill, and multiple decode steps for dense and stateful fixtures.
+1. The native graph/runtime owner proves metadata build, actual slice,
+   selected-weight binding, prompt prefill, and multiple decode steps for dense
+   and stateful fixtures.
 2. Agree the `TensorCatalog`, guarded `StageSlicePlan`, and boundary
    identity/schema contracts.
-3. Run lanes B, D, and E in parallel where their agreed contracts allow.
-4. Complete Lane A graph semantics and partitioner implementation.
-5. Lane C integrates exact realization, native reporting, and host admission.
+3. Run package/conversion, acceptance-infrastructure, and conditional boundary
+   transport work in parallel where their agreed contracts allow.
+4. Complete native graph semantics and partitioner implementation.
+5. Complete exact realization, native reporting, and host admission.
 6. Run shadow diagnostics without treating old behavior as the oracle.
 7. Rebuild or independently certify and convert the complete production package
    corpus offline to v2; the converter never enters the serving runtime.
