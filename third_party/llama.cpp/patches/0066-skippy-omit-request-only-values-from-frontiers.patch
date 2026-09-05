@@ -1,0 +1,107 @@
+From e80a342419900c8cefa808190d1c1c01207bde78 Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 20:16:08 +1000
+Subject: [PATCH] skippy: omit request-only values from frontiers
+
+---
+ src/skippy/stage_slice_plan.cpp       | 50 ++++++++++++++++++++++++++-
+ src/skippy/tests/stage_slice_plan.cpp |  4 +--
+ 2 files changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
+index a87640604..057dba9de 100644
+--- a/src/skippy/stage_slice_plan.cpp
++++ b/src/skippy/stage_slice_plan.cpp
+@@ -71,6 +71,8 @@ struct selector {
+     std::unordered_set<const ggml_tensor *> local_visiting;
+     std::unordered_map<const ggml_tensor *, int8_t> foreign_state_cache;
+     std::unordered_set<const ggml_tensor *> foreign_state_visiting;
++    std::unordered_map<const ggml_tensor *, int8_t> request_derived_cache;
++    std::unordered_set<const ggml_tensor *> request_derived_visiting;
+ 
+     int structural_class_count(const ggml_tensor * tensor) const {
+         if (node_index.find(tensor) != node_index.end()) {
+@@ -236,6 +238,46 @@ struct selector {
+         return depends;
+     }
+ 
++    bool request_derived(const ggml_tensor * tensor) {
++        if (tensor == nullptr) {
++            return true;
++        }
++        const auto cached = request_derived_cache.find(tensor);
++        if (cached != request_derived_cache.end()) {
++            return cached->second > 0;
++        }
++        if (node_index.find(tensor) == node_index.end()) {
++            const int structural_classes = structural_class_count(tensor);
++            if (structural_classes > 1) {
++                error = "graph dependency has multiple structural leaf classes";
++                return false;
++            }
++            const ggml_tensor * canonical = canonical_storage(tensor);
++            const bool request = structural_classes == 1 &&
++                    (((tensor->flags & GGML_TENSOR_FLAG_INPUT) != 0) ||
++                     ((canonical->flags & GGML_TENSOR_FLAG_INPUT) != 0));
++            request_derived_cache[tensor] = request ? 1 : -1;
++            return request;
++        }
++        if (!request_derived_visiting.insert(tensor).second) {
++            error = "graph dependency cycle encountered while resolving request ownership";
++            return false;
++        }
++        bool has_dependency = tensor->view_src != nullptr;
++        bool derived = request_derived(tensor->view_src);
++        for (const ggml_tensor * source : tensor->src) {
++            if (source == nullptr) {
++                continue;
++            }
++            has_dependency = true;
++            derived = request_derived(source) && derived;
++        }
++        request_derived_visiting.erase(tensor);
++        derived = has_dependency && derived;
++        request_derived_cache[tensor] = derived ? 1 : -1;
++        return derived;
++    }
++
+     void add_live_edges(int32_t frontier, std::unordered_set<const ggml_tensor *> & live) const {
+         for (int32_t consumer_index = frontier + 1; consumer_index < ggml_graph_n_nodes(graph); ++consumer_index) {
+             const ggml_tensor * consumer = ggml_graph_node(graph, consumer_index);
+@@ -422,7 +464,13 @@ struct selector {
+                 }
+             }
+             if (producer != node_index.end() && selected_nodes.find(producer->second) != selected_nodes.end()) {
+-                append_once(result.activation_exports, exported, tensor);
++                const bool request_only = request_derived(tensor);
++                if (!error.empty()) {
++                    return false;
++                }
++                if (!request_only) {
++                    append_once(result.activation_exports, exported, tensor);
++                }
+             } else if (imported.find(tensor) != imported.end()) {
+                 append_once(result.activation_exports, exported, tensor);
+             }
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 57791565f..7107d46f9 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -34,11 +34,11 @@ static int check_middle_stage_selection() {
+ 
+     ggml_tensor * entry_0 = ggml_mul(ctx, tokens, parameter_0);
+     ggml_tensor * pass_through = ggml_mul(ctx, entry_0, parameter_0);
+-    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, parameter_0);
++    ggml_tensor * request_only = ggml_view_1d(ctx, request, 4, 0);
++    ggml_tensor * exit_0 = ggml_add(ctx, ggml_add(ctx, entry_0, parameter_0), request_only);
+     ggml_tensor * local_state_read = ggml_add(ctx, state, request);
+     ggml_tensor * exit_1 = ggml_add(ctx, exit_0, ggml_mul(ctx, local_state_read, parameter_1));
+     ggml_tensor * state_write = ggml_cpy(ctx, exit_1, state);
+-    ggml_tensor * request_only = ggml_mul(ctx, request, parameter_2);
+     ggml_tensor * exit_2 = ggml_add(
+             ctx,
+             ggml_add(ctx, ggml_mul(ctx, exit_1, parameter_2), pass_through),
+-- 
+2.54.0 (Apple Git-157)
+
