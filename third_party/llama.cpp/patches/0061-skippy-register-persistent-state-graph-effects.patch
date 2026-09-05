@@ -1,23 +1,24 @@
-From 97e9252e31bbe11ef6d9e9433e9f5e7d99811338 Mon Sep 17 00:00:00 2001
+From 399bb29203fb97b502b55826e4535992e21ce087 Mon Sep 17 00:00:00 2001
 From: Galadriel
  <b81c841ed20a8e17caf4e6fac2f6f3bc61d304c84b8394720f6d00f37538c47e@meshllm.communities.buzz.xyz>
 Date: Sat, 5 Sep 2026 18:41:02 +1000
 Subject: [PATCH] skippy: register persistent-state graph effects
 
 ---
- src/CMakeLists.txt                          |   1 +
- src/llama-graph.cpp                         |  24 ++-
- src/llama-graph.h                           |   9 ++
- src/models/mamba-base.cpp                   |  24 ++-
- src/skippy/state_effects.cpp                | 119 +++++++++++++++
- src/skippy/state_effects.h                  |  56 +++++++
- src/skippy/tests/noalloc_graph_planning.cpp | 156 +++++++++++++++++++-
- 7 files changed, 379 insertions(+), 10 deletions(-)
+ src/CMakeLists.txt                          |  26 +-
+ src/llama-graph.cpp                         |  24 +-
+ src/llama-graph.h                           |   9 +
+ src/models/mamba-base.cpp                   |  22 +-
+ src/models/nemotron-h.cpp                   |   4 +
+ src/skippy/state_effects.cpp                | 118 +++++++++
+ src/skippy/state_effects.h                  |  58 +++++
+ src/skippy/tests/noalloc_graph_planning.cpp | 256 +++++++++++++++++++-
+ 8 files changed, 498 insertions(+), 19 deletions(-)
  create mode 100644 src/skippy/state_effects.cpp
  create mode 100644 src/skippy/state_effects.h
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 3ac27ef8b..3e31ac8fe 100644
+index 3ac27ef8b..7fdff53de 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -57,6 +57,7 @@ add_library(llama
@@ -28,6 +29,47 @@ index 3ac27ef8b..3e31ac8fe 100644
              skippy/speculative_decoding.cpp
              skippy/tokenization.cpp
              llama-vocab.cpp
+@@ -158,7 +159,8 @@ if (LLAMA_STAGE_BUILD_TESTS)
+         NAME skippy_noalloc_graph_planning_dense
+         COMMAND skippy-noalloc-graph-planning
+             "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
+-            0)
++            0
++            "kv,kv")
+     set_tests_properties(skippy_noalloc_graph_planning_dense PROPERTIES
+         FIXTURES_REQUIRED skippy-model-loader-fixtures)
+ 
+@@ -166,9 +168,29 @@ if (LLAMA_STAGE_BUILD_TESTS)
+         NAME skippy_noalloc_graph_planning_granite_hybrid
+         COMMAND skippy-noalloc-graph-planning
+             "${SKIPPY_MODEL_FIXTURE_DIR}/granitehybrid-dense.gguf"
+-            1)
++            1
++            "kv,recurrent")
+     set_tests_properties(skippy_noalloc_graph_planning_granite_hybrid PROPERTIES
+         FIXTURES_REQUIRED skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_generate_nemotron_h_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch nemotron_h
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_nemotron_h_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-nemotron-h-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_recurrent_rollback
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/nemotron_h-dense.gguf"
++            1
++            "kv,recurrent,none"
++            2)
++    set_tests_properties(skippy_noalloc_graph_planning_recurrent_rollback PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-nemotron-h-fixture)
+ endif()
+ 
+ if (BUILD_SHARED_LIBS)
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
 index 014f95205..a714f1b89 100644
 --- a/src/llama-graph.cpp
@@ -126,7 +168,7 @@ index f6a5e39e4..fbda56aeb 100644
      // common
      //
 diff --git a/src/models/mamba-base.cpp b/src/models/mamba-base.cpp
-index 03ee3805b..41f00313f 100644
+index 03ee3805b..1c9b2536a 100644
 --- a/src/models/mamba-base.cpp
 +++ b/src/models/mamba-base.cpp
 @@ -182,6 +182,8 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
@@ -138,7 +180,7 @@ index 03ee3805b..41f00313f 100644
      // d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
  
      // Keep the projection 2D: with a {n_embd, 1, n_seqs} batch the CUDA backend
-@@ -212,10 +214,14 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+@@ -212,10 +214,12 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
              ggml_tensor * last_conv = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs,
                                                     conv_x->nb[1], conv_x->nb[2], (n_seq_tokens - slot) * conv_x->nb[0]);
  
@@ -151,13 +193,11 @@ index 03ee3805b..41f00313f 100644
 +                                                             conv_states_all->nb[1],
 +                                                             ((size_t) slot * mem_size + kv_head) * row_size));
 +            ggml_build_forward_expand(gf, conv_write);
-+            if (slot == 0) {
-+                state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
-+            }
++            state_write(skippy_state_kind::recurrent_conv, conv_states_all, conv_write, il);
          }
  
          // 1D convolution
-@@ -263,18 +269,22 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+@@ -263,18 +267,22 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
          };
  
          ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
@@ -183,12 +223,34 @@ index 03ee3805b..41f00313f 100644
  
          ggml_tensor * y = ggml_view_4d(ctx0, y_ssm, head_dim, n_head, n_seq_tokens, n_seqs, x->nb[1], n_head * x->nb[1],
                                         n_seq_tokens * n_head * x->nb[1], 0);
+diff --git a/src/models/nemotron-h.cpp b/src/models/nemotron-h.cpp
+index 165541bbd..3243cdfa7 100644
+--- a/src/models/nemotron-h.cpp
++++ b/src/models/nemotron-h.cpp
+@@ -192,6 +192,8 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
+     const bool extract_final_inp = (size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer];
+ 
+     for (int il = il_start; il < il_end; ++il) {
++        begin_block(inpL, il);
++
+         res->t_layer_inp[il] = inpL;
+         struct ggml_tensor * inpSA = inpL;
+ 
+@@ -218,6 +220,8 @@ llama_model_nemotron_h::graph::graph(const llama_model & model, const llm_graph_
+         cur = ggml_add(ctx0, cur, inpSA);
+         cb(cur, "nemotron_h_block_out", il);
+ 
++        end_block(cur, il);
++
+         // input for next layer
+         inpL = cur;
+     }
 diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
 new file mode 100644
-index 000000000..589cf5cc2
+index 000000000..a0456aef0
 --- /dev/null
 +++ b/src/skippy/state_effects.cpp
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,118 @@
 +#include "state_effects.h"
 +
 +#include "ggml.h"
@@ -246,8 +308,8 @@ index 000000000..589cf5cc2
 +        graph_nodes.insert(ggml_graph_node(const_cast<ggml_cgraph *>(graph), i));
 +    }
 +
-+    using access_key = std::tuple<int32_t, int32_t, int32_t>;
-+    std::set<access_key> seen;
++    std::set<std::tuple<int32_t, int32_t>> seen_reads;
++    std::unordered_set<const ggml_tensor *> seen_write_nodes;
 +    std::set<std::tuple<int32_t, int32_t, const ggml_tensor *>> reads;
 +
 +    for (size_t i = 0; i < effects.size(); ++i) {
@@ -272,16 +334,11 @@ index 000000000..589cf5cc2
 +            error = effect_error("state effect %zu storage is a view, not canonical", i);
 +            return false;
 +        }
-+        const access_key key{
-+            static_cast<int32_t>(effect.kind),
-+            static_cast<int32_t>(effect.access),
-+            effect.layer,
-+        };
-+        if (!seen.insert(key).second) {
-+            error = effect_error("state effect %zu duplicates a (kind, access, layer) record", i);
-+            return false;
-+        }
 +        if (effect.access == skippy_state_access::read) {
++            if (!seen_reads.insert({static_cast<int32_t>(effect.kind), effect.layer}).second) {
++                error = effect_error("state effect %zu duplicates a (kind, layer) read owner", i);
++                return false;
++            }
 +            reads.insert({static_cast<int32_t>(effect.kind), effect.layer, effect.storage});
 +        } else {
 +            if (effect.effect_node == nullptr) {
@@ -290,6 +347,10 @@ index 000000000..589cf5cc2
 +            }
 +            if (graph_nodes.find(effect.effect_node) == graph_nodes.end()) {
 +                error = effect_error("state effect %zu write node is not in the exact graph", i);
++                return false;
++            }
++            if (!seen_write_nodes.insert(effect.effect_node).second) {
++                error = effect_error("state effect %zu duplicates an exact write node", i);
 +                return false;
 +            }
 +        }
@@ -310,10 +371,10 @@ index 000000000..589cf5cc2
 +}
 diff --git a/src/skippy/state_effects.h b/src/skippy/state_effects.h
 new file mode 100644
-index 000000000..a4a57865e
+index 000000000..f0aec1aec
 --- /dev/null
 +++ b/src/skippy/state_effects.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,58 @@
 +#pragma once
 +
 +// Stage-independent persistent-state access/effect records for the
@@ -363,18 +424,20 @@ index 000000000..a4a57865e
 +//
 +// Fails closed: returns false and sets `error` on an unknown kind or access,
 +// invalid layer, null storage, a write without an effect node, a write whose
-+// effect node is not present in the exact graph, a duplicate (kind, access,
-+// layer) record, or a write without a matching read of the same kind and
-+// layer against the same canonical storage.
++// effect node is not present in the exact graph, a duplicate (kind, layer)
++// read record, a duplicate exact write node, or a write without a matching
++// read of the same kind and layer against the same canonical storage. A
++// state owner may register multiple ordered writes (for example recurrent
++// rollback slots) as long as each carries a distinct exact graph node.
 +bool skippy_validate_state_effects(
 +        const std::vector<skippy_state_effect> & effects,
 +        const ggml_cgraph * graph,
 +        std::string & error);
 diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
-index a5814145d..2fd838615 100644
+index a5814145d..f433ad31e 100644
 --- a/src/skippy/tests/noalloc_graph_planning.cpp
 +++ b/src/skippy/tests/noalloc_graph_planning.cpp
-@@ -9,6 +9,7 @@
+@@ -9,10 +9,12 @@
  #include "llama.h"
  #include "skippy/block_boundaries.h"
  #include "skippy/graph_dependencies.h"
@@ -382,7 +445,12 @@ index a5814145d..2fd838615 100644
  
  #include <algorithm>
  #include <cstdint>
-@@ -176,9 +177,87 @@ static llama_model * load_metadata_only_model(const char * model_path) {
+ #include <cstdio>
++#include <cstdlib>
+ #include <string>
+ #include <vector>
+ 
+@@ -176,9 +178,144 @@ static llama_model * load_metadata_only_model(const char * model_path) {
  struct graph_profile_result {
      int node_count = 0;
      size_t boundary_pairs = 0;
@@ -390,24 +458,64 @@ index a5814145d..2fd838615 100644
      std::vector<std::string> dependencies;
  };
  
++static size_t layer_state_count(
++        const std::vector<skippy_state_effect> & effects,
++        int32_t layer,
++        skippy_state_kind kind,
++        skippy_state_access access) {
++    size_t count = 0;
++    for (const auto & effect : effects) {
++        if (effect.layer == layer && effect.kind == kind && effect.access == access) {
++            ++count;
++        }
++    }
++    return count;
++}
++
 +static bool layer_has_state(
 +        const std::vector<skippy_state_effect> & effects,
 +        int32_t layer,
 +        skippy_state_kind kind,
 +        skippy_state_access access) {
-+    for (const auto & effect : effects) {
-+        if (effect.layer == layer && effect.kind == kind && effect.access == access) {
-+            return true;
++    return layer_state_count(effects, layer, kind, access) > 0;
++}
++
++enum class layer_state_class {
++    kv,
++    recurrent,
++    none,
++};
++
++static bool parse_layer_classes(const char * spec, std::vector<layer_state_class> & classes) {
++    std::string token;
++    for (const char * c = spec;; ++c) {
++        if (*c == ',' || *c == '\0') {
++            if (token == "kv") {
++                classes.push_back(layer_state_class::kv);
++            } else if (token == "recurrent") {
++                classes.push_back(layer_state_class::recurrent);
++            } else if (token == "none") {
++                classes.push_back(layer_state_class::none);
++            } else {
++                return false;
++            }
++            token.clear();
++            if (*c == '\0') {
++                return !classes.empty();
++            }
++        } else {
++            token += *c;
 +        }
 +    }
-+    return false;
 +}
 +
 +static bool check_state_effects(
 +        const llm_graph_result * graph_result,
 +        ggml_cgraph * graph,
 +        const llama_model * model,
-+        const char * profile_name) {
++        const char * profile_name,
++        const std::vector<layer_state_class> & layer_classes,
++        size_t expected_conv_writes) {
 +    const auto & effects = graph_result->get_state_effects();
 +    std::string effect_error;
 +    if (!skippy_validate_state_effects(effects, graph, effect_error)) {
@@ -416,37 +524,54 @@ index a5814145d..2fd838615 100644
 +        return false;
 +    }
 +
-+    // every declared layer carries its expected local state class
 +    const int32_t n_layer = llama_model_n_layer(model);
++    if (layer_classes.size() != static_cast<size_t>(n_layer)) {
++        std::fprintf(stderr, "fixture declares %d layers but %zu layer classes were specified\n",
++                n_layer, layer_classes.size());
++        return false;
++    }
++
++    // every declared layer carries exactly its expected local state class
 +    for (int32_t il = 0; il < n_layer; ++il) {
-+        const bool recurrent = model->hparams.is_recr(il);
++        const layer_state_class expected = layer_classes[il];
++
++        const size_t kv_key_reads    = layer_state_count(effects, il, skippy_state_kind::kv_key, skippy_state_access::read);
++        const size_t kv_key_writes   = layer_state_count(effects, il, skippy_state_kind::kv_key, skippy_state_access::write);
++        const size_t kv_value_reads  = layer_state_count(effects, il, skippy_state_kind::kv_value, skippy_state_access::read);
++        const size_t kv_value_writes = layer_state_count(effects, il, skippy_state_kind::kv_value, skippy_state_access::write);
++        const size_t conv_reads      = layer_state_count(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read);
++        const size_t conv_writes     = layer_state_count(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::write);
++        const size_t ssm_reads       = layer_state_count(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read);
++        const size_t ssm_writes      = layer_state_count(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::write);
++
++        const size_t kv_total   = kv_key_reads + kv_key_writes + kv_value_reads + kv_value_writes;
++        const size_t recr_total = conv_reads + conv_writes + ssm_reads + ssm_writes;
++
 +        bool ok = true;
-+        if (recurrent) {
-+            ok = layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read) &&
-+                 layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::write) &&
-+                 layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read) &&
-+                 layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::write);
-+        } else {
-+            ok = layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::read) &&
-+                 layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::write) &&
-+                 layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::read) &&
-+                 layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::write);
++        switch (expected) {
++            case layer_state_class::kv:
++                ok = kv_key_reads == 1 && kv_key_writes == 1 &&
++                     kv_value_reads == 1 && kv_value_writes == 1 &&
++                     recr_total == 0;
++                break;
++            case layer_state_class::recurrent:
++                ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 1 &&
++                     conv_writes == expected_conv_writes &&
++                     kv_total == 0;
++                if (conv_writes != expected_conv_writes) {
++                    std::fprintf(stderr,
++                            "metadata-only %s layer %d registered %zu conv writes, expected %zu\n",
++                            profile_name, il, conv_writes, expected_conv_writes);
++                    return false;
++                }
++                break;
++            case layer_state_class::none:
++                ok = kv_total == 0 && recr_total == 0;
++                break;
 +        }
 +        if (!ok) {
 +            std::fprintf(stderr,
-+                    "metadata-only %s layer %d does not declare its expected %s state class\n",
-+                    profile_name, il, recurrent ? "recurrent" : "KV");
-+            return false;
-+        }
-+        // no layer declares the other class's state
-+        const bool cross = recurrent
-+                ? (layer_has_state(effects, il, skippy_state_kind::kv_key, skippy_state_access::read) ||
-+                   layer_has_state(effects, il, skippy_state_kind::kv_value, skippy_state_access::read))
-+                : (layer_has_state(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read) ||
-+                   layer_has_state(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read));
-+        if (cross) {
-+            std::fprintf(stderr,
-+                    "metadata-only %s layer %d declares state of the wrong class\n",
++                    "metadata-only %s layer %d does not declare exactly its expected state class\n",
 +                    profile_name, il);
 +            return false;
 +        }
@@ -470,11 +595,37 @@ index a5814145d..2fd838615 100644
  static bool build_graph_profile(
          llama_model * model,
          bool expect_recurrent,
-@@ -237,6 +316,12 @@ static bool build_graph_profile(
+@@ -186,12 +323,15 @@ static bool build_graph_profile(
+         uint32_t n_tokens,
+         uint32_t n_seqs,
+         uint32_t n_outputs,
++        const std::vector<layer_state_class> & layer_classes,
++        uint32_t n_rs_seq,
+         graph_profile_result & result) {
+     llama_context_params context_params = llama_context_default_params();
+     context_params.n_ctx = 32;
+     context_params.n_batch = 8;
+     context_params.n_ubatch = 8;
+     context_params.n_seq_max = n_seqs;
++    context_params.n_rs_seq = n_rs_seq;
+     context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+     llama_context * context = llama_init_from_model(model, context_params);
+     if (context == nullptr) {
+@@ -237,6 +377,22 @@ static bool build_graph_profile(
      }
      result.boundary_pairs = boundaries.size() / 2;
  
-+    if (!check_state_effects(graph_result, graph, model, profile_name)) {
++    // mirror the mamba2 slot loop: writes = min(n_seq_tokens, 1 + effective n_rs_seq)
++    const uint32_t effective_rs_seq = llama_n_rs_seq(context);
++    if (n_rs_seq > 0 && effective_rs_seq != n_rs_seq) {
++        std::fprintf(stderr, "metadata-only %s requested n_rs_seq=%u but context clamped it to %u\n",
++                profile_name, n_rs_seq, effective_rs_seq);
++        llama_free(context);
++        return false;
++    }
++    const size_t expected_conv_writes = std::min<size_t>(n_tokens / n_seqs, 1 + effective_rs_seq);
++
++    if (!check_state_effects(graph_result, graph, model, profile_name, layer_classes, expected_conv_writes)) {
 +        llama_free(context);
 +        return false;
 +    }
@@ -483,22 +634,37 @@ index a5814145d..2fd838615 100644
      result.dependencies = skippy_graph_parameter_dependencies(graph, model);
      if (result.dependencies.empty()) {
          std::fprintf(stderr, "metadata-only %s graph has no parameter dependencies\n", profile_name);
-@@ -303,12 +388,24 @@ static int check_noalloc_graphs(const char * model_path, bool expect_recurrent)
+@@ -253,7 +409,11 @@ static bool build_graph_profile(
+     return true;
+ }
+ 
+-static int check_noalloc_graphs(const char * model_path, bool expect_recurrent) {
++static int check_noalloc_graphs(
++        const char * model_path,
++        bool expect_recurrent,
++        const std::vector<layer_state_class> & layer_classes,
++        uint32_t n_rs_seq) {
+     llama_model * model = load_metadata_only_model(model_path);
+     if (model == nullptr) {
+         std::fprintf(stderr, "failed to load metadata-only model\n");
+@@ -267,9 +427,9 @@ static int check_noalloc_graphs(const char * model_path, bool expect_recurrent)
+     graph_profile_result prefill;
+     graph_profile_result batched;
+     graph_profile_result decode;
+-    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, prefill) ||
+-            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, batched) ||
+-            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, decode)) {
++    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, prefill) ||
++            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, batched) ||
++            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, decode)) {
+         llama_model_free(model);
+         return 3;
+     }
+@@ -303,12 +463,13 @@ static int check_noalloc_graphs(const char * model_path, bool expect_recurrent)
          return 6;
      }
  
 -    std::printf("metadata-only planning: prefill_nodes=%d batched_nodes=%d decode_nodes=%d parameters=%zu block_pairs=%zu recurrent=%d\n",
-+    if (prefill.state_effects != batched.state_effects ||
-+            prefill.state_effects != decode.state_effects) {
-+        std::fprintf(stderr,
-+                "metadata-only state effect counts differ: prefill=%zu batched=%zu decode=%zu\n",
-+                prefill.state_effects,
-+                batched.state_effects,
-+                decode.state_effects);
-+        llama_model_free(model);
-+        return 7;
-+    }
-+
 +    std::printf("metadata-only planning: prefill_nodes=%d batched_nodes=%d decode_nodes=%d parameters=%zu block_pairs=%zu state_effects=%zu recurrent=%d\n",
              prefill.node_count,
              batched.node_count,
@@ -509,7 +675,7 @@ index a5814145d..2fd838615 100644
              expect_recurrent ? 1 : 0);
      llama_model_free(model);
      return 0;
-@@ -365,6 +462,60 @@ static bool check_boundary_validation_rejects() {
+@@ -365,16 +526,95 @@ static bool check_boundary_validation_rejects() {
      return true;
  }
  
@@ -521,9 +687,11 @@ index a5814145d..2fd838615 100644
 +    ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
 +    ggml_tensor * value   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
 +    ggml_tensor * node    = ggml_add(ctx, storage, value);
++    ggml_tensor * node2   = ggml_sub(ctx, storage, value);
 +    ggml_tensor * stray   = ggml_mul(ctx, storage, value);
 +    ggml_cgraph * graph   = ggml_new_graph(ctx);
 +    ggml_build_forward_expand(graph, node);
++    ggml_build_forward_expand(graph, node2);
 +
 +    std::string error;
 +    const auto kv = skippy_state_kind::kv_key;
@@ -540,6 +708,18 @@ index a5814145d..2fd838615 100644
 +        return false;
 +    }
 +
++    // multiple ordered writes (rollback slots) with distinct exact nodes are valid
++    const std::vector<skippy_state_effect> valid_multi_write = {
++        {kv, rd, 0, storage, nullptr},
++        {kv, wr, 0, storage, node},
++        {kv, wr, 0, storage, node2},
++    };
++    if (!skippy_validate_state_effects(valid_multi_write, graph, error)) {
++        std::fprintf(stderr, "valid multi-write state effects rejected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return false;
++    }
++
 +    const std::vector<std::vector<skippy_state_effect>> rejected = {
 +        // unknown kind
 +        {{static_cast<skippy_state_kind>(99), rd, 0, storage, nullptr}},
@@ -551,8 +731,10 @@ index a5814145d..2fd838615 100644
 +        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, nullptr}},
 +        // write whose effect node is not in the exact graph
 +        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, stray}},
-+        // duplicate (kind, access, layer)
++        // duplicate (kind, layer) read owner
 +        {{kv, rd, 0, storage, nullptr}, {kv, rd, 0, storage, nullptr}},
++        // duplicate exact write node
++        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, node}, {kv, wr, 0, storage, node}},
 +        // write without matching read owner
 +        {{kv, wr, 0, storage, node}},
 +    };
@@ -568,18 +750,30 @@ index a5814145d..2fd838615 100644
 +}
 +
  int main(int argc, char ** argv) {
-     if (argc != 3) {
-         std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT\n", argv[0]);
-@@ -373,6 +524,9 @@ int main(int argc, char ** argv) {
+-    if (argc != 3) {
+-        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT\n", argv[0]);
++    if (argc != 4 && argc != 5) {
++        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ]\n", argv[0]);
+         return 64;
+     }
      if (!check_boundary_validation_rejects()) {
          return 65;
      }
 +    if (!check_state_validation_rejects()) {
 +        return 66;
 +    }
++    std::vector<layer_state_class> layer_classes;
++    if (!parse_layer_classes(argv[3], layer_classes)) {
++        std::fprintf(stderr, "invalid layer class list: %s\n", argv[3]);
++        return 64;
++    }
++    const uint32_t n_rs_seq = argc == 5 ? static_cast<uint32_t>(std::atoi(argv[4])) : 0;
      llama_backend_init();
-     const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1");
+-    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1");
++    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq);
      llama_backend_free();
+     return result;
+ }
 -- 
 2.54.0
 
