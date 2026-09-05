@@ -10,6 +10,13 @@ LLAMA_WORKDIR="${LLAMA_WORKDIR:-$ROOT/.deps/llama.cpp}"
 LLAMA_BUILD_ROOT="${MESH_LLM_LLAMA_BUILD_ROOT:-$ROOT/.deps/llama-build}"
 LLAMA_BACKEND="${LLAMA_STAGE_BACKEND:-${SKIPPY_LLAMA_BACKEND:-${LLAMA_BACKEND:-cpu}}}"
 LLAMA_LINK_MODE="${LLAMA_STAGE_LINK_MODE:-${SKIPPY_LLAMA_LINK_MODE:-static}}"
+LLAMA_STAGE_BUILD_TESTS="${LLAMA_STAGE_BUILD_TESTS:-OFF}"
+LLAMA_STAGE_FULL_REPLAY="${LLAMA_STAGE_FULL_REPLAY:-OFF}"
+LLAMA_BUILD_TESTS=OFF
+if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
+  LLAMA_BUILD_TESTS=ON
+  LLAMA_STAGE_BUILD_TESTS=ON
+fi
 PRINT_BUILD_DIR=0
 REQUIRE_EXISTING=0
 
@@ -196,8 +203,8 @@ CMAKE_ARGS=(
   -DLLAMA_OPENSSL=OFF
   -DLLAMA_BUILD_EXAMPLES=OFF
   -DLLAMA_BUILD_SERVER=OFF
-  -DLLAMA_BUILD_TESTS=OFF
-  -DLLAMA_STAGE_BUILD_TESTS="${LLAMA_STAGE_BUILD_TESTS:-OFF}"
+  -DLLAMA_BUILD_TESTS="$LLAMA_BUILD_TESTS"
+  -DLLAMA_STAGE_BUILD_TESTS="$LLAMA_STAGE_BUILD_TESTS"
   -DLLAMA_CURL=OFF
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON
   # mtmd video shells out to ffmpeg via sheredom/subprocess.h, which calls
@@ -363,19 +370,37 @@ fi
 cmake "${CMAKE_ARGS[@]}"
 
 BUILD_TARGETS=(llama llama-common mtmd)
-if [[ "${LLAMA_STAGE_BUILD_TESTS:-OFF}" == "ON" ]]; then
+if [[ "$LLAMA_STAGE_BUILD_TESTS" == "ON" ]]; then
   BUILD_TARGETS+=(
+    skippy-graph-build-inputs
     skippy-hardware-application-probe
     skippy-model-fixture-generator
     skippy-model-loader-accounting
     skippy-noalloc-graph-planning
+    skippy-renamed-multishard-planning
     skippy-stage-slice-plan
+  )
+fi
+if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
+  BUILD_TARGETS+=(
+    test-skippy-activation-layout
+    test-skippy-kv-cells-contiguous
+    test-skippy-kv-page-export
+    test-skippy-model-loader-accounting
+    test-skippy-recurrent-state-roundtrip
+    test-skippy-verify-checkpoint-retirement
   )
 fi
 
 cmake --build "$LLAMA_BUILD_DIR" --config "${CMAKE_BUILD_TYPE:-Release}" --parallel "$(detect_jobs)" --target "${BUILD_TARGETS[@]}"
 
-if [[ "${LLAMA_STAGE_BUILD_TESTS:-OFF}" == "ON" ]]; then
+if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
+  REPLAY_FIXTURE_DIR="$LLAMA_BUILD_DIR/tests/test-models"
+  mkdir -p "$REPLAY_FIXTURE_DIR"
+  "$LLAMA_BUILD_DIR/bin/skippy-model-fixture-generator" --arch gemma --seed 1 --out "$REPLAY_FIXTURE_DIR"
+  "$LLAMA_BUILD_DIR/bin/skippy-model-fixture-generator" --arch qwen2moe --seed 1 --out "$REPLAY_FIXTURE_DIR"
+  ctest --test-dir "$LLAMA_BUILD_DIR" --build-config "${CMAKE_BUILD_TYPE:-Release}" --output-on-failure --timeout 900 --fixture-exclude-any '^generate-models$' -R '^(skippy_|test-skippy-)'
+elif [[ "$LLAMA_STAGE_BUILD_TESTS" == "ON" ]]; then
   ctest --test-dir "$LLAMA_BUILD_DIR" --build-config "${CMAKE_BUILD_TYPE:-Release}" --output-on-failure -R '^skippy_'
 fi
 
