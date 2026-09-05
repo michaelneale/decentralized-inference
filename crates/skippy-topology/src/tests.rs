@@ -1516,6 +1516,777 @@ fn reviewed_supported_families_smoke_plan_with_expected_policy_signals() {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FrozenSupportedFamilySplit {
+    docs_family: &'static str,
+    family_id: &'static str,
+    layer_count: u32,
+    activation_width: u32,
+    boundaries: Option<&'static [u32]>,
+    wire_multiplier: u64,
+}
+
+const FROZEN_SUPPORTED_FAMILY_SPLITS: &[FrozenSupportedFamilySplit] = &[
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3 dense",
+        family_id: "qwen3_dense",
+        layer_count: 28,
+        activation_width: 1024,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen2",
+        family_id: "qwen2",
+        layer_count: 24,
+        activation_width: 896,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen2-VL",
+        family_id: "qwen2vl",
+        layer_count: 28,
+        activation_width: 1536,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3-VL",
+        family_id: "qwen3vl",
+        layer_count: 28,
+        activation_width: 2048,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Llama",
+        family_id: "llama",
+        layer_count: 16,
+        activation_width: 2048,
+        boundaries: Some(&[5, 10]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "DeepSeek2",
+        family_id: "deepseek2",
+        layer_count: 27,
+        activation_width: 2048,
+        boundaries: Some(&[7, 14]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "DeepSeek LLM",
+        family_id: "deepseek",
+        layer_count: 30,
+        activation_width: 4096,
+        boundaries: Some(&[10, 20]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "DeepSeek3",
+        family_id: "deepseek3",
+        layer_count: 61,
+        activation_width: 7168,
+        boundaries: None,
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "GLM-4.7 Flash",
+        family_id: "glm47_flash",
+        layer_count: 47,
+        activation_width: 2048,
+        boundaries: Some(&[15, 31]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "GLM4-MoE",
+        family_id: "glm4_moe",
+        layer_count: 47,
+        activation_width: 2048,
+        boundaries: Some(&[15, 31]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "GLM4 9B",
+        family_id: "glm4",
+        layer_count: 40,
+        activation_width: 4096,
+        boundaries: Some(&[13, 27]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Baichuan",
+        family_id: "baichuan",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Bloom",
+        family_id: "bloom",
+        layer_count: 24,
+        activation_width: 1024,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "GPT2",
+        family_id: "gpt2",
+        layer_count: 12,
+        activation_width: 768,
+        boundaries: Some(&[4, 8]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "GPT-NeoX",
+        family_id: "gptneox",
+        layer_count: 6,
+        activation_width: 512,
+        boundaries: Some(&[2, 4]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Gemma4 A4B",
+        family_id: "gemma4_a4b",
+        layer_count: 30,
+        activation_width: 2816,
+        boundaries: Some(&[8, 15]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Gemma4 E4B",
+        family_id: "gemma4_e4b",
+        layer_count: 42,
+        activation_width: 2560,
+        boundaries: Some(&[21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Gemma3",
+        family_id: "gemma3",
+        layer_count: 26,
+        activation_width: 1152,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Gemma3n",
+        family_id: "gemma3n",
+        layer_count: 30,
+        activation_width: 2048,
+        boundaries: Some(&[10, 15]),
+        wire_multiplier: 4,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Gemma2",
+        family_id: "gemma2",
+        layer_count: 26,
+        activation_width: 2304,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Phi2",
+        family_id: "phi2",
+        layer_count: 32,
+        activation_width: 2560,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Granite",
+        family_id: "granite",
+        layer_count: 40,
+        activation_width: 2048,
+        boundaries: Some(&[13, 26]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Granite-Hybrid",
+        family_id: "granite_hybrid",
+        layer_count: 32,
+        activation_width: 768,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Granite-MoE",
+        family_id: "granite_moe",
+        layer_count: 6,
+        activation_width: 64,
+        boundaries: Some(&[2, 4]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Hunyuan-Dense",
+        family_id: "hunyuan_dense",
+        layer_count: 32,
+        activation_width: 2048,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Hunyuan-MoE",
+        family_id: "hunyuan_moe",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Hunyuan-VL / HunyuanOCR",
+        family_id: "hunyuan_vl",
+        layer_count: 24,
+        activation_width: 1024,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "LFM2",
+        family_id: "lfm2",
+        layer_count: 16,
+        activation_width: 1024,
+        boundaries: Some(&[5, 10]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Jamba",
+        family_id: "jamba",
+        layer_count: 28,
+        activation_width: 2560,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Kimi Linear",
+        family_id: "kimi_linear",
+        layer_count: 27,
+        activation_width: 2304,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Laguna S 2.1",
+        family_id: "laguna",
+        layer_count: 48,
+        activation_width: 3072,
+        boundaries: Some(&[25, 39]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Mamba",
+        family_id: "mamba",
+        layer_count: 24,
+        activation_width: 768,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Mamba2",
+        family_id: "mamba2",
+        layer_count: 64,
+        activation_width: 2560,
+        boundaries: Some(&[21, 42]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "RWKV6",
+        family_id: "rwkv6",
+        layer_count: 24,
+        activation_width: 2048,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "RWKV7",
+        family_id: "rwkv7",
+        layer_count: 12,
+        activation_width: 768,
+        boundaries: Some(&[4, 8]),
+        wire_multiplier: 2,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Falcon-H1",
+        family_id: "falcon_h1",
+        layer_count: 24,
+        activation_width: 2048,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Falcon",
+        family_id: "falcon",
+        layer_count: 32,
+        activation_width: 4544,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "InternLM2",
+        family_id: "internlm2",
+        layer_count: 24,
+        activation_width: 2048,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Phi3",
+        family_id: "phi",
+        layer_count: 32,
+        activation_width: 3072,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "PhiMoE",
+        family_id: "phimoe",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "OLMo",
+        family_id: "olmo",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "OLMo2",
+        family_id: "olmo2",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "OLMoE",
+        family_id: "olmoe",
+        layer_count: 16,
+        activation_width: 2048,
+        boundaries: Some(&[5, 10]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Mistral3",
+        family_id: "mistral",
+        layer_count: 26,
+        activation_width: 3072,
+        boundaries: Some(&[8, 17]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen2-MoE",
+        family_id: "qwen2moe",
+        layer_count: 28,
+        activation_width: 1536,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3-MoE",
+        family_id: "qwen3moe",
+        layer_count: 28,
+        activation_width: 1024,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3-VL-MoE",
+        family_id: "qwen3vlmoe",
+        layer_count: 48,
+        activation_width: 2048,
+        boundaries: Some(&[16, 32]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "EXAONE",
+        family_id: "exaone",
+        layer_count: 30,
+        activation_width: 2560,
+        boundaries: Some(&[10, 20]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "EXAONE4",
+        family_id: "exaone4",
+        layer_count: 30,
+        activation_width: 2048,
+        boundaries: Some(&[10, 20]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "EXAONE-MoE",
+        family_id: "exaone_moe",
+        layer_count: 49,
+        activation_width: 6144,
+        boundaries: None,
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Cohere2",
+        family_id: "cohere2",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "MiniMax M2.7",
+        family_id: "minimax_m27",
+        layer_count: 62,
+        activation_width: 3072,
+        boundaries: Some(&[20, 41]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3Next",
+        family_id: "qwen3next",
+        layer_count: 48,
+        activation_width: 2048,
+        boundaries: Some(&[16, 32]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Arcee",
+        family_id: "arcee",
+        layer_count: 36,
+        activation_width: 2560,
+        boundaries: Some(&[12, 24]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "ChatGLM",
+        family_id: "chatglm",
+        layer_count: 28,
+        activation_width: 4096,
+        boundaries: Some(&[9, 18]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "CodeShell",
+        family_id: "codeshell",
+        layer_count: 42,
+        activation_width: 4096,
+        boundaries: Some(&[14, 28]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Deci",
+        family_id: "deci",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Qwen3.5 recurrent",
+        family_id: "qwen35",
+        layer_count: 32,
+        activation_width: 2560,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "XVerse",
+        family_id: "xverse",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Maincoder",
+        family_id: "maincoder",
+        layer_count: 32,
+        activation_width: 1536,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "OpenELM",
+        family_id: "openelm",
+        layer_count: 16,
+        activation_width: 1280,
+        boundaries: Some(&[5, 10]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "MiniCPM",
+        family_id: "minicpm",
+        layer_count: 40,
+        activation_width: 2304,
+        boundaries: Some(&[13, 26]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "MiniCPM3",
+        family_id: "minicpm3",
+        layer_count: 40,
+        activation_width: 2304,
+        boundaries: Some(&[13, 26]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Plamo3",
+        family_id: "plamo3",
+        layer_count: 24,
+        activation_width: 2560,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "PLM",
+        family_id: "plm",
+        layer_count: 24,
+        activation_width: 2048,
+        boundaries: Some(&[8, 16]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "Refact",
+        family_id: "refact",
+        layer_count: 32,
+        activation_width: 2048,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "SmallThinker",
+        family_id: "smallthinker",
+        layer_count: 36,
+        activation_width: 2048,
+        boundaries: Some(&[12, 24]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "SmolLM3",
+        family_id: "smollm3",
+        layer_count: 36,
+        activation_width: 2048,
+        boundaries: Some(&[12, 24]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "StableLM",
+        family_id: "stablelm",
+        layer_count: 32,
+        activation_width: 2560,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "StarCoder2",
+        family_id: "starcoder2",
+        layer_count: 30,
+        activation_width: 3072,
+        boundaries: Some(&[10, 20]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "MPT",
+        family_id: "mpt",
+        layer_count: 32,
+        activation_width: 4096,
+        boundaries: Some(&[10, 21]),
+        wire_multiplier: 1,
+    },
+    FrozenSupportedFamilySplit {
+        docs_family: "DeepSeek-OCR",
+        family_id: "deepseek2ocr",
+        layer_count: 12,
+        activation_width: 1280,
+        boundaries: Some(&[4, 8]),
+        wire_multiplier: 1,
+    },
+];
+
+fn reviewed_capability_for_frozen_family(
+    spec: FrozenSupportedFamilySplit,
+) -> FamilyCapabilityRecord {
+    let mut matches = reviewed_capability_records().into_iter().filter(|record| {
+        record.capability.family_id == spec.family_id
+            && record.capability.layer_count == spec.layer_count
+            && record.capability.activation_width == spec.activation_width
+    });
+    let record = matches.next().unwrap_or_else(|| {
+        panic!(
+            "missing reviewed capability for {} ({})",
+            spec.docs_family, spec.family_id
+        )
+    });
+    assert!(
+        matches.next().is_none(),
+        "multiple reviewed capabilities for {} ({})",
+        spec.docs_family,
+        spec.family_id
+    );
+    record.capability
+}
+
+#[test]
+fn frozen_supported_family_split_contract_matches_planner() {
+    assert_eq!(FROZEN_SUPPORTED_FAMILY_SPLITS.len(), 72);
+    let mut explicit_boundary_rows = 0;
+    let mut no_boundary_rows = 0;
+
+    for spec in FROZEN_SUPPORTED_FAMILY_SPLITS {
+        let family = reviewed_capability_for_frozen_family(*spec);
+        let request = TopologyPlanRequest {
+            topology_id: format!("frozen-{}", spec.family_id),
+            model_id: spec.family_id.to_string(),
+            layers: dense_attention_layers(spec.layer_count, 10),
+            nodes: nodes(3),
+            family: Some(family),
+            policy: PlannerPolicy::default(),
+        };
+
+        let Some(boundaries) = spec.boundaries else {
+            no_boundary_rows += 1;
+            let plan = plan_contiguous_with_splits(&request, &[])
+                .unwrap_or_else(|error| panic!("{} no-cut plan failed: {error}", spec.docs_family));
+            assert_eq!(plan.stages.len(), 1, "{}", spec.docs_family);
+            assert_eq!(
+                (plan.stages[0].layer_start, plan.stages[0].layer_end),
+                (0, spec.layer_count)
+            );
+            assert!(
+                plan.boundaries.is_empty(),
+                "{} invented a split",
+                spec.docs_family
+            );
+            continue;
+        };
+
+        explicit_boundary_rows += 1;
+        let plan = plan_contiguous_with_splits(&request, boundaries)
+            .unwrap_or_else(|error| panic!("{} split plan failed: {error}", spec.docs_family));
+        assert_eq!(
+            plan.family_id.as_deref(),
+            Some(spec.family_id),
+            "{}",
+            spec.docs_family
+        );
+        let mut expected_edges = Vec::with_capacity(boundaries.len() + 1);
+        expected_edges.push(0);
+        expected_edges.extend_from_slice(boundaries);
+        expected_edges.push(spec.layer_count);
+        let expected_ranges = expected_edges
+            .windows(2)
+            .map(|edge| (edge[0], edge[1]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| (stage.layer_start, stage.layer_end))
+                .collect::<Vec<_>>(),
+            expected_ranges,
+            "{} stage ranges",
+            spec.docs_family
+        );
+        assert!(
+            plan.boundaries
+                .iter()
+                .all(|boundary| boundary.decision == BoundaryDecision::Accepted),
+            "{} has an unexpected rejected documented boundary",
+            spec.docs_family
+        );
+        let expected_payload_bytes = u64::from(spec.activation_width) * 4 * spec.wire_multiplier;
+        assert!(
+            plan.boundaries.iter().all(|boundary| {
+                boundary.raw_activation_bytes_per_token == expected_payload_bytes
+                    && boundary.wire_payload_bytes_per_token == expected_payload_bytes
+            }),
+            "{} F32 payload bytes",
+            spec.docs_family
+        );
+    }
+
+    assert_eq!(explicit_boundary_rows, 70);
+    assert_eq!(no_boundary_rows, 2);
+}
+
+#[test]
+fn frozen_supported_family_split_exceptions_remain_enforced() {
+    let gemma4_spec = FROZEN_SUPPORTED_FAMILY_SPLITS
+        .iter()
+        .find(|spec| spec.family_id == "gemma4_e4b")
+        .copied()
+        .expect("Gemma4 E4B contract");
+    let gemma4_request = TopologyPlanRequest {
+        topology_id: "frozen-gemma4-e4b-invalid".to_string(),
+        model_id: gemma4_spec.family_id.to_string(),
+        layers: dense_attention_layers(gemma4_spec.layer_count, 10),
+        nodes: nodes(2),
+        family: Some(reviewed_capability_for_frozen_family(gemma4_spec)),
+        policy: PlannerPolicy::default(),
+    };
+    for cut in [12, 14, 24, 28] {
+        let plan = plan_contiguous_with_splits(&gemma4_request, &[cut]).expect("Gemma4 plan");
+        assert_eq!(
+            plan.boundaries[0].decision,
+            BoundaryDecision::Rejected,
+            "cut {cut}"
+        );
+        assert!(
+            plan.boundaries[0]
+                .reason_codes
+                .contains(&PlanReasonCode::SharedKvRegionCut)
+        );
+    }
+
+    let gemma3n_spec = FROZEN_SUPPORTED_FAMILY_SPLITS
+        .iter()
+        .find(|spec| spec.family_id == "gemma3n")
+        .copied()
+        .expect("Gemma3n contract");
+    let gemma3n_request = TopologyPlanRequest {
+        topology_id: "frozen-gemma3n".to_string(),
+        model_id: gemma3n_spec.family_id.to_string(),
+        layers: dense_attention_layers(gemma3n_spec.layer_count, 10),
+        nodes: nodes(3),
+        family: Some(reviewed_capability_for_frozen_family(gemma3n_spec)),
+        policy: PlannerPolicy::default(),
+    };
+    let reviewed_chain =
+        plan_contiguous_with_splits(&gemma3n_request, &[10, 15]).expect("Gemma3n chain");
+    assert_eq!(
+        reviewed_chain
+            .stages
+            .iter()
+            .map(|stage| (stage.layer_start, stage.layer_end))
+            .collect::<Vec<_>>(),
+        vec![(0, 10), (10, 15), (15, 30)]
+    );
+    assert!(reviewed_chain.boundaries.iter().all(|boundary| {
+        boundary.decision == BoundaryDecision::Accepted
+            && boundary
+                .reason_codes
+                .contains(&PlanReasonCode::ActivationSidebandRequired)
+            && boundary.raw_activation_bytes_per_token == 32_768
+            && boundary.wire_payload_bytes_per_token == 32_768
+    }));
+    let rejected_final_slice =
+        plan_contiguous_with_splits(&gemma3n_request, &[10, 20]).expect("Gemma3n rejected chain");
+    assert_eq!(
+        rejected_final_slice.boundaries[0].decision,
+        BoundaryDecision::Accepted
+    );
+    assert_eq!(
+        rejected_final_slice.boundaries[1].decision,
+        BoundaryDecision::Rejected
+    );
+    assert!(
+        rejected_final_slice.boundaries[1]
+            .reason_codes
+            .contains(&PlanReasonCode::SharedKvRegionCut)
+    );
+}
+
 #[test]
 fn qwen35_series_inference_covers_qwen36_release_names() {
     // Qwen3.6 and Qwen3.8 load as llama.cpp `qwen35`/`qwen35moe`; there is no
