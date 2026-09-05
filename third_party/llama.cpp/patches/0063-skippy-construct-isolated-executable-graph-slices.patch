@@ -1,0 +1,547 @@
+From 6cee3a5fba74faf62467dd47877e6aff5a7dd953 Mon Sep 17 00:00:00 2001
+From: Thinker
+ <75d8a808fa21bb8d1812e080cf471db601c6e8e6a62dcd516d37531e83a7bb77@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 19:50:02 +1000
+Subject: [PATCH] skippy: construct isolated executable graph slices
+
+---
+ src/CMakeLists.txt                    |   1 +
+ src/skippy/executable_graph.cpp       | 219 +++++++++++++++++++++++
+ src/skippy/executable_graph.h         |  27 +++
+ src/skippy/tests/stage_slice_plan.cpp | 240 +++++++++++++++++++++++++-
+ 4 files changed, 486 insertions(+), 1 deletion(-)
+ create mode 100644 src/skippy/executable_graph.cpp
+ create mode 100644 src/skippy/executable_graph.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 49646af15..5572cfce9 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -54,6 +54,7 @@ add_library(llama
+             skippy/devices.cpp
+             skippy/glm_dsa.cpp
+             skippy/graph_dependencies.cpp
++            skippy/executable_graph.cpp
+             skippy/model_package.cpp
+             skippy/sampling.cpp
+             skippy/stage_slice_plan.cpp
+diff --git a/src/skippy/executable_graph.cpp b/src/skippy/executable_graph.cpp
+new file mode 100644
+index 000000000..549e0a0bc
+--- /dev/null
++++ b/src/skippy/executable_graph.cpp
+@@ -0,0 +1,219 @@
++#include "executable_graph.h"
++
++#include "../../ggml/src/ggml-impl.h"
++
++#include <algorithm>
++#include <cstring>
++#include <limits>
++#include <unordered_set>
++
++namespace {
++
++bool is_storage_leaf(const ggml_tensor * tensor) {
++    if (tensor->op != GGML_OP_NONE || tensor->view_src != nullptr) {
++        return false;
++    }
++    for (const ggml_tensor * src : tensor->src) {
++        if (src != nullptr) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool is_custom_op(ggml_op op) {
++    return op == GGML_OP_MAP_CUSTOM1 || op == GGML_OP_MAP_CUSTOM2 ||
++           op == GGML_OP_MAP_CUSTOM3 || op == GGML_OP_CUSTOM;
++}
++
++struct graph_builder {
++    skippy_executable_graph result;
++    std::vector<const ggml_tensor *> tensors;
++    std::unordered_set<const ggml_tensor *> available;
++    std::unordered_set<const ggml_tensor *> imported;
++    std::string & error;
++
++    bool dependency(const ggml_tensor * tensor) {
++        if (tensor == nullptr || available.count(tensor)) {
++            return true;
++        }
++        if (!is_storage_leaf(tensor)) {
++            error = "slice dependency is not an earlier selected node, import, or storage leaf";
++            return false;
++        }
++        available.insert(tensor);
++        tensors.push_back(tensor);
++        return true;
++    }
++
++    bool collect(
++            const ggml_cgraph * source,
++            const std::vector<int32_t> & indices,
++            const std::vector<const ggml_tensor *> & imports,
++            const std::vector<const ggml_tensor *> & exports) {
++        std::unordered_set<const ggml_tensor *> members;
++        std::unordered_set<const ggml_tensor *> selected;
++        for (int i = 0; i < source->n_nodes; ++i) {
++            if (source->nodes[i] == nullptr || !members.insert(source->nodes[i]).second) {
++                error = "source graph has null or duplicate nodes";
++                return false;
++            }
++        }
++        for (int i = 0; i < source->n_leafs; ++i) {
++            members.insert(source->leafs[i]);
++        }
++        int32_t previous = -1;
++        for (int32_t index : indices) {
++            if (index <= previous || index < 0 || index >= source->n_nodes) {
++                error = "slice node indices must be unique and in source order";
++                return false;
++            }
++            previous = index;
++            selected.insert(source->nodes[index]);
++        }
++        for (const ggml_tensor * tensor : imports) {
++            if (tensor == nullptr || !members.count(tensor) || selected.count(tensor) ||
++                    !imported.insert(tensor).second) {
++                error = "slice imports must be unique source tensors outside the selection";
++                return false;
++            }
++            available.insert(tensor);
++            tensors.push_back(tensor);
++        }
++        for (int32_t index : indices) {
++            const ggml_tensor * tensor = source->nodes[index];
++            if (is_custom_op(tensor->op)) {
++                error = "slice cannot relocate opaque custom-op state";
++                return false;
++            }
++            // ggml flattens view_src. A detached imported view cannot silently reuse its old base.
++            for (const ggml_tensor * input : imports) {
++                if (input->view_src && tensor->view_src == input->view_src) {
++                    error = "slice view requires alias rebasing across an imported view";
++                    return false;
++                }
++            }
++            // Storage leaves can be graph nodes when marked PARAM.
++            if (!is_storage_leaf(tensor)) {
++                if (!dependency(tensor->view_src)) {
++                    return false;
++                }
++                for (const ggml_tensor * src : tensor->src) {
++                    if (!dependency(src)) {
++                        return false;
++                    }
++                }
++            }
++            if (available.insert(tensor).second) {
++                tensors.push_back(tensor);
++            }
++        }
++        std::unordered_set<const ggml_tensor *> exported;
++        for (const ggml_tensor * tensor : exports) {
++            if (tensor == nullptr || (!selected.count(tensor) && !imported.count(tensor)) ||
++                    !exported.insert(tensor).second) {
++                error = "slice exports must be unique selected or imported tensors";
++                return false;
++            }
++        }
++        return true;
++    }
++
++    void clone_tensors() {
++        for (const ggml_tensor * source : tensors) {
++            ggml_tensor * tensor = ggml_dup_tensor(result.context.get(), source);
++            std::memcpy(tensor->nb, source->nb, sizeof(tensor->nb));
++            ggml_set_name(tensor, source->name);
++            tensor->flags = source->flags & ~GGML_TENSOR_FLAG_COMPUTE;
++            if (imported.count(source)) {
++                tensor->flags = GGML_TENSOR_FLAG_INPUT;
++            } else {
++                tensor->op = source->op;
++                std::memcpy(tensor->op_params, source->op_params, sizeof(tensor->op_params));
++                tensor->view_offs = source->view_offs;
++            }
++            result.tensors.emplace(source, tensor);
++        }
++        for (const ggml_tensor * source : tensors) {
++            if (imported.count(source)) {
++                continue;
++            }
++            ggml_tensor * tensor = result.tensors.at(source);
++            if (source->view_src != nullptr) {
++                tensor->view_src = result.tensors.at(source->view_src);
++            }
++            for (int i = 0; i < GGML_MAX_SRC; ++i) {
++                if (source->src[i] != nullptr) {
++                    tensor->src[i] = result.tensors.at(source->src[i]);
++                }
++            }
++        }
++    }
++};
++
++}
++
++bool skippy_build_executable_graph(
++        const ggml_cgraph * source,
++        const std::vector<int32_t> & node_indices,
++        const std::vector<const ggml_tensor *> & imports,
++        const std::vector<const ggml_tensor *> & exports,
++        skippy_executable_graph & result,
++        std::string & error) {
++    result = {};
++    error.clear();
++    if (source == nullptr || source->n_nodes < 0 || source->n_leafs < 0 ||
++            (node_indices.empty() && imports.empty())) {
++        error = "invalid executable slice request";
++        return false;
++    }
++    graph_builder builder{{}, {}, {}, {}, error};
++    if (!builder.collect(source, node_indices, imports, exports)) {
++        return false;
++    }
++    const size_t count = std::max(size_t(1), builder.tensors.size());
++    if (count > size_t(std::numeric_limits<int32_t>::max()) / GGML_MAX_SRC) {
++        error = "executable slice exceeds graph capacity";
++        return false;
++    }
++    ggml_init_params params = {
++        ggml_tensor_overhead() * count + ggml_graph_overhead_custom(count, false), nullptr, true,
++    };
++    builder.result.context.reset(ggml_init(params));
++    if (!builder.result.context) {
++        error = "cannot allocate executable slice metadata";
++        return false;
++    }
++    builder.clone_tensors();
++    ggml_cgraph * graph = ggml_new_graph_custom(builder.result.context.get(), count, false);
++    graph->order = source->order;
++    // Reuse ggml's traversal to rebuild leaves, visited slots, use counts, and compute flags.
++    // Include storage reachable only through view_src as well as ordinary operand leaves.
++    for (const ggml_tensor * tensor : builder.tensors) {
++        if (is_storage_leaf(tensor) || builder.imported.count(tensor)) {
++            ggml_build_forward_order(graph, builder.result.tensors.at(tensor));
++        }
++    }
++    for (const ggml_tensor * tensor : exports) {
++        ggml_set_output(builder.result.tensors.at(tensor));
++    }
++    // An exported view must also keep its backing allocation alive.
++    for (const auto & entry : builder.result.tensors) {
++        if (entry.second->flags & GGML_TENSOR_FLAG_OUTPUT) {
++            for (ggml_tensor * output = entry.second->view_src; output; output = output->view_src) {
++                ggml_set_output(output);
++            }
++        }
++    }
++    for (int32_t index : node_indices) {
++        const ggml_tensor * tensor = source->nodes[index];
++        if (tensor->flags & GGML_TENSOR_FLAG_COMPUTE) {
++            ggml_build_forward_expand(graph, builder.result.tensors.at(tensor));
++        } else {
++            ggml_build_forward_order(graph, builder.result.tensors.at(tensor));
++        }
++    }
++    builder.result.graph = graph;
++    result = std::move(builder.result);
++    return true;
++}
+diff --git a/src/skippy/executable_graph.h b/src/skippy/executable_graph.h
+new file mode 100644
+index 000000000..43fa3834d
+--- /dev/null
++++ b/src/skippy/executable_graph.h
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include "ggml-cpp.h"
++
++#include <cstdint>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++struct skippy_executable_graph {
++    ggml_context_ptr context;
++    ggml_cgraph * graph = nullptr;
++    std::unordered_map<const ggml_tensor *, ggml_tensor *> tensors;
++};
++
++// Clone tensor metadata only. The caller binds leaf storage and supplies import payloads before execution.
++// Imports become independent leaves with the original layout; local aliases keep their canonical storage.
++// No tensor, buffer, graph metadata, or compute flag in source is modified or borrowed.
++// Ordered-only nodes retain that status. Opaque custom ops and unresolved alias bases fail closed.
++// Keep the context alive until its scheduler is released; source tensor keys are identity handles only.
++bool skippy_build_executable_graph(
++        const ggml_cgraph * source,
++        const std::vector<int32_t> & node_indices,
++        const std::vector<const ggml_tensor *> & imports,
++        const std::vector<const ggml_tensor *> & exports,
++        skippy_executable_graph & result,
++        std::string & error);
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index e9a774ddc..8b32062c1 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -1,8 +1,14 @@
+ #include "ggml.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++#include "skippy/executable_graph.h"
++#include "../../../ggml/src/ggml-impl.h"
+ #include "skippy/stage_slice_plan.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
++#include <cmath>
++#include <cstring>
+ #include <string>
+ #include <vector>
+ 
+@@ -190,6 +196,238 @@ static int check_middle_stage_selection() {
+     return 0;
+ }
+ 
++static bool count_compute(void * data) {
++    ++*static_cast<int *>(data);
++    return false;
++}
++
++static int check_executable_slice(bool export_norm) {
++    ggml_init_params params = {ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * input = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * weight = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * state = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_set_input(input);
++    ggml_set_input(weight);
++    ggml_set_input(state);
++    ggml_tensor * imported = ggml_scale(ctx.get(), input, 2.0f);
++    ggml_tensor * passthrough = ggml_scale(ctx.get(), input, 7.0f);
++    ggml_tensor * norm = ggml_rms_norm(ctx.get(), imported, 1e-5f);
++    ggml_tensor * omitted = ggml_scale(ctx.get(), norm, 3.0f);
++    ggml_tensor * product = ggml_mul(ctx.get(), norm, weight);
++    ggml_tensor * write_1 = ggml_cpy(ctx.get(), product, state);
++    ggml_tensor * view = ggml_view_1d(ctx.get(), product, 2, sizeof(float));
++    ggml_tensor * output = ggml_cont(ctx.get(), view);
++    ggml_tensor * write_2 = ggml_cpy(ctx.get(), imported, state);
++    ggml_tensor * ordered_only = ggml_scale(ctx.get(), weight, 100.0f);
++    ggml_cgraph * source = ggml_new_graph_custom(ctx.get(), 64, false);
++    ggml_build_forward_expand(source, passthrough);
++    ggml_build_forward_expand(source, omitted);
++    ggml_build_forward_expand(source, write_1);
++    ggml_build_forward_expand(source, output);
++    ggml_build_forward_expand(source, write_2);
++    ggml_build_forward_order(source, ordered_only);
++    const std::vector<ggml_tensor *> selected = {norm, product, write_1, view, output, write_2, ordered_only};
++    std::vector<int32_t> indices;
++    int norm_index = -1;
++    for (int i = 0; i < source->n_nodes; ++i) {
++        if (source->nodes[i] == norm) {
++            norm_index = i;
++        }
++        if (std::find(selected.begin(), selected.end(), source->nodes[i]) != selected.end()) {
++            indices.push_back(i);
++        }
++    }
++    if (indices.size() != selected.size() || indices[1] != indices[0] + 2 ||
++            ggml_node_get_use_count(source, norm_index) != 2) {
++        return 20;
++    }
++    std::vector<ggml_tensor> source_snapshots;
++    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get()); tensor; tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
++        source_snapshots.push_back(*tensor);
++    }
++    const std::vector<const ggml_tensor *> imports = {imported, passthrough};
++    std::vector<const ggml_tensor *> exports = {output, passthrough, view};
++    if (export_norm) {
++        exports.push_back(norm);
++    }
++    skippy_executable_graph slice;
++    std::string error;
++    if (!skippy_build_executable_graph(source, indices, imports, exports, slice, error)) {
++        std::fprintf(stderr, "executable graph failed: %s\n", error.c_str());
++        return 21;
++    }
++    if (slice.graph->n_nodes != int(selected.size()) || slice.graph->n_leafs != 4 ||
++            slice.tensors.count(input) || slice.tensors.count(omitted) ||
++            slice.graph->visited_hash_set.keys == source->visited_hash_set.keys ||
++            ggml_node_get_use_count(slice.graph, 0) != 1) {
++        return 22;
++    }
++    for (size_t i = 0; i < selected.size(); ++i) {
++        if (slice.graph->nodes[i] != slice.tensors.at(selected[i])) {
++            return 23;
++        }
++    }
++    if (slice.tensors.at(imported)->op != GGML_OP_NONE ||
++            slice.tensors.at(imported)->src[0] || slice.tensors.at(imported)->view_src ||
++            (slice.tensors.at(imported)->flags & GGML_TENSOR_FLAG_COMPUTE) ||
++            (slice.tensors.at(ordered_only)->flags & GGML_TENSOR_FLAG_COMPUTE) ||
++            slice.tensors.at(view)->view_src != slice.tensors.at(product) ||
++            slice.tensors.at(view)->view_offs != sizeof(float) ||
++            !(slice.tensors.at(product)->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++            slice.tensors.at(write_1)->view_src != slice.tensors.at(state) ||
++            slice.tensors.at(write_2)->view_src != slice.tensors.at(state)) {
++        return 24;
++    }
++    if (ggml_can_fuse(slice.graph, 0, {GGML_OP_RMS_NORM, GGML_OP_MUL}) == export_norm) {
++        return 25;
++    }
++    // Every tensor has its own visited slot and exact operand-edge count, not a copy of the full graph's counts.
++    for (const auto & entry : slice.tensors) {
++        const ggml_tensor * tensor = entry.second;
++        size_t slot = ggml_hash_find(&slice.graph->visited_hash_set, tensor);
++        if (slot == GGML_HASHSET_FULL || !ggml_bitset_get(slice.graph->visited_hash_set.used, slot)) {
++            return 26;
++        }
++        int uses = 0;
++        for (int i = 0; i < slice.graph->n_nodes; ++i) {
++            for (const ggml_tensor * src : slice.graph->nodes[i]->src) {
++                uses += src == tensor;
++            }
++        }
++        if (slice.graph->use_counts[slot] != uses || tensor->data || tensor->buffer || tensor->extra) {
++            return 27;
++        }
++    }
++    ggml_backend_ptr cpu(ggml_backend_cpu_init());
++    ggml_backend_cpu_set_n_threads(cpu.get(), 1);
++    ggml_backend_t backends[] = {cpu.get()};
++    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, nullptr, 1, 64, false, true));
++    if (ggml_backend_sched_get_buffer_size(sched.get(), cpu.get()) != 0 ||
++            !ggml_backend_sched_alloc_graph(sched.get(), slice.graph) ||
++            ggml_backend_sched_get_buffer_size(sched.get(), cpu.get()) == 0) {
++        return 28;
++    }
++    const float x[] = {2, 4, 6, 8};
++    const float w[] = {1, 2, 3, 4};
++    const float side[] = {7, 14, 21, 28};
++    ggml_backend_tensor_set(slice.tensors.at(imported), x, 0, sizeof(x));
++    ggml_backend_tensor_set(slice.tensors.at(weight), w, 0, sizeof(w));
++    ggml_backend_tensor_set(slice.tensors.at(passthrough), side, 0, sizeof(side));
++    int compute_calls = 0;
++    ggml_backend_cpu_set_abort_callback(cpu.get(), count_compute, &compute_calls);
++    if (ggml_backend_sched_graph_compute(sched.get(), slice.graph) != GGML_STATUS_SUCCESS) {
++        return 29;
++    }
++    float actual[4];
++    ggml_backend_tensor_get(slice.tensors.at(output), actual, 0, 2 * sizeof(float));
++    for (int i = 0; i < 2; ++i) {
++        float expected = x[i + 1] * w[i + 1] / std::sqrt(30.0f + 1e-5f);
++        if (std::fabs(actual[i] - expected) > 1e-5f) {
++            return 30;
++        }
++    }
++    ggml_backend_tensor_get(slice.tensors.at(state), actual, 0, sizeof(actual));
++    if (std::memcmp(actual, x, sizeof(x)) != 0) {
++        return 31;
++    }
++    ggml_backend_tensor_get(slice.tensors.at(passthrough), actual, 0, sizeof(actual));
++    if (std::memcmp(actual, side, sizeof(side)) != 0) {
++        return 32;
++    }
++    if (export_norm) {
++        ggml_backend_tensor_get(slice.tensors.at(norm), actual, 0, sizeof(actual));
++        for (int i = 0; i < 4; ++i) {
++            if (std::fabs(actual[i] - x[i] / std::sqrt(30.0f + 1e-5f)) > 1e-5f) {
++                return 33;
++            }
++        }
++    }
++    // The CPU abort hook runs once per computed (possibly fused) kernel, not once per graph node.
++    if (compute_calls != (export_norm ? 5 : 4)) {
++        std::fprintf(stderr, "unexpected kernel count: %d (export_norm=%d)\n", compute_calls, export_norm);
++        return 34;
++    }
++    size_t snapshot = 0;
++    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get()); tensor; tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
++        if (std::memcmp(tensor, &source_snapshots[snapshot++], sizeof(*tensor)) != 0) {
++            return 35;
++        }
++    }
++    std::fprintf(stderr, "executable slice: nodes=%d leaves=%d kernels=%d exported_norm=%d\n",
++                 slice.graph->n_nodes, slice.graph->n_leafs, compute_calls, export_norm);
++    return 0;
++}
++
++static int check_invalid_executable_slices() {
++    ggml_init_params params = {ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(32, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * x = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * a = ggml_scale(ctx.get(), x, 2.0f);
++    ggml_tensor * b = ggml_scale(ctx.get(), a, 3.0f);
++    ggml_tensor * foreign = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 32, false);
++    ggml_build_forward_expand(graph, b);
++    skippy_executable_graph result;
++    std::string error;
++    auto rejects = [&](std::vector<int32_t> indices, std::vector<const ggml_tensor *> imports,
++                       std::vector<const ggml_tensor *> exports) {
++        if (skippy_build_executable_graph(graph, indices, imports, exports, result, error)) {
++            return false;
++        }
++        return !error.empty() && !result.graph && !result.context && result.tensors.empty();
++    };
++    if (!rejects({1}, {}, {b}) || !rejects({0, 0}, {}, {a}) ||
++            !rejects({1, 0}, {}, {b}) || !rejects({2}, {}, {}) ||
++            !rejects({-1}, {}, {}) || !rejects({1}, {a, a}, {b}) ||
++            !rejects({0, 1}, {a}, {b}) || !rejects({1}, {foreign}, {b}) ||
++            !rejects({1}, {a}, {foreign}) || !rejects({1}, {a}, {b, b})) {
++        return 40;
++    }
++    // An import-only pass-through is a real allocated leaf, not an empty graph view.
++    if (!skippy_build_executable_graph(graph, {}, {a}, {a}, result, error) ||
++            result.graph->n_nodes != 0 || result.graph->n_leafs != 1 ||
++            !(result.tensors.at(a)->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return 41;
++    }
++    b->src[0] = b;
++    if (!rejects({1}, {}, {b})) {
++        return 42;
++    }
++    b->src[0] = a;
++    b->op = GGML_OP_CUSTOM;
++    if (!rejects({1}, {a}, {b})) {
++        return 43;
++    }
++    b->op = GGML_OP_SCALE;
++    ggml_tensor * imported_view = ggml_view_1d(ctx.get(), x, 3, sizeof(float));
++    ggml_tensor * nested_view = ggml_view_1d(ctx.get(), imported_view, 2, sizeof(float));
++    ggml_build_forward_expand(graph, nested_view);
++    // Both views have flattened x as their base. Never bind nested_view to an unrelated copy of x.
++    if (!rejects({3}, {imported_view}, {nested_view})) {
++        return 44;
++    }
++    ggml_tensor * storage_only_view = ggml_view_1d(ctx.get(), foreign, 2, 0);
++    storage_only_view->src[0] = nullptr;
++    ggml_build_forward_expand(graph, storage_only_view);
++    if (!skippy_build_executable_graph(graph, {4}, {}, {storage_only_view}, result, error) ||
++            result.graph->n_nodes != 1 || result.graph->n_leafs != 1 ||
++            result.tensors.at(storage_only_view)->view_src != result.tensors.at(foreign) ||
++            !(result.tensors.at(foreign)->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return 45;
++    }
++    const size_t slot = ggml_hash_find(&result.graph->visited_hash_set, result.tensors.at(foreign));
++    if (slot == GGML_HASHSET_FULL || !ggml_bitset_get(result.graph->visited_hash_set.used, slot)) {
++        return 46;
++    }
++    return 0;
++}
++
+ int main() {
+-    return check_middle_stage_selection();
++    int result = check_middle_stage_selection();
++    if (!result) { result = check_executable_slice(false); }
++    if (!result) { result = check_executable_slice(true); }
++    if (!result) { result = check_invalid_executable_slices(); }
++    if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
++    return result;
+ }
+-- 
+2.50.1 (Apple Git-155)
+
