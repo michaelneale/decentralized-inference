@@ -203,6 +203,16 @@ class CiWorkflowArtifactTests(unittest.TestCase):
             "if not checkpointed_restore and (", smoke_script
         )
 
+    def test_product_integration_uploads_reconciled_phase_evidence_on_every_outcome(self):
+        workflow = (WORKFLOWS / "product-integration-smoke.yml").read_text()
+
+        self.assertIn("name: Upload product integration phase evidence", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("phase-results.json", workflow)
+        self.assertIn("*/*.log", workflow)
+        self.assertIn("-evidence", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+
     def test_granite_rollout_retains_qwen_and_defers_accelerator_product_rows(self):
         slices = json.loads(SLICES.read_text())
         smoke_ids = {row["id"] for row in slices["smoke_rows"]}
