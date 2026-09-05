@@ -368,6 +368,7 @@ if [[ "${LLAMA_STAGE_BUILD_TESTS:-OFF}" == "ON" ]]; then
     skippy-hardware-application-probe
     skippy-model-fixture-generator
     skippy-model-loader-accounting
+    skippy-noalloc-graph-planning
   )
 fi
 
