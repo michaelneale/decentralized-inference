@@ -5,7 +5,7 @@ mod dynamic_library;
 // without compiling the crate to determine native-runtime compatibility.
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 49;
+pub const ABI_VERSION_PATCH: u32 = 50;
 
 mod abi;
 mod activation;
@@ -15,6 +15,7 @@ mod model;
 mod multimodal;
 mod runtime;
 mod sampling;
+mod stage_plan;
 mod state;
 #[cfg(not(feature = "dynamic-runtime"))]
 mod static_bindings;
@@ -28,14 +29,14 @@ pub use abi::{
     BACKEND_DEVICE_CAP_HOST_BUFFER, BackendDevice, BackendDeviceType, Error,
     FEATURE_ACTIVATION_BOUNDARY, FEATURE_BACKEND_DEVICES, FEATURE_INKLING_MTP_MM,
     FEATURE_ITERATION_BATCH, FEATURE_MODEL_SOURCE, FEATURE_NATIVE_MTP_N1,
-    FEATURE_NGRAM_CACHE_DRAFT, FEATURE_RUNTIME_EVENTS, IterationRequest, LlamaLogCallback,
-    LoadMode, MODEL_TENSOR_SOURCE_V1_ABI_VERSION, Model, ModelImatrixEntryV1, ModelInfo,
-    ModelReadTensorF32Callback, ModelTensorSourceV1, MtmdProgressCallback, MtpSource, NgramCache,
-    Opaque, RuntimeConfig, Session, SkippyDecodeStepSampledMtpFn, SkippyModelAttachMtpDraftModelFn,
-    SkippyRuntimeEventCallback, SkippyRuntimeEventCategory, SkippyRuntimeEventEmitterKind,
-    SkippyRuntimeEventFailureCode, SkippyRuntimeEventKind, SkippyRuntimeEventProgressUnit,
-    SkippyRuntimeEventReporterV1, SkippyRuntimeEventV1, SlicePlan, Status, TRISTATE_AUTO,
-    TRISTATE_FALSE, TRISTATE_TRUE, TensorRole, runtime_abi_supported,
+    FEATURE_NGRAM_CACHE_DRAFT, FEATURE_RUNTIME_EVENTS, FEATURE_STAGE_PLAN, IterationRequest,
+    LlamaLogCallback, LoadMode, MODEL_TENSOR_SOURCE_V1_ABI_VERSION, Model, ModelImatrixEntryV1,
+    ModelInfo, ModelReadTensorF32Callback, ModelTensorSourceV1, MtmdProgressCallback, MtpSource,
+    NgramCache, Opaque, RuntimeConfig, Session, SkippyDecodeStepSampledMtpFn,
+    SkippyModelAttachMtpDraftModelFn, SkippyRuntimeEventCallback, SkippyRuntimeEventCategory,
+    SkippyRuntimeEventEmitterKind, SkippyRuntimeEventFailureCode, SkippyRuntimeEventKind,
+    SkippyRuntimeEventProgressUnit, SkippyRuntimeEventReporterV1, SkippyRuntimeEventV1, SlicePlan,
+    Status, TRISTATE_AUTO, TRISTATE_FALSE, TRISTATE_TRUE, TensorRole, runtime_abi_supported,
 };
 pub use activation::{
     ACTIVATION_FLAG_GEMMA3N_ALTUP, ACTIVATION_FLAG_INKLING_MTP_EMBD, ACTIVATION_SIDEBAND_TOKEN_IDS,
@@ -57,6 +58,15 @@ pub use runtime::{
 pub use sampling::{
     GenerationSignalWindow, MAX_DRY_SEQUENCE_BREAKER_BYTES, MAX_DRY_SEQUENCE_BREAKERS,
     MAX_SAMPLERS, NATIVE_MTP_MAX_DRAFT_TOKENS, NativeMtpDraft, SamplingConfig, TokenSignal,
+};
+pub use stage_plan::{
+    STAGE_PLAN_DESC_V1_ABI_VERSION, STAGE_PLAN_MAX_DIMS, STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION,
+    STAGE_PLAN_STATE_DESC_V1_ABI_VERSION, STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION,
+    STAGE_PLANNER_CONFIG_V1_ABI_VERSION, STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
+    STAGE_PLANNER_TENSOR_V1_ABI_VERSION, StagePlan, StagePlanDescV1, StagePlanProfileDescV1,
+    StagePlanStateAccess, StagePlanStateDescV1, StagePlanStateKind, StagePlanStringRefV1,
+    StagePlanValueDescV1, StagePlanValueKind, StagePlanner, StagePlannerConfigV1,
+    StagePlannerProfileV1, StagePlannerTensorV1,
 };
 pub use state::{
     KV_PAGE_CODEC_ISWA_COMPOSITE_V1, KV_PAGE_CODEC_SINGLE_V1, KV_PAGE_FLAG_HAS_K_IDX,
@@ -110,9 +120,13 @@ pub use dynamic::{
     skippy_session_reset, skippy_session_restore_prefix, skippy_session_sample_current,
     skippy_session_save_prefix, skippy_session_sequence_id, skippy_session_set_position,
     skippy_session_signal_window, skippy_slice_plan_add_layer_range, skippy_slice_plan_create,
-    skippy_slice_plan_free, skippy_token_is_eog, skippy_tokenize, skippy_trim_session,
-    skippy_verify_tokens, skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts,
-    skippy_write_slice_gguf,
+    skippy_slice_plan_free, skippy_stage_plan_describe_v1, skippy_stage_plan_free,
+    skippy_stage_plan_profile_at_v1, skippy_stage_plan_resident_tensor_at_v1,
+    skippy_stage_plan_state_at_v1, skippy_stage_plan_string_v1,
+    skippy_stage_plan_validate_chain_v1, skippy_stage_plan_value_at_v1,
+    skippy_stage_planner_create_v1, skippy_stage_planner_free, skippy_stage_planner_realize_v1,
+    skippy_token_is_eog, skippy_tokenize, skippy_trim_session, skippy_verify_tokens,
+    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts, skippy_write_slice_gguf,
 };
 
 #[cfg(not(feature = "dynamic-runtime"))]
@@ -150,7 +164,11 @@ pub use static_bindings::{
     skippy_session_reset, skippy_session_restore_prefix, skippy_session_sample_current,
     skippy_session_save_prefix, skippy_session_sequence_id, skippy_session_set_position,
     skippy_session_signal_window, skippy_slice_plan_add_layer_range, skippy_slice_plan_create,
-    skippy_slice_plan_free, skippy_token_is_eog, skippy_tokenize, skippy_trim_session,
-    skippy_verify_tokens, skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts,
-    skippy_write_slice_gguf,
+    skippy_slice_plan_free, skippy_stage_plan_describe_v1, skippy_stage_plan_free,
+    skippy_stage_plan_profile_at_v1, skippy_stage_plan_resident_tensor_at_v1,
+    skippy_stage_plan_state_at_v1, skippy_stage_plan_string_v1,
+    skippy_stage_plan_validate_chain_v1, skippy_stage_plan_value_at_v1,
+    skippy_stage_planner_create_v1, skippy_stage_planner_free, skippy_stage_planner_realize_v1,
+    skippy_token_is_eog, skippy_tokenize, skippy_trim_session, skippy_verify_tokens,
+    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts, skippy_write_slice_gguf,
 };

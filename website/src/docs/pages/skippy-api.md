@@ -9,7 +9,7 @@ description: Generated reference for the capability-oriented Skippy C ABI.
 
 This reference is generated from the patched llama.cpp public headers. It documents the native C ABI used by Skippy's Rust FFI layer and staged runtime. The ABI is experimental and versioned for lockstep native/Rust builds.
 
-Current generated surface: **14 headers** and **80 exported functions**.
+Current generated surface: **15 headers** and **91 exported functions**.
 
 ## Quick navigation
 
@@ -127,6 +127,22 @@ Current generated surface: **14 headers** and **80 exported functions**.
       </div>
     </section>
     <section class="skippy-api-index__group">
+      <a class="skippy-api-index__group-title" href="#skippy-header-stage-plan-h"><code>stage_plan.h</code><span>11 functions</span></a>
+      <div class="skippy-api-index__functions">
+        <a href="#skippy-fn-skippy-stage-planner-create-v1"><code>skippy_stage_planner_create_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-planner-free"><code>skippy_stage_planner_free</code></a>
+        <a href="#skippy-fn-skippy-stage-planner-realize-v1"><code>skippy_stage_planner_realize_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-free"><code>skippy_stage_plan_free</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-describe-v1"><code>skippy_stage_plan_describe_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-profile-at-v1"><code>skippy_stage_plan_profile_at_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-resident-tensor-at-v1"><code>skippy_stage_plan_resident_tensor_at_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-value-at-v1"><code>skippy_stage_plan_value_at_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-state-at-v1"><code>skippy_stage_plan_state_at_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-string-v1"><code>skippy_stage_plan_string_v1</code></a>
+        <a href="#skippy-fn-skippy-stage-plan-validate-chain-v1"><code>skippy_stage_plan_validate_chain_v1</code></a>
+      </div>
+    </section>
+    <section class="skippy-api-index__group">
       <a class="skippy-api-index__group-title" href="#skippy-header-state-h"><code>state.h</code><span>14 functions</span></a>
       <div class="skippy-api-index__functions">
         <a href="#skippy-fn-skippy-export-state"><code>skippy_export_state</code></a>
@@ -184,6 +200,7 @@ Capability consumers can include a narrower header:
 | `include/skippy/sampling.h` | Sampling parameters shared by single-token and batched decode calls. |
 | `include/skippy/signals.h` | Generation uncertainty and repetition signals for routing or policy. |
 | `include/skippy/speculative_decoding.h` | Native MTP draft results and request-local n-gram drafting. |
+| `include/skippy/stage_plan.h` | Metadata-only construction and inspection of guarded stage plans. |
 | `include/skippy/state.h` | Moves KV, recurrent, checkpoint, and resident-prefix state. |
 | `include/skippy/tokenization.h` | Token, detokenization, chat-template, and chat-response helpers. |
 
@@ -1080,6 +1097,150 @@ SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_draft(
 
 <a class="skippy-api-backlink" href="#skippy-function-index">↩ Back to function index</a>
 
+<a id="skippy-header-stage-plan-h"></a>
+### `stage_plan.h`
+
+<a id="skippy-fn-skippy-stage-planner-create-v1"></a>
+#### `skippy_stage_planner_create_v1`
+
+Creates a planner from explicit ordered shards and exact package bindings. All pointed-to inputs are borrowed only for this synchronous call. On success `out_planner` owns an independent metadata-only model. On failure it is set to null and no partial planner is returned.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_planner_create_v1(
+         const struct skippy_stage_planner_config_v1 * config,
+        struct skippy_stage_planner ** out_planner,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-planner-free"></a>
+#### `skippy_stage_planner_free`
+
+Releases a metadata-only stage planner.
+
+```cpp
+LLAMA_API void skippy_stage_planner_free(
+        struct skippy_stage_planner * planner);
+```
+
+<a id="skippy-fn-skippy-stage-planner-realize-v1"></a>
+#### `skippy_stage_planner_realize_v1`
+
+Realizes one guarded layer range across every configured profile. The returned immutable plan remains valid independently of the planner and must be released with `skippy_stage_plan_free`. On failure `out_plan` is set to null.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_planner_realize_v1(
+         const struct skippy_stage_planner * planner,
+        int32_t layer_start,
+        int32_t layer_end,
+        struct skippy_stage_plan ** out_plan,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-free"></a>
+#### `skippy_stage_plan_free`
+
+Releases an immutable realized stage plan.
+
+```cpp
+LLAMA_API void skippy_stage_plan_free(
+        struct skippy_stage_plan * plan);
+```
+
+<a id="skippy-fn-skippy-stage-plan-describe-v1"></a>
+#### `skippy_stage_plan_describe_v1`
+
+Copies the root descriptor for a realized plan.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_describe_v1(
+         const struct skippy_stage_plan * plan,
+        struct skippy_stage_plan_desc_v1 * out_desc,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-profile-at-v1"></a>
+#### `skippy_stage_plan_profile_at_v1`
+
+Copies one profile descriptor by deterministic profile index.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_profile_at_v1(
+         const struct skippy_stage_plan * plan,
+        size_t index,
+        struct skippy_stage_plan_profile_desc_v1 * out_desc,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-resident-tensor-at-v1"></a>
+#### `skippy_stage_plan_resident_tensor_at_v1`
+
+Copies one resident package tensor identity by sorted index.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_resident_tensor_at_v1(
+         const struct skippy_stage_plan * plan,
+        size_t index,
+        struct skippy_stage_plan_value_desc_v1 * out_desc,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-value-at-v1"></a>
+#### `skippy_stage_plan_value_at_v1`
+
+Copies one activation-frontier or request-input identity.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_value_at_v1(
+         const struct skippy_stage_plan * plan,
+        size_t profile_index,
+        enum skippy_stage_plan_value_kind kind,
+        size_t index,
+        struct skippy_stage_plan_value_desc_v1 * out_desc,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-state-at-v1"></a>
+#### `skippy_stage_plan_state_at_v1`
+
+Copies one persistent-state effect by profile and deterministic index.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_state_at_v1(
+         const struct skippy_stage_plan * plan,
+        size_t profile_index,
+        size_t index,
+        struct skippy_stage_plan_state_desc_v1 * out_desc,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-string-v1"></a>
+#### `skippy_stage_plan_string_v1`
+
+Resolves a plan-owned string reference. On success `out_data` points into immutable plan storage and remains valid until the plan is freed. The bytes are not NUL-terminated; `out_length` receives their exact length.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_string_v1(
+         const struct skippy_stage_plan * plan,
+        struct skippy_stage_plan_string_ref_v1 reference,
+        const char ** out_data,
+        size_t * out_length,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-stage-plan-validate-chain-v1"></a>
+#### `skippy_stage_plan_validate_chain_v1`
+
+Validates that realized plans form one complete compatible chain.
+
+```cpp
+LLAMA_API enum skippy_status skippy_stage_plan_validate_chain_v1(
+         const struct skippy_stage_plan * const * plans,
+        size_t plan_count,
+        struct skippy_error ** out_error);
+```
+
+<a class="skippy-api-backlink" href="#skippy-function-index">↩ Back to function index</a>
+
 <a id="skippy-header-state-h"></a>
 ### `state.h`
 
@@ -1396,7 +1557,7 @@ SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
 The headers also define the following enums, structs, opaque handles, and ABI constants:
 
 - `activation.h`: `skippy_activation_dtype`, `skippy_activation_layout`, `skippy_activation_boundary_desc`, `skippy_activation_desc`, `SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION = 1`, `SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP = (UINT64_C(1) << 1)`, `SKIPPY_ACTIVATION_FLAG_INKLING_MTP_EMBD = (UINT64_C(1) << 2)`, `SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K = (UINT64_C(1) << 3)`
-- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 49`
+- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 50`
 - `devices.h`: `skippy_backend_device_type`, `skippy_backend_device_cap`, `skippy_backend_device`
 - `events.h`: `skippy_runtime_event_v1`, `skippy_runtime_event_reporter_v1`, `SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION = 1`
 - `execution.h`: `skippy_iteration_request`
@@ -1406,6 +1567,7 @@ The headers also define the following enums, structs, opaque handles, and ABI co
 - `sampling.h`: `skippy_sampler_type`, `skippy_sampling_config`, `SKIPPY_MAX_LOGIT_BIAS = 256`, `SKIPPY_MAX_SAMPLERS = 16`, `SKIPPY_MAX_DRY_SEQUENCE_BREAKERS = 8`, `SKIPPY_MAX_DRY_SEQUENCE_BREAKER_BYTES = 16`, `SKIPPY_SAMPLING_FLAG_ENABLED = (1u << 0)`, `SKIPPY_SAMPLING_FLAG_IGNORE_EOS = (1u << 1)`
 - `signals.h`: `skippy_token_signal`, `skippy_generation_signal_window`
 - `speculative_decoding.h`: `skippy_ngram_cache`, `skippy_native_mtp_draft`, `SKIPPY_NATIVE_MTP_MAX_DRAFT_TOKENS = 8`
+- `stage_plan.h`: `skippy_stage_planner`, `skippy_stage_plan`, `skippy_stage_plan_string_ref_v1`, `skippy_stage_planner_tensor_v1`, `skippy_stage_planner_profile_v1`, `skippy_stage_planner_config_v1`, `skippy_stage_plan_value_kind`, `skippy_stage_plan_state_kind`, `skippy_stage_plan_state_access`, `skippy_stage_plan_desc_v1`, `skippy_stage_plan_profile_desc_v1`, `skippy_stage_plan_value_desc_v1`, `skippy_stage_plan_state_desc_v1`, `SKIPPY_STAGE_PLANNER_CONFIG_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLANNER_TENSOR_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLANNER_PROFILE_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLAN_STATE_DESC_V1_ABI_VERSION = 1`, `SKIPPY_STAGE_PLAN_MAX_DIMS = 4`
 - `state.h`: `skippy_kv_page_flag`, `skippy_kv_page_codec`, `skippy_kv_page_component_role`, `skippy_kv_page_component_desc`, `skippy_kv_page_desc`
 
 Source directory: `include/skippy/`. Regenerate this page after changing any public header or exported function.

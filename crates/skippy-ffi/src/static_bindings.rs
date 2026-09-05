@@ -6,7 +6,9 @@ use crate::{
     ModelTensorSourceV1, MtmdBitmap, MtmdContext, MtmdContextParams, MtmdDecoderPos,
     MtmdHelperBitmapWrapper, MtmdHelperInitOpt, MtmdHelperVideo, MtmdInputChunkType,
     MtmdInputChunks, MtmdInputText, NativeMtpDraft, NgramCache, Opaque, RuntimeConfig,
-    SamplingConfig, Session, SlicePlan, Status, TensorInfo, TokenSignal,
+    SamplingConfig, Session, SlicePlan, StagePlan, StagePlanDescV1, StagePlanProfileDescV1,
+    StagePlanStateDescV1, StagePlanStringRefV1, StagePlanValueDescV1, StagePlanValueKind,
+    StagePlanner, StagePlannerConfigV1, Status, TensorInfo, TokenSignal,
 };
 
 unsafe extern "C" {
@@ -624,6 +626,75 @@ unsafe extern "C" {
         input_paths: *const *const c_char,
         input_count: usize,
         output_path: *const c_char,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_planner_create_v1(
+        config: *const StagePlannerConfigV1,
+        out_planner: *mut *mut StagePlanner,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_planner_free(planner: *mut StagePlanner);
+
+    pub fn skippy_stage_planner_realize_v1(
+        planner: *const StagePlanner,
+        layer_start: i32,
+        layer_end: i32,
+        out_plan: *mut *mut StagePlan,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_free(plan: *mut StagePlan);
+
+    pub fn skippy_stage_plan_describe_v1(
+        plan: *const StagePlan,
+        out_desc: *mut StagePlanDescV1,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_profile_at_v1(
+        plan: *const StagePlan,
+        index: usize,
+        out_desc: *mut StagePlanProfileDescV1,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_resident_tensor_at_v1(
+        plan: *const StagePlan,
+        index: usize,
+        out_desc: *mut StagePlanValueDescV1,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_value_at_v1(
+        plan: *const StagePlan,
+        profile_index: usize,
+        kind: StagePlanValueKind,
+        index: usize,
+        out_desc: *mut StagePlanValueDescV1,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_state_at_v1(
+        plan: *const StagePlan,
+        profile_index: usize,
+        index: usize,
+        out_desc: *mut StagePlanStateDescV1,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_string_v1(
+        plan: *const StagePlan,
+        reference: StagePlanStringRefV1,
+        out_data: *mut *const c_char,
+        out_length: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_stage_plan_validate_chain_v1(
+        plans: *const *const StagePlan,
+        plan_count: usize,
         out_error: *mut *mut Error,
     ) -> Status;
 

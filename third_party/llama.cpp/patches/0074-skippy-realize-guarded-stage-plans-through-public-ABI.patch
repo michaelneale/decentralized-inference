@@ -1,0 +1,826 @@
+From 403a639d4e5c3f2faf8fb0ccfcea62ee8485b120 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 23:30:05 +1000
+Subject: [PATCH] skippy: realize guarded stage plans through public ABI
+
+---
+ src/CMakeLists.txt                            |  15 +
+ src/skippy/graph_identity.cpp                 |  39 ++
+ src/skippy/graph_identity.h                   |   7 +
+ src/skippy/stage_plan.cpp                     | 500 ++++++++++++++++++
+ .../tests/renamed_multishard_planning.cpp     | 141 +++++
+ src/skippy/tests/stage_plan_header.c          |   6 +
+ src/skippy/tests/stage_plan_header.cpp        |   9 +
+ 7 files changed, 717 insertions(+)
+ create mode 100644 src/skippy/stage_plan.cpp
+ create mode 100644 src/skippy/tests/stage_plan_header.c
+ create mode 100644 src/skippy/tests/stage_plan_header.cpp
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index e42e68a7a..5719f52fc 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -60,6 +60,7 @@ add_library(llama
+             skippy/package_tensor_binding.cpp
+             skippy/sampling.cpp
+             skippy/stage_slice_plan.cpp
++            skippy/stage_plan.cpp
+             skippy/state.cpp
+             skippy/state_effects.cpp
+             skippy/speculative_decoding.cpp
+@@ -128,11 +129,25 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     target_link_libraries(skippy-renamed-multishard-planning PRIVATE llama)
+     add_dependencies(skippy-noalloc-graph-planning skippy-renamed-multishard-planning)
+ 
++    add_executable(skippy-stage-plan-header-c
++        skippy/tests/stage_plan_header.c)
++    target_compile_features(skippy-stage-plan-header-c PRIVATE c_std_11)
++    target_include_directories(skippy-stage-plan-header-c PRIVATE ../include ../ggml/include)
++
++    add_executable(skippy-stage-plan-header-cpp
++        skippy/tests/stage_plan_header.cpp)
++    target_compile_features(skippy-stage-plan-header-cpp PRIVATE cxx_std_17)
++    target_include_directories(skippy-stage-plan-header-cpp PRIVATE ../include ../ggml/include)
++
++    add_test(NAME skippy_stage_plan_header_c COMMAND skippy-stage-plan-header-c)
++    add_test(NAME skippy_stage_plan_header_cpp COMMAND skippy-stage-plan-header-cpp)
++
+     add_executable(skippy-stage-slice-plan
+         skippy/tests/stage_slice_plan.cpp)
+     target_include_directories(skippy-stage-slice-plan PRIVATE .)
+     target_compile_features(skippy-stage-slice-plan PRIVATE cxx_std_17)
+     target_link_libraries(skippy-stage-slice-plan PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-stage-plan-header-c skippy-stage-plan-header-cpp)
+ 
+     add_test(
+         NAME skippy_stage_slice_plan
+diff --git a/src/skippy/graph_identity.cpp b/src/skippy/graph_identity.cpp
+index 93e366446..cd5c9129f 100644
+--- a/src/skippy/graph_identity.cpp
++++ b/src/skippy/graph_identity.cpp
+@@ -931,3 +931,42 @@ bool skippy_build_profile_identity(
+     identity = out.digest("skippy-profile");
+     return true;
+ }
++
++bool skippy_build_stage_plan_identity(
++        const std::string & package_id,
++        const skippy_guarded_stage_slice_plan & plan,
++        std::string & identity,
++        std::string & error) {
++    identity.clear();
++    error.clear();
++    if (package_id.empty() || plan.layer_count <= 0 || plan.layer_start < 0 ||
++            plan.layer_start >= plan.layer_end || plan.layer_end > plan.layer_count ||
++            plan.profiles.empty() || plan.resident_parameter_identities.empty()) {
++        error = "stage plan identity inputs are incomplete";
++        return false;
++    }
++    encoding out;
++    out.text("skippy.semantic.stage-plan");
++    out.u32(identity_version);
++    out.text(package_id);
++    out.i32(plan.layer_count);
++    out.i32(plan.layer_start);
++    out.i32(plan.layer_end);
++    out.u32(static_cast<uint32_t>(plan.profiles.size()));
++    for (const auto & profile : plan.profiles) {
++        if (!out.text(profile.profile_id) || !out.text(profile.profile_identity) ||
++                !out.text(profile.slice.slice_identity)) {
++            error = "stage plan profile identity is too large";
++            return false;
++        }
++    }
++    out.u32(static_cast<uint32_t>(plan.resident_parameter_identities.size()));
++    for (const auto & parameter : plan.resident_parameter_identities) {
++        if (!out.text(parameter)) {
++            error = "stage plan parameter identity is too large";
++            return false;
++        }
++    }
++    identity = out.digest("skippy-plan");
++    return true;
++}
+diff --git a/src/skippy/graph_identity.h b/src/skippy/graph_identity.h
+index cedb21b3e..b6f6c8c13 100644
+--- a/src/skippy/graph_identity.h
++++ b/src/skippy/graph_identity.h
+@@ -8,6 +8,7 @@ struct ggml_cgraph;
+ struct ggml_tensor;
+ struct skippy_block_boundary;
+ struct skippy_execution_profile_guard;
++struct skippy_guarded_stage_slice_plan;
+ struct skippy_stage_slice_selection;
+ struct skippy_state_effect;
+ 
+@@ -50,3 +51,9 @@ bool skippy_build_profile_identity(
+         const skippy_execution_profile_guard & guard,
+         std::string & identity,
+         std::string & error);
++
++bool skippy_build_stage_plan_identity(
++        const std::string & package_id,
++        const skippy_guarded_stage_slice_plan & plan,
++        std::string & identity,
++        std::string & error);
+diff --git a/src/skippy/stage_plan.cpp b/src/skippy/stage_plan.cpp
+new file mode 100644
+index 000000000..d9292a659
+--- /dev/null
++++ b/src/skippy/stage_plan.cpp
+@@ -0,0 +1,500 @@
++#include "skippy/stage_plan.h"
++
++#include "errors.h"
++#include "graph_build_inputs.h"
++#include "graph_identity.h"
++#include "package_tensor_binding.h"
++#include "stage_slice_plan.h"
++
++#include "gguf.h"
++#include "llama-context.h"
++#include "llama-memory.h"
++#include "llama-model.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++#include <memory>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace {
++
++constexpr const char * graph_configuration_id = "skippy.metadata-plan.whole-model.v1";
++constexpr const char * backend_id = "cpu";
++using model_owner = std::shared_ptr<llama_model>;
++using context_owner = std::unique_ptr<llama_context, decltype(&llama_free)>;
++
++struct owned_profile {
++    std::string profile_id;
++    uint32_t n_tokens = 0;
++    uint32_t n_sequences = 0;
++    uint32_t n_outputs = 0;
++    uint32_t n_recurrent_rollback_sequences = 0;
++};
++
++struct profile_output {
++    skippy_stage_plan_profile_desc_v1 descriptor{};
++    std::vector<skippy_stage_plan_value_desc_v1> imports;
++    std::vector<skippy_stage_plan_value_desc_v1> exports;
++    std::vector<skippy_stage_plan_value_desc_v1> requests;
++    std::vector<skippy_stage_plan_state_desc_v1> states;
++};
++
++bool read_string(const char * value, std::string & output) {
++    if (value == nullptr) {
++        return false;
++    }
++    output = value;
++    return !output.empty();
++}
++
++bool valid_package_id(const std::string & value) {
++    if (value.size() != 71 || value.compare(0, 7, "sha256:") != 0) {
++        return false;
++    }
++    return std::all_of(value.begin() + 7, value.end(), [](unsigned char byte) {
++        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
++    });
++}
++
++bool valid_versioned(uint32_t version, uint32_t size, uint32_t expected, size_t minimum) {
++    return version == expected && size >= minimum;
++}
++
++bool read_u16(const gguf_context * metadata, const char * key, uint16_t & value) {
++    const int index = gguf_find_key(metadata, key);
++    if (index < 0 || gguf_get_kv_type(metadata, index) != GGUF_TYPE_UINT16) {
++        return false;
++    }
++    value = gguf_get_val_u16(metadata, index);
++    return true;
++}
++
++bool validate_ordered_shards(const std::vector<std::string> & paths, std::string & error) {
++    std::set<std::string> unique;
++    for (size_t index = 0; index < paths.size(); ++index) {
++        if (paths[index].empty() || !unique.insert(paths[index]).second) {
++            error = "stage planner shard paths are empty or duplicated";
++            return false;
++        }
++        gguf_init_params params = {true, nullptr};
++        std::unique_ptr<gguf_context, decltype(&gguf_free)> metadata(
++                gguf_init_from_file(paths[index].c_str(), params), gguf_free);
++        if (!metadata) {
++            error = "stage planner cannot inspect explicit shard";
++            return false;
++        }
++        if (paths.size() > 1) {
++            uint16_t split_no = 0;
++            uint16_t split_count = 0;
++            if (!read_u16(metadata.get(), "split.no", split_no) ||
++                    !read_u16(metadata.get(), "split.count", split_count) ||
++                    split_no != index || split_count != paths.size()) {
++                error = "stage planner shards are not in exact split.no order";
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
++skippy_status fail(skippy_error ** out_error, skippy_status status, const std::string & message) {
++    skippy_set_error(out_error, status, message.c_str());
++    return status;
++}
++
++}
++
++struct skippy_stage_planner {
++    std::string package_id;
++    model_owner model;
++    std::vector<skippy_parameter_binding> bindings;
++    std::vector<owned_profile> profiles;
++};
++
++struct skippy_stage_plan {
++    std::string package_id;
++    std::string plan_id;
++    model_owner model;
++    std::vector<context_owner> contexts;
++    skippy_guarded_stage_slice_plan guarded;
++    std::vector<char> strings;
++    skippy_stage_plan_desc_v1 descriptor{};
++    std::vector<profile_output> profiles;
++    std::vector<skippy_stage_plan_value_desc_v1> residents;
++
++    skippy_stage_plan_string_ref_v1 add_string(const std::string & value) {
++        const skippy_stage_plan_string_ref_v1 result = {
++            static_cast<uint64_t>(strings.size()), static_cast<uint64_t>(value.size())};
++        strings.insert(strings.end(), value.begin(), value.end());
++        return result;
++    }
++};
++
++namespace {
++
++void append_values(
++        skippy_stage_plan & plan,
++        const std::vector<std::string> & identities,
++        std::vector<skippy_stage_plan_value_desc_v1> & values) {
++    for (const auto & identity : identities) {
++        values.push_back({SKIPPY_STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION,
++            sizeof(skippy_stage_plan_value_desc_v1), plan.add_string(identity)});
++    }
++}
++
++bool build_descriptors(skippy_stage_plan & plan, std::string & error) {
++    if (!skippy_build_stage_plan_identity(plan.package_id, plan.guarded, plan.plan_id, error)) {
++        return false;
++    }
++    plan.descriptor.abi_version = SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION;
++    plan.descriptor.struct_size = sizeof(skippy_stage_plan_desc_v1);
++    plan.descriptor.package_id = plan.add_string(plan.package_id);
++    plan.descriptor.plan_id = plan.add_string(plan.plan_id);
++    plan.descriptor.layer_count = plan.guarded.layer_count;
++    plan.descriptor.layer_start = plan.guarded.layer_start;
++    plan.descriptor.layer_end = plan.guarded.layer_end;
++    plan.descriptor.profile_count = plan.guarded.profiles.size();
++    plan.descriptor.resident_tensor_count = plan.guarded.resident_parameter_identities.size();
++    append_values(plan, plan.guarded.resident_parameter_identities, plan.residents);
++    for (const auto & profile : plan.guarded.profiles) {
++        profile_output output;
++        output.descriptor.abi_version = SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION;
++        output.descriptor.struct_size = sizeof(skippy_stage_plan_profile_desc_v1);
++        output.descriptor.profile_id = plan.add_string(profile.profile_id);
++        output.descriptor.graph_identity = plan.add_string(profile.graph_identity);
++        output.descriptor.profile_identity = plan.add_string(profile.profile_identity);
++        output.descriptor.slice_identity = plan.add_string(profile.slice.slice_identity);
++        output.descriptor.source_snapshot_identity = plan.add_string(profile.slice.source_snapshot_identity);
++        output.descriptor.graph_configuration_id = plan.add_string(profile.guard.graph_configuration_id);
++        output.descriptor.backend_id = plan.add_string(profile.guard.backend_id);
++        output.descriptor.n_tokens = profile.guard.n_tokens;
++        output.descriptor.n_sequences = profile.guard.n_sequences;
++        output.descriptor.n_outputs = profile.guard.n_outputs;
++        output.descriptor.n_recurrent_rollback_sequences = profile.guard.n_recurrent_rollback_sequences;
++        output.descriptor.activation_import_count = profile.slice.activation_import_identities.size();
++        output.descriptor.activation_export_count = profile.slice.activation_export_identities.size();
++        output.descriptor.request_input_count = profile.slice.request_input_identities.size();
++        output.descriptor.state_effect_count = profile.slice.state_effect_identities.size();
++        append_values(plan, profile.slice.activation_import_identities, output.imports);
++        append_values(plan, profile.slice.activation_export_identities, output.exports);
++        append_values(plan, profile.slice.request_input_identities, output.requests);
++        for (size_t index = 0; index < profile.slice.state_effects.size(); ++index) {
++            const auto & effect = profile.slice.state_effects[index];
++            output.states.push_back({SKIPPY_STAGE_PLAN_STATE_DESC_V1_ABI_VERSION,
++                sizeof(skippy_stage_plan_state_desc_v1),
++                plan.add_string(profile.slice.state_effect_identities[index]),
++                static_cast<int32_t>(effect.kind), static_cast<int32_t>(effect.access),
++                effect.layer, 0, effect.write_ordinal});
++        }
++        plan.profiles.push_back(std::move(output));
++    }
++    return true;
++}
++
++bool build_profile(
++        const skippy_stage_planner & planner,
++        const owned_profile & profile,
++        context_owner & context,
++        skippy_stage_profile_input & input,
++        std::string & error) {
++    llama_context_params params = llama_context_default_params();
++    params.n_ctx = std::max<uint32_t>(32, profile.n_tokens);
++    params.n_batch = profile.n_tokens;
++    params.n_ubatch = profile.n_tokens;
++    params.n_seq_max = profile.n_sequences;
++    params.n_threads = 1;
++    params.n_threads_batch = 1;
++    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    const skippy_graph_build_inputs build_inputs{};
++    context.reset(llama_init_from_model_with_graph_inputs(planner.model.get(), params, build_inputs));
++    if (!context) {
++        error = "stage planner cannot create metadata-only graph context";
++        return false;
++    }
++    llama_memory_context_ptr memory_context;
++    if (llama_memory_t memory = llama_get_memory(context.get())) {
++        memory_context = memory->init_full();
++    }
++    ggml_cgraph * graph = context->graph_reserve(profile.n_tokens, profile.n_sequences,
++            profile.n_outputs, memory_context.get(), true, nullptr, build_inputs);
++    const llm_graph_result * result = context->get_gf_res_reserve();
++    if (graph == nullptr || result == nullptr || result->get_build_inputs().filter.enabled) {
++        error = "stage planner cannot build an unfiltered whole-model graph";
++        return false;
++    }
++    input = {profile.profile_id, graph, &result->get_block_boundaries(),
++        &result->get_state_effects(), &planner.bindings, &result->get_request_input_bindings(),
++        llama_model_n_layer(planner.model.get()),
++        {profile.n_tokens, profile.n_sequences, profile.n_outputs,
++            profile.n_recurrent_rollback_sequences, graph_configuration_id, backend_id}};
++    return true;
++}
++
++const std::vector<skippy_stage_plan_value_desc_v1> * select_values(
++        const profile_output & profile, skippy_stage_plan_value_kind kind) {
++    switch (kind) {
++        case SKIPPY_STAGE_PLAN_VALUE_ACTIVATION_IMPORT: return &profile.imports;
++        case SKIPPY_STAGE_PLAN_VALUE_ACTIVATION_EXPORT: return &profile.exports;
++        case SKIPPY_STAGE_PLAN_VALUE_REQUEST_INPUT: return &profile.requests;
++    }
++    return nullptr;
++}
++
++}
++
++skippy_status skippy_stage_planner_create_v1(
++        const skippy_stage_planner_config_v1 * config,
++        skippy_stage_planner ** out_planner,
++        skippy_error ** out_error) {
++    if (out_planner != nullptr) {
++        *out_planner = nullptr;
++    }
++    if (out_planner == nullptr || config == nullptr || !valid_versioned(config->abi_version,
++            config->struct_size, SKIPPY_STAGE_PLANNER_CONFIG_V1_ABI_VERSION, sizeof(*config))) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage planner config and output are required at ABI version 1");
++    }
++    try {
++        auto planner = std::make_unique<skippy_stage_planner>();
++        if (!read_string(config->package_id, planner->package_id) ||
++                !valid_package_id(planner->package_id) || config->shard_paths == nullptr ||
++                config->shard_count == 0 || config->tensors == nullptr || config->tensor_count == 0 ||
++                config->profiles == nullptr || config->profile_count == 0) {
++            return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "stage planner config is incomplete");
++        }
++        std::vector<std::string> paths;
++        paths.reserve(config->shard_count);
++        for (size_t index = 0; index < config->shard_count; ++index) {
++            std::string path;
++            if (!read_string(config->shard_paths[index], path)) {
++                return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "stage planner shard path is empty");
++            }
++            paths.push_back(std::move(path));
++        }
++        std::string error;
++        if (!validate_ordered_shards(paths, error)) {
++            return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, error);
++        }
++        std::vector<const char *> native_paths;
++        for (const auto & path : paths) {
++            native_paths.push_back(path.c_str());
++        }
++        llama_model_params params = llama_model_default_params();
++        params.n_gpu_layers = 0;
++        params.load_mode = LLAMA_LOAD_MODE_NONE;
++        params.use_extra_bufts = false;
++        params.no_alloc = true;
++        planner->model = model_owner(llama_model_load_from_splits(
++                native_paths.data(), native_paths.size(), params), llama_model_free);
++        if (!planner->model) {
++            return fail(out_error, SKIPPY_STATUS_MODEL_ERROR,
++                    "stage planner cannot load explicit metadata shards");
++        }
++        std::vector<skippy_package_tensor_binding_input> tensors;
++        tensors.reserve(config->tensor_count);
++        for (size_t index = 0; index < config->tensor_count; ++index) {
++            const auto & source = config->tensors[index];
++            if (!valid_versioned(source.abi_version, source.struct_size,
++                    SKIPPY_STAGE_PLANNER_TENSOR_V1_ABI_VERSION, sizeof(source)) ||
++                    source.dimension_count == 0 || source.dimension_count > SKIPPY_STAGE_PLAN_MAX_DIMS ||
++                    source.split_no > std::numeric_limits<uint16_t>::max()) {
++                return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                        "stage planner tensor descriptor is malformed");
++            }
++            skippy_package_tensor_binding_input tensor;
++            if (!read_string(source.tensor_id, tensor.tensor_id) ||
++                    !read_string(source.native_name, tensor.native_name)) {
++                return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                        "stage planner tensor identity is empty");
++            }
++            tensor.type = static_cast<ggml_type>(source.ggml_type);
++            tensor.dimensions.assign(source.dimensions, source.dimensions + source.dimension_count);
++            tensor.split_no = static_cast<uint16_t>(source.split_no);
++            tensor.data_offset = source.data_offset;
++            tensor.stored_length = source.stored_length;
++            tensors.push_back(std::move(tensor));
++        }
++        if (!skippy_bind_package_tensors(planner->model.get(), tensors, planner->bindings, error)) {
++            return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, error);
++        }
++        std::string previous_profile;
++        for (size_t index = 0; index < config->profile_count; ++index) {
++            const auto & source = config->profiles[index];
++            owned_profile profile;
++            if (!valid_versioned(source.abi_version, source.struct_size,
++                    SKIPPY_STAGE_PLANNER_PROFILE_V1_ABI_VERSION, sizeof(source)) ||
++                    !read_string(source.profile_id, profile.profile_id) ||
++                    (!previous_profile.empty() && profile.profile_id <= previous_profile) ||
++                    source.n_tokens == 0 || source.n_sequences == 0 || source.n_outputs == 0 ||
++                    source.n_outputs > source.n_tokens ||
++                    source.n_recurrent_rollback_sequences > source.n_sequences) {
++                return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                        "stage planner profiles are malformed or not strictly sorted");
++            }
++            previous_profile = profile.profile_id;
++            profile.n_tokens = source.n_tokens;
++            profile.n_sequences = source.n_sequences;
++            profile.n_outputs = source.n_outputs;
++            profile.n_recurrent_rollback_sequences = source.n_recurrent_rollback_sequences;
++            planner->profiles.push_back(std::move(profile));
++        }
++        *out_planner = planner.release();
++        return skippy_success(out_error);
++    } catch (const std::exception & exception) {
++        return fail(out_error, SKIPPY_STATUS_MODEL_ERROR, exception.what());
++    } catch (...) {
++        return fail(out_error, SKIPPY_STATUS_MODEL_ERROR, "stage planner creation failed");
++    }
++}
++
++void skippy_stage_planner_free(skippy_stage_planner * planner) {
++    delete planner;
++}
++
++skippy_status skippy_stage_planner_realize_v1(
++        const skippy_stage_planner * planner, int32_t layer_start, int32_t layer_end,
++        skippy_stage_plan ** out_plan, skippy_error ** out_error) {
++    if (out_plan != nullptr) {
++        *out_plan = nullptr;
++    }
++    if (planner == nullptr || out_plan == nullptr || layer_start < 0 || layer_start >= layer_end ||
++            layer_end > llama_model_n_layer(planner == nullptr ? nullptr : planner->model.get())) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage planner range and output are invalid");
++    }
++    try {
++        auto plan = std::make_unique<skippy_stage_plan>();
++        plan->package_id = planner->package_id;
++        plan->model = planner->model;
++        std::vector<skippy_stage_profile_input> inputs(planner->profiles.size());
++        std::string error;
++        for (size_t index = 0; index < planner->profiles.size(); ++index) {
++            context_owner context(nullptr, llama_free);
++            if (!build_profile(*planner, planner->profiles[index], context, inputs[index], error)) {
++                return fail(out_error, SKIPPY_STATUS_UNSUPPORTED, error);
++            }
++            plan->contexts.push_back(std::move(context));
++        }
++        if (!skippy_build_guarded_stage_slice_plan(inputs, layer_start, layer_end,
++                    plan->guarded, error) || !build_descriptors(*plan, error)) {
++            return fail(out_error, SKIPPY_STATUS_UNSUPPORTED, error);
++        }
++        *out_plan = plan.release();
++        return skippy_success(out_error);
++    } catch (const std::exception & exception) {
++        return fail(out_error, SKIPPY_STATUS_UNSUPPORTED, exception.what());
++    } catch (...) {
++        return fail(out_error, SKIPPY_STATUS_UNSUPPORTED, "stage plan realization failed");
++    }
++}
++
++void skippy_stage_plan_free(skippy_stage_plan * plan) {
++    delete plan;
++}
++
++skippy_status skippy_stage_plan_describe_v1(
++        const skippy_stage_plan * plan, skippy_stage_plan_desc_v1 * out_desc,
++        skippy_error ** out_error) {
++    if (plan == nullptr || out_desc == nullptr) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan and descriptor output are required");
++    }
++    *out_desc = plan->descriptor;
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_profile_at_v1(
++        const skippy_stage_plan * plan, size_t index,
++        skippy_stage_plan_profile_desc_v1 * out_desc, skippy_error ** out_error) {
++    if (plan == nullptr || out_desc == nullptr || index >= plan->profiles.size()) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "stage plan profile index is invalid");
++    }
++    *out_desc = plan->profiles[index].descriptor;
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_resident_tensor_at_v1(
++        const skippy_stage_plan * plan, size_t index,
++        skippy_stage_plan_value_desc_v1 * out_desc, skippy_error ** out_error) {
++    if (plan == nullptr || out_desc == nullptr || index >= plan->residents.size()) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan resident tensor index is invalid");
++    }
++    *out_desc = plan->residents[index];
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_value_at_v1(
++        const skippy_stage_plan * plan, size_t profile_index,
++        skippy_stage_plan_value_kind kind, size_t index,
++        skippy_stage_plan_value_desc_v1 * out_desc, skippy_error ** out_error) {
++    if (plan == nullptr || out_desc == nullptr || profile_index >= plan->profiles.size()) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan value profile index is invalid");
++    }
++    const auto * values = select_values(plan->profiles[profile_index], kind);
++    if (values == nullptr || index >= values->size()) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan value kind or index is invalid");
++    }
++    *out_desc = (*values)[index];
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_state_at_v1(
++        const skippy_stage_plan * plan, size_t profile_index, size_t index,
++        skippy_stage_plan_state_desc_v1 * out_desc, skippy_error ** out_error) {
++    if (plan == nullptr || out_desc == nullptr || profile_index >= plan->profiles.size() ||
++            index >= plan->profiles[profile_index].states.size()) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan state profile or index is invalid");
++    }
++    *out_desc = plan->profiles[profile_index].states[index];
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_string_v1(
++        const skippy_stage_plan * plan, skippy_stage_plan_string_ref_v1 reference,
++        const char ** out_data, size_t * out_length, skippy_error ** out_error) {
++    if (out_data != nullptr) {
++        *out_data = nullptr;
++    }
++    if (out_length != nullptr) {
++        *out_length = 0;
++    }
++    if (plan == nullptr || out_data == nullptr || out_length == nullptr ||
++            reference.offset > plan->strings.size() ||
++            reference.length > plan->strings.size() - reference.offset) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                "stage plan string reference or output is invalid");
++    }
++    *out_data = plan->strings.data() + reference.offset;
++    *out_length = static_cast<size_t>(reference.length);
++    return skippy_success(out_error);
++}
++
++skippy_status skippy_stage_plan_validate_chain_v1(
++        const skippy_stage_plan * const * plans, size_t plan_count,
++        skippy_error ** out_error) {
++    if (plans == nullptr || plan_count == 0) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "stage plan chain is empty");
++    }
++    std::vector<const skippy_guarded_stage_slice_plan *> guarded;
++    const std::string package_id = plans[0] == nullptr ? std::string() : plans[0]->package_id;
++    for (size_t index = 0; index < plan_count; ++index) {
++        if (plans[index] == nullptr || plans[index]->package_id != package_id) {
++            return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT,
++                    "stage plan chain package identities differ");
++        }
++        guarded.push_back(&plans[index]->guarded);
++    }
++    std::string error;
++    if (!skippy_validate_guarded_stage_chain(guarded, error)) {
++        return fail(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, error);
++    }
++    return skippy_success(out_error);
++}
+diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
+index cfe7224cb..df8528892 100644
+--- a/src/skippy/tests/renamed_multishard_planning.cpp
++++ b/src/skippy/tests/renamed_multishard_planning.cpp
+@@ -9,6 +9,7 @@
+ #include "llama-model.h"
+ #include "llama.h"
+ #include "skippy/package_tensor_binding.h"
++#include "skippy/stage_plan.h"
+ #include "skippy/stage_slice_plan.h"
+ 
+ #include <algorithm>
+@@ -475,6 +476,142 @@ bool rejects_invalid_bindings(
+     return rejects(changed);
+ }
+ 
++std::string plan_string(const skippy_stage_plan * plan, skippy_stage_plan_string_ref_v1 reference) {
++    const char * data = nullptr;
++    size_t length = 0;
++    skippy_error * error = nullptr;
++    if (skippy_stage_plan_string_v1(plan, reference, &data, &length, &error) != SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return {};
++    }
++    return std::string(data, length);
++}
++
++bool check_public_stage_plan_abi(
++        const package_inventory & inventory,
++        const std::vector<std::string> & paths,
++        int32_t layer_count) {
++    std::vector<const char *> shard_paths;
++    for (const auto & path : paths) {
++        shard_paths.push_back(path.c_str());
++    }
++    std::vector<skippy_stage_planner_tensor_v1> tensors;
++    for (const auto & source : inventory.tensors) {
++        skippy_stage_planner_tensor_v1 tensor{};
++        tensor.abi_version = 1;
++        tensor.struct_size = sizeof(tensor);
++        tensor.tensor_id = source.tensor_id.c_str();
++        tensor.native_name = source.native_name.c_str();
++        tensor.ggml_type = source.type;
++        tensor.dimension_count = source.dimensions.size();
++        std::copy(source.dimensions.begin(), source.dimensions.end(), tensor.dimensions);
++        tensor.split_no = source.split_no;
++        tensor.data_offset = source.data_offset;
++        tensor.stored_length = source.stored_length;
++        tensors.push_back(tensor);
++    }
++    const std::vector<skippy_stage_planner_profile_v1> profiles = {
++        {1, sizeof(skippy_stage_planner_profile_v1), "batched", 8, 2, 8, 0},
++        {1, sizeof(skippy_stage_planner_profile_v1), "decode", 1, 1, 1, 0},
++        {1, sizeof(skippy_stage_planner_profile_v1), "prefill", 8, 1, 8, 0},
++    };
++    const std::string package_id = "sha256:" + std::string(64, 'a');
++    skippy_stage_planner_config_v1 config = {1, sizeof(skippy_stage_planner_config_v1),
++        package_id.c_str(), shard_paths.data(), shard_paths.size(), tensors.data(), tensors.size(),
++        profiles.data(), profiles.size()};
++    skippy_error * error = nullptr;
++    skippy_stage_planner * planner = nullptr;
++    if (skippy_stage_planner_create_v1(&config, &planner, &error) != SKIPPY_STATUS_OK || planner == nullptr) {
++        std::fprintf(stderr, "public stage planner creation failed: %s\n", error == nullptr ? "" : error->message);
++        skippy_error_free(error);
++        return false;
++    }
++    std::unique_ptr<skippy_stage_planner, decltype(&skippy_stage_planner_free)> planner_owner(
++            planner, skippy_stage_planner_free);
++    skippy_stage_plan * source = nullptr;
++    skippy_stage_plan * final = nullptr;
++    if (skippy_stage_planner_realize_v1(planner, 0, 1, &source, &error) != SKIPPY_STATUS_OK ||
++            skippy_stage_planner_realize_v1(planner, 1, layer_count, &final, &error) != SKIPPY_STATUS_OK) {
++        std::fprintf(stderr, "public stage realization failed: %s\n", error == nullptr ? "" : error->message);
++        skippy_error_free(error);
++        skippy_stage_plan_free(source);
++        skippy_stage_plan_free(final);
++        return false;
++    }
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> source_owner(source, skippy_stage_plan_free);
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> final_owner(final, skippy_stage_plan_free);
++    const skippy_stage_plan * chain[] = {source, final};
++    if (skippy_stage_plan_validate_chain_v1(chain, 2, &error) != SKIPPY_STATUS_OK) {
++        std::fprintf(stderr, "public stage chain failed: %s\n", error == nullptr ? "" : error->message);
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_stage_plan_desc_v1 descriptor{};
++    skippy_stage_plan_profile_desc_v1 profile{};
++    skippy_stage_plan_value_desc_v1 resident{};
++    if (skippy_stage_plan_describe_v1(source, &descriptor, &error) != SKIPPY_STATUS_OK ||
++            descriptor.abi_version != 1 || descriptor.profile_count != profiles.size() ||
++            descriptor.resident_tensor_count == 0 || plan_string(source, descriptor.package_id) != package_id ||
++            plan_string(source, descriptor.plan_id).compare(0, 15, "skippy-plan:v1:") != 0 ||
++            skippy_stage_plan_profile_at_v1(source, 0, &profile, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, profile.profile_id) != "batched" ||
++            skippy_stage_plan_resident_tensor_at_v1(source, 0, &resident, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, resident.identity).compare(0, 15, "package.tensor.") != 0) {
++        std::fprintf(stderr, "public stage descriptors are incomplete\n");
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_stage_plan * repeated = nullptr;
++    if (skippy_stage_planner_realize_v1(planner, 0, 1, &repeated, &error) != SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return false;
++    }
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> repeated_owner(
++            repeated, skippy_stage_plan_free);
++    skippy_stage_plan_desc_v1 repeated_descriptor{};
++    if (skippy_stage_plan_describe_v1(repeated, &repeated_descriptor, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, descriptor.plan_id) != plan_string(repeated, repeated_descriptor.plan_id)) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_stage_plan * partial = reinterpret_cast<skippy_stage_plan *>(1);
++    if (skippy_stage_planner_realize_v1(planner, -1, 1, &partial, &error) == SKIPPY_STATUS_OK || partial != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    const skippy_stage_plan * invalid_chain[] = {source, source};
++    if (skippy_stage_plan_validate_chain_v1(invalid_chain, 2, &error) == SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    auto malformed = config;
++    malformed.abi_version = 0;
++    skippy_stage_planner * partial_planner = reinterpret_cast<skippy_stage_planner *>(1);
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    auto reversed_paths = shard_paths;
++    std::reverse(reversed_paths.begin(), reversed_paths.end());
++    malformed = config;
++    malformed.shard_paths = reversed_paths.data();
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    return true;
++}
++
+ int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
+     std::string error;
+     std::vector<std::string> generated_paths;
+@@ -540,6 +677,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+         std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
+         return 8;
+     }
++    if (!check_public_stage_plan_abi(inventory, inventory.ordered_paths, llama_model_n_layer(model.get()))) {
++        std::fprintf(stderr, "public stage-plan ABI proof failed\n");
++        return 9;
++    }
+     std::printf(
+             "renamed multishard metadata planning: tensors=%zu dependencies=%zu payload_reads=%zu payload_bytes=%zu recurrent=%d\n",
+             bindings.size(),
+diff --git a/src/skippy/tests/stage_plan_header.c b/src/skippy/tests/stage_plan_header.c
+new file mode 100644
+index 000000000..c3e502be7
+--- /dev/null
++++ b/src/skippy/tests/stage_plan_header.c
+@@ -0,0 +1,6 @@
++#include "skippy/stage_plan.h"
++
++int main(void) {
++    struct skippy_stage_plan_desc_v1 descriptor = {0};
++    return sizeof(descriptor) > 0 && SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
++}
+diff --git a/src/skippy/tests/stage_plan_header.cpp b/src/skippy/tests/stage_plan_header.cpp
+new file mode 100644
+index 000000000..035721446
+--- /dev/null
++++ b/src/skippy/tests/stage_plan_header.cpp
+@@ -0,0 +1,9 @@
++#include "skippy/stage_plan.h"
++
++#include <type_traits>
++
++int main() {
++    static_assert(std::is_standard_layout<skippy_stage_plan_profile_desc_v1>::value, "C ABI layout required");
++    static_assert(std::is_trivial<skippy_stage_plan_state_desc_v1>::value, "C ABI triviality required");
++    return SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
++}
+-- 
+2.54.0 (Apple Git-157)

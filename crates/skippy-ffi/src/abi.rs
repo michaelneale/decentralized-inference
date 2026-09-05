@@ -4,6 +4,7 @@ use crate::{
     ABI_VERSION_MAJOR, ABI_VERSION_MINOR, ABI_VERSION_PATCH, NativeMtpDraft, SamplingConfig,
 };
 
+pub const FEATURE_STAGE_PLAN: u64 = 1 << 17;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
