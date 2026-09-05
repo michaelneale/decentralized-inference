@@ -1905,19 +1905,19 @@
   ],
   "crates/mesh-llm-host-runtime/src/runtime/local_split/tests.rs": [
     {
-      "line": 1892,
+      "line": 1951,
       "macro_name": "eprintln!"
     },
     {
-      "line": 1897,
+      "line": 1956,
       "macro_name": "eprintln!"
     },
     {
-      "line": 1909,
+      "line": 1968,
       "macro_name": "eprintln!"
     },
     {
-      "line": 1930,
+      "line": 1989,
       "macro_name": "eprintln!"
     }
   ],
