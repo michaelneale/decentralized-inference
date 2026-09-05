@@ -39,9 +39,10 @@ use super::response::{
     request_service_for_target, route_attempt_result_label, route_http_endpoint_attempt,
     route_local_attempt, route_remote_attempt, target_health_outcome_for_attempt,
 };
+#[cfg(test)]
+use super::routing_rank::order_remote_hosts_by_context;
 use super::routing_rank::{
-    cached_auto_model_satisfies_media_requirements, move_target_first,
-    order_remote_hosts_by_context, order_targets_by_context,
+    cached_auto_model_satisfies_media_requirements, move_target_first, rank_remote_hosts_by_context,
 };
 use mesh_llm_events::logging::events::TokenUsage;
 use mesh_llm_events::logging::identifiers::RequestId;
@@ -197,6 +198,9 @@ struct MeshRequestPlan {
     effective_model: Option<String>,
     auto_session_key: Option<u64>,
     target_hosts: Vec<iroh::EndpointId>,
+    /// Leading run of `target_hosts` whose throughput rank ties with the best
+    /// one; reservation spreading is confined to this run.
+    equivalent_hosts: usize,
     affinity_applied: bool,
 }
 
@@ -522,7 +526,7 @@ async fn build_mesh_request_plan(
         &resolved_hosts,
         affinity,
     );
-    let target_hosts = order_mesh_target_hosts(
+    let (target_hosts, equivalent_hosts) = order_mesh_target_hosts(
         node,
         effective_model.as_deref(),
         required_tokens,
@@ -534,6 +538,7 @@ async fn build_mesh_request_plan(
         effective_model,
         auto_session_key,
         target_hosts,
+        equivalent_hosts,
         affinity_applied: prepared.affinity_applied,
     })
 }
@@ -582,7 +587,7 @@ async fn order_mesh_target_hosts(
     required_tokens: Option<u32>,
     prepared: &mut PreparedTargets,
     affinity: &AffinityRouter,
-) -> Vec<iroh::EndpointId> {
+) -> (Vec<iroh::EndpointId>, usize) {
     let target_hosts: Vec<iroh::EndpointId> = prepared
         .ordered
         .iter()
@@ -592,10 +597,12 @@ async fn order_mesh_target_hosts(
         })
         .collect();
     let Some(name) = effective_model else {
-        return target_hosts;
+        let hosts_len = target_hosts.len();
+        return (target_hosts, hosts_len);
     };
-    let mut ordered =
-        order_remote_hosts_by_context(node, name, required_tokens, &target_hosts).await;
+    let ranked = rank_remote_hosts_by_context(node, name, required_tokens, &target_hosts).await;
+    let equivalent_hosts = ranked.equivalent_prefix;
+    let mut ordered = ranked.ordered;
     if affinity.prefix_enabled()
         && let Some(prefix_hash) = prepared.prefix_hash
     {
@@ -621,10 +628,13 @@ async fn order_mesh_target_hosts(
         affinity.record_cache_probe(prepared.cache_target.is_some());
         if let Some(election::InferenceTarget::Remote(cache_host)) = prepared.cache_target.as_ref()
         {
+            // Cache affinity sets `affinity_applied`, which disables
+            // reservation spreading, so this rotation cannot leak a
+            // lower-ranked host into the equivalent run.
             move_target_first(&mut ordered, cache_host);
         }
     }
-    ordered
+    (ordered, equivalent_hosts)
 }
 
 async fn handle_mesh_request_failure(
@@ -775,8 +785,13 @@ fn reserve_mesh_request_target(
             .map(election::InferenceTarget::Remote)
             .collect::<Vec<_>>();
         let preferred = candidates.first()?;
-        let (selected, reservation) =
-            affinity.reserve_route(model, &candidates, preferred, plan.affinity_applied)?;
+        let (selected, reservation) = affinity.reserve_route(
+            model,
+            &candidates,
+            plan.equivalent_hosts,
+            preferred,
+            plan.affinity_applied,
+        )?;
         if let election::InferenceTarget::Remote(selected_host) = selected {
             move_target_first(&mut target_hosts, &selected_host);
         }

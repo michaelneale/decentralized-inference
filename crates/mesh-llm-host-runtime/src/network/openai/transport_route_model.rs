@@ -1,4 +1,5 @@
 use super::*;
+use crate::network::openai::routing_rank::rank_targets_by_context;
 
 pub(crate) struct RouteModelRequestContext<'a> {
     pub(crate) required_tokens: Option<u32>,
@@ -93,9 +94,15 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     } = args;
     let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
-    let ordered_candidates =
-        order_targets_by_context(&node, model, required_tokens, &targets.candidates(model)).await;
-    let ordered_candidates = affinity.route_eligible_candidates(model, &ordered_candidates);
+    let ranked =
+        rank_targets_by_context(&node, model, required_tokens, &targets.candidates(model)).await;
+    let ordered_candidates = affinity.route_eligible_candidates(model, &ranked.ordered);
+    // Health filtering preserves order, so the throughput-equivalent leading
+    // run stays a (possibly shortened) prefix of the filtered list.
+    let spread_limit = ordered_candidates
+        .iter()
+        .take_while(|candidate| ranked.ordered[..ranked.equivalent_prefix].contains(candidate))
+        .count();
     if ordered_candidates.is_empty() {
         record_route_model_unavailable(&node, model, 0);
         let reason = no_context_eligible_target_reason(model, required_tokens);
@@ -124,6 +131,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
         .reserve_route(
             model,
             &ordered_candidates,
+            spread_limit,
             &selection.target,
             selection.affinity_applied,
         )

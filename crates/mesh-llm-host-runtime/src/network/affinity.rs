@@ -151,11 +151,12 @@ impl AffinityRouter {
         &self,
         model: &str,
         candidates: &[election::InferenceTarget],
+        spread_limit: usize,
         preferred: &election::InferenceTarget,
         affinity_applied: bool,
     ) -> Option<(election::InferenceTarget, RoutingReservation)> {
         self.reservations
-            .reserve(model, candidates, preferred, affinity_applied)
+            .reserve(model, candidates, spread_limit, preferred, affinity_applied)
     }
 
     /// Look up a previously-classified model name for an auto-routed session.

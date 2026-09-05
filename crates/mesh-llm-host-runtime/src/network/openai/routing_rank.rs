@@ -83,7 +83,12 @@ struct RankedTarget<T> {
 const LOCAL_THROUGHPUT_PRECEDENCE_SAMPLES: u64 = 3;
 const TARGET_THROUGHPUT_MAX_SCORE_SAMPLES: u64 = 32;
 
-fn target_throughput_rank_key(throughput: Option<TargetThroughputRank>) -> (bool, bool, u64, u64) {
+/// Sort key produced by [`target_throughput_rank_key`]. Candidates with equal
+/// keys are throughput-equivalent: the measurements give no reason to prefer
+/// one over the other.
+pub(super) type ThroughputRankKey = (bool, bool, u64, u64);
+
+fn target_throughput_rank_key(throughput: Option<TargetThroughputRank>) -> ThroughputRankKey {
     let Some(throughput) = throughput else {
         return (false, false, 0, 0);
     };
@@ -109,10 +114,33 @@ fn sort_ranked_targets<T>(targets: &mut [RankedTarget<T>]) {
     });
 }
 
-pub(super) fn reorder_candidates_by_context_and_throughput<T: Clone>(
+/// Candidates ordered by context fit and measured throughput, plus the length
+/// of the leading run of targets whose throughput rank ties with the best one.
+///
+/// `equivalent_prefix` bounds in-flight reservation spreading: only the
+/// leading targets that the measurements cannot distinguish are equivalent
+/// enough to trade off by local in-flight count. It never crosses the
+/// adequate-context / unknown-context boundary.
+pub(super) struct RankedCandidates<T> {
+    pub(super) ordered: Vec<T>,
+    pub(super) equivalent_prefix: usize,
+}
+
+fn equivalent_prefix_len<T>(targets: &[RankedTarget<T>]) -> usize {
+    let Some(first) = targets.first() else {
+        return 0;
+    };
+    let key = target_throughput_rank_key(first.throughput);
+    targets
+        .iter()
+        .take_while(|target| target_throughput_rank_key(target.throughput) == key)
+        .count()
+}
+
+pub(super) fn rank_candidates_by_context_and_throughput<T: Clone>(
     candidates: &[(T, Option<u32>, Option<TargetThroughputRank>)],
     required_tokens: Option<u32>,
-) -> Vec<T> {
+) -> RankedCandidates<T> {
     let ranked = candidates
         .iter()
         .enumerate()
@@ -129,7 +157,11 @@ pub(super) fn reorder_candidates_by_context_and_throughput<T: Clone>(
     let Some(required_tokens) = required_tokens else {
         let mut ranked = ranked;
         sort_ranked_targets(&mut ranked);
-        return ranked.into_iter().map(|ranked| ranked.candidate).collect();
+        let equivalent_prefix = equivalent_prefix_len(&ranked);
+        return RankedCandidates {
+            ordered: ranked.into_iter().map(|ranked| ranked.candidate).collect(),
+            equivalent_prefix,
+        };
     };
 
     let mut adequate = Vec::new();
@@ -143,16 +175,35 @@ pub(super) fn reorder_candidates_by_context_and_throughput<T: Clone>(
     }
 
     if adequate.is_empty() && unknown.is_empty() {
-        return Vec::new();
+        return RankedCandidates {
+            ordered: Vec::new(),
+            equivalent_prefix: 0,
+        };
     }
 
     sort_ranked_targets(&mut adequate);
     sort_ranked_targets(&mut unknown);
-    adequate
-        .into_iter()
-        .chain(unknown)
-        .map(|ranked| ranked.candidate)
-        .collect()
+    let equivalent_prefix = if adequate.is_empty() {
+        equivalent_prefix_len(&unknown)
+    } else {
+        equivalent_prefix_len(&adequate)
+    };
+    RankedCandidates {
+        ordered: adequate
+            .into_iter()
+            .chain(unknown)
+            .map(|ranked| ranked.candidate)
+            .collect(),
+        equivalent_prefix,
+    }
+}
+
+#[cfg(test)]
+fn reorder_candidates_by_context_and_throughput<T: Clone>(
+    candidates: &[(T, Option<u32>, Option<TargetThroughputRank>)],
+    required_tokens: Option<u32>,
+) -> Vec<T> {
+    rank_candidates_by_context_and_throughput(candidates, required_tokens).ordered
 }
 
 fn local_target_throughput_rank(
@@ -203,12 +254,12 @@ async fn remote_target_throughput_rank(
     gossiped.or(local)
 }
 
-pub(super) async fn order_remote_hosts_by_context(
+pub(super) async fn rank_remote_hosts_by_context(
     node: &mesh::Node,
     model: &str,
     required_tokens: Option<u32>,
     hosts: &[iroh::EndpointId],
-) -> Vec<iroh::EndpointId> {
+) -> RankedCandidates<iroh::EndpointId> {
     let mut candidates = Vec::with_capacity(hosts.len());
     for host in hosts {
         candidates.push((
@@ -217,15 +268,27 @@ pub(super) async fn order_remote_hosts_by_context(
             remote_target_throughput_rank(node, model, *host).await,
         ));
     }
-    reorder_candidates_by_context_and_throughput(&candidates, required_tokens)
+    rank_candidates_by_context_and_throughput(&candidates, required_tokens)
 }
 
-pub(super) async fn order_targets_by_context(
+#[cfg(test)]
+pub(super) async fn order_remote_hosts_by_context(
+    node: &mesh::Node,
+    model: &str,
+    required_tokens: Option<u32>,
+    hosts: &[iroh::EndpointId],
+) -> Vec<iroh::EndpointId> {
+    rank_remote_hosts_by_context(node, model, required_tokens, hosts)
+        .await
+        .ordered
+}
+
+pub(super) async fn rank_targets_by_context(
     node: &mesh::Node,
     model: &str,
     required_tokens: Option<u32>,
     targets: &[election::InferenceTarget],
-) -> Vec<election::InferenceTarget> {
+) -> RankedCandidates<election::InferenceTarget> {
     let mut candidates = Vec::with_capacity(targets.len());
     for target in targets {
         let context_length = match target {
@@ -243,7 +306,19 @@ pub(super) async fn order_targets_by_context(
         };
         candidates.push((target.clone(), context_length, throughput));
     }
-    reorder_candidates_by_context_and_throughput(&candidates, required_tokens)
+    rank_candidates_by_context_and_throughput(&candidates, required_tokens)
+}
+
+#[cfg(test)]
+pub(super) async fn order_targets_by_context(
+    node: &mesh::Node,
+    model: &str,
+    required_tokens: Option<u32>,
+    targets: &[election::InferenceTarget],
+) -> Vec<election::InferenceTarget> {
+    rank_targets_by_context(node, model, required_tokens, targets)
+        .await
+        .ordered
 }
 
 pub(super) fn move_target_first<T: PartialEq>(targets: &mut [T], target: &T) -> bool {
@@ -487,6 +562,69 @@ mod tests {
         let budget = request_budget_tokens_from_parts(1_024, None).unwrap();
 
         assert_eq!(budget, prompt_tokens + request_token_margin(prompt_tokens));
+    }
+
+    fn throughput(milli: u64) -> Option<TargetThroughputRank> {
+        Some(TargetThroughputRank {
+            avg_tokens_per_second_milli: milli,
+            throughput_samples: 4,
+            local_observation: false,
+        })
+    }
+
+    #[test]
+    fn test_equivalent_prefix_is_one_when_ranks_differ() {
+        let ranked = rank_candidates_by_context_and_throughput(
+            &[
+                (1u8, Some(8192), throughput(40_000)),
+                (2u8, Some(8192), throughput(10_000)),
+            ],
+            Some(4096),
+        );
+
+        assert_eq!(ranked.ordered, vec![1, 2]);
+        assert_eq!(ranked.equivalent_prefix, 1);
+    }
+
+    #[test]
+    fn test_equivalent_prefix_covers_tied_throughput_ranks() {
+        let ranked = rank_candidates_by_context_and_throughput(
+            &[
+                (1u8, Some(8192), throughput(40_000)),
+                (2u8, Some(8192), throughput(40_000)),
+                (3u8, Some(8192), throughput(10_000)),
+            ],
+            Some(4096),
+        );
+
+        assert_eq!(ranked.ordered, vec![1, 2, 3]);
+        assert_eq!(ranked.equivalent_prefix, 2);
+    }
+
+    #[test]
+    fn test_equivalent_prefix_covers_all_unmeasured_candidates() {
+        let ranked = rank_candidates_by_context_and_throughput(
+            &[
+                (1u8, Some(8192), None),
+                (2u8, Some(8192), None),
+                (3u8, None, None),
+            ],
+            Some(4096),
+        );
+
+        assert_eq!(ranked.ordered, vec![1, 2, 3]);
+        assert_eq!(ranked.equivalent_prefix, 2);
+    }
+
+    #[test]
+    fn test_equivalent_prefix_does_not_cross_into_unknown_context_tier() {
+        let ranked = rank_candidates_by_context_and_throughput(
+            &[(1u8, Some(8192), None), (2u8, None, None)],
+            Some(4096),
+        );
+
+        assert_eq!(ranked.ordered, vec![1, 2]);
+        assert_eq!(ranked.equivalent_prefix, 1);
     }
 
     #[test]

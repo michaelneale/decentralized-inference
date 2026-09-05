@@ -34,16 +34,26 @@ impl RoutingReservations {
     /// Choose and reserve a target in one critical section. Existing affinity
     /// stays authoritative; otherwise the current picker result is the stable
     /// tie-breaker among targets with the fewest local in-flight requests.
+    ///
+    /// `spread_limit` bounds spreading to the leading `candidates[..limit]`,
+    /// which callers set to the run of throughput-equivalent targets at the
+    /// head of the ranked candidate order. Reservation pressure only trades
+    /// off targets the measurements cannot distinguish; it never redirects a
+    /// request to a lower-ranked (measurably slower or smaller-context)
+    /// target, and a preferred target outside the leading run is reserved
+    /// as-is.
     pub(crate) fn reserve(
         &self,
         model: &str,
         candidates: &[election::InferenceTarget],
+        spread_limit: usize,
         preferred: &election::InferenceTarget,
         affinity_applied: bool,
     ) -> Option<(election::InferenceTarget, RoutingReservation)> {
         if candidates.is_empty() {
             return None;
         }
+        let spread_limit = spread_limit.clamp(1, candidates.len());
         let mut counts = self.counts.lock().unwrap();
         let count = |counts: &HashMap<ReservationKey, usize>,
                      target: &election::InferenceTarget| {
@@ -59,18 +69,19 @@ impl RoutingReservations {
             .iter()
             .position(|candidate| candidate == preferred)
             .unwrap_or(0);
-        let target = if affinity_applied {
+        let target = if affinity_applied || preferred_index >= spread_limit {
             candidates[preferred_index].clone()
         } else {
-            let minimum = candidates
+            let spread = &candidates[..spread_limit];
+            let minimum = spread
                 .iter()
                 .map(|candidate| count(&counts, candidate))
                 .min()
                 .unwrap_or(0);
-            (0..candidates.len())
-                .map(|offset| (preferred_index + offset) % candidates.len())
-                .find(|index| count(&counts, &candidates[*index]) == minimum)
-                .map(|index| candidates[index].clone())
+            (0..spread.len())
+                .map(|offset| (preferred_index + offset) % spread.len())
+                .find(|index| count(&counts, &spread[*index]) == minimum)
+                .map(|index| spread[index].clone())
                 .unwrap_or_else(|| candidates[preferred_index].clone())
         };
         let key = ReservationKey {
@@ -159,7 +170,7 @@ mod tests {
                 let targets = targets.clone();
                 scope.spawn(move || {
                     let (target, reservation) = reservations
-                        .reserve("model", &targets, &targets[0], false)
+                        .reserve("model", &targets, targets.len(), &targets[0], false)
                         .expect("reservation");
                     selected.lock().unwrap().push(target);
                     barrier.wait();
@@ -203,14 +214,68 @@ mod tests {
     }
 
     #[test]
+    fn reservation_pressure_never_displaces_a_higher_ranked_target() {
+        // Candidate order encodes measured throughput rank: target 1 is
+        // materially faster and forms a rank tier of its own (spread limit 1).
+        // Even with in-flight requests on the fast target and none on the
+        // slow one, new sessions must keep going to the fast target.
+        let reservations = RoutingReservations::default();
+        let targets = vec![local(1), local(2)];
+        let mut guards = Vec::new();
+        for _ in 0..4 {
+            let (selected, guard) = reservations
+                .reserve("model", &targets, 1, &targets[0], false)
+                .expect("reservation");
+            assert_eq!(selected, targets[0]);
+            guards.push(guard);
+        }
+        assert_eq!(reservations.active_count("model", &targets[0]), 4);
+        assert_eq!(reservations.active_count("model", &targets[1]), 0);
+    }
+
+    #[test]
+    fn reservation_pressure_spreads_only_within_the_equivalent_tier() {
+        // Targets 1 and 2 are throughput-equivalent (spread limit 2); target 3
+        // is a lower tier. Concurrent requests alternate between the first two
+        // and never spill to the third.
+        let reservations = RoutingReservations::default();
+        let targets = vec![local(1), local(2), local(3)];
+        let mut guards = Vec::new();
+        let mut selections = Vec::new();
+        for _ in 0..4 {
+            let (selected, guard) = reservations
+                .reserve("model", &targets, 2, &targets[0], false)
+                .expect("reservation");
+            selections.push(selected);
+            guards.push(guard);
+        }
+        assert_eq!(reservations.active_count("model", &targets[0]), 2);
+        assert_eq!(reservations.active_count("model", &targets[1]), 2);
+        assert_eq!(reservations.active_count("model", &targets[2]), 0);
+    }
+
+    #[test]
+    fn preferred_target_outside_the_spread_window_is_reserved_as_is() {
+        // A sticky/round-robin pick may land past the equivalent tier; the
+        // reservation must follow it rather than pull the request forward.
+        let reservations = RoutingReservations::default();
+        let targets = vec![local(1), local(2)];
+        let (selected, _guard) = reservations
+            .reserve("model", &targets, 1, &targets[1], false)
+            .expect("reservation");
+        assert_eq!(selected, targets[1]);
+        assert_eq!(reservations.active_count("model", &targets[1]), 1);
+    }
+
+    #[test]
     fn established_affinity_ignores_reservation_pressure() {
         let reservations = RoutingReservations::default();
         let targets = vec![local(1), local(2)];
         let (_, _first) = reservations
-            .reserve("model", &targets, &targets[0], false)
+            .reserve("model", &targets, targets.len(), &targets[0], false)
             .expect("first reservation");
         let (selected, _sticky) = reservations
-            .reserve("model", &targets, &targets[0], true)
+            .reserve("model", &targets, targets.len(), &targets[0], true)
             .expect("sticky reservation");
 
         assert_eq!(selected, targets[0]);
@@ -223,10 +288,10 @@ mod tests {
         let reservations = RoutingReservations::default();
         let targets = vec![local(1), local(2)];
         let (_, _model_a) = reservations
-            .reserve("model-a", &targets, &targets[0], false)
+            .reserve("model-a", &targets, targets.len(), &targets[0], false)
             .expect("model-a reservation");
         let (selected, _model_b) = reservations
-            .reserve("model-b", &targets, &targets[0], false)
+            .reserve("model-b", &targets, targets.len(), &targets[0], false)
             .expect("model-b reservation");
 
         assert_eq!(selected, targets[0]);
@@ -239,7 +304,7 @@ mod tests {
         let reservations = RoutingReservations::default();
         let targets = vec![local(1), local(2)];
         let (_, mut reservation) = reservations
-            .reserve("model", &targets, &targets[0], false)
+            .reserve("model", &targets, targets.len(), &targets[0], false)
             .expect("reservation");
 
         reservation.transfer_to(&targets[1]);
