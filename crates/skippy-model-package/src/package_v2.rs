@@ -158,6 +158,7 @@ fn manifest_from_source(
         },
         tensor_catalog: inventory.tensor_catalog(),
         sidecars: Vec::new(),
+        generation: None,
         native_abi_version: format!(
             "{}.{}.{}",
             skippy_ffi::ABI_VERSION_MAJOR,
