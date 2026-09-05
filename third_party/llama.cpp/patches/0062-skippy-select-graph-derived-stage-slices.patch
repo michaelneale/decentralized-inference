@@ -1,0 +1,732 @@
+From 39becda13ea68aff9802d33c8c1d43b9b2c2b331 Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 19:07:54 +1000
+Subject: [PATCH] feat(skippy): select graph-derived stage slices
+
+---
+ src/CMakeLists.txt                          |  11 +
+ src/skippy/stage_slice_plan.cpp             | 364 ++++++++++++++++++++
+ src/skippy/stage_slice_plan.h               |  38 ++
+ src/skippy/tests/noalloc_graph_planning.cpp | 105 ++++++
+ src/skippy/tests/stage_slice_plan.cpp       | 133 +++++++
+ 5 files changed, 651 insertions(+)
+ create mode 100644 src/skippy/stage_slice_plan.cpp
+ create mode 100644 src/skippy/stage_slice_plan.h
+ create mode 100644 src/skippy/tests/stage_slice_plan.cpp
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 7fdff53de..49646af15 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -56,6 +56,7 @@ add_library(llama
+             skippy/graph_dependencies.cpp
+             skippy/model_package.cpp
+             skippy/sampling.cpp
++            skippy/stage_slice_plan.cpp
+             skippy/state.cpp
+             skippy/state_effects.cpp
+             skippy/speculative_decoding.cpp
+@@ -114,6 +115,16 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     target_compile_features(skippy-noalloc-graph-planning PRIVATE cxx_std_17)
+     target_link_libraries(skippy-noalloc-graph-planning PRIVATE llama)
+ 
++    add_executable(skippy-stage-slice-plan
++        skippy/tests/stage_slice_plan.cpp)
++    target_include_directories(skippy-stage-slice-plan PRIVATE .)
++    target_compile_features(skippy-stage-slice-plan PRIVATE cxx_std_17)
++    target_link_libraries(skippy-stage-slice-plan PRIVATE llama)
++
++    add_test(
++        NAME skippy_stage_slice_plan
++        COMMAND skippy-stage-slice-plan)
++
+     add_test(
+         NAME skippy_generate_gemma_fixture
+         COMMAND skippy-model-fixture-generator
+diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
+new file mode 100644
+index 000000000..12d3dbf70
+--- /dev/null
++++ b/src/skippy/stage_slice_plan.cpp
+@@ -0,0 +1,364 @@
++#include "stage_slice_plan.h"
++
++#include "ggml.h"
++
++#include <algorithm>
++#include <set>
++#include <unordered_map>
++#include <unordered_set>
++
++namespace {
++
++const ggml_tensor * canonical_storage(const ggml_tensor * tensor) {
++    while (tensor != nullptr && tensor->view_src != nullptr) {
++        tensor = tensor->view_src;
++    }
++    return tensor;
++}
++
++template <typename T>
++void append_once(std::vector<T> & values, std::unordered_set<T> & seen, T value) {
++    if (seen.insert(value).second) {
++        values.push_back(value);
++    }
++}
++
++struct selector {
++    selector(
++            ggml_cgraph * graph,
++            const std::vector<skippy_block_boundary> & boundaries,
++            const std::vector<skippy_state_effect> & effects,
++            int32_t layer_count,
++            int32_t layer_start,
++            int32_t layer_end,
++            skippy_stage_slice_selection & result,
++            std::string & error) :
++        graph(graph),
++        boundaries(boundaries),
++        effects(effects),
++        layer_count(layer_count),
++        layer_start(layer_start),
++        layer_end(layer_end),
++        result(result),
++        error(error) {
++    }
++
++    ggml_cgraph * graph;
++    const std::vector<skippy_block_boundary> & boundaries;
++    const std::vector<skippy_state_effect> & effects;
++    int32_t layer_count;
++    int32_t layer_start;
++    int32_t layer_end;
++    skippy_stage_slice_selection & result;
++    std::string & error;
++
++    std::unordered_map<const ggml_tensor *, int32_t> node_index;
++    std::unordered_map<const ggml_tensor *, std::vector<std::string>> parameter_names;
++    std::unordered_set<const ggml_tensor *> state_storage;
++    std::unordered_map<const ggml_tensor *, std::unordered_set<int32_t>> state_layers;
++    std::unordered_set<const ggml_tensor *> prior_boundaries;
++    std::unordered_set<const ggml_tensor *> live_start;
++    std::unordered_set<const ggml_tensor *> live_end;
++    std::unordered_set<int32_t> selected_nodes;
++    std::unordered_set<const ggml_tensor *> imported;
++    std::unordered_set<const ggml_tensor *> exported;
++    std::unordered_set<const ggml_tensor *> request_inputs;
++    std::set<std::string> parameters;
++    std::unordered_map<const ggml_tensor *, int8_t> local_cache;
++    std::unordered_set<const ggml_tensor *> local_visiting;
++
++    int structural_class_count(const ggml_tensor * tensor) const {
++        if (node_index.find(tensor) != node_index.end()) {
++            return 0;
++        }
++        const ggml_tensor * canonical = canonical_storage(tensor);
++        int count = 0;
++        count += parameter_names.find(tensor) != parameter_names.end() ||
++                 parameter_names.find(canonical) != parameter_names.end();
++        count += (tensor->flags & GGML_TENSOR_FLAG_INPUT) != 0 ||
++                 (canonical->flags & GGML_TENSOR_FLAG_INPUT) != 0;
++        count += state_storage.find(canonical) != state_storage.end();
++        return count;
++    }
++
++    bool state_owned_by_slice(const ggml_tensor * tensor) {
++        const auto owners = state_layers.find(canonical_storage(tensor));
++        if (owners == state_layers.end() || owners->second.empty()) {
++            error = "persistent state has no registered owner";
++            return false;
++        }
++        for (int32_t owner : owners->second) {
++            if (owner < layer_start || owner >= layer_end) {
++                error = "persistent state ";
++                error += ggml_get_name(tensor);
++                error += " is owned outside the requested slice";
++                return false;
++            }
++        }
++        return true;
++    }
++
++    bool record_structural(const ggml_tensor * tensor) {
++        if (node_index.find(tensor) != node_index.end()) {
++            return false;
++        }
++        const ggml_tensor * canonical = canonical_storage(tensor);
++        const auto exact_parameter = parameter_names.find(tensor);
++        const auto canonical_parameter = parameter_names.find(canonical);
++        const bool is_parameter = exact_parameter != parameter_names.end() ||
++                                  canonical_parameter != parameter_names.end();
++        const bool is_request = (tensor->flags & GGML_TENSOR_FLAG_INPUT) != 0 ||
++                                (canonical->flags & GGML_TENSOR_FLAG_INPUT) != 0;
++        const bool is_state = state_storage.find(canonical) != state_storage.end();
++        const int count = static_cast<int>(is_parameter) + static_cast<int>(is_request) + static_cast<int>(is_state);
++        if (count > 1) {
++            error = "graph dependency has multiple structural leaf classes";
++            return false;
++        }
++        if (is_parameter) {
++            const auto & names = exact_parameter != parameter_names.end()
++                    ? exact_parameter->second
++                    : canonical_parameter->second;
++            parameters.insert(names.begin(), names.end());
++            return true;
++        }
++        if (is_request) {
++            append_once(result.request_inputs, request_inputs, canonical);
++            return true;
++        }
++        return is_state && state_owned_by_slice(canonical);
++    }
++
++    bool locally_resolvable(const ggml_tensor * tensor) {
++        if (tensor == nullptr) {
++            return true;
++        }
++        const auto cached = local_cache.find(tensor);
++        if (cached != local_cache.end()) {
++            return cached->second > 0;
++        }
++        if (prior_boundaries.find(tensor) != prior_boundaries.end()) {
++            local_cache[tensor] = -1;
++            return false;
++        }
++        const int structural_classes = structural_class_count(tensor);
++        if (structural_classes > 1) {
++            error = "graph dependency has multiple structural leaf classes";
++            return false;
++        }
++        if (structural_classes == 1) {
++            local_cache[tensor] = 1;
++            return true;
++        }
++        if (tensor->op == GGML_OP_NONE || node_index.find(tensor) == node_index.end()) {
++            local_cache[tensor] = -1;
++            return false;
++        }
++        if (!local_visiting.insert(tensor).second) {
++            error = "graph dependency cycle encountered while classifying a frontier";
++            return false;
++        }
++        bool local = locally_resolvable(tensor->view_src);
++        for (const ggml_tensor * source : tensor->src) {
++            local = locally_resolvable(source) && local;
++        }
++        local_visiting.erase(tensor);
++        local_cache[tensor] = local ? 1 : -1;
++        return local;
++    }
++
++    void add_live_edges(int32_t frontier, std::unordered_set<const ggml_tensor *> & live) const {
++        for (int32_t consumer_index = frontier + 1; consumer_index < ggml_graph_n_nodes(graph); ++consumer_index) {
++            const ggml_tensor * consumer = ggml_graph_node(graph, consumer_index);
++            auto consider = [&](const ggml_tensor * source) {
++                if (source == nullptr) {
++                    return;
++                }
++                const auto producer = node_index.find(source);
++                if (producer == node_index.end() || producer->second <= frontier) {
++                    live.insert(source);
++                }
++            };
++            consider(consumer->view_src);
++            for (const ggml_tensor * source : consumer->src) {
++                consider(source);
++            }
++        }
++    }
++
++    bool walk(const ggml_tensor * tensor) {
++        if (tensor == nullptr) {
++            return true;
++        }
++        if (record_structural(tensor)) {
++            return true;
++        }
++        if (!error.empty()) {
++            return false;
++        }
++        if (prior_boundaries.find(tensor) != prior_boundaries.end()) {
++            append_once(result.activation_imports, imported, tensor);
++            return true;
++        }
++        if (live_start.find(tensor) != live_start.end()) {
++            const bool local = locally_resolvable(tensor);
++            if (!error.empty()) {
++                return false;
++            }
++            if (!local) {
++                append_once(result.activation_imports, imported, tensor);
++                return true;
++            }
++        }
++        const auto found = node_index.find(tensor);
++        if (found == node_index.end()) {
++            error = "graph dependency is neither structural nor a live activation import";
++            return false;
++        }
++        if (!selected_nodes.insert(found->second).second) {
++            return true;
++        }
++        if (!walk(tensor->view_src)) {
++            return false;
++        }
++        for (const ggml_tensor * source : tensor->src) {
++            if (!walk(source)) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    bool select() {
++        if (graph == nullptr || layer_count <= 0 || layer_start < 0 ||
++                layer_start >= layer_end || layer_end > layer_count) {
++            error = "invalid stage slice request";
++            return false;
++        }
++        if (!skippy_validate_block_boundaries(boundaries, 0, layer_count, error) ||
++                !skippy_validate_state_effects(effects, graph, error)) {
++            return false;
++        }
++        for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++            node_index.emplace(ggml_graph_node(graph, index), index);
++        }
++        for (const auto & effect : effects) {
++            const ggml_tensor * storage = canonical_storage(effect.storage);
++            state_storage.insert(storage);
++            state_layers[storage].insert(effect.layer);
++        }
++        for (int32_t layer = 0; layer < layer_start; ++layer) {
++            prior_boundaries.insert(boundaries[2 * layer].tensor);
++            prior_boundaries.insert(boundaries[2 * layer + 1].tensor);
++        }
++        if (layer_start > 0) {
++            prior_boundaries.insert(boundaries[2 * layer_start].tensor);
++            const auto start = node_index.find(boundaries[2 * layer_start].tensor);
++            if (start == node_index.end()) {
++                error = "stage start boundary is not a graph node";
++                return false;
++            }
++            add_live_edges(start->second, live_start);
++            live_start.insert(boundaries[2 * layer_start].tensor);
++        }
++        if (layer_end < layer_count) {
++            const auto finish = node_index.find(boundaries[2 * (layer_end - 1) + 1].tensor);
++            if (finish == node_index.end()) {
++                error = "stage end boundary is not a graph node";
++                return false;
++            }
++            add_live_edges(finish->second, live_end);
++        }
++
++        const ggml_tensor * primary_output = layer_end == layer_count
++                ? ggml_graph_node(graph, -1)
++                : boundaries[2 * (layer_end - 1) + 1].tensor;
++        if (!walk(primary_output)) {
++            return false;
++        }
++        for (const auto & effect : effects) {
++            if (effect.layer < layer_start || effect.layer >= layer_end) {
++                continue;
++            }
++            result.state_effects.push_back(effect);
++            if (effect.access == skippy_state_access::write && !walk(effect.effect_node)) {
++                return false;
++            }
++        }
++
++        for (const ggml_tensor * tensor : live_end) {
++            const int structural_classes = structural_class_count(tensor);
++            if (structural_classes > 1) {
++                error = "graph dependency has multiple structural leaf classes";
++                return false;
++            }
++            if (structural_classes == 1) {
++                continue;
++            }
++            const auto producer = node_index.find(tensor);
++            if (producer != node_index.end() && selected_nodes.find(producer->second) == selected_nodes.end()) {
++                const bool local = locally_resolvable(tensor);
++                if (!error.empty()) {
++                    return false;
++                }
++                if (!local) {
++                    append_once(result.activation_imports, imported, tensor);
++                }
++            }
++            if (producer != node_index.end() && selected_nodes.find(producer->second) != selected_nodes.end()) {
++                append_once(result.activation_exports, exported, tensor);
++            } else if (imported.find(tensor) != imported.end()) {
++                append_once(result.activation_exports, exported, tensor);
++            }
++        }
++
++        if (layer_start > 0 && imported.find(boundaries[2 * layer_start].tensor) == imported.end()) {
++            error = "stage start boundary is not an activation import";
++            return false;
++        }
++        if (layer_end < layer_count && exported.find(primary_output) == exported.end()) {
++            error = "stage end boundary is not an activation export";
++            return false;
++        }
++
++        result.layer_start = layer_start;
++        result.layer_end = layer_end;
++        result.node_indices.assign(selected_nodes.begin(), selected_nodes.end());
++        std::sort(result.node_indices.begin(), result.node_indices.end());
++        result.parameter_identities.assign(parameters.begin(), parameters.end());
++        return true;
++    }
++};
++
++}
++
++bool skippy_select_stage_slice(
++        ggml_cgraph * graph,
++        const std::vector<skippy_block_boundary> & boundaries,
++        const std::vector<skippy_state_effect> & state_effects,
++        const std::vector<skippy_parameter_binding> & parameters,
++        int32_t layer_count,
++        int32_t layer_start,
++        int32_t layer_end,
++        skippy_stage_slice_selection & selection,
++        std::string & error) {
++    selection = {};
++    error.clear();
++    selector state(
++        graph,
++        boundaries,
++        state_effects,
++        layer_count,
++        layer_start,
++        layer_end,
++        selection,
++        error);
++    for (const auto & parameter : parameters) {
++        if (parameter.tensor == nullptr || parameter.identity.empty()) {
++            error = "parameter binding is incomplete";
++            return false;
++        }
++        state.parameter_names[parameter.tensor].push_back(parameter.identity);
++    }
++    return state.select();
++}
+diff --git a/src/skippy/stage_slice_plan.h b/src/skippy/stage_slice_plan.h
+new file mode 100644
+index 000000000..ee801c314
+--- /dev/null
++++ b/src/skippy/stage_slice_plan.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++#include "block_boundaries.h"
++#include "state_effects.h"
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++struct ggml_cgraph;
++struct ggml_tensor;
++
++struct skippy_parameter_binding {
++    const ggml_tensor * tensor = nullptr;
++    std::string identity;
++};
++
++struct skippy_stage_slice_selection {
++    int32_t layer_start = 0;
++    int32_t layer_end = 0;
++    std::vector<int32_t> node_indices;
++    std::vector<const ggml_tensor *> activation_imports;
++    std::vector<const ggml_tensor *> activation_exports;
++    std::vector<const ggml_tensor *> request_inputs;
++    std::vector<std::string> parameter_identities;
++    std::vector<skippy_state_effect> state_effects;
++};
++
++bool skippy_select_stage_slice(
++        ggml_cgraph * graph,
++        const std::vector<skippy_block_boundary> & boundaries,
++        const std::vector<skippy_state_effect> & state_effects,
++        const std::vector<skippy_parameter_binding> & parameters,
++        int32_t layer_count,
++        int32_t layer_start,
++        int32_t layer_end,
++        skippy_stage_slice_selection & selection,
++        std::string & error);
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index f433ad31e..c19928fb1 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -9,6 +9,7 @@
+ #include "llama.h"
+ #include "skippy/block_boundaries.h"
+ #include "skippy/graph_dependencies.h"
++#include "skippy/stage_slice_plan.h"
+ #include "skippy/state_effects.h"
+ 
+ #include <algorithm>
+@@ -196,6 +197,106 @@ static size_t layer_state_count(
+     return count;
+ }
+ 
++static bool check_stage_slices(
++        const llm_graph_result * graph_result,
++        ggml_cgraph * graph,
++        const llama_model * model,
++        const char * profile_name,
++        const std::vector<std::string> & full_dependencies) {
++    std::vector<skippy_parameter_binding> parameters;
++    for (const auto & [name, tensor] : llama_internal_get_tensor_map(model)) {
++        parameters.push_back({tensor, name});
++    }
++
++    const int32_t n_layer = llama_model_n_layer(model);
++    std::vector<std::string> selected_dependencies;
++    bool has_recurrent_layer = false;
++    bool proved_noncontiguous_recurrent_slice = false;
++    for (int32_t layer = 0; layer < n_layer; ++layer) {
++        skippy_stage_slice_selection selection;
++        std::string error;
++        if (!skippy_select_stage_slice(
++                    graph,
++                    graph_result->get_block_boundaries(),
++                    graph_result->get_state_effects(),
++                    parameters,
++                    n_layer,
++                    layer,
++                    layer + 1,
++                    selection,
++                    error)) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice invalid: %s\n",
++                    profile_name, layer, error.c_str());
++            return false;
++        }
++        if (selection.node_indices.empty() || selection.parameter_identities.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice is incomplete\n",
++                    profile_name, layer);
++            return false;
++        }
++        if (!std::is_sorted(selection.node_indices.begin(), selection.node_indices.end()) ||
++                std::adjacent_find(selection.node_indices.begin(), selection.node_indices.end()) != selection.node_indices.end()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice nodes are not normalized\n",
++                    profile_name, layer);
++            return false;
++        }
++        for (int32_t index : selection.node_indices) {
++            if (index < 0 || index >= ggml_graph_n_nodes(graph)) {
++                std::fprintf(stderr, "metadata-only %s layer %d slice has an invalid node index\n",
++                        profile_name, layer);
++                return false;
++            }
++        }
++        if (layer > 0 && selection.activation_imports.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice has no activation import\n",
++                    profile_name, layer);
++            return false;
++        }
++        if (layer + 1 < n_layer && selection.activation_exports.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice has no activation export\n",
++                    profile_name, layer);
++            return false;
++        }
++        if (layer > 0 && model->hparams.is_recr(layer)) {
++            has_recurrent_layer = true;
++            const ggml_tensor * entry = graph_result->get_block_boundaries()[2 * layer].tensor;
++            int32_t entry_index = -1;
++            for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++                if (ggml_graph_node(graph, index) == entry) {
++                    entry_index = index;
++                    break;
++                }
++            }
++            if (entry_index < 0 || selection.node_indices.front() >= entry_index) {
++                std::fprintf(stderr,
++                        "metadata-only %s recurrent layer %d slice omitted its pre-entry auxiliary cone\n",
++                        profile_name, layer);
++                return false;
++            }
++            proved_noncontiguous_recurrent_slice = true;
++        }
++        selected_dependencies.insert(
++                selected_dependencies.end(),
++                selection.parameter_identities.begin(),
++                selection.parameter_identities.end());
++    }
++    std::sort(selected_dependencies.begin(), selected_dependencies.end());
++    selected_dependencies.erase(
++            std::unique(selected_dependencies.begin(), selected_dependencies.end()),
++            selected_dependencies.end());
++    if (selected_dependencies != full_dependencies) {
++        std::fprintf(stderr, "metadata-only %s slices do not cover the exact graph dependency set\n",
++                profile_name);
++        return false;
++    }
++    if (has_recurrent_layer && !proved_noncontiguous_recurrent_slice) {
++        std::fprintf(stderr, "metadata-only %s did not prove a non-contiguous recurrent slice\n",
++                profile_name);
++        return false;
++    }
++    return true;
++}
++
+ static bool layer_has_state(
+         const std::vector<skippy_state_effect> & effects,
+         int32_t layer,
+@@ -405,6 +506,10 @@ static bool build_graph_profile(
+         llama_free(context);
+         return false;
+     }
++    if (!check_stage_slices(graph_result, graph, model, profile_name, result.dependencies)) {
++        llama_free(context);
++        return false;
++    }
+     llama_free(context);
+     return true;
+ }
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+new file mode 100644
+index 000000000..3053376dc
+--- /dev/null
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -0,0 +1,133 @@
++#include "ggml.h"
++#include "skippy/stage_slice_plan.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <string>
++#include <vector>
++
++static bool contains_tensor(
++        const std::vector<const ggml_tensor *> & tensors,
++        const ggml_tensor * expected) {
++    return std::find(tensors.begin(), tensors.end(), expected) != tensors.end();
++}
++
++static int check_middle_stage_selection() {
++    std::vector<uint8_t> buffer(ggml_tensor_overhead() * 96 + ggml_graph_overhead_custom(96, false));
++    ggml_init_params params = { buffer.size(), buffer.data(), true };
++    ggml_context * ctx = ggml_init(params);
++
++    ggml_tensor * tokens = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * request = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_set_input(tokens);
++    ggml_set_input(request);
++    ggml_tensor * parameter_0 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_2 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * state = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++
++    ggml_tensor * entry_0 = ggml_mul(ctx, tokens, parameter_0);
++    ggml_tensor * pass_through = ggml_mul(ctx, entry_0, parameter_0);
++    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, pass_through);
++    ggml_tensor * local_state_read = ggml_add(ctx, state, request);
++    ggml_tensor * exit_1 = ggml_add(ctx, exit_0, ggml_mul(ctx, local_state_read, parameter_1));
++    ggml_tensor * state_write = ggml_cpy(ctx, exit_1, state);
++    ggml_tensor * exit_2 = ggml_add(ctx, ggml_mul(ctx, exit_1, parameter_2), pass_through);
++    ggml_tensor * logits = ggml_mul(ctx, exit_2, parameter_2);
++
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 96, false);
++    ggml_build_forward_expand(graph, pass_through);
++    ggml_build_forward_expand(graph, state_write);
++    ggml_build_forward_expand(graph, logits);
++
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_0},
++        {skippy_block_boundary_kind::entry, 1, exit_0},
++        {skippy_block_boundary_kind::exit, 1, exit_1},
++        {skippy_block_boundary_kind::entry, 2, exit_1},
++        {skippy_block_boundary_kind::exit, 2, exit_2},
++    };
++    const std::vector<skippy_state_effect> effects = {
++        {skippy_state_kind::recurrent_conv, skippy_state_access::read, 1, state, nullptr},
++        {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, state_write},
++    };
++    const std::vector<skippy_parameter_binding> parameter_bindings = {
++        {parameter_0, "block.0.weight"},
++        {parameter_1, "block.1.weight"},
++        {parameter_2, "block.2.weight"},
++    };
++
++    skippy_stage_slice_selection selection;
++    std::string error;
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                3,
++                1,
++                2,
++                selection,
++                error)) {
++        std::fprintf(stderr, "middle stage selection failed: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 1;
++    }
++    if (selection.parameter_identities != std::vector<std::string>{"block.1.weight"}) {
++        std::fprintf(stderr, "middle stage selected the wrong parameters:");
++        for (const std::string & identity : selection.parameter_identities) {
++            std::fprintf(stderr, " %s", identity.c_str());
++        }
++        std::fprintf(stderr, "\n");
++        ggml_free(ctx);
++        return 2;
++    }
++    if (!contains_tensor(selection.activation_imports, exit_0) ||
++            !contains_tensor(selection.activation_imports, pass_through) ||
++            !contains_tensor(selection.activation_exports, exit_1) ||
++            !contains_tensor(selection.activation_exports, pass_through)) {
++        std::fprintf(stderr, "middle stage lost an activation or pass-through frontier\n");
++        ggml_free(ctx);
++        return 3;
++    }
++    if (!contains_tensor(selection.request_inputs, request) ||
++            contains_tensor(selection.request_inputs, tokens)) {
++        std::fprintf(stderr, "middle stage request-input classification is incorrect\n");
++        ggml_free(ctx);
++        return 4;
++    }
++    if (selection.state_effects.size() != 2) {
++        std::fprintf(stderr, "middle stage did not retain its state owner and write effect\n");
++        ggml_free(ctx);
++        return 5;
++    }
++    if (selection.node_indices.size() < 4) {
++        std::fprintf(stderr, "middle stage omitted locally resolvable state preparation\n");
++        ggml_free(ctx);
++        return 6;
++    }
++
++    ggml_set_input(parameter_1);
++    if (skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                3,
++                1,
++                2,
++                selection,
++                error)) {
++        std::fprintf(stderr, "multiply classified parameter was accepted\n");
++        ggml_free(ctx);
++        return 7;
++    }
++
++    ggml_free(ctx);
++    return 0;
++}
++
++int main() {
++    return check_middle_stage_selection();
++}
+-- 
+2.54.0 (Apple Git-157)
+
