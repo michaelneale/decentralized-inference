@@ -708,6 +708,10 @@ async fn route_mesh_request_attempts(
                 retry_policy: ResponseRetryPolicy::next_target_available(idx + 1 < total_targets),
                 response_adapter: request.response_adapter,
                 route_observer,
+                // This is the separate "mesh" auto-plan fan-out across many
+                // candidate hosts, not the `x-mesh-target` forced single-peer
+                // path -- there is no one chosen target to echo here.
+                served_by: None,
             },
         )
         .await;
@@ -1456,6 +1460,7 @@ pub async fn route_to_target(
             retry_policy,
             response_adapter,
             route_observer,
+            served_by: None,
         },
     )
     .await;
@@ -1547,6 +1552,7 @@ pub async fn route_http_endpoint_request(
             retry_policy: ResponseRetryPolicy::next_target_available(false),
             response_adapter: request.response_adapter,
             route_observer,
+            served_by: None,
         },
     )
     .await;

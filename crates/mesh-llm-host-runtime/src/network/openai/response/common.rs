@@ -29,6 +29,9 @@ pub(in crate::network::openai) struct RouteAttemptLoggingContext<'a> {
     pub(in crate::network::openai) retry_policy: ResponseRetryPolicy,
     pub(in crate::network::openai) response_adapter: ResponseAdapter,
     pub(in crate::network::openai) route_observer: OpenAiRouteObserver<'a>,
+    /// Hex-encoded `EndpointId` to echo back as `x-mesh-served-by` on
+    /// delivery. See `RouteModelRequestContext::served_by_header`.
+    pub(in crate::network::openai) served_by: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

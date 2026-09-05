@@ -42,6 +42,54 @@ pub(in crate::network::openai::response) fn append_capsule_nonce_headers(
     }
 }
 
+/// The header the routing node echoes the resolved `x-mesh-target` peer back
+/// on, so the client can seal which peer answered without parsing
+/// provenance. See `ingress.rs`'s remote-mesh routing.
+pub(in crate::network::openai::response) const MESH_SERVED_BY_HEADER: &str = "x-mesh-served-by";
+
+/// Append the `x-mesh-served-by` header (when present) to a hand-built
+/// response header string. Sibling of `append_capsule_nonce_headers` for
+/// response adapters that rebuild headers instead of relaying them raw.
+pub(in crate::network::openai::response) fn append_mesh_served_by_header(
+    header: &mut String,
+    served_by: Option<&str>,
+) {
+    if let Some(served_by) = served_by {
+        header.push_str(&format!("{MESH_SERVED_BY_HEADER}: {served_by}\r\n"));
+    }
+}
+
+/// Splice a `name: value` header line into an already-buffered raw HTTP
+/// response, immediately before the blank line that terminates the header
+/// block, and return how many bytes were inserted. Used by relay paths that
+/// forward upstream response bytes verbatim and have no other rebuild step.
+///
+/// `header_end` must be the byte offset of the first body byte (the
+/// convention `httparse::Status::Complete` and `ParsedResponseHeaders`
+/// already use) — i.e. it points just past the terminating `\r\n\r\n`.
+pub(in crate::network::openai::response) fn insert_header_before_body(
+    buf: &mut Vec<u8>,
+    header_end: usize,
+    name: &str,
+    value: &str,
+) -> usize {
+    if header_end < 2 || header_end > buf.len() {
+        return 0;
+    }
+    let mut line = Vec::with_capacity(name.len() + value.len() + 4);
+    line.extend_from_slice(name.as_bytes());
+    line.extend_from_slice(b": ");
+    line.extend(
+        value
+            .bytes()
+            .filter(|byte| *byte != b'\r' && *byte != b'\n'),
+    );
+    line.extend_from_slice(b"\r\n");
+    let inserted = line.len();
+    buf.splice(header_end - 2..header_end - 2, line);
+    inserted
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::network::openai::response) struct ResponseBodyReadLimits {
     pub(in crate::network::openai::response) max_body_bytes: usize,
@@ -328,6 +376,38 @@ mod tests {
     use super::*;
     use crate::network::openai::response::common::is_timeout_error;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn insert_header_before_body_splices_before_the_blank_line() {
+        let body = b"{}";
+        let header = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+        let mut buf = header.to_vec();
+        buf.extend_from_slice(body);
+        let header_end = header.len();
+
+        let inserted = insert_header_before_body(&mut buf, header_end, "x-mesh-served-by", "ab12");
+
+        let expected = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nx-mesh-served-by: ab12\r\n\r\n{}";
+        assert_eq!(buf, expected);
+        assert_eq!(inserted, expected.len() - (header.len() + body.len()));
+        // The body bytes themselves must be untouched, just shifted.
+        assert_eq!(&buf[buf.len() - body.len()..], body);
+    }
+
+    #[test]
+    fn insert_header_before_body_strips_crlf_from_the_value() {
+        let header = b"HTTP/1.1 200 OK\r\n\r\n";
+        let mut buf = header.to_vec();
+        let header_end = header.len();
+
+        insert_header_before_body(&mut buf, header_end, "x-mesh-served-by", "ab\r\n12");
+
+        assert!(
+            String::from_utf8_lossy(&buf).contains("x-mesh-served-by: ab12\r\n"),
+            "CR/LF in the value must not let it smuggle extra header lines: {}",
+            String::from_utf8_lossy(&buf)
+        );
+    }
 
     #[tokio::test]
     async fn transformed_response_rejects_oversized_content_length_before_reading() {

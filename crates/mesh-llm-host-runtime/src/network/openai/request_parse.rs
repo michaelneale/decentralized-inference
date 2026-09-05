@@ -18,6 +18,12 @@ pub(crate) const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// lifecycle parent, so ordinary API clients cannot opt into target-owner
 /// suppression by sending it themselves.
 pub(crate) const RAW_LIFECYCLE_OWNER_HEADER: &str = "x-mesh-llm-raw-lifecycle";
+/// Force remote-mesh dispatch to exactly one peer (fail closed if it doesn't
+/// serve the requested model). See `ingress.rs`'s remote-mesh routing.
+pub(crate) const MESH_TARGET_HEADER: &str = "x-mesh-target";
+/// Remove one or more peers from the remote-mesh candidate set before
+/// selection. Comma-separated within one header value.
+pub(crate) const MESH_EXCLUDE_HEADER: &str = "x-mesh-exclude";
 pub(super) const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT_UPLOAD_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CHUNKED_WIRE_BYTES: usize = MAX_BODY_BYTES * 6 + 64 * 1024;
@@ -161,6 +167,20 @@ impl BufferedHttpRequest {
     /// nonce every downstream reader expects, rather than dropping it.
     pub fn capsule_nonce_headers(&self) -> (Option<String>, Option<String>) {
         capsule_nonce_headers_from_raw(&self.raw)
+    }
+
+    /// Raw (unparsed) values of the `x-mesh-target` / `x-mesh-exclude` mesh
+    /// routing headers, read back off the already-buffered raw request.
+    ///
+    /// Every occurrence of each header name is returned verbatim, including
+    /// duplicates — the router (not this parser) decides whether more than
+    /// one `x-mesh-target` value is an error. These headers are opaque to
+    /// this layer: no endpoint-id parsing happens here.
+    pub fn mesh_routing_header_values(&self) -> (Vec<String>, Vec<String>) {
+        (
+            header_values_from_raw(&self.raw, MESH_TARGET_HEADER),
+            header_values_from_raw(&self.raw, MESH_EXCLUDE_HEADER),
+        )
     }
 
     /// The only semantic request media kind trusted by artifact capture.
@@ -853,6 +873,30 @@ fn capsule_nonce_headers_from_raw(raw: &[u8]) -> (Option<String>, Option<String>
             .map(str::to_string)
     };
     (find(nonce_header), find(origin_header))
+}
+
+/// Every value of a given header name, read back off an already-rebuilt raw
+/// HTTP request. Only the request-header block is scanned. Order matches the
+/// wire order; duplicates are returned as separate entries.
+fn header_values_from_raw(raw: &[u8], name: &str) -> Vec<String> {
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map_or(raw.len(), |pos| pos);
+    let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut headers_buf);
+    if req
+        .parse(&raw[..header_end.saturating_add(4).min(raw.len())])
+        .is_err()
+    {
+        return Vec::new();
+    }
+    req.headers
+        .iter()
+        .filter(|header| header.name.eq_ignore_ascii_case(name))
+        .filter_map(|header| std::str::from_utf8(header.value).ok())
+        .map(|value| value.trim().to_string())
+        .collect()
 }
 
 fn client_nonce_from_headers(headers: &[httparse::Header<'_>]) -> (String, Option<&'static str>) {

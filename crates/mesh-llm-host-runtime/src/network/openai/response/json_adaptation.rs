@@ -5,7 +5,7 @@ use super::common::{
 };
 use super::probe::{
     ResponseBodyReadLimits, ResponseProbe, append_capsule_nonce_headers,
-    read_transformed_response_body, try_parse_response_headers,
+    append_mesh_served_by_header, read_transformed_response_body, try_parse_response_headers,
 };
 use super::relay::relay_error_response;
 use crate::logging::OpenAiRouteObserver;
@@ -30,6 +30,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_jso
     reader: &mut R,
     probe: ResponseProbe,
     retry_policy: ResponseRetryPolicy,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     if retry_policy.context_overflow && probe.retryable_context_overflow {
@@ -66,6 +67,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_jso
         parsed.client_nonce.as_deref(),
         parsed.nonce_origin.as_deref(),
     );
+    append_mesh_served_by_header(&mut header, served_by);
     header.push_str("Connection: close\r\n\r\n");
     tcp_stream.write_all(header.as_bytes()).await?;
     tcp_stream.write_all(&translated_body).await?;
@@ -85,6 +87,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     reader: &mut R,
     probe: ResponseProbe,
     retry_policy: ResponseRetryPolicy,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     if retry_policy.context_overflow && probe.retryable_context_overflow {
@@ -122,6 +125,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         parsed.client_nonce.as_deref(),
         parsed.nonce_origin.as_deref(),
     );
+    append_mesh_served_by_header(&mut header, served_by);
     header.push_str("Connection: close\r\n\r\n");
     tcp_stream.write_all(header.as_bytes()).await?;
     tcp_stream.write_all(&normalized_body).await?;
@@ -200,6 +204,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -274,6 +279,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -328,6 +334,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
