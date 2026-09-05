@@ -1,4 +1,4 @@
-From e4f195c4d358347ff8cdc126d4528b0e29c9d465 Mon Sep 17 00:00:00 2001
+From a2e8277ce22c94e92d247f4d6e4c61a801f09f99 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 5 Sep 2026 23:30:05 +1000
 Subject: [PATCH] skippy: realize guarded stage plans through public ABI
@@ -13,11 +13,11 @@ Subject: [PATCH] skippy: realize guarded stage plans through public ABI
  src/skippy/stage_slice_plan.cpp               |  27 +-
  src/skippy/stage_slice_plan.h                 |   4 +-
  src/skippy/tests/noalloc_graph_planning.cpp   |   3 +
- .../tests/renamed_multishard_planning.cpp     | 219 ++++++++
+ .../tests/renamed_multishard_planning.cpp     | 240 ++++++++
  src/skippy/tests/stage_plan_header.c          |  10 +
  src/skippy/tests/stage_plan_header.cpp        |  13 +
  src/skippy/tests/stage_slice_plan.cpp         |  85 ++-
- 13 files changed, 928 insertions(+), 20 deletions(-)
+ 13 files changed, 949 insertions(+), 20 deletions(-)
  create mode 100644 src/skippy/stage_plan.cpp
  create mode 100644 src/skippy/tests/stage_plan_header.c
  create mode 100644 src/skippy/tests/stage_plan_header.cpp
@@ -814,7 +814,7 @@ index 9dbc7fb0a..f46288a22 100644
      skippy_guarded_stage_slice_plan full_plan;
      std::string full_plan_error;
 diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
-index cfe7224cb..bfb14fd5f 100644
+index cfe7224cb..260e76fa4 100644
 --- a/src/skippy/tests/renamed_multishard_planning.cpp
 +++ b/src/skippy/tests/renamed_multishard_planning.cpp
 @@ -9,6 +9,7 @@
@@ -833,7 +833,7 @@ index cfe7224cb..bfb14fd5f 100644
      }};
      skippy_guarded_stage_slice_plan plan;
      if (!skippy_build_guarded_stage_slice_plan(
-@@ -475,6 +477,219 @@ bool rejects_invalid_bindings(
+@@ -475,6 +477,240 @@ bool rejects_invalid_bindings(
      return rejects(changed);
  }
  
@@ -893,13 +893,34 @@ index cfe7224cb..bfb14fd5f 100644
 +            planner, skippy_stage_planner_free);
 +    skippy_stage_plan * source = nullptr;
 +    skippy_stage_plan * final = nullptr;
-+    if (skippy_stage_planner_realize_v1(planner, 0, 1, &source, &error) != SKIPPY_STATUS_OK ||
-+            skippy_stage_planner_realize_v1(planner, 1, layer_count, &final, &error) != SKIPPY_STATUS_OK) {
-+        std::fprintf(stderr, "public stage realization failed: %s\n", error == nullptr ? "" : error->message);
-+        skippy_error_free(error);
-+        skippy_stage_plan_free(source);
-+        skippy_stage_plan_free(final);
-+        return false;
++    for (int32_t cut = 1; cut < layer_count; ++cut) {
++        skippy_stage_plan * cut_source = nullptr;
++        skippy_stage_plan * cut_final = nullptr;
++        if (skippy_stage_planner_realize_v1(planner, 0, cut, &cut_source, &error) != SKIPPY_STATUS_OK ||
++                skippy_stage_planner_realize_v1(planner, cut, layer_count, &cut_final, &error) != SKIPPY_STATUS_OK) {
++            std::fprintf(stderr, "public stage realization failed at cut %d: %s\n",
++                    cut, error == nullptr ? "" : error->message);
++            skippy_error_free(error);
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++            return false;
++        }
++        const skippy_stage_plan * cut_chain[] = {cut_source, cut_final};
++        if (skippy_stage_plan_validate_chain_v1(cut_chain, 2, &error) != SKIPPY_STATUS_OK) {
++            std::fprintf(stderr, "public stage chain failed at cut %d: %s\n",
++                    cut, error == nullptr ? "" : error->message);
++            skippy_error_free(error);
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++            return false;
++        }
++        if (cut == 1) {
++            source = cut_source;
++            final = cut_final;
++        } else {
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++        }
 +    }
 +    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> source_owner(source, skippy_stage_plan_free);
 +    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> final_owner(final, skippy_stage_plan_free);
@@ -1053,7 +1074,7 @@ index cfe7224cb..bfb14fd5f 100644
  int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
      std::string error;
      std::vector<std::string> generated_paths;
-@@ -540,6 +755,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+@@ -540,6 +776,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
          std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
          return 8;
      }
@@ -1237,5 +1258,4 @@ index 8a4048097..380cf4976 100644
      if (!result) { result = check_state_preparation_execution(true, true); }
 -- 
 2.54.0 (Apple Git-157)
-
 
