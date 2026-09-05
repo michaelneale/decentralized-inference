@@ -57,6 +57,38 @@ jobs:
       backend: cuda
       timeout_minutes: ${{ inputs.timeout_minutes }}
 
+  qwen_recurrent_gate:
+    name: Qwen3.5 recurrent migration gate
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'qwen-recurrent-gate') }}
+    uses: ./.github/workflows/scripted-binary-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-cpu
+      artifact_path: ci-artifacts/linux
+      staged_binary_path: ${{ inputs.binary_target }}
+      model_url: https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf
+      model_file: Qwen3.5-0.8B-Q4_K_M.gguf
+      model_cache_scope: two-node-split-recurrent-smoke-model
+      model_context_size: '4096'
+      expected_exact_payload_kind: kv-recurrent
+      smoke_script: scripts/ci-two-node-split-smoke.sh
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  core_cuda:
+    name: CUDA inference smoke
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'core-cuda') }}
+    uses: ./.github/workflows/smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-cuda
+      artifact_path: ci-artifacts/linux-cuda
+      mesh_binary_target: ${{ inputs.binary_target }}
+      cache_key_prefix: ""
+      runner: gpu-nvidia
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+
   model_download:
     name: Model download smoke
     if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'model-download') }}

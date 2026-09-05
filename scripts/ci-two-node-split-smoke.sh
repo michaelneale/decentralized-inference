@@ -47,12 +47,20 @@ WORK_DIR="${MESH_TWO_NODE_SPLIT_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/mesh-two-
 # Keep this under /tmp with a short prefix because plugin Unix socket paths
 # must fit platform SUN_LEN limits, especially on macOS where TMPDIR is long.
 PROCESS_ROOT="${MESH_TWO_NODE_SPLIT_PROCESS_ROOT:-$(mktemp -d "/tmp/m2split.XXXXXX")}"
-SEED_LOG="${WORK_DIR}/dense-seed.log"
-WORKER_LOG="${WORK_DIR}/dense-worker.log"
 CLIENT_ROUTING="${MESH_TWO_NODE_SPLIT_CLIENT_ROUTING:-0}"
 CLIENT_API_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_API_PORT:-9369}"
 CLIENT_CONSOLE_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_CONSOLE_PORT:-3163}"
-CLIENT_LOG="${WORK_DIR}/dense-client.log"
+PRIMARY_MODEL_LABEL="${MESH_TWO_NODE_SPLIT_MODEL_LABEL:-}"
+if [[ -z "$PRIMARY_MODEL_LABEL" ]]; then
+    if [[ "$EXPECTED_EXACT_PAYLOAD_KIND" == "kv-recurrent" ]]; then
+        PRIMARY_MODEL_LABEL="recurrent"
+    else
+        PRIMARY_MODEL_LABEL="dense"
+    fi
+fi
+SEED_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-seed.log"
+WORKER_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-worker.log"
+CLIENT_LOG="${WORK_DIR}/${PRIMARY_MODEL_LABEL}-client.log"
 
 echo "=== CI Two-Node Split Smoke ==="
 echo "  mesh-llm:       $MESH_LLM"
@@ -399,7 +407,7 @@ if [[ -z "$MODEL_ID" ]]; then
     echo "${DRIVER_LABEL:-selected driver} /v1/models did not return a model id" >&2
     exit 1
 fi
-MODEL_LABEL="dense"
+MODEL_LABEL="$PRIMARY_MODEL_LABEL"
 export MODEL_ID MODEL_LABEL
 
 run_client_routing_probe

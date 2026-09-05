@@ -302,9 +302,14 @@ class CiLaneWorkflowTests(unittest.TestCase):
             "ci-linux-product-smoke-slice.yml": (
                 "product-integration-cpu",
                 "product-integration-cuda",
+                "qwen-recurrent-gate",
+                "core-cuda",
                 "model-download",
             ),
-            "ci-macos-product-smoke-slice.yml": ("product-integration-metal",),
+            "ci-macos-product-smoke-slice.yml": (
+                "metal-model-load",
+                "product-integration-metal",
+            ),
         }
         for workflow_name, smoke_ids in smoke_workflows.items():
             workflow = self.workflow(workflow_name)

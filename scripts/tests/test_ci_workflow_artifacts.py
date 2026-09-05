@@ -189,7 +189,10 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("--github-output-prefix dense_", restore)
         self.assertIn("--github-output-prefix recurrent_", restore)
         self.assertIn("MESH_TWO_NODE_SPLIT_CLIENT_ROUTING=1", product_script)
-        self.assertIn("MESH_TWO_NODE_SPLIT_RECURRENT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent", product_script)
+        self.assertIn("run_phase dense-split-kv", product_script)
+        self.assertIn("run_phase recurrent-split-kv", product_script)
+        self.assertIn("MESH_TWO_NODE_SPLIT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent", product_script)
+        self.assertNotIn("MESH_TWO_NODE_SPLIT_RECURRENT_MODEL=", product_script)
         self.assertIn("run_client_routing_probe", smoke_script)
         self.assertIn("Passive client routing and streaming validated", smoke_script)
         self.assertIn(
@@ -199,6 +202,19 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn(
             "if not checkpointed_restore and (", smoke_script
         )
+
+    def test_granite_rollout_retains_qwen_and_defers_accelerator_product_rows(self):
+        slices = json.loads(SLICES.read_text())
+        smoke_ids = {row["id"] for row in slices["smoke_rows"]}
+        linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
+
+        self.assertIn("qwen-recurrent-gate", smoke_ids)
+        self.assertIn("Qwen3.5-0.8B-Q4_K_M.gguf", linux)
+        self.assertIn("expected_exact_payload_kind: kv-recurrent", linux)
+        self.assertNotIn("product-integration-cuda", smoke_ids)
+        self.assertNotIn("product-integration-metal", smoke_ids)
+        self.assertIn("core-cuda", smoke_ids)
+        self.assertIn("metal-model-load", smoke_ids)
 
     def test_cuda_product_supports_the_registered_gpu_runner_architecture(self):
         runtimes = json.loads(SLICES.read_text())["runtime_rows"]

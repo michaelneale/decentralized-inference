@@ -82,14 +82,21 @@ run_phase dense-constrained-tokio-restart env \
     MESH_CI_HEADLESS_LOG="$PHASE_ROOT/dense-constrained-tokio-restart/headless.log" \
     scripts/ci-smoke-test.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
-run_phase dense-and-recurrent-split-kv env \
+run_phase dense-split-kv env \
     MESH_TWO_NODE_SPLIT_DEVICE="$DEVICE" \
     MESH_TWO_NODE_SPLIT_MODEL="$DENSE_MODEL" \
-    MESH_TWO_NODE_SPLIT_RECURRENT_MODEL="$RECURRENT_MODEL" \
-    MESH_TWO_NODE_SPLIT_RECURRENT_CTX_SIZE=4096 \
-    MESH_TWO_NODE_SPLIT_RECURRENT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent \
+    MESH_TWO_NODE_SPLIT_MODEL_LABEL=dense \
     MESH_TWO_NODE_SPLIT_CLIENT_ROUTING=1 \
-    MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/dense-and-recurrent-split-kv" \
+    MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/dense-split-kv" \
     scripts/ci-two-node-split-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
+
+run_phase recurrent-split-kv env \
+    MESH_TWO_NODE_SPLIT_DEVICE="$DEVICE" \
+    MESH_TWO_NODE_SPLIT_MODEL="$RECURRENT_MODEL" \
+    MESH_TWO_NODE_SPLIT_MODEL_LABEL=recurrent \
+    MESH_TWO_NODE_SPLIT_CTX_SIZE=4096 \
+    MESH_TWO_NODE_SPLIT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent \
+    MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/recurrent-split-kv" \
+    scripts/ci-two-node-split-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$RECURRENT_MODEL"
 
 echo "Product integration suite passed; phase logs retained at $PHASE_ROOT"

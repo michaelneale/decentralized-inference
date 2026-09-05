@@ -174,15 +174,15 @@
     "backend-vulkan": ["linux-vulkan", "windows-vulkan"]
   },
   "smoke_domain_rows": {
-    "runtime-product": ["product-integration-cpu"],
+    "runtime-product": ["product-integration-cpu", "qwen-recurrent-gate"],
     "ui": ["product-integration-cpu"],
-    "native-abi": ["product-integration-cpu"],
-    "protocol": ["product-integration-cpu"],
-    "split-serving": ["product-integration-cpu"],
+    "native-abi": ["product-integration-cpu", "qwen-recurrent-gate"],
+    "protocol": ["product-integration-cpu", "qwen-recurrent-gate"],
+    "split-serving": ["product-integration-cpu", "qwen-recurrent-gate"],
     "model-download": ["model-download"],
-    "platform-macos": ["product-integration-metal"],
+    "platform-macos": ["metal-model-load"],
     "platform-windows": ["product-integration-cpu"],
-    "backend-cuda": ["product-integration-cuda"],
+    "backend-cuda": ["core-cuda"],
     "backend-rocm": ["product-integration-cpu"],
     "backend-vulkan": ["product-integration-cpu"]
   },
@@ -220,9 +220,10 @@
   ],
   "smoke_rows": [
     {"id": "product-integration-cpu", "kind": "product-integration", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-8"},
-    {"id": "product-integration-cuda", "kind": "product-integration", "platform": "linux", "backend": "cuda", "runner_role": "gpu-nvidia"},
+    {"id": "qwen-recurrent-gate", "kind": "two-node-split", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-8"},
+    {"id": "core-cuda", "kind": "core", "platform": "linux", "backend": "cuda", "runner_role": "gpu-nvidia"},
     {"id": "model-download", "kind": "model-download", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-4"},
-    {"id": "product-integration-metal", "kind": "product-integration", "platform": "macos", "backend": "metal", "runner_role": "macos-build"}
+    {"id": "metal-model-load", "kind": "metal-model-load", "platform": "macos", "backend": "metal", "runner_role": "macos-build"}
   ],
   "batch_limits": {"clippy": 3, "rust_tests": 4},
   "slices": [

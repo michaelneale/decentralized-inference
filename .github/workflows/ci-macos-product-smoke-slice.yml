@@ -33,6 +33,21 @@ permissions:
   packages: read
 
 jobs:
+  metal_model_load:
+    name: Metal model-load smoke
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'metal-model-load') }}
+    uses: ./.github/workflows/smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-macos-${{ inputs.architecture }}-metal
+      artifact_path: ci-artifacts/macos
+      mesh_binary_target: ${{ inputs.binary_target }}
+      cache_key_prefix: ""
+      runner: macos-15
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   product_integration_metal:
     name: Metal product integration suite
     if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-metal') }}

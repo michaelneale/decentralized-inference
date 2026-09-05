@@ -305,7 +305,7 @@ class PlanCiTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["smoke"]],
-            ["product-integration-cpu"],
+            ["product-integration-cpu", "qwen-recurrent-gate"],
         )
 
     def test_cuda_change_selects_the_gpu_smoke_row(self) -> None:
@@ -317,7 +317,7 @@ class PlanCiTests(unittest.TestCase):
 
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["smoke"]],
-            ["product-integration-cuda"],
+            ["core-cuda"],
         )
 
     def test_macos_platform_change_selects_portable_and_unit_rows(self) -> None:
@@ -364,9 +364,10 @@ class PlanCiTests(unittest.TestCase):
             {row["id"] for row in plan["matrices"]["smoke"]},
             {
                 "product-integration-cpu",
-                "product-integration-cuda",
+                "qwen-recurrent-gate",
+                "core-cuda",
                 "model-download",
-                "product-integration-metal",
+                "metal-model-load",
             },
         )
         self.assertIn(

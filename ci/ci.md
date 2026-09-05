@@ -289,9 +289,13 @@ runtime producers are not duplicated.
   its registry-derived pair exactly once: dense SmolLM2-135M Q8 and recurrent
   IBM Granite 4.0 H 350M Q4. Its ordered phases cover dense standalone,
   OpenAI/SDK, constrained-Tokio restart, and a dense seed/worker/passive-client
-  topology followed by strict Granite `KvRecurrent` cache validation. CPU,
-  CUDA, and Metal use the same fixture identities; CUDA and Metal request their
-  explicit accelerator device and reject unsupported typed backend selections.
+  topology followed by a separately evidenced strict Granite `KvRecurrent`
+  phase. The existing Qwen3.5 recurrent job remains required until Granite
+  passes that live contract. The typed runner supports CPU, CUDA, and Metal,
+  but only CPU is selected during the first qualification stage; the existing
+  CUDA inference and Metal model-load signals remain required until their typed
+  product rows pass live qualification in that order. CUDA and Metal request
+  their explicit accelerator device and reject unsupported typed selections.
   CUDA inference uses the
   approved `gpu-nvidia` ephemeral self-hosted scale set, including for
   same-repository PRs. That hardware-qualified exception executes only through
