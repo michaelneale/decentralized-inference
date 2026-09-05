@@ -959,7 +959,7 @@ fn read_native_values(
         )?;
         values.push(read_plan_string(raw, descriptor.identity)?);
     }
-    ensure_canonical_strings(&format!("native {kind:?} identities"), &values)?;
+    ensure_unique_strings(&format!("native {kind:?} identities"), &values)?;
     Ok(values)
 }
 
@@ -1005,6 +1005,17 @@ fn ensure_canonical_strings(label: &str, values: &[String]) -> anyhow::Result<()
         anyhow::ensure!(
             window[0] < window[1],
             "{label} are not strictly sorted at index {index}"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_unique_strings(label: &str, values: &[String]) -> anyhow::Result<()> {
+    let mut unique = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        anyhow::ensure!(
+            unique.insert(value),
+            "{label} contain a duplicate at index {index}: {value:?}"
         );
     }
     Ok(())
@@ -1684,5 +1695,56 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    #[ignore = "requires SKIPPY_PACKAGE_V2_TEST_DIR and the prepared native runtime"]
+    fn realizes_and_admits_a_real_package_v2_chain() {
+        let package_dir = std::env::var_os("SKIPPY_PACKAGE_V2_TEST_DIR")
+            .map(PathBuf::from)
+            .expect("SKIPPY_PACKAGE_V2_TEST_DIR is required");
+        let admissions = realize_stage_admissions(
+            &package_dir,
+            &[(0, 16), (16, 32)],
+            &[
+                StagePlannerProfile {
+                    profile_id: "batched".to_string(),
+                    n_tokens: 8,
+                    n_sequences: 2,
+                    n_outputs: 8,
+                    n_recurrent_rollback_sequences: 0,
+                },
+                StagePlannerProfile {
+                    profile_id: "decode".to_string(),
+                    n_tokens: 1,
+                    n_sequences: 1,
+                    n_outputs: 1,
+                    n_recurrent_rollback_sequences: 0,
+                },
+                StagePlannerProfile {
+                    profile_id: "prefill".to_string(),
+                    n_tokens: 8,
+                    n_sequences: 1,
+                    n_outputs: 8,
+                    n_recurrent_rollback_sequences: 0,
+                },
+            ],
+            "skippy-graph-configuration:v1:real-package-test",
+            "skippy-backend:cpu:v1",
+        )
+        .expect("real package-v2 chain must admit");
+        assert_eq!(admissions.len(), 2);
+        assert_eq!(admissions[0].package_id, admissions[1].package_id);
+        assert_ne!(admissions[0].plan_id, admissions[1].plan_id);
+        assert!(
+            admissions
+                .iter()
+                .all(|admission| !admission.resident_tensor_ids.is_empty())
+        );
+        assert!(
+            admissions
+                .iter()
+                .all(|admission| admission.profiles.len() == 3)
+        );
     }
 }

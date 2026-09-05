@@ -53,10 +53,8 @@ fn topology_hash_commits_exact_stage_admission() {
         skippy::test_stage_admission(0, 8),
     )]);
     let original = split_topology_hash(&stages, &admissions);
-    admissions
-        .get_mut(&stages[0].stage_id)
-        .unwrap()
-        .plan_id = format!("skippy-plan:v1:{}", "c7".repeat(32));
+    admissions.get_mut(&stages[0].stage_id).unwrap().plan_id =
+        format!("skippy-plan:v1:{}", "c7".repeat(32));
     assert_ne!(original, split_topology_hash(&stages, &admissions));
 }
 
