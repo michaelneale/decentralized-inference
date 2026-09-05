@@ -1,23 +1,17 @@
 mod activation;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "generation-15 frame integration intentionally lands separately"
-    )
-)]
 mod activation_codec;
 mod codec;
 mod types;
 
 pub use activation::{
     activation_payload_multiplier_from_state_flags, activation_wire_bytes,
-    activation_wire_bytes_with_state_flags, encode_f32_activation_payload,
+    activation_wire_bytes_for_codec_with_state_flags, activation_wire_bytes_with_state_flags,
+    encode_activation_payload_with_state_flags, encode_f32_activation_payload,
     encode_f32_activation_payload_with_state_flags,
 };
 pub use codec::{
-    read_stage_message, recv_ready, recv_reply, send_ready, send_reply_ack,
-    send_reply_ack_with_stats, send_reply_message, send_reply_predicted,
+    read_stage_message, read_stage_message_for_codec, recv_ready, recv_reply, send_ready,
+    send_reply_ack, send_reply_ack_with_stats, send_reply_message, send_reply_predicted,
     send_reply_predicted_tokens_with_stats, send_reply_predicted_tokens_with_window_and_stats,
     send_reply_predicted_with_stats, send_reply_predicted_with_tokens_and_stats,
     send_reply_predicted_with_tokens_window_and_stats, write_stage_message,
@@ -73,6 +67,7 @@ mod tests {
         push_i32(bytes, state.decode_step);
         push_i32(bytes, state.current_token);
         push_i32(bytes, state.source_stage_index);
+        push_i32(bytes, state.activation_codec.binary_wire_id());
     }
 
     fn stage_frame_prefix(
@@ -89,6 +84,7 @@ mod tests {
         push_i32(&mut bytes, token_sideband_count);
         push_i32(&mut bytes, position_sideband_count);
         push_state_header(&mut bytes, state);
+        push_i32(&mut bytes, 0);
         push_u64(&mut bytes, 7);
         push_u64(&mut bytes, 11);
         bytes
@@ -271,6 +267,7 @@ mod tests {
         state.decode_step = 0;
         state.current_token = 11;
         state.source_stage_index = 0;
+        state.activation_codec = crate::StageActivationCodec::RawF32V1;
         let activation: Vec<u8> = [1.0_f32, 2.0_f32]
             .into_iter()
             .flat_map(f32::to_le_bytes)
@@ -328,6 +325,107 @@ mod tests {
         assert_eq!(sampling.logit_bias.len(), 1);
         assert_eq!(sampling.logit_bias[0].token_id, 123);
         assert_eq!(sampling.logit_bias[0].bias, -50.0);
+    }
+
+    #[test]
+    fn stage_message_round_trips_every_activation_codec_with_sideband_rows() {
+        let values = [1.0_f32, -1.0, 0.5, -0.5];
+        let f32_payload = values
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        for codec in [
+            crate::StageActivationCodec::RawF32V1,
+            crate::StageActivationCodec::F16RneV1,
+            crate::StageActivationCodec::Bf16RneV1,
+            crate::StageActivationCodec::S8RowF32RneV1,
+        ] {
+            let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
+            state.source_stage_index = 0;
+            state.flags |= state_flags::RWKV7_V_FIRST_SIDEBAND;
+            state.activation_codec = codec;
+            let activation =
+                encode_activation_payload_with_state_flags(codec, 1, 2, &f32_payload, state.flags)
+                    .unwrap();
+            assert_eq!(
+                activation.len(),
+                activation_wire_bytes_for_codec_with_state_flags(codec, 1, 2, state.flags).unwrap()
+            );
+            let message = StageWireMessage {
+                kind: WireMessageKind::DecodeEmbd,
+                pos_start: 0,
+                token_count: 1,
+                state,
+                request_id: 7,
+                session_id: 9,
+                sampling: None,
+                chat_sampling_metadata: None,
+                tokens: vec![42],
+                positions: Vec::new(),
+                activation,
+                raw_bytes: Vec::new(),
+            };
+            let mut bytes = Vec::new();
+            write_stage_message(&mut bytes, &message).unwrap();
+            let decoded = read_stage_message_for_codec(Cursor::new(bytes), 2, codec).unwrap();
+            assert_eq!(decoded.state.activation_codec, codec);
+            assert_eq!(decoded.activation.len(), f32_payload.len());
+            if codec == crate::StageActivationCodec::RawF32V1 {
+                assert_eq!(decoded.activation, f32_payload);
+            }
+        }
+    }
+
+    #[test]
+    fn stage_message_rejects_codec_mismatch_and_malformed_compact_header() {
+        let codec = crate::StageActivationCodec::F16RneV1;
+        let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
+        state.source_stage_index = 0;
+        state.activation_codec = codec;
+        let f32_payload = [1.0_f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let activation =
+            encode_activation_payload_with_state_flags(codec, 1, 2, &f32_payload, 0).unwrap();
+        let message = StageWireMessage {
+            kind: WireMessageKind::DecodeEmbd,
+            pos_start: 0,
+            token_count: 1,
+            state,
+            request_id: 7,
+            session_id: 9,
+            sampling: None,
+            chat_sampling_metadata: None,
+            tokens: Vec::new(),
+            positions: Vec::new(),
+            activation,
+            raw_bytes: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        write_stage_message(&mut bytes, &message).unwrap();
+        let fixed_header_only = bytes[..STAGE_WIRE_FIXED_HEADER_BYTES].to_vec();
+        assert_invalid_data(
+            read_stage_message_for_codec(
+                Cursor::new(fixed_header_only),
+                2,
+                crate::StageActivationCodec::RawF32V1,
+            ),
+            "stage activation codec mismatch",
+        );
+
+        let mut wrong_size = bytes.clone();
+        wrong_size[60..64].copy_from_slice(&5_i32.to_le_bytes());
+        assert_invalid_data(
+            read_stage_message(Cursor::new(wrong_size), 2),
+            "activation payload size mismatch",
+        );
+
+        bytes[56..60].copy_from_slice(&99_i32.to_le_bytes());
+        assert_invalid_data(
+            read_stage_message(Cursor::new(bytes), 2),
+            "unknown stage activation codec",
+        );
     }
 
     #[test]
@@ -419,11 +517,13 @@ mod tests {
 
     #[test]
     fn stage_message_estimates_full_wire_transfer_bytes() {
+        let mut state = StageStateHeader::new(WireMessageKind::PrefillEmbd);
+        state.source_stage_index = 0;
         let message = StageWireMessage {
             kind: WireMessageKind::PrefillEmbd,
             pos_start: 0,
             token_count: 2,
-            state: StageStateHeader::new(WireMessageKind::PrefillEmbd),
+            state,
             request_id: 7,
             session_id: 11,
             sampling: Some(StageSamplingConfig {
@@ -727,9 +827,9 @@ mod tests {
         let mut bytes = Vec::new();
         write_stage_message(&mut bytes, &message).unwrap();
 
-        assert_eq!(STAGE_STATE_HEADER_BYTES, 36);
+        assert_eq!(STAGE_STATE_HEADER_BYTES, 40);
         assert_eq!(STAGE_SAMPLING_CONFIG_BASE_BYTES, 108);
-        assert_eq!(STAGE_WIRE_FIXED_HEADER_BYTES, 72);
+        assert_eq!(STAGE_WIRE_FIXED_HEADER_BYTES, 80);
         assert_eq!(
             bytes.len(),
             STAGE_WIRE_FIXED_HEADER_BYTES + message.tokens.len() * 4
@@ -915,6 +1015,7 @@ mod tests {
     fn rwkv7_sideband_activation_round_trips() {
         let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
         state.source_stage_index = 0;
+        state.activation_codec = crate::StageActivationCodec::RawF32V1;
         state.flags |= state_flags::RWKV7_V_FIRST_SIDEBAND;
         let mut activation_f32 = Vec::new();
         for value in [1.0_f32, 2.0, 3.0, 4.0] {
@@ -952,6 +1053,7 @@ mod tests {
     fn inkling_mtp_embedding_sideband_activation_round_trips() {
         let mut state = StageStateHeader::new(WireMessageKind::PrefillEmbd);
         state.source_stage_index = 0;
+        state.activation_codec = crate::StageActivationCodec::RawF32V1;
         state.flags |= state_flags::INKLING_MTP_EMBD_SIDEBAND;
         let mut activation_f32 = Vec::new();
         for value in [1.0_f32, 2.0, 3.0, 4.0] {
@@ -1051,6 +1153,7 @@ mod tests {
     fn gemma3n_altup_sideband_activation_round_trips() {
         let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
         state.source_stage_index = 0;
+        state.activation_codec = crate::StageActivationCodec::RawF32V1;
         state.flags |= state_flags::GEMMA3N_ALTUP_SIDEBAND;
         let mut activation_f32 = Vec::new();
         for value in 0..8 {

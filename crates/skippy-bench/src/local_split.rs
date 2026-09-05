@@ -431,7 +431,8 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
     state.source_stage_index = 0;
     state.flags |=
         skippy_protocol::binary::activation_state_flags_from_frame_flags(boundary.desc.flags);
-    let activation = skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+    let activation = skippy_protocol::binary::encode_activation_payload_with_state_flags(
+        state.activation_codec,
         1,
         activation_width,
         &boundary.payload,
@@ -679,7 +680,8 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
     state.source_stage_index = 0;
     state.flags |=
         skippy_protocol::binary::activation_state_flags_from_frame_flags(boundary.desc.flags);
-    let activation = skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+    let activation = skippy_protocol::binary::encode_activation_payload_with_state_flags(
+        state.activation_codec,
         1,
         activation_width,
         &boundary.payload,

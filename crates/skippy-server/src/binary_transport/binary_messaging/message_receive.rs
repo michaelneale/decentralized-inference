@@ -1,6 +1,9 @@
 use super::ConnectionWorkerControl;
 use anyhow::{Context, Result};
-use skippy_protocol::binary::{StageWireMessage, read_stage_message};
+use skippy_protocol::{
+    StageActivationCodec,
+    binary::{StageWireMessage, read_stage_message_for_codec},
+};
 use std::io;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +18,7 @@ pub(super) fn receive_next_message(
     upstream: &mut TcpStream,
     worker_control: &ConnectionWorkerControl,
     activation_width: i32,
+    activation_codec: StageActivationCodec,
     first_message: Option<StageWireMessage>,
     pending_prefill_replies: usize,
     observed_message_count: usize,
@@ -31,7 +35,7 @@ pub(super) fn receive_next_message(
         // shutdown cannot interrupt on Windows (#1538).
         return Ok(None);
     }
-    match read_stage_message(upstream, activation_width) {
+    match read_stage_message_for_codec(upstream, activation_width, activation_codec) {
         Ok(message) => Ok(Some(message)),
         Err(error)
             if error.kind() == io::ErrorKind::UnexpectedEof

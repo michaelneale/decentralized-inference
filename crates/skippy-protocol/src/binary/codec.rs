@@ -1,5 +1,7 @@
 use std::io::{self, Read, Write};
 
+use crate::StageActivationCodec;
+
 use super::{
     MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
     MAX_STAGE_DECODED_ACTIVATION_BYTES, MAX_STAGE_DRY_SEQUENCE_BREAKERS, MAX_STAGE_LOGIT_BIAS,
@@ -8,7 +10,9 @@ use super::{
     StageLogitBias, StageNativeMtpDraft, StageReply, StageReplyStats, StageReplyWindow,
     StageSamplingConfig, StageStateHeader, StageWireMessage, WireMessageKind, WireReplyKind,
     activation::{
-        activation_decoded_f32_bytes_with_state_flags, activation_wire_bytes_with_state_flags,
+        activation_decoded_f32_bytes_with_state_flags,
+        activation_wire_bytes_for_codec_with_state_flags,
+        decode_activation_payload_with_state_flags,
     },
     invalid_data, invalid_input,
 };
@@ -240,7 +244,8 @@ fn read_native_mtp_draft(mut reader: impl Read) -> io::Result<Option<StageNative
 pub fn write_stage_message(mut writer: impl Write, message: &StageWireMessage) -> io::Result<()> {
     // Wire v4 fixed prefix, little-endian:
     // kind, pos_start, token_count, token_sideband_count, position_sideband_count (5 x i32);
-    // StageStateHeader (9 x i32); request_id, session_id (2 x u64);
+    // StageStateHeader (10 x i32); activation wire byte count (1 x i32);
+    // request_id, session_id (2 x u64);
     // optional StageSamplingConfig follows when state_flags::SAMPLING is set.
     // Token sideband, raw StateImport bytes, or activation bytes follow this
     // prefix, so prefill overhead stays independent of ID string length.
@@ -274,7 +279,27 @@ pub fn write_stage_message(mut writer: impl Write, message: &StageWireMessage) -
     } else {
         state.flags &= !super::state_flags::CHAT_SAMPLING_METADATA;
     }
+    let activation_wire_byte_count = if message.kind == WireMessageKind::StateImport
+        || state.source_stage_index < 0
+        || message.kind.is_activationless_prefix_cache_control()
+    {
+        if !message.activation.is_empty() {
+            return Err(invalid_input(
+                "activationless stage message contains activation payload",
+            ));
+        }
+        0
+    } else {
+        if message.activation.len() > MAX_STAGE_ACTIVATION_BYTES {
+            return Err(invalid_input(
+                "activation payload byte count exceeds maximum",
+            ));
+        }
+        i32::try_from(message.activation.len())
+            .map_err(|_| invalid_input("activation payload byte count exceeds maximum"))?
+    };
     write_state_header(&mut writer, state)?;
+    write_i32(&mut writer, activation_wire_byte_count)?;
     write_u64(&mut writer, message.request_id)?;
     write_u64(&mut writer, message.session_id)?;
     if let Some(sampling) = message.sampling.as_ref() {
@@ -311,7 +336,23 @@ pub fn write_stage_message(mut writer: impl Write, message: &StageWireMessage) -
     Ok(())
 }
 
-pub fn read_stage_message(mut reader: impl Read, n_embd: i32) -> io::Result<StageWireMessage> {
+pub fn read_stage_message(reader: impl Read, n_embd: i32) -> io::Result<StageWireMessage> {
+    read_stage_message_inner(reader, n_embd, None)
+}
+
+pub fn read_stage_message_for_codec(
+    reader: impl Read,
+    n_embd: i32,
+    expected_codec: StageActivationCodec,
+) -> io::Result<StageWireMessage> {
+    read_stage_message_inner(reader, n_embd, Some(expected_codec))
+}
+
+fn read_stage_message_inner(
+    mut reader: impl Read,
+    n_embd: i32,
+    expected_codec: Option<StageActivationCodec>,
+) -> io::Result<StageWireMessage> {
     let kind = WireMessageKind::try_from(read_i32(&mut reader)?)?;
     let pos_start = read_i32(&mut reader)?;
     let token_count = read_i32(&mut reader)?;
@@ -321,8 +362,47 @@ pub fn read_stage_message(mut reader: impl Read, n_embd: i32) -> io::Result<Stag
     if state.version != STAGE_STATE_VERSION {
         return Err(invalid_data("unsupported stage state version"));
     }
+    let activation_wire_byte_count = checked_i32_len(
+        read_i32(&mut reader)?,
+        MAX_STAGE_ACTIVATION_BYTES,
+        "negative activation payload byte count",
+        "activation payload byte count exceeds maximum",
+    )?;
     let request_id = read_u64(&mut reader)?;
     let session_id = read_u64(&mut reader)?;
+    let activation_bytes = if kind == WireMessageKind::StateImport
+        || kind == WireMessageKind::Stop
+        || state.source_stage_index < 0
+        || kind.is_activationless_prefix_cache_control()
+    {
+        if activation_wire_byte_count != 0 {
+            return Err(invalid_data(
+                "activationless stage message contains activation payload",
+            ));
+        }
+        0
+    } else {
+        if expected_codec.is_some_and(|expected| expected != state.activation_codec) {
+            return Err(invalid_data("stage activation codec mismatch"));
+        }
+        let expected_bytes = activation_wire_bytes_for_codec_with_state_flags(
+            state.activation_codec,
+            token_count,
+            n_embd,
+            state.flags,
+        )?;
+        if activation_wire_byte_count != expected_bytes {
+            return Err(invalid_data("activation payload size mismatch"));
+        }
+        let decoded_activation_bytes =
+            activation_decoded_f32_bytes_with_state_flags(token_count, n_embd, state.flags)?;
+        if decoded_activation_bytes > MAX_STAGE_DECODED_ACTIVATION_BYTES {
+            return Err(invalid_data(
+                "decoded activation payload byte count exceeds maximum",
+            ));
+        }
+        expected_bytes
+    };
     let sampling = if (state.flags & super::state_flags::SAMPLING) != 0 {
         Some(read_sampling_config(&mut reader)?)
     } else {
@@ -402,30 +482,21 @@ pub fn read_stage_message(mut reader: impl Read, n_embd: i32) -> io::Result<Stag
 
     let tokens = read_i32_values(&mut reader, token_sideband_count)?;
     let positions = read_i32_values(&mut reader, position_sideband_count)?;
-    let activation_bytes =
-        if state.source_stage_index < 0 || kind.is_activationless_prefix_cache_control() {
-            0
-        } else {
-            activation_wire_bytes_with_state_flags(token_count, n_embd, state.flags)?
-        };
-    if activation_bytes > MAX_STAGE_ACTIVATION_BYTES {
-        return Err(invalid_data(
-            "activation payload byte count exceeds maximum",
-        ));
-    }
+    let mut wire_activation = vec![0; activation_bytes];
     if activation_bytes > 0 {
-        let decoded_activation_bytes =
-            activation_decoded_f32_bytes_with_state_flags(token_count, n_embd, state.flags)?;
-        if decoded_activation_bytes > MAX_STAGE_DECODED_ACTIVATION_BYTES {
-            return Err(invalid_data(
-                "decoded activation payload byte count exceeds maximum",
-            ));
-        }
+        reader.read_exact(&mut wire_activation)?;
     }
-    let mut activation = vec![0; activation_bytes];
-    if activation_bytes > 0 {
-        reader.read_exact(&mut activation)?;
-    }
+    let activation = if wire_activation.is_empty() {
+        Vec::new()
+    } else {
+        decode_activation_payload_with_state_flags(
+            state.activation_codec,
+            token_count,
+            n_embd,
+            &wire_activation,
+            state.flags,
+        )?
+    };
     Ok(StageWireMessage {
         kind,
         pos_start,
@@ -475,20 +546,33 @@ fn write_state_header(mut writer: impl Write, state: StageStateHeader) -> io::Re
     write_i32(&mut writer, state.prompt_token_count)?;
     write_i32(&mut writer, state.decode_step)?;
     write_i32(&mut writer, state.current_token)?;
-    write_i32(&mut writer, state.source_stage_index)
+    write_i32(&mut writer, state.source_stage_index)?;
+    write_i32(&mut writer, state.activation_codec.binary_wire_id())
 }
 
 fn read_state_header(mut reader: impl Read) -> io::Result<StageStateHeader> {
+    let version = read_i32(&mut reader)?;
+    let seq_id = read_i32(&mut reader)?;
+    let phase = read_i32(&mut reader)?;
+    let flags = read_i32(&mut reader)?;
+    let checkpoint_generation = read_i32(&mut reader)?;
+    let prompt_token_count = read_i32(&mut reader)?;
+    let decode_step = read_i32(&mut reader)?;
+    let current_token = read_i32(&mut reader)?;
+    let source_stage_index = read_i32(&mut reader)?;
+    let activation_codec = StageActivationCodec::from_binary_wire_id(read_i32(&mut reader)?)
+        .ok_or_else(|| invalid_data("unknown stage activation codec"))?;
     Ok(StageStateHeader {
-        version: read_i32(&mut reader)?,
-        seq_id: read_i32(&mut reader)?,
-        phase: read_i32(&mut reader)?,
-        flags: read_i32(&mut reader)?,
-        checkpoint_generation: read_i32(&mut reader)?,
-        prompt_token_count: read_i32(&mut reader)?,
-        decode_step: read_i32(&mut reader)?,
-        current_token: read_i32(&mut reader)?,
-        source_stage_index: read_i32(&mut reader)?,
+        version,
+        seq_id,
+        phase,
+        flags,
+        checkpoint_generation,
+        prompt_token_count,
+        decode_step,
+        current_token,
+        source_stage_index,
+        activation_codec,
     })
 }
 

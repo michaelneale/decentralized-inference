@@ -124,7 +124,8 @@ pub(in crate::runner) fn binary_decode_message(
     state.current_token = args.token_id;
     state.source_stage_index = args.source_stage_index;
     state.flags |= activation_state_flags(args.boundary);
-    let activation = skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+    let activation = skippy_protocol::binary::encode_activation_payload_with_state_flags(
+        state.activation_codec,
         1,
         args.activation_width,
         &args.boundary.payload,

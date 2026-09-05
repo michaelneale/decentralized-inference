@@ -30,7 +30,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
-use skippy_protocol::binary::{WireMessageKind, read_stage_message, send_ready};
+use skippy_protocol::binary::{WireMessageKind, read_stage_message_for_codec, send_ready};
 use skippy_runtime::ActivationBoundaryDesc;
 
 pub(in crate::binary_transport) mod async_forwarder;
@@ -461,14 +461,17 @@ fn run_binary_stage(
                     {
                         return Ok(());
                     }
-                    let first_message =
-                        match read_stage_message(&mut upstream, input_activation_width) {
-                            Ok(message) => message,
-                            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                                return Ok(());
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
+                    let first_message = match read_stage_message_for_codec(
+                        &mut upstream,
+                        input_activation_width,
+                        config.activation_codec,
+                    ) {
+                        Ok(message) => message,
+                        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     if first_message.kind == WireMessageKind::PredictionReturnOpen {
                         if config.stage_index == 0 {
                             return prediction_returns

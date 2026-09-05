@@ -55,10 +55,17 @@ pub(crate) fn forwarded_stage_message_timed(
     }
     let mut state = incoming.state;
     state.source_stage_index = config.stage_index as i32;
+    state.activation_codec = config.activation_codec;
     state.flags |= activation_state_flags_from_frame_flags(output.desc.flags);
     let encode_started = Instant::now();
     let activation =
-        encode_output_activation_payload(incoming, output, activation_width, state.flags)
+        encode_output_activation_payload(
+            config.activation_codec,
+            incoming,
+            output,
+            activation_width,
+            state.flags,
+        )
             .with_context(|| {
                 format!(
                     "encode f32 output activation payload; frame_dtype={:?} incoming_tokens={} output_tokens={} activation_width={} payload_bytes={} frame_payload_bytes={} state_flags={}",
@@ -91,6 +98,7 @@ pub(crate) fn forwarded_stage_message_timed(
 }
 
 fn encode_output_activation_payload(
+    codec: skippy_protocol::StageActivationCodec,
     incoming: &StageWireMessage,
     output: &ActivationFrame,
     activation_width: i32,
@@ -98,7 +106,8 @@ fn encode_output_activation_payload(
 ) -> Result<Vec<u8>> {
     match output.desc.dtype {
         RuntimeActivationDType::F32 => Ok(
-            skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+            skippy_protocol::binary::encode_activation_payload_with_state_flags(
+                codec,
                 incoming.token_count,
                 activation_width,
                 &output.payload,
@@ -234,7 +243,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(forwarded.message.activation.len(), 16);
+        assert_eq!(
+            forwarded.message.state.activation_codec,
+            skippy_protocol::StageActivationCodec::F16RneV1
+        );
+        assert_eq!(forwarded.message.activation.len(), 8);
         assert_ne!(
             forwarded.message.state.flags & state_flags::RWKV7_V_FIRST_SIDEBAND,
             0
@@ -243,6 +256,30 @@ mod tests {
             activation_frame_flags_from_state_flags(forwarded.message.state.flags),
             skippy_protocol::binary::ACTIVATION_FLAG_RWKV7_V_FIRST
         );
+
+        let mut wire = Vec::new();
+        skippy_protocol::binary::write_stage_message(&mut wire, &forwarded.message).unwrap();
+        let decoded = skippy_protocol::binary::read_stage_message_for_codec(
+            std::io::Cursor::new(wire),
+            2,
+            skippy_protocol::StageActivationCodec::F16RneV1,
+        )
+        .unwrap();
+        assert_eq!(decoded.activation.len(), 16);
+    }
+
+    #[test]
+    fn compact_activation_encode_failure_does_not_fall_back_to_raw() {
+        let error = forwarded_stage_message_timed(
+            &stage_config(),
+            &incoming_message(),
+            &f32_frame(0, 1, &[f32::MAX, 1.0]),
+            2,
+        )
+        .err()
+        .expect("F16 overflow must fail the stage connection");
+
+        assert!(format!("{error:#}").contains("F16 activation value is out of range"));
     }
 
     /// A non-first stage must execute the full incoming token range.

@@ -79,6 +79,25 @@ impl StageActivationCodec {
             Self::S8RowF32RneV1 => "s8-row-f32-rne-v1",
         }
     }
+
+    pub(crate) const fn binary_wire_id(self) -> i32 {
+        match self {
+            Self::RawF32V1 => 1,
+            Self::F16RneV1 => 2,
+            Self::Bf16RneV1 => 3,
+            Self::S8RowF32RneV1 => 4,
+        }
+    }
+
+    pub(crate) const fn from_binary_wire_id(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::RawF32V1),
+            2 => Some(Self::F16RneV1),
+            3 => Some(Self::Bf16RneV1),
+            4 => Some(Self::S8RowF32RneV1),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

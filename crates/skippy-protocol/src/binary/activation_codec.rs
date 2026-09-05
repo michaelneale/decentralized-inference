@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::StageActivationCodec;
+
 use super::{
     invalid_data,
     types::{MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_DECODED_ACTIVATION_BYTES},
@@ -7,14 +9,6 @@ use super::{
 
 /// Pure activation payload codecs. This module intentionally does not define a
 /// frame header: framing, codec negotiation, and server wiring own that seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActivationCodec {
-    RawF32,
-    F16Rne,
-    Bf16Rne,
-    S8RowF32RneV1,
-}
-
 /// Logical activation dimensions. Sideband rows are encoded after primary
 /// rows and use the same width and codec rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +60,7 @@ impl ActivationShape {
 }
 
 pub(crate) fn encode_activation(
-    codec: ActivationCodec,
+    codec: StageActivationCodec,
     shape: ActivationShape,
     values: &[f32],
 ) -> io::Result<Vec<u8>> {
@@ -78,25 +72,45 @@ pub(crate) fn encode_activation(
     validate_finite(values)?;
 
     match codec {
-        ActivationCodec::RawF32 => encode_raw_f32(values),
-        ActivationCodec::F16Rne => encode_f16(values),
-        ActivationCodec::Bf16Rne => encode_bf16(values),
-        ActivationCodec::S8RowF32RneV1 => encode_s8_rows(shape, values),
+        StageActivationCodec::RawF32V1 => encode_raw_f32(values),
+        StageActivationCodec::F16RneV1 => encode_f16(values),
+        StageActivationCodec::Bf16RneV1 => encode_bf16(values),
+        StageActivationCodec::S8RowF32RneV1 => encode_s8_rows(shape, values),
     }
 }
 
 pub(crate) fn decode_activation(
-    codec: ActivationCodec,
+    codec: StageActivationCodec,
     shape: ActivationShape,
     payload: &[u8],
 ) -> io::Result<Vec<f32>> {
     let elements = shape.elements()?;
     shape.validate_decoded_limit()?;
     match codec {
-        ActivationCodec::RawF32 => decode_raw_f32(payload, elements),
-        ActivationCodec::F16Rne => decode_f16(payload, elements),
-        ActivationCodec::Bf16Rne => decode_bf16(payload, elements),
-        ActivationCodec::S8RowF32RneV1 => decode_s8_rows(shape, payload),
+        StageActivationCodec::RawF32V1 => decode_raw_f32(payload, elements),
+        StageActivationCodec::F16RneV1 => decode_f16(payload, elements),
+        StageActivationCodec::Bf16RneV1 => decode_bf16(payload, elements),
+        StageActivationCodec::S8RowF32RneV1 => decode_s8_rows(shape, payload),
+    }
+}
+
+pub(crate) fn encoded_len(
+    codec: StageActivationCodec,
+    shape: ActivationShape,
+) -> io::Result<usize> {
+    let rows = shape.rows()?;
+    match codec {
+        StageActivationCodec::RawF32V1 => checked_wire_bytes(shape.elements()?, 4),
+        StageActivationCodec::F16RneV1 | StageActivationCodec::Bf16RneV1 => {
+            checked_wire_bytes(shape.elements()?, 2)
+        }
+        StageActivationCodec::S8RowF32RneV1 => {
+            let row_bytes = shape
+                .columns
+                .checked_add(4)
+                .ok_or_else(|| invalid_data("S8 row byte count overflow"))?;
+            checked_wire_bytes(rows, row_bytes)
+        }
     }
 }
 
@@ -112,10 +126,8 @@ fn encode_raw_f32(values: &[f32]) -> io::Result<Vec<u8>> {
 fn decode_raw_f32(payload: &[u8], elements: usize) -> io::Result<Vec<f32>> {
     validate_payload_bytes(payload.len(), checked_wire_bytes(elements, 4)?)?;
     let mut out = Vec::with_capacity(elements);
-    for bytes in payload.chunks_exact(4) {
-        out.push(f32::from_le_bytes(
-            bytes.try_into().expect("exact f32 chunk"),
-        ));
+    for bytes in payload.as_chunks::<4>().0 {
+        out.push(f32::from_le_bytes(*bytes));
     }
     validate_finite(&out)?;
     Ok(out)
@@ -138,10 +150,8 @@ fn encode_f16(values: &[f32]) -> io::Result<Vec<u8>> {
 fn decode_f16(payload: &[u8], elements: usize) -> io::Result<Vec<f32>> {
     validate_payload_bytes(payload.len(), checked_wire_bytes(elements, 2)?)?;
     let mut out = Vec::with_capacity(elements);
-    for bytes in payload.chunks_exact(2) {
-        let value = f16_bits_to_f32(u16::from_le_bytes(
-            bytes.try_into().expect("exact f16 chunk"),
-        ));
+    for bytes in payload.as_chunks::<2>().0 {
+        let value = f16_bits_to_f32(u16::from_le_bytes(*bytes));
         if !value.is_finite() {
             return Err(invalid_data("activation payload contains non-finite value"));
         }
@@ -166,12 +176,8 @@ fn encode_bf16(values: &[f32]) -> io::Result<Vec<u8>> {
 fn decode_bf16(payload: &[u8], elements: usize) -> io::Result<Vec<f32>> {
     validate_payload_bytes(payload.len(), checked_wire_bytes(elements, 2)?)?;
     let mut out = Vec::with_capacity(elements);
-    for bytes in payload.chunks_exact(2) {
-        let value = f32::from_bits(
-            u32::from(u16::from_le_bytes(
-                bytes.try_into().expect("exact bf16 chunk"),
-            )) << 16,
-        );
+    for bytes in payload.as_chunks::<2>().0 {
+        let value = f32::from_bits(u32::from(u16::from_le_bytes(*bytes)) << 16);
         if !value.is_finite() {
             return Err(invalid_data("activation payload contains non-finite value"));
         }
@@ -368,10 +374,10 @@ mod tests {
     #[test]
     fn raw_f32_is_exact_and_shape_aware() {
         let values = [-0.0, 1.0, -2.5, f32::MIN_POSITIVE, 7.0, -9.0];
-        let payload = encode_activation(ActivationCodec::RawF32, SHAPE, &values).unwrap();
+        let payload = encode_activation(StageActivationCodec::RawF32V1, SHAPE, &values).unwrap();
         assert_eq!(payload.len(), 24);
         assert_eq!(
-            decode_activation(ActivationCodec::RawF32, SHAPE, &payload).unwrap(),
+            decode_activation(StageActivationCodec::RawF32V1, SHAPE, &payload).unwrap(),
             values
         );
     }
@@ -381,13 +387,13 @@ mod tests {
         let shape = ActivationShape::new(1, 0, 4);
         let f16_values = [1.0, 1.000_488_3, 1.001_464_8, -0.0];
         assert_eq!(
-            encode_activation(ActivationCodec::F16Rne, shape, &f16_values).unwrap(),
+            encode_activation(StageActivationCodec::F16RneV1, shape, &f16_values).unwrap(),
             vec![0x00, 0x3c, 0x00, 0x3c, 0x02, 0x3c, 0x00, 0x80]
         );
 
         let bf16_values = [1.0, 1.003_906_3, 1.011_718_8, -0.0];
         assert_eq!(
-            encode_activation(ActivationCodec::Bf16Rne, shape, &bf16_values).unwrap(),
+            encode_activation(StageActivationCodec::Bf16RneV1, shape, &bf16_values).unwrap(),
             vec![0x80, 0x3f, 0x80, 0x3f, 0x82, 0x3f, 0x00, 0x80]
         );
     }
@@ -396,7 +402,8 @@ mod tests {
     fn s8_rows_have_deterministic_golden_bytes_and_zero_rows_use_scale_one() {
         let shape = ActivationShape::new(2, 0, 4);
         let values = [0.0, 0.0, 0.0, 0.0, -1.0, -0.5, 0.5, 1.0];
-        let payload = encode_activation(ActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
+        let payload =
+            encode_activation(StageActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
         assert_eq!(
             payload,
             vec![
@@ -404,7 +411,8 @@ mod tests {
                 0x04, 0x02, 0x01, 0x3c, 129, 192, 64, 127,
             ]
         );
-        let decoded = decode_activation(ActivationCodec::S8RowF32RneV1, shape, &payload).unwrap();
+        let decoded =
+            decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &payload).unwrap();
         assert_eq!(&decoded[..4], &[0.0; 4]);
         assert_eq!(decoded[4], -1.0);
         assert_eq!(decoded[5], -64.0 / 127.0);
@@ -416,7 +424,8 @@ mod tests {
     fn s8_uses_symmetric_range_zero_point_and_round_to_even() {
         let shape = ActivationShape::new(1, 0, 5);
         let values = [-1.0, -0.5, 0.0, 0.5, 1.0];
-        let payload = encode_activation(ActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
+        let payload =
+            encode_activation(StageActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
         assert_eq!(&payload[4..], &[129, 192, 0, 64, 127]);
 
         assert_eq!(round_to_even_i8(-2.5), -2);
@@ -428,12 +437,12 @@ mod tests {
     #[test]
     fn sideband_rows_are_included_in_shape_and_s8_chunks_are_invariant() {
         let values = [1.0, -1.0, 0.5, -0.5, 2.0, -2.0];
-        let all = encode_activation(ActivationCodec::S8RowF32RneV1, SHAPE, &values).unwrap();
+        let all = encode_activation(StageActivationCodec::S8RowF32RneV1, SHAPE, &values).unwrap();
         let mut chunks = Vec::new();
-        for row in values.chunks_exact(2) {
+        for row in values.as_chunks::<2>().0 {
             chunks.extend(
                 encode_activation(
-                    ActivationCodec::S8RowF32RneV1,
+                    StageActivationCodec::S8RowF32RneV1,
                     ActivationShape::new(1, 0, 2),
                     row,
                 )
@@ -442,7 +451,7 @@ mod tests {
         }
         assert_eq!(all, chunks);
         assert_eq!(
-            decode_activation(ActivationCodec::S8RowF32RneV1, SHAPE, &all)
+            decode_activation(StageActivationCodec::S8RowF32RneV1, SHAPE, &all)
                 .unwrap()
                 .len(),
             6
@@ -453,10 +462,10 @@ mod tests {
     fn codecs_reject_non_finite_values_and_malformed_payloads() {
         let shape = ActivationShape::new(1, 0, 1);
         for codec in [
-            ActivationCodec::RawF32,
-            ActivationCodec::F16Rne,
-            ActivationCodec::Bf16Rne,
-            ActivationCodec::S8RowF32RneV1,
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::F16RneV1,
+            StageActivationCodec::Bf16RneV1,
+            StageActivationCodec::S8RowF32RneV1,
         ] {
             assert_invalid(
                 encode_activation(codec, shape, &[f32::NAN]),
@@ -474,33 +483,33 @@ mod tests {
 
         let nan_payload = f32::NAN.to_le_bytes();
         assert_invalid(
-            decode_activation(ActivationCodec::RawF32, shape, &nan_payload),
+            decode_activation(StageActivationCodec::RawF32V1, shape, &nan_payload),
             "activation values must be finite",
         );
         assert_invalid(
-            decode_activation(ActivationCodec::S8RowF32RneV1, shape, &[0, 0, 0, 0, 0]),
+            decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &[0, 0, 0, 0, 0]),
             "S8 activation row scale is not finite and positive",
         );
         assert_invalid(
-            decode_activation(ActivationCodec::F16Rne, shape, &[0, 0x7c]),
+            decode_activation(StageActivationCodec::F16RneV1, shape, &[0, 0x7c]),
             "activation payload contains non-finite value",
         );
         assert_invalid(
-            decode_activation(ActivationCodec::Bf16Rne, shape, &[0x80, 0x7f]),
+            decode_activation(StageActivationCodec::Bf16RneV1, shape, &[0x80, 0x7f]),
             "activation payload contains non-finite value",
         );
         let mut overflowing_s8 = f32::MAX.to_le_bytes().to_vec();
         overflowing_s8.push(127);
         assert_invalid(
-            decode_activation(ActivationCodec::S8RowF32RneV1, shape, &overflowing_s8),
+            decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &overflowing_s8),
             "activation payload contains non-finite value",
         );
         assert_invalid(
-            encode_activation(ActivationCodec::F16Rne, shape, &[f32::MAX]),
+            encode_activation(StageActivationCodec::F16RneV1, shape, &[f32::MAX]),
             "F16 activation value is out of range",
         );
         assert_invalid(
-            encode_activation(ActivationCodec::Bf16Rne, shape, &[f32::MAX]),
+            encode_activation(StageActivationCodec::Bf16RneV1, shape, &[f32::MAX]),
             "BF16 activation value is out of range",
         );
     }
@@ -509,19 +518,19 @@ mod tests {
     fn checked_limits_reject_overflow_and_payloads_over_protocol_maximum() {
         let overflow = ActivationShape::new(usize::MAX, 1, 1);
         assert_invalid(
-            encode_activation(ActivationCodec::RawF32, overflow, &[]),
+            encode_activation(StageActivationCodec::RawF32V1, overflow, &[]),
             "activation row count overflow",
         );
 
         let too_large = ActivationShape::new(MAX_STAGE_DECODED_ACTIVATION_BYTES / 4 + 1, 0, 1);
         assert_invalid(
-            decode_activation(ActivationCodec::RawF32, too_large, &[]),
+            decode_activation(StageActivationCodec::RawF32V1, too_large, &[]),
             "decoded activation payload byte count exceeds maximum",
         );
 
         let s8_wire_too_large = ActivationShape::new(MAX_STAGE_ACTIVATION_BYTES / 5 + 1, 0, 1);
         assert_invalid(
-            decode_activation(ActivationCodec::S8RowF32RneV1, s8_wire_too_large, &[]),
+            decode_activation(StageActivationCodec::S8RowF32RneV1, s8_wire_too_large, &[]),
             "activation payload byte count exceeds maximum",
         );
     }

@@ -1529,7 +1529,8 @@ fn send_prefill_for_state_handoff(
         .map(|frame| frame.desc.producer_stage_index)
         .unwrap_or(-1);
     state.flags |= activation_state_flags_optional(input);
-    let activation = encode_handoff_activation(input, token_count, activation_width)?;
+    let activation =
+        encode_handoff_activation(state.activation_codec, input, token_count, activation_width)?;
     let message = StageWireMessage {
         kind: WireMessageKind::PrefillEmbd,
         pos_start: 0,
@@ -1634,7 +1635,7 @@ fn decode_for_state_handoff(
         .map(|frame| frame.desc.producer_stage_index)
         .unwrap_or(-1);
     state.flags |= activation_state_flags_optional(input);
-    let activation = encode_handoff_activation(input, 1, activation_width)?;
+    let activation = encode_handoff_activation(state.activation_codec, input, 1, activation_width)?;
     let message = StageWireMessage {
         kind: WireMessageKind::DecodeEmbd,
         pos_start: i32::try_from(pos_start).context("decode position exceeds i32")?,
@@ -1658,6 +1659,7 @@ fn decode_for_state_handoff(
 }
 
 fn encode_handoff_activation(
+    codec: skippy_protocol::StageActivationCodec,
     input: Option<&ActivationFrame>,
     token_count: i32,
     activation_width: i32,
@@ -1665,7 +1667,8 @@ fn encode_handoff_activation(
     let Some(input) = input else {
         return Ok(Vec::new());
     };
-    skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+    skippy_protocol::binary::encode_activation_payload_with_state_flags(
+        codec,
         token_count,
         activation_width,
         &input.payload,
