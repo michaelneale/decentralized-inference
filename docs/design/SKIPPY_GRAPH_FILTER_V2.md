@@ -54,20 +54,23 @@ These invariants are non-negotiable implementation gates:
    loaded exactly once with matching identity, dtype, and shape.
 6. **Effects are dependencies.** KV/recurrent reads and writes, aliases,
    ordering constraints, and lifetimes participate in the slice closure.
-7. **Boundaries come from crossing edges.** Activation and state planes are
-   derived from graph edges crossing the selected block frontier, not declared
-   by family policy.
+7. **Boundaries preserve frontier liveness.** Activation and state planes are
+   derived from values live across each selected block frontier, not declared
+   by family policy. A value that skips an intermediate stage remains a typed
+   pass-through import and export even when that stage does not consume it.
 8. **Persistent state stays local.** KV or recurrent state remains owned by the
    stage executing the relevant layers unless a real graph edge crosses the
    cut.
-9. **Plans cover execution modes.** The realized dependency set is the
-   conservative union across supported prefill, decode, batch, speculative,
-   and optional paths. A single traced shape cannot certify a stage.
+9. **Execution profiles remain guarded.** Prefill, decode, batch, speculative,
+   and optional paths retain separate executable slices and boundary schemas.
+   Only their resident weight requirements are conservatively unioned. A
+   single traced shape or one merged executable graph cannot certify a stage.
 10. **Legal cuts are derived.** A numbered layer boundary is not automatically
     legal. Unsupported boundaries fail closed with a structured reason.
 11. **Validation precedes publication.** No partial or inconsistent stage is
     advertised to the topology.
-12. **Deterministic planning.** The same package identity, runtime profile, and
+12. **Deterministic planning.** The same package identity, graph/planner
+    semantic version, graph-affecting configuration, runtime profile, and
     requested range produce the same normalized plan and digest independent of
     tensor-probe order.
 
@@ -79,7 +82,7 @@ flowchart LR
   B["Normal model builder\nno stage knowledge"]
   G["Full ggml_cgraph\nno_alloc"]
   M["Block boundaries\nstate, effect, alias metadata"]
-  U["Union of supported\nexecution profiles"]
+  U["Guarded supported\nexecution profiles"]
   R["Requested layer range"]
   S["Generic partitioner"]
   X["Sliced executable graph"]
@@ -110,10 +113,15 @@ flowchart LR
 - Record exact baseline commits for Mesh and the prepared llama.cpp tree.
 - Capture current package corpus identities, supported-family registry, stage
   protocol generation, and end-to-end parity results.
+- Freeze an expected support matrix before enabling the new planner. It records
+  every certified model profile, required lane, currently supported cut, and
+  capability obligation independently of what the new partitioner later
+  chooses to accept or reject.
 - Use a dedicated worktree. Do not modify the default branch.
 
-**Exit gate:** reproducible baseline and no ambiguous ownership with the
-Granite fix or activation-plane work.
+**Exit gate:** reproducible baseline, independently frozen expected support
+matrix, and no ambiguous ownership with the Granite fix or activation-plane
+work.
 
 ## Workstream 1: Package Format v2
 
@@ -155,13 +163,16 @@ runtime path. Do not add long-lived v1 runtime compatibility.
   certification step.
 - Reject missing, duplicate, mismatched, overlapping, or out-of-bounds tensor
   records.
-- Provide an optional offline v1-to-v2 converter. It may reuse existing GGUF
-  bytes only when a full scan proves exact coverage; otherwise it refuses with
-  the missing tensor list and requires a rebuild.
+- Provide an optional offline v1-to-v2 converter. Existing v1 artifacts prove
+  only what survived old package selection, not what the source model
+  contained. The converter may certify full coverage only by comparing against
+  the original source tensor directories or an immutable, source-bound tensor
+  inventory captured independently of v1 selection. Without that independent
+  expected set it must refuse certification and require a rebuild.
 
 **Exit gate:** v2 packages can reconstruct the full metadata model without
 reading weight payloads, and the current certification corpus has been rebuilt
-or explicitly converted.
+or converted only where independent source evidence proves full coverage.
 
 ## Workstream 2: Metadata-Only Unsplit Graph
 
@@ -178,14 +189,20 @@ or explicitly converted.
   - multi-sequence/batched execution;
   - enabled speculative/MTP paths;
   - enabled multimodal or other optional paths that affect the language graph.
-- Normalize and union graph facts across profiles. Reject unstable or
-  unexplained shape-dependent tensor closures.
+- Normalize each admitted execution profile separately. Preserve its own
+  executable slice, guards, and boundary schema; union only exact parameter
+  requirements needed for the shared resident weight set.
+- Bind admitted profiles to graph/planner semantics and all graph-affecting
+  configuration. Every subsequently built runtime graph must match an admitted
+  contract before execution; a new configuration either replans or rejects.
+- Reject unstable or unexplained shape-dependent tensor closures.
 - Measure planning time and metadata memory. Assert that no full-model weight
   allocation or KV allocation occurs merely to plan.
 
-**Exit gate:** the same executable graph machinery builds in metadata-only mode
-for the certification fixtures, with bounded planning resources and no weight
-payload reads.
+**Exit gate:** the same executable graph machinery builds in metadata-only mode,
+produces a real slice, binds only selected weights, and completes prompt prefill
+plus multiple decode steps for dense and stateful fixtures, with bounded
+planning resources and no unselected weight payload reads.
 
 ## Workstream 3: Generic Graph Semantics
 
@@ -204,9 +221,14 @@ partition. Do not encode staging policy.
 
 ### Parameters and aliases
 
+- Classify every graph leaf explicitly as a catalog parameter, request input,
+  persistent state, or activation import. Do not infer a leaf class from where
+  its tensor was created.
 - Identify parameter leaves by stable catalog identity.
 - Preserve view/base relationships and storage aliases.
 - Ensure an alias cannot make an unloaded base allocation reachable.
+- Define request-input bindings for token ids, positions, masks, and equivalent
+  invocation data so they cannot be mistaken for activation planes or weights.
 
 ### Effects and persistent state
 
@@ -233,36 +255,50 @@ Implement the partitioner as a deterministic pure function of:
 ### Algorithm
 
 1. Resolve the requested start and end to registered block frontiers.
-2. Treat graph values produced before the start frontier and consumed inside
-   the slice as typed imports.
-3. Retain computation from the start frontier through the end frontier.
-4. Preserve all effect nodes, ordering edges, alias bases, and lifetimes needed
+2. Classify every graph leaf as parameter, request input, persistent state, or
+   activation value before computing a boundary.
+3. Compute graph-wide value liveness at every registered frontier for each
+   admitted execution profile.
+4. Retain computation from the start frontier through the end frontier.
+5. Preserve all effect nodes, ordering edges, alias bases, and lifetimes needed
    by the retained computation.
-5. Treat values produced inside and consumed after the end frontier as typed
-   exports.
-6. Walk the retained graph to derive exact parameter identities.
-7. Union dependencies and boundary shapes across all supported graph profiles.
-8. Classify persistent state ownership from registered state effects.
-9. Validate that every dependency resolves exactly once in the package catalog.
-10. Normalize and hash the plan.
+6. Import every activation value live at the start frontier. Export every
+   activation value live at the end frontier, including an imported value that
+   the stage merely forwards to a later consumer. Preserve semantic identity
+   across pass-through planes.
+7. Resolve parameters locally from the catalog, request inputs from the
+   invocation contract, and persistent state from its declared owner; none may
+   be reclassified as an upstream activation.
+8. Walk the retained graph to derive exact parameter identities.
+9. Preserve separate guarded executable slices and boundary schemas per
+   profile, then union only their exact parameter identities into the resident
+   weight requirement.
+10. Classify persistent state ownership from registered state effects.
+11. Validate that every dependency resolves exactly once in the package
+    catalog.
+12. Normalize and hash the plan.
 
 ### `StageSlicePlan`
 
 - descriptor version;
 - requested and realized layer range;
 - legal-cut result and structured rejection reason;
-- retained graph/profile identifiers;
+- guarded per-profile executable-slice identifiers and boundary schemas;
 - exact sorted tensor dependency identities and digest;
-- resident parameter bytes;
+- logical parameter bytes derived from the catalog, separate from
+  backend-specific allocated, aligned, repacked, and peak bytes;
+- request-input bindings and typed activation pass-through relationships;
 - typed input and output boundary planes;
 - persistent KV/recurrent state ownership and geometry;
 - supported execution profiles, sequence/batch limits, and backend constraints;
-- plan digest bound to package identity and runtime ABI.
+- plan digest bound to package identity, graph/planner semantic version, native
+  ABI, and graph-affecting configuration.
 
 The partitioner cannot call or depend on model-family helpers.
 
-**Exit gate:** unit/property tests prove closure, deterministic output, boundary
-completeness, and effect preservation for valid and invalid cuts.
+**Exit gate:** unit/property tests prove closure, deterministic output, complete
+frontier liveness including pass-through values, guarded profile separation,
+and effect preservation for valid and invalid cuts.
 
 ## Workstream 5: Exact Realization and Loading
 
@@ -274,6 +310,9 @@ completeness, and effect preservation for valid and invalid cuts.
   model but allocate/read payloads only for the dependency closure.
 - Instantiate the executable slice from the same normalized plan used for
   loading.
+- Before executing any concrete graph, verify that its profile, guards,
+  boundary schema, parameter references, effects, and configuration match the
+  admitted plan. Replan or reject on mismatch.
 - Make representation selection structural: the unsplit graph references fused
   QKV or separate Q/K/V according to what exists; the loader never makes that
   choice.
@@ -283,6 +322,8 @@ completeness, and effect preservation for valid and invalid cuts.
   - every loaded tensor is in the closure;
   - no closure tensor is absent;
   - dtype, shape, alias, and backend placement match;
+  - catalog-derived logical parameter bytes match the dependency closure while
+    physical and peak backend allocations are reported separately;
   - input/output plane descriptors match neighboring stages;
   - state ownership and supported operations are complete.
 - Fail with a structured `UnsupportedStage` / `InvalidPackage` error, never an
@@ -316,9 +357,14 @@ negative fixtures fail before topology publication.
   coordinated protocol cutoff is explicitly approved. This is required by
   repository policy even though package v1 compatibility is intentionally not
   retained.
+- The transport workstream may proceed independently, but it must land before
+  graph-filter-v2 cutover if the frozen expected support matrix contains any
+  required model or cut whose boundary generation 7 cannot represent. Reduced
+  support requires an explicit, separately reviewed product decision.
 
 **Exit gate:** current single-plane models run unchanged on generation 7;
-multi-plane models are either negotiated correctly or rejected before topology
+multi-plane obligations in the frozen support matrix are negotiated correctly
+before cutover, and other unsupported boundaries reject before topology
 publication.
 
 ## Workstream 7: Migration and Deletion
@@ -328,14 +374,18 @@ Use a shadow-first migration so the old path can be compared, then deleted.
 1. Add the new planner behind a development-only switch.
 2. In shadow mode, build the current stage and independently compute the new
    plan. Compare exact tensor identities, realized boundaries, state ownership,
-   and resident bytes without changing execution.
+   and logical bytes without changing execution. Treat this comparison as a
+   migration diagnostic; unsplit numerical execution remains the correctness
+   oracle, and old over-retention or bugs are not compatibility requirements.
 3. Enable execution from the new plan for compact dense fixtures.
 4. Expand to fused-QKV, separate-QKV, MoE/shared-weight, hybrid/recurrent,
    hyper-connected, sideband, MTP, and multimodal fixtures.
 5. Run the full registry canary and every-cut certification.
 6. Rebuild or convert the production package corpus to v2.
-7. Atomically cut over the runtime to v2 plus graph-derived planning.
-8. Delete:
+7. Land typed boundary transport first if any frozen baseline obligation cannot
+   be represented by generation 7.
+8. Atomically cut over the runtime to v2 plus graph-derived planning.
+9. Delete:
    - thread-local and mutable stage-filter diagnostics;
    - loader family retention branches;
    - package role/name stage-selection policy;
@@ -355,9 +405,12 @@ builders find no model-family staging policy and no stage-filter control flow.
 - first, middle, final, single-layer, and invalid cuts;
 - parameter-free ops at boundaries;
 - residual, skip, fan-out, and alias edges;
+- a three-stage skip or sideband edge whose value passes through a middle stage
+  without being consumed there; every two-stage cut alone is insufficient;
 - effect-only KV/recurrent writes;
 - deterministic output under tensor and node enumeration changes;
-- closure union across prefill/decode/batch/optional profiles;
+- separate guarded prefill/decode/batch/optional slices with a shared
+  conservative parameter union;
 - unsupported hidden state and unrepresentable boundary failures.
 
 ### Package tests
@@ -366,7 +419,10 @@ builders find no model-family staging policy and no stage-filter control flow.
 - missing, duplicate, mismatched dtype/shape, corrupt offset, alias, and checksum
   failures;
 - v1 rejection with an actionable conversion command;
-- v1-to-v2 conversion success only for complete packages;
+- v1-to-v2 conversion success only when an independent source inventory proves
+  the package complete;
+- refusal when only the selected v1 artifacts are available as the expected
+  tensor set;
 - no weight payload reads during metadata planning.
 
 ### Native/runtime integration fixtures
@@ -388,8 +444,11 @@ For every legal cut:
   tolerance;
 - neighboring boundary descriptors match exactly;
 - planned dependency identities equal loaded identities;
-- resident parameter bytes equal the catalog sum;
-- state export/import and prefix-cache behavior remain correct where supported.
+- logical parameter bytes equal the catalog sum while backend physical and peak
+  allocation measurements are reported independently;
+- state export/import and prefix-cache behavior remain correct where supported;
+- three-or-more-stage composition preserves live pass-through values and state
+  lifecycle across adjacent boundaries.
 
 Run the same behavioral matrix through direct GGUF, callback/SafeTensors, and
 model-package v2 sources where those paths are supported.
@@ -405,32 +464,37 @@ profiles when this plan is written, and it may grow before implementation
 lands.
 
 The acceptance plan must be immutable and digest-bound to the candidate source
-commit, package-v2 corpus, llama.cpp pin, and generated family policy. For every
-selected model profile, Mic Studio must:
+commit, package-v2 corpus, llama.cpp pin, generated family policy, frozen
+expected support matrix, graph/planner semantic version, and graph-affecting
+configuration. For every selected model profile, Mic Studio must:
 
 - create or validate its v2 package and exact tensor catalog;
 - build the metadata-only unsplit execution profiles used for planning;
-- derive the legal cuts rather than accepting a checked-in cut allowlist;
+- derive legal cuts generically, then prove that the result retains every cut
+  and capability obligation in the independently frozen support matrix;
 - execute every derived legal cut through package load, prompt prefill,
   multiple decode steps, and split/unsplit correctness comparison;
 - exercise state handoff, cache behavior, MTP/speculative, multimodal, and
   typed sideband behavior whenever the profile declares those capabilities;
 - retain the existing required `single-step`, `chain`, and `state-handoff`
-  lanes as compatibility evidence while the every-cut lane is added.
+  lanes as compatibility evidence while the every-cut lane is added;
+- use unsplit numerical execution as the correctness oracle and include
+  multi-stage composition plus persistent-state lifecycle coverage.
 
-The canary must reconcile the plan against execution by exact model identity,
-profile, cut, and required lane. Missing, skipped, duplicate, unplanned, or
-incomplete results are failures; a green subset is not acceptance. Every
-currently certified model must expose and pass the stage placements it already
-supports. A model that derives no usable cut, loses an existing supported cut,
-or requires an unrepresentable boundary blocks completion unless its supported
-status is changed through a separately reviewed product decision.
+The canary must reconcile the frozen support matrix, derived plan, and execution
+by exact model identity, profile, cut, capability, and required lane. Missing,
+skipped, duplicate, unplanned, newly rejected baseline, or incomplete results
+are failures; a green subset is not acceptance. Every currently certified model
+must expose and pass the stage placements it already supports. A model that
+derives no usable cut, loses an existing supported cut, or requires an
+unrepresentable boundary blocks completion unless its supported status is
+changed through a separately reviewed product decision.
 
 Upload the plan, plan digest, runner identity, immutable model manifests,
-package-v2 manifests, per-cut outcomes, dependency-closure comparisons,
-boundary descriptors, and logs even when the run fails. The bounded nightly
-cadence remains useful for routine detection, but it cannot substitute for this
-full-registry Mic Studio acceptance run.
+package-v2 manifests, frozen support matrix, per-cut outcomes,
+dependency-closure comparisons, boundary descriptors, and logs even when the
+run fails. The bounded nightly cadence remains useful for routine detection,
+but it cannot substitute for this full-registry Mic Studio acceptance run.
 
 ### Required repository validation
 
@@ -446,21 +510,43 @@ full-registry Mic Studio acceptance run.
 - one green, exactly reconciled Mic Studio full-registry acceptance run at the
   candidate commit.
 
+## Implementation Ownership
+
+Use five implementation lanes with one integration owner. These are ownership
+boundaries, not separate architectural authorities: all lanes implement the
+same three early shared contracts—`TensorCatalog`, guarded `StageSlicePlan`, and
+boundary identity/schema.
+
+| Lane | Deliverable | Dependency |
+| --- | --- | --- |
+| A. Native graph contract and partitioner | Workstreams 2–4: end-to-end feasibility proof, block/effect/alias annotations, guarded profiles, complete frontier liveness, and the pure partitioner | Critical path. Keep annotations and slicing under one design owner until their contract is proven. |
+| B. Package v2 and conversion | Workstream 1: catalog/schema, writer/reader, independent source-inventory proof, integrity checks, and malformed-package tests | Schema work can begin with A and implementation can proceed independently after the minimal catalog contract is agreed. |
+| C. Realization and host admission | Workstream 5 plus the native ABI portion of Workstream 6: selected-weight allocation, runtime contract checks, realized descriptor/FFI, neighboring-stage validation, and readiness | May scaffold against contract fixtures; integration requires A and B. Native reports local facts and the host validates composed topology. |
+| D. Independent acceptance harness | Workstreams 0 and 8: frozen support baseline, complete Mic Studio roster, plan/execution reconciliation, unsplit oracle, multi-stage/state/negative tests, and resource evidence | Baseline and harness work can start with A. Final acceptance consumes A, B, C, and E where required. The expected-support set must remain independent of planner rejection results. |
+| E. Boundary transport | Network portion of Workstream 6: generation-7 representability, typed bundles, semantic ids, shape constraints, bounded framing, and negotiation | Proceeds after boundary-contract agreement and coordinates with existing activation-plane work. Required before cutover for any baseline obligation that needs it. |
+
+The integration owner owns Workstream 7, serializes shared llama.cpp patch-queue
+changes, and prevents lane-local adapters from becoming competing sources of
+stage policy.
+
 ## Delivery Sequence
 
 Deliver as reviewable, independently gated changes rather than one giant patch:
 
-1. Metadata-only full-graph feasibility prototype and resource measurements.
-2. Package v2 schema, writer, reader, and exact validation.
-3. Generic block/state/effect/alias metadata.
-4. Pure partitioner plus `StageSlicePlan` and property tests.
-5. Exact dependency realization and fail-closed native descriptor.
-6. Shadow comparison against the current runtime.
-7. Cross-family execution rollout and every-cut certification.
-8. Production package rebuild/conversion.
-9. Old stage-filter/family-policy deletion and v2-only cutover.
-10. Typed multi-plane protocol generation, only if required boundaries cannot
-    be represented by generation 7.
+1. Lane A proves metadata build, actual slice, selected-weight binding, prompt
+   prefill, and multiple decode steps for dense and stateful fixtures.
+2. Agree the `TensorCatalog`, guarded `StageSlicePlan`, and boundary
+   identity/schema contracts.
+3. Run lanes B, D, and E in parallel where their agreed contracts allow.
+4. Complete Lane A graph semantics and partitioner implementation.
+5. Lane C integrates exact realization, native reporting, and host admission.
+6. Run shadow diagnostics without treating old behavior as the oracle.
+7. Complete cross-family execution rollout, every-cut certification, and the
+   full Mic Studio acceptance run.
+8. Rebuild or independently certify and convert the production package corpus.
+9. Land Lane E before cutover when any frozen baseline boundary requires it.
+10. The integration owner deletes the old stage filter and family policy, then
+    performs the v2-only cutover.
 
 Each change must state its base commit, tests, observed fixture coverage, and
 whether it changes package, native ABI, or network compatibility.
@@ -477,8 +563,14 @@ The project is complete only when all of the following are true:
   stage-retention rules;
 - the executable graph, tensor closure, boundary ABI, and persistent-state
   ownership all come from one normalized partition result;
+- every concrete runtime graph matches a guarded admitted profile or triggers
+  deterministic replanning/rejection before execution;
 - every supported model passes every legal cut through load, prefill, and
   multiple decode steps;
+- every cut and capability in the independently frozen support matrix remains
+  supported unless a separate product decision explicitly removes it;
+- three-or-more-stage composition preserves pass-through values and persistent
+  state lifecycle;
 - the candidate commit has a green Mic Studio canary result covering every
   certified model profile in the generated full-registry plan, with no missing,
   skipped, duplicate, unplanned, or incomplete model/cut/lane result;
@@ -486,7 +578,8 @@ The project is complete only when all of the following are true:
   reasons;
 - planning reads metadata only and does not allocate full-model weights or KV;
 - current generation-7 boundaries remain operational, and any typed-plane
-  generation has explicit compatibility evidence;
+  generation required by the frozen support matrix lands before cutover with
+  explicit compatibility evidence;
 - old staging implementation, development flags, and v1 runtime compatibility
   have been removed.
 
@@ -504,7 +597,11 @@ The project is complete only when all of the following are true:
 - **`no_alloc` is not sufficient end to end.** Prove it before designing around
   it; stop if planning still requires weight or KV allocation.
 - **Graph shape changes dependencies.** Use a conservative profile union and
-  reject unexplained instability.
+  reject unexplained instability, but retain separate guarded executable
+  slices instead of merging profile graphs.
+- **A live value disappears in an intermediate stage.** Compute liveness at
+  every frontier and preserve typed pass-through identity; certify with a
+  three-stage skip/sideband fixture.
 - **Hidden side effects escape reachability.** Make state/effect registration a
   certification gate; do not silently accept invisible state.
 - **Boundary annotation becomes staging by another name.** Limit annotations to
@@ -512,10 +609,20 @@ The project is complete only when all of the following are true:
   ownership in builders.
 - **Package v2 omits legacy bytes.** Exact identity/type/shape validation against
   the source inventory prevents false certification.
+- **A converter certifies its own incomplete input.** Require original source
+  tensor directories or an independently captured source-bound inventory;
+  otherwise rebuild.
 - **Large llama.cpp patch burden.** Prefer common graph-context helpers and
   mechanical registration; keep the partitioner outside model files.
 - **Protocol work expands scope.** Gate current-compatible models first and run
-  typed activation planes as a separate negotiated change.
+  typed activation planes as a separate negotiated change, but do not cut over
+  while a frozen baseline obligation still depends on it.
+- **Rejecting hard cases creates a false green result.** Freeze expected model,
+  profile, cut, lane, and capability support before rollout and reconcile it
+  independently against both planning and execution.
+- **Logical and physical memory are conflated.** Use catalog bytes for logical
+  closure accounting and report backend allocation, alignment, repacking, and
+  peak memory separately.
 - **A shadow mismatch is normalized away.** Compare exact tensor identities and
   boundary descriptors; aggregate counts are not evidence.
 
@@ -531,13 +638,24 @@ Approval is requested for these decisions:
 - [ ] Model package v2 is a deliberate hard format cutover; no permanent v1
       runtime compatibility.
 - [ ] An offline converter may reuse old weight artifacts only after exact
-      coverage validation.
+      coverage validation against an independent source-bound inventory.
 - [ ] Legal cuts are discovered and certified; not every numbered boundary is
       promised.
+- [ ] Frontiers preserve every live pass-through value, and leaf classes are
+      explicit rather than inferred from creation order.
+- [ ] Execution profiles remain separate guarded slices; only their exact
+      resident parameter requirements are unioned.
+- [ ] The plan digest covers graph/planner semantics and graph-affecting
+      configuration, and every runtime graph is checked against it.
 - [ ] Generation-7 wire behavior remains for representable boundaries; typed
-      activation planes are a separate negotiated protocol change.
+      activation planes are a separate negotiated protocol change that lands
+      before cutover if a frozen baseline obligation requires it.
 - [ ] Old split logic is deleted only after shadow comparison and the full
       cross-family every-cut gate passes.
+- [ ] Acceptance reconciles an independently frozen support matrix so the new
+      planner cannot pass by rejecting previously supported models or cuts.
+- [ ] The work is split across lanes A–E with one integration owner and three
+      shared contracts.
 
 No implementation starts under this plan until these decisions are approved.
 
