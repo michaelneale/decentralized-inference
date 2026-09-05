@@ -123,6 +123,8 @@ impl std::error::Error for PinnedGpuResolverError {}
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct HardwareSurvey {
     pub vram_bytes: u64,
+    /// GPU name as reported by the OS/driver (e.g. Metal, nvidia-smi, ROCm).
+    /// Best-effort and OS-reported, not an independently verified measurement.
     pub gpu_name: Option<String>,
     pub gpu_count: u8,
     pub hostname: Option<String>,
@@ -281,6 +283,7 @@ struct RetainedObjcObject(*mut std::ffi::c_void);
 
 #[cfg(target_os = "macos")]
 impl Drop for RetainedObjcObject {
+    /// Releases the retained object, balancing the "create rule" retain.
     fn drop(&mut self) {
         if self.0.is_null() {
             return;
@@ -293,6 +296,8 @@ impl Drop for RetainedObjcObject {
     }
 }
 
+/// Queries the Metal-recommended working-set size in bytes for the default
+/// device — best-effort, OS-reported, not a verified measurement.
 #[cfg(target_os = "macos")]
 fn query_metal_recommended_working_set_bytes() -> Option<u64> {
     use std::ffi::{c_char, c_void};
@@ -325,8 +330,9 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
     }
 }
 
-/// Queries the real GPU identifier via `MTLDevice.name` (e.g. "Apple M4 Max"
-/// or "AMD Radeon Pro 5500M") — never the CPU brand string.
+/// Queries the GPU name as reported by the OS via `MTLDevice.name` (e.g.
+/// "Apple M4 Max" or "AMD Radeon Pro 5500M") — best-effort, not a verified
+/// measurement, but sourced from the GPU device rather than the CPU.
 #[cfg(target_os = "macos")]
 fn query_metal_device_name() -> Option<String> {
     use std::ffi::{CStr, c_char, c_void};

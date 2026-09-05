@@ -38,11 +38,12 @@ pub fn parse_nvidia_gpu_memory_and_reserved(output: &str) -> Vec<(u64, Option<u6
 }
 
 /// Sanitizes a macOS Metal `MTLDevice.name` query result into `gpu_name`.
-/// Rejects anything shaped like a CPU brand string (`sysctl
-/// machdep.cpu.brand_string` output always embeds " CPU @ " and a GHz clock
-/// speed on Intel Macs) so a regression that re-wires CPU output into this
-/// path degrades to labeled-absent instead of silently mislabeling the CPU
-/// as the GPU.
+/// This is what the OS reported, not a verified measurement, so the only
+/// correction applied is rejecting anything shaped like a CPU brand string
+/// (`sysctl machdep.cpu.brand_string` output always embeds " CPU @ " and a
+/// GHz clock speed on Intel Macs) so a regression that re-wires CPU output
+/// into this path degrades to labeled-absent instead of silently
+/// mislabeling the CPU as the GPU.
 #[cfg(any(target_os = "macos", test))]
 pub fn sanitize_macos_gpu_name(name: Option<String>) -> Option<String> {
     let trimmed = name?.trim().to_string();
