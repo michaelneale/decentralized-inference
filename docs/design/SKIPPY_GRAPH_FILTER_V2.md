@@ -394,6 +394,44 @@ For every legal cut:
 Run the same behavioral matrix through direct GGUF, callback/SafeTensors, and
 model-package v2 sources where those paths are supported.
 
+### Mic Studio full-registry acceptance gate
+
+Final acceptance requires an explicit `manual-full` llama canary run on the
+trusted Mic Studio `family-certify` runner. The accepted model count is not a
+number copied into this document: it is the complete set of certified model
+profiles generated from `ci/model-artifacts/registry.json` into
+`ci/llama-canary/family-certified.json` at the candidate commit. That set is 33
+profiles when this plan is written, and it may grow before implementation
+lands.
+
+The acceptance plan must be immutable and digest-bound to the candidate source
+commit, package-v2 corpus, llama.cpp pin, and generated family policy. For every
+selected model profile, Mic Studio must:
+
+- create or validate its v2 package and exact tensor catalog;
+- build the metadata-only unsplit execution profiles used for planning;
+- derive the legal cuts rather than accepting a checked-in cut allowlist;
+- execute every derived legal cut through package load, prompt prefill,
+  multiple decode steps, and split/unsplit correctness comparison;
+- exercise state handoff, cache behavior, MTP/speculative, multimodal, and
+  typed sideband behavior whenever the profile declares those capabilities;
+- retain the existing required `single-step`, `chain`, and `state-handoff`
+  lanes as compatibility evidence while the every-cut lane is added.
+
+The canary must reconcile the plan against execution by exact model identity,
+profile, cut, and required lane. Missing, skipped, duplicate, unplanned, or
+incomplete results are failures; a green subset is not acceptance. Every
+currently certified model must expose and pass the stage placements it already
+supports. A model that derives no usable cut, loses an existing supported cut,
+or requires an unrepresentable boundary blocks completion unless its supported
+status is changed through a separately reviewed product decision.
+
+Upload the plan, plan digest, runner identity, immutable model manifests,
+package-v2 manifests, per-cut outcomes, dependency-closure comparisons,
+boundary descriptors, and logs even when the run fails. The bounded nightly
+cadence remains useful for routine detection, but it cannot substitute for this
+full-registry Mic Studio acceptance run.
+
 ### Required repository validation
 
 - full tests for every touched Rust package, never module-scoped substitutes;
@@ -404,7 +442,9 @@ model-package v2 sources where those paths are supported.
   `cargo test -p mesh-llm-host-runtime --lib` for protocol/control changes;
 - real two-node inference for user-visible integration behavior;
 - mixed-version node validation whenever the network protocol changes;
-- upstream llama.cpp pin/canary validation across the supported registry.
+- upstream llama.cpp pin/canary validation across the supported registry;
+- one green, exactly reconciled Mic Studio full-registry acceptance run at the
+  candidate commit.
 
 ## Delivery Sequence
 
@@ -439,6 +479,9 @@ The project is complete only when all of the following are true:
   ownership all come from one normalized partition result;
 - every supported model passes every legal cut through load, prefill, and
   multiple decode steps;
+- the candidate commit has a green Mic Studio canary result covering every
+  certified model profile in the generated full-registry plan, with no missing,
+  skipped, duplicate, unplanned, or incomplete model/cut/lane result;
 - unsupported models/cuts fail before topology publication with structured
   reasons;
 - planning reads metadata only and does not allocate full-model weights or KV;
