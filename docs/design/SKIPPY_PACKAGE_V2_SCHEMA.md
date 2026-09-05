@@ -86,10 +86,12 @@ manifest layer count and dimensions must be non-zero.
 
 ## Sidecars
 
-Tokenizer, projector, generation, or future non-weight inputs are sidecars that
-reference artifact ids. Their role does not imply stage ownership. A sidecar
-kind is a stable identifier; an optional name distinguishes multiple sidecars
-of the same kind.
+The schema currently admits one closed sidecar kind: `mmproj`. Unknown kinds
+fail during deserialization. Sidecars reference artifact ids but imply no stage
+ownership, and their semantic identity is the unique `(kind, name)` pair.
+Multiple projectors therefore require stable distinct names; the package writer
+uses each projector's deterministic artifact id as its name. Generation remains
+a typed manifest field rather than a generic sidecar.
 
 ## Loading Rule
 
