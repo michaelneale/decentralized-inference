@@ -728,9 +728,12 @@ requires it; this project does not start a competing transport implementation.
 
 No implementation or test edits begin until the owner signs off on these
 descriptions and the three shared contracts against one pinned base SHA. After
-approval, create separate worktrees and branches for scama and astrid, plus at
-most one short-lived jy task worktree for the currently assigned bounded unit;
-never share uncommitted source edits across worktrees.
+approval, use separate local worktrees for isolation but one remote delivery
+branch: `feature/skippy_graph_filter_v2`. Do not open lane PRs or publish lane
+branches. Astrid and jy produce small linear commits in their worktrees and
+hand the commit SHAs to scama. Scama is the push-order authority: review,
+integrate, validate the combined head, and push only that shared branch. Never
+share uncommitted source edits or let multiple worktrees race to push it.
 
 ## Delivery Sequence
 
