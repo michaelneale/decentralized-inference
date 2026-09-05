@@ -5,6 +5,9 @@
 > [`../MESHES.md`](../MESHES.md) and
 > [`../SKIPPY_SPLITS.md`](../SKIPPY_SPLITS.md).
 
+The proposed graph-derived replacement for model-aware stage filtering is
+specified in [`SKIPPY_GRAPH_FILTER_V2.md`](SKIPPY_GRAPH_FILTER_V2.md).
+
 mesh-llm connects nodes over QUIC (via [iroh](https://iroh.computer)), gossips
 capabilities and model state, routes OpenAI-compatible requests through the
 mesh, and can coordinate package-backed Skippy stage execution for models that
