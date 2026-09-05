@@ -235,13 +235,11 @@ mod tests {
 
     #[test]
     fn forwarded_stage_message_preserves_rwkv7_sideband_shape() {
-        let forwarded = forwarded_stage_message_timed(
-            &stage_config(),
-            &incoming_message(),
-            &rwkv7_sideband_frame(),
-            2,
-        )
-        .unwrap();
+        let mut config = stage_config();
+        config.activation_codec = skippy_protocol::StageActivationCodec::F16RneV1;
+        let forwarded =
+            forwarded_stage_message_timed(&config, &incoming_message(), &rwkv7_sideband_frame(), 2)
+                .unwrap();
 
         assert_eq!(
             forwarded.message.state.activation_codec,
@@ -270,8 +268,10 @@ mod tests {
 
     #[test]
     fn compact_activation_encode_failure_does_not_fall_back_to_raw() {
+        let mut config = stage_config();
+        config.activation_codec = skippy_protocol::StageActivationCodec::F16RneV1;
         let error = forwarded_stage_message_timed(
-            &stage_config(),
+            &config,
             &incoming_message(),
             &f32_frame(0, 1, &[f32::MAX, 1.0]),
             2,

@@ -55,11 +55,11 @@ pub enum GlmDsaPolicy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum StageActivationCodec {
     /// Exact little-endian IEEE-754 binary32 payloads. Kept as the correctness
-    /// oracle and an explicit escape hatch for model qualification.
+    /// oracle and the default until a lossy codec is explicitly qualified.
+    #[default]
     #[serde(rename = "raw-f32-v1")]
     RawF32V1,
     /// IEEE-754 binary16 with round-to-nearest, ties-to-even conversion.
-    #[default]
     #[serde(rename = "f16-rne-v1")]
     F16RneV1,
     /// bfloat16 with round-to-nearest, ties-to-even conversion.

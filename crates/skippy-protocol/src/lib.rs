@@ -101,6 +101,14 @@ mod tests {
             }],
         }
     }
+
+    #[test]
+    fn activation_codec_default_is_bit_exact() {
+        assert_eq!(
+            super::StageActivationCodec::default(),
+            super::StageActivationCodec::RawF32V1
+        );
+    }
     use super::{
         STAGE_PROTOCOL_GENERATION, STAGE_SUBPROTOCOL_FEATURE_STAGE_PROTOCOL_GENERATION_V8,
         StageFrameError, validate_stage_admission_descriptor,
