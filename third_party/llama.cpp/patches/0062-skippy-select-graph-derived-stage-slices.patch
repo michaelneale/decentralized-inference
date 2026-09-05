@@ -1,4 +1,4 @@
-From 39becda13ea68aff9802d33c8c1d43b9b2c2b331 Mon Sep 17 00:00:00 2001
+From 21ec61b98daa772361493a59c1136b1d98a37470 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Sat, 5 Sep 2026 19:07:54 +1000
@@ -6,11 +6,11 @@ Subject: [PATCH] feat(skippy): select graph-derived stage slices
 
 ---
  src/CMakeLists.txt                          |  11 +
- src/skippy/stage_slice_plan.cpp             | 364 ++++++++++++++++++++
+ src/skippy/stage_slice_plan.cpp             | 443 ++++++++++++++++++++
  src/skippy/stage_slice_plan.h               |  38 ++
- src/skippy/tests/noalloc_graph_planning.cpp | 105 ++++++
- src/skippy/tests/stage_slice_plan.cpp       | 133 +++++++
- 5 files changed, 651 insertions(+)
+ src/skippy/tests/noalloc_graph_planning.cpp | 105 +++++
+ src/skippy/tests/stage_slice_plan.cpp       | 195 +++++++++
+ 5 files changed, 792 insertions(+)
  create mode 100644 src/skippy/stage_slice_plan.cpp
  create mode 100644 src/skippy/stage_slice_plan.h
  create mode 100644 src/skippy/tests/stage_slice_plan.cpp
@@ -46,10 +46,10 @@ index 7fdff53de..49646af15 100644
          COMMAND skippy-model-fixture-generator
 diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
 new file mode 100644
-index 000000000..12d3dbf70
+index 000000000..37eaadfd2
 --- /dev/null
 +++ b/src/skippy/stage_slice_plan.cpp
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,443 @@
 +#include "stage_slice_plan.h"
 +
 +#include "ggml.h"
@@ -118,6 +118,8 @@ index 000000000..12d3dbf70
 +    std::set<std::string> parameters;
 +    std::unordered_map<const ggml_tensor *, int8_t> local_cache;
 +    std::unordered_set<const ggml_tensor *> local_visiting;
++    std::unordered_map<const ggml_tensor *, int8_t> foreign_state_cache;
++    std::unordered_set<const ggml_tensor *> foreign_state_visiting;
 +
 +    int structural_class_count(const ggml_tensor * tensor) const {
 +        if (node_index.find(tensor) != node_index.end()) {
@@ -219,6 +221,42 @@ index 000000000..12d3dbf70
 +        return local;
 +    }
 +
++    bool depends_on_foreign_state(const ggml_tensor * tensor) {
++        if (tensor == nullptr) {
++            return false;
++        }
++        const auto cached = foreign_state_cache.find(tensor);
++        if (cached != foreign_state_cache.end()) {
++            return cached->second > 0;
++        }
++        if (node_index.find(tensor) == node_index.end()) {
++            const auto owners = state_layers.find(canonical_storage(tensor));
++            if (owners == state_layers.end()) {
++                foreign_state_cache[tensor] = -1;
++                return false;
++            }
++            for (int32_t owner : owners->second) {
++                if (owner < layer_start || owner >= layer_end) {
++                    foreign_state_cache[tensor] = 1;
++                    return true;
++                }
++            }
++            foreign_state_cache[tensor] = -1;
++            return false;
++        }
++        if (!foreign_state_visiting.insert(tensor).second) {
++            error = "graph dependency cycle encountered while resolving state ownership";
++            return false;
++        }
++        bool foreign = depends_on_foreign_state(tensor->view_src);
++        for (const ggml_tensor * source : tensor->src) {
++            foreign = depends_on_foreign_state(source) || foreign;
++        }
++        foreign_state_visiting.erase(tensor);
++        foreign_state_cache[tensor] = foreign ? 1 : -1;
++        return foreign;
++    }
++
 +    void add_live_edges(int32_t frontier, std::unordered_set<const ggml_tensor *> & live) const {
 +        for (int32_t consumer_index = frontier + 1; consumer_index < ggml_graph_n_nodes(graph); ++consumer_index) {
 +            const ggml_tensor * consumer = ggml_graph_node(graph, consumer_index);
@@ -236,6 +274,40 @@ index 000000000..12d3dbf70
 +                consider(source);
 +            }
 +        }
++    }
++
++    bool normalize_graph_tensors(std::vector<const ggml_tensor *> & tensors) {
++        for (const ggml_tensor * tensor : tensors) {
++            if (node_index.find(tensor) == node_index.end()) {
++                error = "selected tensor is absent from the normalized graph order";
++                return false;
++            }
++        }
++        std::sort(tensors.begin(), tensors.end(), [&](const ggml_tensor * left, const ggml_tensor * right) {
++            return node_index.at(left) < node_index.at(right);
++        });
++        return true;
++    }
++
++    bool normalize_request_tensors(std::vector<const ggml_tensor *> & tensors) {
++        std::unordered_map<const ggml_tensor *, std::string> keys;
++        std::set<std::string> unique_keys;
++        for (const ggml_tensor * tensor : tensors) {
++            std::string key = ggml_get_name(tensor);
++            key += ":" + std::to_string(static_cast<int>(tensor->type));
++            for (int32_t dimension = 0; dimension < GGML_MAX_DIMS; ++dimension) {
++                key += ":" + std::to_string(tensor->ne[dimension]);
++            }
++            if (!unique_keys.insert(key).second) {
++                error = "request inputs do not have unique structural identities";
++                return false;
++            }
++            keys.emplace(tensor, key);
++        }
++        std::sort(tensors.begin(), tensors.end(), [&](const ggml_tensor * left, const ggml_tensor * right) {
++            return keys.at(left) < keys.at(right);
++        });
++        return true;
 +    }
 +
 +    bool walk(const ggml_tensor * tensor) {
@@ -292,7 +364,8 @@ index 000000000..12d3dbf70
 +            return false;
 +        }
 +        for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
-+            node_index.emplace(ggml_graph_node(graph, index), index);
++            const ggml_tensor * tensor = ggml_graph_node(graph, index);
++            node_index.emplace(tensor, index);
 +        }
 +        for (const auto & effect : effects) {
 +            const ggml_tensor * storage = canonical_storage(effect.storage);
@@ -355,6 +428,10 @@ index 000000000..12d3dbf70
 +                }
 +                if (!local) {
 +                    append_once(result.activation_imports, imported, tensor);
++                } else if (!depends_on_foreign_state(tensor)) {
++                    if (!error.empty() || !walk(tensor)) {
++                        return false;
++                    }
 +                }
 +            }
 +            if (producer != node_index.end() && selected_nodes.find(producer->second) != selected_nodes.end()) {
@@ -378,7 +455,9 @@ index 000000000..12d3dbf70
 +        result.node_indices.assign(selected_nodes.begin(), selected_nodes.end());
 +        std::sort(result.node_indices.begin(), result.node_indices.end());
 +        result.parameter_identities.assign(parameters.begin(), parameters.end());
-+        return true;
++        return normalize_graph_tensors(result.activation_imports) &&
++               normalize_graph_tensors(result.activation_exports) &&
++               normalize_request_tensors(result.request_inputs);
 +    }
 +};
 +
@@ -590,10 +669,10 @@ index f433ad31e..c19928fb1 100644
  }
 diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
 new file mode 100644
-index 000000000..3053376dc
+index 000000000..e9a774ddc
 --- /dev/null
 +++ b/src/skippy/tests/stage_slice_plan.cpp
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,195 @@
 +#include "ggml.h"
 +#include "skippy/stage_slice_plan.h"
 +
@@ -624,7 +703,7 @@ index 000000000..3053376dc
 +
 +    ggml_tensor * entry_0 = ggml_mul(ctx, tokens, parameter_0);
 +    ggml_tensor * pass_through = ggml_mul(ctx, entry_0, parameter_0);
-+    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, pass_through);
++    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, parameter_0);
 +    ggml_tensor * local_state_read = ggml_add(ctx, state, request);
 +    ggml_tensor * exit_1 = ggml_add(ctx, exit_0, ggml_mul(ctx, local_state_read, parameter_1));
 +    ggml_tensor * state_write = ggml_cpy(ctx, exit_1, state);
@@ -704,6 +783,68 @@ index 000000000..3053376dc
 +        return 6;
 +    }
 +
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error) ||
++            !contains_tensor(selection.activation_exports, pass_through)) {
++        std::fprintf(stderr, "source stage did not export its detached pass-through value: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 7;
++    }
++
++    const skippy_stage_slice_selection normalized = selection;
++    std::vector<skippy_parameter_binding> reversed_bindings = parameter_bindings;
++    std::reverse(reversed_bindings.begin(), reversed_bindings.end());
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                reversed_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error) ||
++            selection.node_indices != normalized.node_indices ||
++            selection.activation_imports != normalized.activation_imports ||
++            selection.activation_exports != normalized.activation_exports ||
++            selection.request_inputs != normalized.request_inputs ||
++            selection.parameter_identities != normalized.parameter_identities) {
++        std::fprintf(stderr, "stage selection changed with parameter enumeration order: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 8;
++    }
++
++    const std::vector<skippy_block_boundary> foreign_state_boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_1},
++        {skippy_block_boundary_kind::entry, 1, exit_1},
++        {skippy_block_boundary_kind::exit, 1, exit_2},
++        {skippy_block_boundary_kind::entry, 2, exit_2},
++        {skippy_block_boundary_kind::exit, 2, logits},
++    };
++    if (skippy_select_stage_slice(
++                graph,
++                foreign_state_boundaries,
++                effects,
++                parameter_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error)) {
++        std::fprintf(stderr, "slice accepted persistent state owned by another layer\n");
++        ggml_free(ctx);
++        return 9;
++    }
++
 +    ggml_set_input(parameter_1);
 +    if (skippy_select_stage_slice(
 +                graph,
@@ -717,7 +858,7 @@ index 000000000..3053376dc
 +                error)) {
 +        std::fprintf(stderr, "multiply classified parameter was accepted\n");
 +        ggml_free(ctx);
-+        return 7;
++        return 10;
 +    }
 +
 +    ggml_free(ctx);
