@@ -41,6 +41,7 @@ fn assert_decoded_stage_load(decoded: &crate::inference::skippy::StageLoadReques
 fn stage_load_proto_missing_continuous_batching_keeps_legacy_enabled_default() {
     let mut proto = skippy_stage_proto::LoadStage::default();
     proto.admission = Some(crate::inference::skippy::test_stage_admission(0, 1).into());
+    proto.activation_codec = skippy_stage_proto::StageActivationCodec::F16RneV1 as i32;
     let decoded = stage_load_from_proto(proto).unwrap();
 
     assert!(decoded.continuous_batching);

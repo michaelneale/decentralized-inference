@@ -52,10 +52,42 @@ fn topology_hash_commits_exact_stage_admission() {
         stages[0].stage_id.clone(),
         skippy::test_stage_admission(0, 8),
     )]);
-    let original = split_topology_hash(&stages, &admissions);
+    let original = split_topology_hash(
+        &stages,
+        &admissions,
+        skippy_protocol::StageActivationCodec::F16RneV1,
+    );
     admissions.get_mut(&stages[0].stage_id).unwrap().plan_id =
         format!("skippy-plan:v1:{}", "c7".repeat(32));
-    assert_ne!(original, split_topology_hash(&stages, &admissions));
+    assert_ne!(
+        original,
+        split_topology_hash(
+            &stages,
+            &admissions,
+            skippy_protocol::StageActivationCodec::F16RneV1,
+        )
+    );
+}
+
+#[test]
+fn topology_hash_commits_activation_codec() {
+    let stages = vec![stage(1, 0, 0, 8)];
+    let admissions = std::collections::BTreeMap::from([(
+        stages[0].stage_id.clone(),
+        skippy::test_stage_admission(0, 8),
+    )]);
+    assert_ne!(
+        split_topology_hash(
+            &stages,
+            &admissions,
+            skippy_protocol::StageActivationCodec::RawF32V1,
+        ),
+        split_topology_hash(
+            &stages,
+            &admissions,
+            skippy_protocol::StageActivationCodec::F16RneV1,
+        )
+    );
 }
 
 #[tokio::test(start_paused = true)]

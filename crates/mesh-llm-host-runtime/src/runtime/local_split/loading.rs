@@ -667,7 +667,12 @@ pub(super) fn split_runtime_stage_load_request(
         layer_end: stage.layer_end,
         admission,
         participant_set_hash: split_participant_set_hash(&spec.generation.participants),
-        topology_hash: split_topology_hash(&spec.generation.stages, &spec.generation.admissions),
+        topology_hash: split_topology_hash(
+            &spec.generation.stages,
+            &spec.generation.admissions,
+            spec.generation.activation_codec,
+        ),
+        activation_codec: spec.generation.activation_codec,
         model_path: (!spec.local_source_required).then(|| {
             stage_load_model_path(
                 settings.load_mode.clone(),
@@ -1056,7 +1061,11 @@ pub(super) fn split_coordinator_claim(
         coordinator_id: coordinator_id.to_string(),
         coordinator_term: generation.coordinator_term,
         participant_set_hash: split_participant_set_hash(&generation.participants),
-        topology_hash: split_topology_hash(&generation.stages, &generation.admissions),
+        topology_hash: split_topology_hash(
+            &generation.stages,
+            &generation.admissions,
+            generation.activation_codec,
+        ),
         lease_until_unix_ms: generation.lease_until_unix_ms,
     }
 }

@@ -273,7 +273,7 @@ fn strict_ready_status_attests_digest_without_worker_path() {
     accepted.source_model_path = None;
     accepted.source_model_sha256 = load.source_model_sha256.clone();
     type StatusMutation = fn(&mut skippy::StageStatusSnapshot);
-    let mutations: [(&str, StatusMutation); 13] = [
+    let mutations: [(&str, StatusMutation); 14] = [
         ("state", |status| {
             status.state = skippy::StageRuntimeState::Failed
         }),
@@ -293,6 +293,9 @@ fn strict_ready_status_attests_digest_without_worker_path() {
         }),
         ("admission descriptor", |status| {
             status.admission.as_mut().unwrap().plan_id = "other-plan".into()
+        }),
+        ("activation codec", |status| {
+            status.activation_codec = skippy_protocol::StageActivationCodec::RawF32V1
         }),
         ("source bytes", |status| {
             status.source_model_bytes = status.source_model_bytes.map(|bytes| bytes + 1)

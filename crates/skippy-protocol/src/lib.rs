@@ -25,8 +25,8 @@ pub use admission::{
 };
 pub use config::{
     ActivationDType, ActivationDescriptor, ActivationLayout, FlashAttentionType, GlmDsaPolicy,
-    LoadMode, PeerConfig, SplitMode, StageConfig, StageDevice, StageIdentity, StageKvCacheConfig,
-    StageKvCacheMode, StageKvCachePayload, StageTopology, StageTopologyEntry,
+    LoadMode, PeerConfig, SplitMode, StageActivationCodec, StageConfig, StageDevice, StageIdentity,
+    StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload, StageTopology, StageTopologyEntry,
 };
 pub use messages::{
     AckMessage, DecodeTokenMessage, ErrorMessage, FinalPrefillChunkMessage, MessageBase,
@@ -69,12 +69,12 @@ mod tests {
     use super::proto::stage::{
         CancelPrepareStage, GetLayerInventory, GetStageStatus, LayerInventory, LayerRange,
         LoadStage, PrepareStage, PrepareStageAccepted, SourceModelKind, SourceResolutionPolicy,
-        StageAdmissionDescriptor, StageAdmissionProfile, StageAdmissionSidecar,
-        StageAdmissionSidecarKind, StageArtifactTransferRequest, StageArtifactTransferResponse,
-        StageControlRequest, StageControlResponse, StageLoadMode, StagePreparationState,
-        StagePreparationStatus, StageReady, StageRuntimeState, StageStatus, StageStatusAck,
-        StageStatusList, StageStatusUpdate, StageTransportOpen, StopStage, stage_control_request,
-        stage_control_response,
+        StageActivationCodec, StageAdmissionDescriptor, StageAdmissionProfile,
+        StageAdmissionSidecar, StageAdmissionSidecarKind, StageArtifactTransferRequest,
+        StageArtifactTransferResponse, StageControlRequest, StageControlResponse, StageLoadMode,
+        StagePreparationState, StagePreparationStatus, StageReady, StageRuntimeState, StageStatus,
+        StageStatusAck, StageStatusList, StageStatusUpdate, StageTransportOpen, StopStage,
+        stage_control_request, stage_control_response,
     };
 
     fn admission(layer_start: u32, layer_end: u32) -> StageAdmissionDescriptor {
@@ -181,6 +181,7 @@ mod tests {
                 admission: Some(admission(0, 16)),
                 participant_set_hash: "participants".to_string(),
                 topology_hash: "topology".to_string(),
+                activation_codec: StageActivationCodec::F16RneV1 as i32,
                 projector_path: Some("/models/mmproj.gguf".to_string()),
                 source_model_sha256: Some("b6".repeat(32)),
                 source_resolution_policy: SourceResolutionPolicy::Fallback as i32,
@@ -364,6 +365,7 @@ mod tests {
                     admission: Some(admission(8, 16)),
                     participant_set_hash: "participants".to_string(),
                     topology_hash: "topology".to_string(),
+                    activation_codec: StageActivationCodec::F16RneV1 as i32,
                     ..Default::default()
                 }),
                 coordinator_id: Some(vec![8u8; 32]),
@@ -419,6 +421,7 @@ mod tests {
                         layer_start: 8,
                         layer_end: 16,
                         admission: Some(admission(8, 16)),
+                        activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StagePreparationState::Loading as i32,
                         bytes_done: Some(10),
                         bytes_total: Some(20),
@@ -511,6 +514,7 @@ mod tests {
                     layer_start: 0,
                     layer_end: 16,
                     admission: Some(admission(0, 16)),
+                    activation_codec: StageActivationCodec::F16RneV1 as i32,
                     state: StageRuntimeState::Ready as i32,
                     bind_addr: "127.0.0.1:0".to_string(),
                     shutdown_generation: 7,
@@ -575,6 +579,7 @@ mod tests {
                         layer_start: 8,
                         layer_end: 16,
                         admission: Some(admission(8, 16)),
+                        activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StagePreparationState::Assigned as i32,
                         shutdown_generation: 7,
                         ..Default::default()
@@ -610,6 +615,7 @@ mod tests {
                         layer_start: 0,
                         layer_end: 16,
                         admission: Some(admission(0, 16)),
+                        activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StageRuntimeState::Ready as i32,
                         bind_addr: "127.0.0.1:51234".to_string(),
                         shutdown_generation: 7,

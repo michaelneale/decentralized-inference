@@ -41,6 +41,7 @@ pub enum StageFrameError {
     MissingStageControlResponse,
     MissingStageAdmissionDescriptor,
     MissingLoadClaimHashes,
+    InvalidActivationCodec { got: i32 },
     InvalidStageAdmissionDescriptor(&'static str),
     MissingStageTransportTarget,
     MissingStageArtifactTarget,
@@ -116,6 +117,9 @@ impl std::fmt::Display for StageFrameError {
                     f,
                     "generation 8 stage load requires participant and topology hashes"
                 )
+            }
+            StageFrameError::InvalidActivationCodec { got } => {
+                write!(f, "unsupported generation-8 activation codec {got}")
             }
             StageFrameError::InvalidStageAdmissionDescriptor(reason) => {
                 write!(f, "invalid stage admission descriptor: {reason}")
@@ -274,6 +278,7 @@ fn validate_load_stage_admission(load: &proto::stage::LoadStage) -> Result<(), S
             "descriptor layer range does not match load range",
         ));
     }
+    validate_activation_codec(load.activation_codec)?;
     Ok(())
 }
 
@@ -292,6 +297,7 @@ fn validate_status_stage_admission(
             "descriptor layer range does not match status range",
         ));
     }
+    validate_activation_codec(status.activation_codec)?;
     Ok(())
 }
 
@@ -310,7 +316,18 @@ fn validate_preparation_stage_admission(
             "descriptor layer range does not match preparation range",
         ));
     }
+    validate_activation_codec(status.activation_codec)?;
     Ok(())
+}
+
+fn validate_activation_codec(value: i32) -> Result<(), StageFrameError> {
+    match proto::stage::StageActivationCodec::try_from(value) {
+        Ok(proto::stage::StageActivationCodec::RawF32V1)
+        | Ok(proto::stage::StageActivationCodec::F16RneV1)
+        | Ok(proto::stage::StageActivationCodec::Bf16RneV1)
+        | Ok(proto::stage::StageActivationCodec::S8RowF32RneV1) => Ok(()),
+        _ => Err(StageFrameError::InvalidActivationCodec { got: value }),
+    }
 }
 
 pub fn validate_stage_admission_descriptor(

@@ -114,6 +114,7 @@ message LoadStage {
   StageAdmissionDescriptor admission = 48;
   string participant_set_hash = 49;
   string topology_hash = 50;
+  StageActivationCodec activation_codec = 51;
 }
 
 message StageLoadRuntimeSettings {
@@ -250,6 +251,7 @@ message StageStatus {
   optional ActivationBoundaryDescriptor input_activation_boundary = 32;
   optional ActivationBoundaryDescriptor output_activation_boundary = 33;
   StageAdmissionDescriptor admission = 34;
+  StageActivationCodec activation_codec = 35;
 }
 
 message StageStatusList {
@@ -303,6 +305,15 @@ message StagePreparationStatus {
   optional string coordinator_id = 18;
   uint64 lease_until_unix_ms = 19;
   StageAdmissionDescriptor admission = 20;
+  StageActivationCodec activation_codec = 21;
+}
+
+enum StageActivationCodec {
+  STAGE_ACTIVATION_CODEC_UNSPECIFIED = 0;
+  STAGE_ACTIVATION_CODEC_RAW_F32_V1 = 1;
+  STAGE_ACTIVATION_CODEC_F16_RNE_V1 = 2;
+  STAGE_ACTIVATION_CODEC_BF16_RNE_V1 = 3;
+  STAGE_ACTIVATION_CODEC_S8_ROW_F32_RNE_V1 = 4;
 }
 
 message StageAdmissionDescriptor {

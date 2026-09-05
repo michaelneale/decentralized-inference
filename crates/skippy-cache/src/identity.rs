@@ -71,6 +71,12 @@ fn update_platform_identity(hasher: &mut blake3::Hasher) {
 /// configured cache types, so it cannot stand in for them.
 fn update_layout_identity(hasher: &mut blake3::Hasher, config: &StageConfig) {
     hasher.update(b"kv-layout-identity-v1");
+    // Resident activation checkpoints are restored into the same execution
+    // flow as native KV pages. A different activation codec can change the
+    // numerical state seen by downstream stages, so it must produce a distinct
+    // cache namespace even when the model, layers, and KV layout are equal.
+    hasher.update(b"activation-codec:");
+    hasher.update(config.activation_codec.identity().as_bytes());
     hasher.update(config.cache_type_k.as_bytes());
     hasher.update(b"/");
     hasher.update(config.cache_type_v.as_bytes());
@@ -279,6 +285,7 @@ mod identity_completeness_tests {
             batch_max_tokens: None,
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
+            activation_codec: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,
@@ -335,6 +342,21 @@ mod identity_completeness_tests {
         assert_ne!(
             prefix_identity(&quality, 0, &[1, 2, 3, 4]).page_id,
             prefix_identity(&saver, 0, &[1, 2, 3, 4]).page_id
+        );
+    }
+
+    #[test]
+    fn activation_codec_changes_page_identity() {
+        let f16 = test_config();
+        let exact = StageConfig {
+            activation_codec: skippy_protocol::StageActivationCodec::RawF32V1,
+            ..test_config()
+        };
+
+        assert_ne!(hash_of(&f16), hash_of(&exact));
+        assert_ne!(
+            prefix_identity(&f16, 0, &[1, 2, 3, 4]).page_id,
+            prefix_identity(&exact, 0, &[1, 2, 3, 4]).page_id
         );
     }
 
@@ -558,6 +580,7 @@ mod identity_stability_tests {
             batch_max_tokens: None,
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
+            activation_codec: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,

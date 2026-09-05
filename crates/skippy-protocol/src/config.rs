@@ -48,6 +48,39 @@ pub enum GlmDsaPolicy {
     V1,
 }
 
+/// Versioned encoding used for floating-point activation planes between stages.
+///
+/// Tokens, positions, masks, routing data, and control fields stay in their
+/// exact wire representations. This policy applies only to activation values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum StageActivationCodec {
+    /// Exact little-endian IEEE-754 binary32 payloads. Kept as the correctness
+    /// oracle and an explicit escape hatch for model qualification.
+    #[serde(rename = "raw-f32-v1")]
+    RawF32V1,
+    /// IEEE-754 binary16 with round-to-nearest, ties-to-even conversion.
+    #[default]
+    #[serde(rename = "f16-rne-v1")]
+    F16RneV1,
+    /// bfloat16 with round-to-nearest, ties-to-even conversion.
+    #[serde(rename = "bf16-rne-v1")]
+    Bf16RneV1,
+    /// Per-logical-row symmetric signed int8 with an inline finite F32 scale.
+    #[serde(rename = "s8-row-f32-rne-v1")]
+    S8RowF32RneV1,
+}
+
+impl StageActivationCodec {
+    pub const fn identity(self) -> &'static str {
+        match self {
+            Self::RawF32V1 => "raw-f32-v1",
+            Self::F16RneV1 => "f16-rne-v1",
+            Self::Bf16RneV1 => "bf16-rne-v1",
+            Self::S8RowF32RneV1 => "s8-row-f32-rne-v1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct StageConfig {
     pub run_id: String,
@@ -94,6 +127,11 @@ pub struct StageConfig {
     pub glm_dsa_policy: GlmDsaPolicy,
     #[serde(default)]
     pub generation_signal_window: Option<u32>,
+    /// Floating-point activation encoding for every downstream edge produced
+    /// by this stage. Generation 8 peers echo and bind this policy before the
+    /// binary data plane starts.
+    #[serde(default)]
+    pub activation_codec: StageActivationCodec,
     pub stage_id: String,
     pub stage_index: u32,
     pub layer_start: u32,

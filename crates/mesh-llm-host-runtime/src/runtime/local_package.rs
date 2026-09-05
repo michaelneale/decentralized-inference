@@ -830,9 +830,11 @@ pub(super) fn split_participant_set_hash(participants: &[SplitParticipant]) -> S
 pub(super) fn split_topology_hash(
     stages: &[RuntimeSliceStagePlan],
     admissions: &BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
+    activation_codec: skippy_protocol::StageActivationCodec,
 ) -> String {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, b"skippy-topology:v2");
+    hash_field(&mut hasher, activation_codec.identity().as_bytes());
     for stage in stages {
         hash_field(&mut hasher, stage.stage_id.as_bytes());
         hasher.update(stage.stage_index.to_le_bytes());

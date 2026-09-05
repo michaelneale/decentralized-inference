@@ -1049,6 +1049,7 @@ async fn seed_runtime_data_api_state(state: &MeshApi) {
             layer_start: 0,
             layer_end: 12,
             admission: Some(crate::inference::skippy::test_stage_admission(0, 12)),
+            activation_codec: skippy_protocol::StageActivationCodec::default(),
             state: crate::inference::skippy::StageRuntimeState::Ready,
             bind_addr: "127.0.0.1:39100".into(),
             input_activation_boundary: None,
