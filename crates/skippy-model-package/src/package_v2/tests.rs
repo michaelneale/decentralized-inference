@@ -301,6 +301,26 @@ fn missing_independent_source_prevents_resume_certification() {
 }
 
 #[test]
+fn resumed_hard_linked_source_is_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.gguf");
+    fixture(&source, &[tensor("first", 0)], None);
+    let out = temp.path().join("package");
+    let artifact = out.join("artifacts/source-00000.gguf");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::hard_link(&source, &artifact).unwrap();
+
+    let error = write(&source, &out, true).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("package artifact must not be the independent source file")
+    );
+    assert!(!out.join("model-package.json").exists());
+}
+
+#[test]
 fn refuses_transform_hooks_and_existing_completion_marker() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.gguf");

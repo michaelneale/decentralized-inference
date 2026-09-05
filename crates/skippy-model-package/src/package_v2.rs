@@ -175,7 +175,7 @@ fn manifest_from_source(
 fn copy_artifact(source: &Path, output: &Path, resume: bool) -> Result<()> {
     if resume && output.is_file() {
         ensure!(
-            fs::canonicalize(source)? != fs::canonicalize(output)?,
+            !same_file::is_same_file(source, output)?,
             "package artifact must not be the independent source file"
         );
         return Ok(());

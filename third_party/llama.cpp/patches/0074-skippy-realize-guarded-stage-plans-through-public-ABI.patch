@@ -1,4 +1,4 @@
-From 403a639d4e5c3f2faf8fb0ccfcea62ee8485b120 Mon Sep 17 00:00:00 2001
+From 7d00060c566969227ff355972cd04bcf14801f12 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 5 Sep 2026 23:30:05 +1000
 Subject: [PATCH] skippy: realize guarded stage plans through public ABI
@@ -7,17 +7,21 @@ Subject: [PATCH] skippy: realize guarded stage plans through public ABI
  src/CMakeLists.txt                            |  15 +
  src/skippy/graph_identity.cpp                 |  39 ++
  src/skippy/graph_identity.h                   |   7 +
- src/skippy/stage_plan.cpp                     | 500 ++++++++++++++++++
- .../tests/renamed_multishard_planning.cpp     | 141 +++++
+ src/skippy/stage_plan.cpp                     | 512 ++++++++++++++++++
+ src/skippy/stage_slice_plan.cpp               |  27 +-
+ src/skippy/stage_slice_plan.h                 |   4 +-
+ src/skippy/tests/noalloc_graph_planning.cpp   |   3 +
+ .../tests/renamed_multishard_planning.cpp     | 142 +++++
  src/skippy/tests/stage_plan_header.c          |   6 +
  src/skippy/tests/stage_plan_header.cpp        |   9 +
- 7 files changed, 717 insertions(+)
+ src/skippy/tests/stage_slice_plan.cpp         |  85 ++-
+ 11 files changed, 831 insertions(+), 18 deletions(-)
  create mode 100644 src/skippy/stage_plan.cpp
  create mode 100644 src/skippy/tests/stage_plan_header.c
  create mode 100644 src/skippy/tests/stage_plan_header.cpp
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index e42e68a7a..5719f52fc 100644
+index e42e68a7a..312d1248b 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -60,6 +60,7 @@ add_library(llama
@@ -125,10 +129,10 @@ index cedb21b3e..b6f6c8c13 100644
 +        std::string & error);
 diff --git a/src/skippy/stage_plan.cpp b/src/skippy/stage_plan.cpp
 new file mode 100644
-index 000000000..d9292a659
+index 000000000..00b56834d
 --- /dev/null
 +++ b/src/skippy/stage_plan.cpp
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,512 @@
 +#include "skippy/stage_plan.h"
 +
 +#include "errors.h"
@@ -357,11 +361,23 @@ index 000000000..d9292a659
 +        error = "stage planner cannot build an unfiltered whole-model graph";
 +        return false;
 +    }
++    const ggml_tensor * explicit_output = result->get_logits();
++    if (explicit_output == nullptr) {
++        explicit_output = result->get_embd_pooled();
++    }
++    if (explicit_output == nullptr) {
++        explicit_output = result->get_embd();
++    }
++    if (explicit_output == nullptr) {
++        error = "stage planner graph has no logits or embedding output";
++        return false;
++    }
 +    input = {profile.profile_id, graph, &result->get_block_boundaries(),
 +        &result->get_state_effects(), &planner.bindings, &result->get_request_input_bindings(),
 +        llama_model_n_layer(planner.model.get()),
 +        {profile.n_tokens, profile.n_sequences, profile.n_outputs,
-+            profile.n_recurrent_rollback_sequences, graph_configuration_id, backend_id}};
++            profile.n_recurrent_rollback_sequences, graph_configuration_id, backend_id},
++        explicit_output};
 +    return true;
 +}
 +
@@ -629,8 +645,131 @@ index 000000000..d9292a659
 +    }
 +    return skippy_success(out_error);
 +}
+diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
+index 5349330ff..d79874210 100644
+--- a/src/skippy/stage_slice_plan.cpp
++++ b/src/skippy/stage_slice_plan.cpp
+@@ -33,7 +33,8 @@ struct selector {
+             int32_t layer_start,
+             int32_t layer_end,
+             skippy_stage_slice_selection & result,
+-            std::string & error) :
++            std::string & error,
++            const ggml_tensor * explicit_output) :
+         graph(graph),
+         boundaries(boundaries),
+         effects(effects),
+@@ -41,7 +42,8 @@ struct selector {
+         layer_start(layer_start),
+         layer_end(layer_end),
+         result(result),
+-        error(error) {
++        error(error),
++        explicit_output(explicit_output) {
+     }
+ 
+     ggml_cgraph * graph;
+@@ -52,6 +54,7 @@ struct selector {
+     int32_t layer_end;
+     skippy_stage_slice_selection & result;
+     std::string & error;
++    const ggml_tensor * explicit_output;
+ 
+     std::unordered_map<const ggml_tensor *, int32_t> node_index;
+     std::unordered_set<int32_t> core_selected_nodes;
+@@ -421,9 +424,13 @@ struct selector {
+             add_live_edges(finish->second, live_end);
+         }
+ 
+-        const ggml_tensor * primary_output = layer_end == layer_count
+-                ? ggml_graph_node(graph, -1)
+-                : boundaries[2 * (layer_end - 1) + 1].tensor;
++        const ggml_tensor * primary_output = explicit_output;
++        if (layer_end != layer_count) {
++            primary_output = boundaries[2 * (layer_end - 1) + 1].tensor;
++        } else if (primary_output == nullptr) {
++            error = "final stage has no explicit logits or embedding output";
++            return false;
++        }
+         if (!walk(primary_output)) {
+             return false;
+         }
+@@ -520,7 +527,8 @@ bool skippy_select_stage_slice(
+         int32_t layer_start,
+         int32_t layer_end,
+         skippy_stage_slice_selection & selection,
+-        std::string & error) {
++        std::string & error,
++        const ggml_tensor * explicit_output) {
+     selection = {};
+     error.clear();
+     skippy_graph_semantics semantics;
+@@ -536,7 +544,8 @@ bool skippy_select_stage_slice(
+         layer_start,
+         layer_end,
+         selection,
+-        error);
++        error,
++        explicit_output);
+     for (const auto & parameter : parameters) {
+         state.parameter_names[parameter.tensor].push_back(parameter.identity);
+     }
+@@ -593,6 +602,7 @@ bool skippy_build_guarded_stage_slice_plan(
+         }
+         if (profile->guard.n_tokens == 0 || profile->guard.n_sequences == 0 ||
+                 profile->guard.n_outputs == 0 ||
++                profile->guard.n_tokens % profile->guard.n_sequences != 0 ||
+                 profile->guard.n_outputs > profile->guard.n_tokens ||
+                 profile->guard.graph_configuration_id.empty() ||
+                 profile->guard.backend_id.empty()) {
+@@ -614,7 +624,8 @@ bool skippy_build_guarded_stage_slice_plan(
+                     layer_start,
+                     layer_end,
+                     profile_plan.slice,
+-                    error)) {
++                    error,
++                    profile->explicit_output)) {
+             error = "execution profile " + profile->profile_id + " rejected: " + error;
+             return false;
+         }
+diff --git a/src/skippy/stage_slice_plan.h b/src/skippy/stage_slice_plan.h
+index 243e56ddf..f5517646a 100644
+--- a/src/skippy/stage_slice_plan.h
++++ b/src/skippy/stage_slice_plan.h
+@@ -53,6 +53,7 @@ struct skippy_stage_profile_input {
+     const std::vector<skippy_request_input_binding> * request_inputs = nullptr;
+     int32_t layer_count = 0;
+     skippy_execution_profile_guard guard;
++    const ggml_tensor * explicit_output = nullptr;
+ };
+ 
+ struct skippy_stage_profile_plan {
+@@ -82,7 +83,8 @@ bool skippy_select_stage_slice(
+         int32_t layer_start,
+         int32_t layer_end,
+         skippy_stage_slice_selection & selection,
+-        std::string & error);
++        std::string & error,
++        const ggml_tensor * explicit_output = nullptr);
+ 
+ bool skippy_build_guarded_stage_slice_plan(
+         const std::vector<skippy_stage_profile_input> & profiles,
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index 9dbc7fb0a..f46288a22 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -298,6 +298,9 @@ static bool check_stage_slices(
+         &graph_result->get_request_input_bindings(),
+         n_layer,
+         guard,
++        graph_result->get_logits() != nullptr
++                ? graph_result->get_logits()
++                : graph_result->get_embd(),
+     }};
+     skippy_guarded_stage_slice_plan full_plan;
+     std::string full_plan_error;
 diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
-index cfe7224cb..df8528892 100644
+index cfe7224cb..b8f549c29 100644
 --- a/src/skippy/tests/renamed_multishard_planning.cpp
 +++ b/src/skippy/tests/renamed_multishard_planning.cpp
 @@ -9,6 +9,7 @@
@@ -641,7 +780,15 @@ index cfe7224cb..df8528892 100644
  #include "skippy/stage_slice_plan.h"
  
  #include <algorithm>
-@@ -475,6 +476,142 @@ bool rejects_invalid_bindings(
+@@ -400,6 +401,7 @@ bool build_profile(
+         &result->get_request_input_bindings(),
+         llama_model_n_layer(model),
+         guard,
++        result->get_logits() != nullptr ? result->get_logits() : result->get_embd(),
+     }};
+     skippy_guarded_stage_slice_plan plan;
+     if (!skippy_build_guarded_stage_slice_plan(
+@@ -475,6 +477,142 @@ bool rejects_invalid_bindings(
      return rejects(changed);
  }
  
@@ -784,7 +931,7 @@ index cfe7224cb..df8528892 100644
  int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
      std::string error;
      std::vector<std::string> generated_paths;
-@@ -540,6 +677,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+@@ -540,6 +678,10 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
          std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
          return 8;
      }
@@ -822,5 +969,142 @@ index 000000000..035721446
 +    static_assert(std::is_trivial<skippy_stage_plan_state_desc_v1>::value, "C ABI triviality required");
 +    return SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
 +}
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 8a4048097..380cf4976 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -96,11 +96,11 @@ static int check_semantic_identities() {
+     const skippy_execution_profile_guard guard = {4, 1, 4, 0, "semantic-config", "cpu"};
+     const std::vector<skippy_stage_profile_input> left_profiles = {{
+         "semantic", left.graph, &left.boundaries, &left.effects,
+-        &left.parameters, &left.requests, 2, guard,
++        &left.parameters, &left.requests, 2, guard, left.exit_1,
+     }};
+     const std::vector<skippy_stage_profile_input> right_profiles = {{
+         "semantic", right.graph, &right.boundaries, &right.effects,
+-        &right.parameters, &right.requests, 2, guard,
++        &right.parameters, &right.requests, 2, guard, right.exit_1,
+     }};
+     skippy_guarded_stage_slice_plan source;
+     skippy_guarded_stage_slice_plan final;
+@@ -508,8 +508,8 @@ static int check_middle_stage_selection() {
+     std::vector<skippy_parameter_binding> decode_parameter_bindings = parameter_bindings;
+     decode_parameter_bindings[1].identity = "block.1.decode_weight";
+     std::vector<skippy_stage_profile_input> profiles = {
+-        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard},
+-        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard},
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard, logits},
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard, logits},
+     };
+     skippy_guarded_stage_slice_plan guarded_plan;
+     if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error) ||
+@@ -557,16 +557,16 @@ static int check_middle_stage_selection() {
+     profiles[0].guard = decode_guard;
+     profiles[0].guard.n_tokens = 5;
+     profiles[0].guard.n_sequences = 2;
+-    if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
+-        std::fprintf(stderr, "uneven multi-sequence execution profile was rejected: %s\n", error.c_str());
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "uneven multi-sequence execution profile was accepted\n");
+         ggml_free(ctx);
+         return 13;
+     }
+     profiles[0].guard = decode_guard;
+ 
+     std::vector<skippy_stage_profile_input> ordered_profiles = {
+-        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard},
+-        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard},
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard, logits},
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard, logits},
+     };
+     skippy_guarded_stage_slice_plan source_plan;
+     skippy_guarded_stage_slice_plan middle_plan;
+@@ -915,7 +915,8 @@ static int check_state_preparation_execution(bool empty_zero, bool empty_extra)
+     skippy_stage_slice_selection selection;
+     skippy_executable_graph slice;
+     std::string error;
+-    if (!skippy_select_stage_slice(graph, boundaries, effects, {}, request_bindings, 1, 0, 1, selection, error) ||
++    if (!skippy_select_stage_slice(graph, boundaries, effects, {}, request_bindings, 1, 0, 1,
++                selection, error, output) ||
+             !selection.activation_imports.empty() || selection.state_effects.size() != effects.size() ||
+             !skippy_build_executable_graph(graph, selection, slice, error)) {
+         std::fprintf(stderr, "state preparation slice failed: %s\n", error.c_str());
+@@ -955,9 +956,75 @@ static int check_state_preparation_execution(bool empty_zero, bool empty_extra)
+     return 0;
+ }
+ 
++static int check_explicit_final_output() {
++    std::vector<uint8_t> buffer(ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false));
++    ggml_init_params params = { buffer.size(), buffer.data(), true };
++    ggml_context * ctx = ggml_init(params);
++    ggml_tensor * request = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_0 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_2 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_set_input(request);
++    ggml_tensor * entry_0 = ggml_mul(ctx, request, parameter_0);
++    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, parameter_0);
++    ggml_tensor * exit_1 = ggml_add(ctx, exit_0, parameter_1);
++    ggml_tensor * exit_2 = ggml_add(ctx, exit_1, parameter_2);
++    ggml_tensor * logits = ggml_mul(ctx, exit_2, parameter_2);
++    ggml_tensor * trailing_unrelated = ggml_mul(ctx, request, parameter_0);
++
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 64, false);
++    ggml_build_forward_expand(graph, logits);
++    ggml_build_forward_order(graph, trailing_unrelated);
++    int32_t trailing_index = -1;
++    for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++        if (ggml_graph_node(graph, index) == trailing_unrelated) {
++            trailing_index = index;
++            break;
++        }
++    }
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_0},
++        {skippy_block_boundary_kind::entry, 1, exit_0},
++        {skippy_block_boundary_kind::exit, 1, exit_1},
++        {skippy_block_boundary_kind::entry, 2, exit_1},
++        {skippy_block_boundary_kind::exit, 2, exit_2},
++    };
++    const std::vector<skippy_parameter_binding> parameters = {
++        {parameter_0, "block.0.weight"},
++        {parameter_1, "block.1.weight"},
++        {parameter_2, "block.2.weight"},
++    };
++    const std::vector<skippy_request_input_binding> requests = {
++        {request, "tokens"},
++    };
++    skippy_stage_slice_selection selection;
++    std::string error;
++    if (!skippy_select_stage_slice(graph, boundaries, {}, parameters, requests, 3, 2, 3,
++                selection, error, logits) ||
++            selection.parameter_identities != std::vector<std::string>{"block.2.weight"} ||
++            !contains_tensor(selection.activation_imports, exit_1) ||
++            !selection.activation_exports.empty() || trailing_index < 0 ||
++            std::find(selection.node_indices.begin(), selection.node_indices.end(),
++                    trailing_index) != selection.node_indices.end()) {
++        std::fprintf(stderr, "explicit final output cone was not selected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 78;
++    }
++    if (skippy_select_stage_slice(graph, boundaries, {}, parameters, requests, 3, 2, 3,
++                selection, error)) {
++        std::fprintf(stderr, "final slice accepted without an explicit output root\n");
++        ggml_free(ctx);
++        return 79;
++    }
++    ggml_free(ctx);
++    return 0;
++}
++
+ int main() {
+     int result = check_semantic_identities();
+     if (!result) { result = check_middle_stage_selection(); }
++    if (!result) { result = check_explicit_final_output(); }
+     if (!result) { result = check_state_preparation_execution(false, false); }
+     if (!result) { result = check_state_preparation_execution(true, false); }
+     if (!result) { result = check_state_preparation_execution(true, true); }
 -- 
 2.54.0 (Apple Git-157)
+

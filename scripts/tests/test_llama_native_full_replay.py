@@ -33,7 +33,9 @@ LEGACY_TARGETS = {
 
 
 class LlamaNativeFullReplayTests(unittest.TestCase):
-    def run_build(self, *, full_replay: bool) -> list[dict[str, object]]:
+    def run_build(
+        self, *, full_replay: bool, repeat_cached: bool = False
+    ) -> list[dict[str, object]]:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             llama = root / "llama.cpp"
@@ -85,6 +87,15 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (bin_dir / "git").write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    exit 0
+                    """
+                ),
+                encoding="utf-8",
+            )
             (bin_dir / "ctest").write_text(
                 textwrap.dedent(
                     """\
@@ -100,7 +111,7 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            for tool in (bin_dir / "cmake", bin_dir / "ctest"):
+            for tool in (bin_dir / "cmake", bin_dir / "ctest", bin_dir / "git"):
                 tool.chmod(0o755)
 
             environment = os.environ.copy()
@@ -119,14 +130,17 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
             if full_replay:
                 environment["LLAMA_STAGE_FULL_REPLAY"] = "ON"
 
-            subprocess.run(
-                [shutil.which("bash") or "bash", str(BUILD_SCRIPT)],
-                cwd=ROOT,
-                env=environment,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            for run_number in range(2 if repeat_cached else 1):
+                if run_number:
+                    environment.pop("LLAMA_STAGE_FORCE_BUILD", None)
+                subprocess.run(
+                    [shutil.which("bash") or "bash", str(BUILD_SCRIPT)],
+                    cwd=ROOT,
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
             return [json.loads(line) for line in trace.read_text().splitlines()]
 
     def test_default_build_keeps_standard_and_private_tests_disabled(self) -> None:
@@ -163,6 +177,27 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
         self.assertEqual(ctest["args"][-2:], ["-R", "^(skippy_|test-skippy-)"])
         self.assertIn("--timeout", ctest["args"])
         self.assertEqual(ctest["args"][ctest["args"].index("--timeout") + 1], "900")
+
+    def test_cached_full_replay_rebuilds_and_runs_skippy_gates(self) -> None:
+        trace = self.run_build(full_replay=True, repeat_cached=True)
+
+        build_calls = [
+            call for call in trace if call["tool"] == "cmake" and call["args"][0] == "--build"
+        ]
+        ctest_calls = [call for call in trace if call["tool"] == "ctest"]
+
+        self.assertEqual(len(build_calls), 2)
+        self.assertEqual(len(ctest_calls), 2)
+
+    def test_cached_standard_build_keeps_cache_shortcut(self) -> None:
+        trace = self.run_build(full_replay=False, repeat_cached=True)
+
+        build_calls = [
+            call for call in trace if call["tool"] == "cmake" and call["args"][0] == "--build"
+        ]
+
+        self.assertEqual(len(build_calls), 1)
+        self.assertFalse(any(call["tool"] == "ctest" for call in trace))
 
     def test_just_recipe_uses_a_dedicated_forced_replay_build(self) -> None:
         recipe = (ROOT / "just" / "skippy.just").read_text(encoding="utf-8")

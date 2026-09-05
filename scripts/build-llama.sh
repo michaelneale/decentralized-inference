@@ -346,7 +346,8 @@ CURRENT_BUILD_STAMP="$(
   done
 )"
 
-if [[ "${LLAMA_STAGE_FORCE_BUILD:-${SKIPPY_FORCE_LLAMA_BUILD:-0}}" != "1" &&
+if [[ "$LLAMA_STAGE_FULL_REPLAY" != "ON" &&
+      "${LLAMA_STAGE_FORCE_BUILD:-${SKIPPY_FORCE_LLAMA_BUILD:-0}}" != "1" &&
       -f "$BUILD_STAMP" &&
       "$(cat "$BUILD_STAMP")" == "$CURRENT_BUILD_STAMP" ]] &&
    git -C "$LLAMA_WORKDIR" diff-index --quiet HEAD -- &&
