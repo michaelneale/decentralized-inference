@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub mod materialization;
+pub mod stage_admission;
 
 pub const PACKAGE_SCHEMA_VERSION: u32 = 2;
 
@@ -170,13 +171,19 @@ pub enum TensorIntegrity {
     TensorSha256 { sha256: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sidecar {
-    pub kind: String,
+    pub kind: SidecarKind,
     pub artifact_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarKind {
+    Mmproj,
 }
 
 /// Generation capability declarations carried as package data.
@@ -316,6 +323,7 @@ pub enum ValidationCode {
     SourceIdentityMismatch,
     DuplicateArtifact,
     DuplicateArtifactPath,
+    DuplicateSidecar,
     DuplicateTensor,
     LayerOutOfBounds,
     InvalidDimension,
@@ -811,9 +819,20 @@ fn validate_sidecars(
     artifacts: &BTreeMap<&str, &Artifact>,
     issues: &mut Vec<ValidationIssue>,
 ) {
+    let mut seen = BTreeSet::new();
     for (index, sidecar) in sidecars.iter().enumerate() {
         let prefix = format!("sidecars[{index}]");
-        validate_identifier(&format!("{prefix}.kind"), &sidecar.kind, issues);
+        if !seen.insert((sidecar.kind, sidecar.name.as_deref())) {
+            push_issue(
+                issues,
+                ValidationCode::DuplicateSidecar,
+                prefix.clone(),
+                format!(
+                    "sidecar semantic identity ({:?}, {:?}) appears more than once",
+                    sidecar.kind, sidecar.name
+                ),
+            );
+        }
         if !artifacts.contains_key(sidecar.artifact_id.as_str()) {
             push_issue(
                 issues,
@@ -1397,7 +1416,7 @@ mod tests {
 
         let mut sidecar = manifest;
         sidecar.sidecars.push(Sidecar {
-            kind: "mmproj".to_string(),
+            kind: SidecarKind::Mmproj,
             artifact_id: sidecar.source_model.metadata_artifact_id.clone(),
             name: None,
         });
@@ -1490,13 +1509,13 @@ mod tests {
     fn package_identity_ignores_catalog_enumeration_order() {
         let mut manifest = fixture();
         manifest.source_model.files.push(SourceFile {
-            path: "tokenizer.json".to_string(),
+            path: "model-00002-of-00002.gguf".to_string(),
             byte_size: 32,
             sha256: DIGEST.to_string(),
         });
         manifest.artifact_catalog.entries.push(Artifact {
-            id: "tokenizer".to_string(),
-            path: "sidecars/tokenizer.json".to_string(),
+            id: "mmproj".to_string(),
+            path: "sidecars/mmproj.gguf".to_string(),
             byte_size: 32,
             sha256: DIGEST.to_string(),
         });
@@ -1515,8 +1534,8 @@ mod tests {
             },
         });
         manifest.sidecars.push(Sidecar {
-            kind: "tokenizer".to_string(),
-            artifact_id: "tokenizer".to_string(),
+            kind: SidecarKind::Mmproj,
+            artifact_id: "mmproj".to_string(),
             name: Some("default".to_string()),
         });
         manifest.package_id = manifest.computed_package_id().unwrap();

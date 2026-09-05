@@ -300,7 +300,14 @@ fn verified_resume_and_projector_sidecar_round_trip() {
     manifest.validate().unwrap();
     assert_eq!(manifest.tensor_catalog.entries.len(), 1);
     assert_eq!(manifest.sidecars.len(), 1);
-    assert_eq!(manifest.sidecars[0].kind, "mmproj");
+    assert_eq!(
+        manifest.sidecars[0].kind,
+        skippy_package_format::SidecarKind::Mmproj
+    );
+    assert_eq!(
+        manifest.sidecars[0].name.as_deref(),
+        Some("projector-00000")
+    );
     assert_eq!(manifest.artifact_catalog.entries.len(), 2);
 }
 

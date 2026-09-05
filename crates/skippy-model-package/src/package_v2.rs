@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
 use skippy_package_format::{
-    Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, PackageManifest, Sidecar, SourceModel,
+    Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, PackageManifest, Sidecar, SidecarKind,
+    SourceModel,
 };
 
 use crate::hash::file_sha256;
@@ -83,9 +84,9 @@ pub(crate) fn write_package(
             format_bytes(artifact.byte_size)
         ))?;
         manifest.sidecars.push(Sidecar {
-            kind: "mmproj".to_string(),
+            kind: SidecarKind::Mmproj,
             artifact_id: artifact.id.clone(),
-            name: None,
+            name: Some(artifact.id.clone()),
         });
         manifest.artifact_catalog.entries.push(artifact);
     }

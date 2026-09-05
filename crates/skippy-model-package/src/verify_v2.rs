@@ -249,7 +249,7 @@ fn verify_projectors(
     let mut sidecars = BTreeSet::new();
     for sidecar in &manifest.sidecars {
         ensure!(
-            sidecar.kind == "mmproj",
+            sidecar.kind == skippy_package_format::SidecarKind::Mmproj,
             "unsupported sidecar kind {:?}",
             sidecar.kind
         );
