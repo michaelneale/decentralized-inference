@@ -100,8 +100,6 @@ index 04064fbf2..b8807005b 100644
 +        if (model->hparams.is_recr(layer)) {
 +            if (layer > 0) {
 +                has_downstream_recurrent_layer = true;
-+                // every recurrent stage that has an upstream stage must claim
-+                // its pre-entry auxiliary cone
 +                const ggml_tensor * entry = graph_result->get_block_boundaries()[2 * layer].tensor;
 +                int32_t entry_index = -1;
 +                for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
@@ -118,8 +116,6 @@ index 04064fbf2..b8807005b 100644
 +                }
 +                proved_noncontiguous_recurrent_slice = true;
 +            } else {
-+                // a recurrent source stage has no upstream stage to import the
-+                // cone from: it must be self-contained and own its state effects
 +                if (!selection.activation_imports.empty()) {
 +                    std::fprintf(stderr,
 +                            "metadata-only %s recurrent layer 0 slice imports an activation\n",
@@ -192,4 +188,3 @@ index 04064fbf2..b8807005b 100644
  
 -- 
 2.54.0
-
