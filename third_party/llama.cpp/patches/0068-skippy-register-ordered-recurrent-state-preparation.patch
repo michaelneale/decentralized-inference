@@ -1,0 +1,828 @@
+From fc1783b3b64a115ffdf71307dd041e0ed32556c0 Mon Sep 17 00:00:00 2001
+From: Thinker
+ <75d8a808fa21bb8d1812e080cf471db601c6e8e6a62dcd516d37531e83a7bb77@meshllm.communities.buzz.xyz>
+Date: Sat, 5 Sep 2026 20:40:10 +1000
+Subject: [PATCH] skippy: register ordered recurrent state preparation
+
+---
+ src/llama-graph.cpp                         |  59 +++++-
+ src/llama-graph.h                           |  22 ++
+ src/models/mamba-base.cpp                   |   8 +-
+ src/skippy/state_effects.cpp                | 210 +++++++++++++++++---
+ src/skippy/state_effects.h                  |  18 +-
+ src/skippy/tests/noalloc_graph_planning.cpp | 190 ++++++++++++------
+ src/skippy/tests/stage_slice_plan.cpp       |  80 +++++++-
+ 7 files changed, 472 insertions(+), 115 deletions(-)
+
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index a714f1b89..fc32b7b86 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1768,8 +1768,15 @@ void llm_graph_context::state_read(skippy_state_kind kind, ggml_tensor * storage
+ }
+ 
+ void llm_graph_context::state_write(skippy_state_kind kind, ggml_tensor * storage, ggml_tensor * effect_node, int il) const {
+-    res->state_effects.push_back({kind, skippy_state_access::write,
+-            il, skippy_state_canonical_storage(storage), effect_node});
++    const ggml_tensor * canonical = skippy_state_canonical_storage(storage);
++    int64_t ordinal = 0;
++    for (const auto & effect : res->state_effects) {
++        if (effect.access == skippy_state_access::write && effect.kind == kind &&
++                effect.layer == il && effect.storage == canonical) {
++            ++ordinal;
++        }
++    }
++    res->state_effects.push_back({kind, skippy_state_access::write, il, canonical, effect_node, ordinal});
+ }
+ 
+ 
+@@ -3742,14 +3749,37 @@ ggml_tensor * llm_graph_context::build_rs(
+            uint32_t   rs_size,
+             int32_t   rs_zero,
+         const llm_graph_get_rows_fn & get_state_rows) const {
++    return build_rs_impl(s, state_copy_main, state_copy_extra, state_size, n_seqs,
++            n_rs, rs_head, rs_size, rs_zero, get_state_rows, nullptr, -1);
++}
++
++ggml_tensor * llm_graph_context::build_rs_impl(
++        ggml_tensor * s,
++        ggml_tensor * state_copy_main,
++        ggml_tensor * state_copy_extra,
++            int32_t   state_size,
++            int32_t   n_seqs,
++           uint32_t   n_rs,
++           uint32_t   rs_head,
++           uint32_t   rs_size,
++            int32_t   rs_zero,
++        const llm_graph_get_rows_fn & get_state_rows,
++        const skippy_state_kind * kind, int il) const {
+ 
+     GGML_UNUSED(rs_size);
++    if (kind != nullptr) {
++        state_read(*kind, s, il);
++    }
+     ggml_tensor * states = ggml_reshape_2d(ctx0, s, state_size, s->ne[1]);
+ 
+     // Clear a single state which will then be copied to the other cleared states.
+     // Note that this is a no-op when the view is zero-sized.
+     ggml_tensor * state_zero = ggml_view_1d(ctx0, states, state_size*(rs_zero >= 0), rs_zero*states->nb[1]*(rs_zero >= 0));
+-    ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero, 0));
++    ggml_tensor * zero_write = ggml_scale_inplace(ctx0, state_zero, 0);
++    ggml_build_forward_expand(gf, zero_write);
++    if (kind != nullptr) {
++        state_write(*kind, s, zero_write, il);
++    }
+ 
+     // copy states
+     // NOTE: assuming the copy destinations are ALL contained between rs_head and rs_head + n_rs
+@@ -3759,10 +3789,12 @@ ggml_tensor * llm_graph_context::build_rs(
+ 
+     // copy extra states which won't be changed further (between n_seqs and n_rs)
+     ggml_tensor * states_extra = ggml_get_rows(ctx0, states, state_copy_extra);
+-    ggml_build_forward_expand(gf,
+-        ggml_cpy(ctx0,
+-            states_extra,
+-            ggml_view_2d(ctx0, s, state_size, (n_rs - n_seqs), s->nb[1], (rs_head + n_seqs)*s->nb[1])));
++    ggml_tensor * extra_write = ggml_cpy(ctx0, states_extra,
++            ggml_view_2d(ctx0, s, state_size, (n_rs - n_seqs), s->nb[1], (rs_head + n_seqs)*s->nb[1]));
++    ggml_build_forward_expand(gf, extra_write);
++    if (kind != nullptr) {
++        state_write(*kind, s, extra_write, il);
++    }
+ 
+     return output_states;
+ }
+@@ -3810,6 +3842,19 @@ ggml_tensor * llm_graph_context::build_rs(
+                     get_state_rows);
+ }
+ 
++ggml_tensor * llm_graph_context::build_rs(
++        llm_graph_input_rs * inp,
++        ggml_tensor * s,
++            int32_t   state_size,
++            int32_t   n_seqs,
++        skippy_state_kind kind, int il,
++        const llm_graph_get_rows_fn & get_state_rows) const {
++    const auto * kv_state = inp->mctx;
++    return build_rs_impl(s, inp->s_copy_main, inp->s_copy_extra, state_size, n_seqs,
++            kv_state->get_n_rs(), kv_state->get_head(), kv_state->get_size(), kv_state->get_rs_z(),
++            get_state_rows, &kind, il);
++}
++
+ ggml_tensor * llm_graph_context::build_rwkv_token_shift_load(
+     llm_graph_input_rs * inp,
+     const llama_ubatch & ubatch,
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index fbda56aeb..ae95414e4 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -1509,6 +1509,19 @@ struct llm_graph_context {
+                 int32_t   rs_zero,
+             const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
+ 
++    ggml_tensor * build_rs_impl(
++            ggml_tensor * s,
++            ggml_tensor * state_copy_main,
++            ggml_tensor * state_copy_extra,
++                int32_t   state_size,
++                int32_t   n_seqs,
++               uint32_t   n_rs,
++               uint32_t   rs_head,
++               uint32_t   rs_size,
++                int32_t   rs_zero,
++            const llm_graph_get_rows_fn & get_state_rows,
++            const skippy_state_kind * kind, int il) const;
++
+     llm_graph_input_rs * build_rs_inp() const;
+ 
+     ggml_tensor * build_rs(
+@@ -1518,6 +1531,15 @@ struct llm_graph_context {
+                 int32_t   n_seqs,
+             const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
+ 
++    /** Prepare state and register its read owner and ordered zero/copy writes. */
++    ggml_tensor * build_rs(
++            llm_graph_input_rs * inp,
++            ggml_tensor * s,
++                int32_t   state_size,
++                int32_t   n_seqs,
++            skippy_state_kind kind, int il,
++            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
++
+     ggml_tensor * build_rwkv_token_shift_load(
+         llm_graph_input_rs * inp,
+         const llama_ubatch & ubatch,
+diff --git a/src/models/mamba-base.cpp b/src/models/mamba-base.cpp
+index 1c9b2536a..e70b31c14 100644
+--- a/src/models/mamba-base.cpp
++++ b/src/models/mamba-base.cpp
+@@ -179,11 +179,9 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
+     const int64_t state_slots     = ssm_states_all->ne[1];
+ 
+-    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
++    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, skippy_state_kind::recurrent_conv, il);
+     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs);
+ 
+-    state_read(skippy_state_kind::recurrent_conv, conv_states_all, il);
+-
+     // d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
+ 
+     // Keep the projection 2D: with a {n_embd, 1, n_seqs} batch the CUDA backend
+@@ -266,9 +264,7 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
+             return ggml_ssm_scan(ctx, ssm, x, dt, A, B, C, ids, K);
+         };
+ 
+-        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
+-
+-        state_read(skippy_state_kind::recurrent_ssm, ssm_states_all, il);
++        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, skippy_state_kind::recurrent_ssm, il, get_ssm_rows);
+ 
+         const int64_t D            = d_state * d_inner;
+         const int64_t n_written    = std::min<int64_t>(n_seq_tokens, K);
+diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
+index a0456aef0..19b0f404e 100644
+--- a/src/skippy/state_effects.cpp
++++ b/src/skippy/state_effects.cpp
+@@ -4,11 +4,23 @@
+ 
+ #include <cinttypes>
+ #include <cstdio>
++#include <limits>
++#include <map>
+ #include <set>
+ #include <tuple>
++#include <unordered_map>
+ #include <unordered_set>
+ 
+ const ggml_tensor * skippy_state_canonical_storage(const ggml_tensor * tensor) {
++    const ggml_tensor * slow = tensor;
++    const ggml_tensor * fast = tensor;
++    while (fast != nullptr && fast->view_src != nullptr) {
++        slow = slow->view_src;
++        fast = fast->view_src->view_src;
++        if (slow == fast) {
++            return nullptr;
++        }
++    }
+     while (tensor != nullptr && tensor->view_src != nullptr) {
+         tensor = tensor->view_src;
+     }
+@@ -41,6 +53,113 @@ static bool state_access_known(skippy_state_access access) {
+     return false;
+ }
+ 
++static bool checked_add(size_t a, size_t b, size_t & result) {
++    if (b > std::numeric_limits<size_t>::max() - a) {
++        return false;
++    }
++    result = a + b;
++    return true;
++}
++
++static bool checked_mul(size_t a, size_t b, size_t & result) {
++    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) {
++        return false;
++    }
++    result = a * b;
++    return true;
++}
++
++/** Compute the strided byte extent without overflowing ggml_nbytes arithmetic. */
++static bool tensor_span(const ggml_tensor * tensor, size_t & span) {
++    if (tensor == nullptr || tensor->type < 0 || tensor->type >= GGML_TYPE_COUNT) {
++        return false;
++    }
++    bool empty = false;
++    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
++        if (tensor->ne[d] < 0 || static_cast<uint64_t>(tensor->ne[d]) > std::numeric_limits<size_t>::max()) {
++            return false;
++        }
++        empty |= tensor->ne[d] == 0;
++    }
++    const size_t block = ggml_blck_size(tensor->type);
++    const size_t element = ggml_type_size(tensor->type);
++    if (block == 0 || element == 0 || tensor->ne[0] % block != 0) {
++        return false;
++    }
++    span = 0;
++    if (empty) {
++        return true;
++    }
++    span = element;
++    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
++        const size_t count = static_cast<size_t>(tensor->ne[d]) / (d == 0 ? block : 1);
++        size_t extent;
++        if (!checked_mul(count - 1, tensor->nb[d], extent) || !checked_add(span, extent, span)) {
++            return false;
++        }
++    }
++    return true;
++}
++
++struct state_region {
++    const ggml_tensor * base = nullptr;
++    size_t offset = 0;
++    size_t span = 0;
++};
++
++static bool tensor_region(const ggml_tensor * tensor, state_region & region) {
++    region = {};
++    region.base = skippy_state_canonical_storage(tensor);
++    if (region.base == nullptr || !tensor_span(tensor, region.span)) {
++        return false;
++    }
++    while (tensor->view_src != nullptr) {
++        size_t child_span;
++        size_t parent_span;
++        if (!tensor_span(tensor, child_span) || !tensor_span(tensor->view_src, parent_span) ||
++                tensor->view_offs > parent_span || child_span > parent_span - tensor->view_offs ||
++                !checked_add(region.offset, tensor->view_offs, region.offset)) {
++            return false;
++        }
++        tensor = tensor->view_src;
++    }
++    size_t base_span;
++    return tensor->view_offs == 0 && tensor_span(tensor, base_span) &&
++            region.offset <= base_span && region.span <= base_span - region.offset;
++}
++
++/** ggml_cast uses CPY with src[1] == result; it is not a persistent mutation. */
++static const ggml_tensor * write_destination(const ggml_tensor * node) {
++    switch (node->op) {
++        case GGML_OP_CPY:
++            return node->src[1] != node ? node->src[1] : nullptr;
++        case GGML_OP_SET_ROWS:
++            return node->src[2];
++        case GGML_OP_SCALE:
++            return node->view_src != nullptr ? node->src[0] : nullptr;
++        default:
++            return nullptr;
++    }
++}
++
++static bool valid_write_destination(const ggml_tensor * node, const ggml_tensor * storage) {
++    const ggml_tensor * destination = write_destination(node);
++    state_region result;
++    state_region target;
++    if (destination == nullptr || node->view_src == nullptr ||
++            !tensor_region(node, result) || !tensor_region(destination, target) ||
++            result.base != storage || target.base != storage ||
++            result.offset != target.offset || result.span != target.span || node->type != destination->type) {
++        return false;
++    }
++    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
++        if (node->ne[d] != destination->ne[d] || node->nb[d] != destination->nb[d]) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ bool skippy_validate_state_effects(
+         const std::vector<skippy_state_effect> & effects,
+         const ggml_cgraph * graph,
+@@ -50,69 +169,96 @@ bool skippy_validate_state_effects(
+         return false;
+     }
+ 
+-    std::unordered_set<const ggml_tensor *> graph_nodes;
++    std::unordered_map<const ggml_tensor *, int> graph_positions;
+     for (int i = 0; i < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++i) {
+-        graph_nodes.insert(ggml_graph_node(const_cast<ggml_cgraph *>(graph), i));
++        if (!graph_positions.emplace(ggml_graph_node(const_cast<ggml_cgraph *>(graph), i), i).second) {
++            error = "state effects require distinct exact graph nodes";
++            return false;
++        }
+     }
+ 
++    using owner = std::tuple<int32_t, int32_t, const ggml_tensor *>;
+     std::set<std::tuple<int32_t, int32_t>> seen_reads;
+     std::unordered_set<const ggml_tensor *> seen_write_nodes;
+-    std::set<std::tuple<int32_t, int32_t, const ggml_tensor *>> reads;
++    std::unordered_map<const ggml_tensor *, owner> storage_owners;
++    std::set<owner> reads;
++    std::map<owner, std::map<int64_t, int>> writes;
+ 
+     for (size_t i = 0; i < effects.size(); ++i) {
+         const skippy_state_effect & effect = effects[i];
+-        if (!state_kind_known(effect.kind)) {
+-            error = effect_error("state effect %zu has an unknown kind", i);
+-            return false;
+-        }
+-        if (!state_access_known(effect.access)) {
+-            error = effect_error("state effect %zu has an unknown access", i);
+-            return false;
+-        }
+-        if (effect.layer < 0) {
+-            error = effect_error("state effect %zu has an invalid layer", i);
++        if (!state_kind_known(effect.kind) || !state_access_known(effect.access) || effect.layer < 0) {
++            error = effect_error("state effect %zu has an unknown kind/access or invalid layer", i);
+             return false;
+         }
+-        if (effect.storage == nullptr) {
+-            error = effect_error("state effect %zu has null storage", i);
++        state_region storage;
++        if (!tensor_region(effect.storage, storage) || storage.base != effect.storage) {
++            error = effect_error("state effect %zu has invalid or noncanonical storage", i);
+             return false;
+         }
+-        if (effect.storage->view_src != nullptr) {
+-            error = effect_error("state effect %zu storage is a view, not canonical", i);
++        const owner key = {static_cast<int32_t>(effect.kind), effect.layer, effect.storage};
++        const auto inserted = storage_owners.emplace(effect.storage, key);
++        if (!inserted.second && inserted.first->second != key) {
++            error = effect_error("state effect %zu conflicts with another storage owner", i);
+             return false;
+         }
+         if (effect.access == skippy_state_access::read) {
+-            if (!seen_reads.insert({static_cast<int32_t>(effect.kind), effect.layer}).second) {
+-                error = effect_error("state effect %zu duplicates a (kind, layer) read owner", i);
++            if (effect.effect_node != nullptr || effect.write_ordinal != -1 ||
++                    !seen_reads.insert({static_cast<int32_t>(effect.kind), effect.layer}).second) {
++                error = effect_error("state effect %zu has an invalid or duplicate read owner", i);
+                 return false;
+             }
+-            reads.insert({static_cast<int32_t>(effect.kind), effect.layer, effect.storage});
++            reads.insert(key);
+         } else {
+-            if (effect.effect_node == nullptr) {
+-                error = effect_error("state effect %zu write has no ordered effect node", i);
+-                return false;
+-            }
+-            if (graph_nodes.find(effect.effect_node) == graph_nodes.end()) {
+-                error = effect_error("state effect %zu write node is not in the exact graph", i);
++            const auto position = graph_positions.find(effect.effect_node);
++            if (position == graph_positions.end() || !(effect.effect_node->flags & GGML_TENSOR_FLAG_COMPUTE)) {
++                error = effect_error("state effect %zu write node is not executable in the exact graph", i);
+                 return false;
+             }
+             if (!seen_write_nodes.insert(effect.effect_node).second) {
+                 error = effect_error("state effect %zu duplicates an exact write node", i);
+                 return false;
+             }
++            if (!valid_write_destination(effect.effect_node, effect.storage)) {
++                error = effect_error("state effect %zu has an unsupported write or invalid destination", i);
++                return false;
++            }
++            if (effect.write_ordinal < 0 || !writes[key].emplace(effect.write_ordinal, position->second).second) {
++                error = effect_error("state effect %zu has a missing or duplicate write ordinal", i);
++                return false;
++            }
+         }
+     }
+ 
+-    for (size_t i = 0; i < effects.size(); ++i) {
+-        const skippy_state_effect & effect = effects[i];
+-        if (effect.access != skippy_state_access::write) {
++    for (const auto & owner_writes : writes) {
++        if (reads.find(owner_writes.first) == reads.end()) {
++            error = "state write has no matching read owner";
++            return false;
++        }
++        int64_t next = 0;
++        int previous_position = -1;
++        for (const auto & write : owner_writes.second) {
++            if (write.first != next++ || write.second <= previous_position) {
++                error = "state write ordinals are not contiguous in executable graph order";
++                return false;
++            }
++            previous_position = write.second;
++        }
++    }
++
++    for (const auto & node_position : graph_positions) {
++        const ggml_tensor * node = node_position.first;
++        if (node->op != GGML_OP_CPY && node->op != GGML_OP_SET_ROWS && node->op != GGML_OP_SCALE) {
+             continue;
+         }
+-        if (reads.find({static_cast<int32_t>(effect.kind), effect.layer, effect.storage}) == reads.end()) {
+-            error = effect_error("state effect %zu write has no matching read owner", i);
++        const ggml_tensor * destination = write_destination(node);
++        const ggml_tensor * storage = skippy_state_canonical_storage(destination);
++        const ggml_tensor * result_storage = skippy_state_canonical_storage(node);
++        if ((storage_owners.find(storage) != storage_owners.end() ||
++                storage_owners.find(result_storage) != storage_owners.end()) &&
++                (!valid_write_destination(node, storage) || seen_write_nodes.find(node) == seen_write_nodes.end())) {
++            error = effect_error("graph node %zu mutates owned state without a valid write record", node_position.second);
+             return false;
+         }
+     }
+-
+     return true;
+ }
+diff --git a/src/skippy/state_effects.h b/src/skippy/state_effects.h
+index f0aec1aec..9fecf5df3 100644
+--- a/src/skippy/state_effects.h
++++ b/src/skippy/state_effects.h
+@@ -36,22 +36,20 @@ struct skippy_state_effect {
+     // canonical backing storage tensor of the persistent state
+     const ggml_tensor * storage = nullptr;
+     // for writes: the graph node that establishes the ordered state update;
+-    // null for reads, whose ordering the storage dependency already carries
++    // null for reads, which declare ownership rather than a read-event order
+     const ggml_tensor * effect_node = nullptr;
++    /** Per-owner write order: zero-based, contiguous; -1 only for read declarations. */
++    int64_t write_ordinal = -1;
+ };
+ 
+ // Resolve a possibly-view tensor to its canonical backing storage.
+ const ggml_tensor * skippy_state_canonical_storage(const ggml_tensor * tensor);
+ 
+-// Validate the state effects registered while building one graph profile.
+-//
+-// Fails closed: returns false and sets `error` on an unknown kind or access,
+-// invalid layer, null storage, a write without an effect node, a write whose
+-// effect node is not present in the exact graph, a duplicate (kind, layer)
+-// read record, a duplicate exact write node, or a write without a matching
+-// read of the same kind and layer against the same canonical storage. A
+-// state owner may register multiple ordered writes (for example recurrent
+-// rollback slots) as long as each carries a distinct exact graph node.
++/** Validate exact-graph state owners, mutation destinations and per-owner write order.
++ * Known CPY, SET_ROWS and in-place SCALE mutations of owned storage must be registered,
++ * including zero-sized writes. Destination views must fit their canonical allocation.
++ * SET_ROWS index payload bounds and universal read/write hazards are not certified here.
++ */
+ bool skippy_validate_state_effects(
+         const std::vector<skippy_state_effect> & effects,
+         const ggml_cgraph * graph,
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index 2a6f18d98..49811c423 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -279,6 +279,20 @@ static bool check_stage_slices(
+                     profile_name, layer);
+             return false;
+         }
++        for (const auto & effect : graph_result->get_state_effects()) {
++            if (effect.layer != layer || effect.access != skippy_state_access::write) {
++                continue;
++            }
++            bool retained = false;
++            for (int32_t index : selection.node_indices) {
++                retained |= ggml_graph_node(graph, index) == effect.effect_node;
++            }
++            if (!retained) {
++                std::fprintf(stderr, "metadata-only %s layer %d omitted owning write ordinal %lld\n",
++                        profile_name, layer, static_cast<long long>(effect.write_ordinal));
++                return false;
++            }
++        }
+         if (model->hparams.is_recr(layer)) {
+             if (layer > 0) {
+                 has_downstream_recurrent_layer = true;
+@@ -475,13 +489,13 @@ static bool check_state_effects(
+                      recr_total == 0;
+                 break;
+             case layer_state_class::recurrent:
+-                ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 1 &&
+-                     conv_writes == expected_conv_writes &&
++                ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 3 &&
++                     conv_writes == expected_conv_writes + 2 &&
+                      kv_total == 0;
+-                if (conv_writes != expected_conv_writes) {
++                if (conv_writes != expected_conv_writes + 2) {
+                     std::fprintf(stderr,
+                             "metadata-only %s layer %d registered %zu conv writes, expected %zu\n",
+-                            profile_name, il, conv_writes, expected_conv_writes);
++                            profile_name, il, conv_writes, expected_conv_writes + 2);
+                     return false;
+                 }
+                 break;
+@@ -497,6 +511,40 @@ static bool check_state_effects(
+         }
+     }
+ 
++    for (const auto & owner : effects) {
++        if (owner.access != skippy_state_access::read ||
++                (owner.kind != skippy_state_kind::recurrent_conv && owner.kind != skippy_state_kind::recurrent_ssm)) {
++            continue;
++        }
++        int zero_position = -1;
++        int copy_position = -1;
++        int output_position = -1;
++        const ggml_tensor * extra_read = nullptr;
++        for (const auto & effect : effects) {
++            if (effect.storage != owner.storage || effect.access != skippy_state_access::write) { continue; }
++            const ggml_tensor * node = effect.effect_node;
++            if (node->op != (effect.write_ordinal == 0 ? GGML_OP_SCALE : GGML_OP_CPY)) { return false; }
++            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++                if (ggml_graph_node(graph, i) != node) { continue; }
++                if (effect.write_ordinal == 0) { zero_position = i; }
++                if (effect.write_ordinal == 1) { copy_position = i; extra_read = node->src[0]; }
++            }
++        }
++        const ggml_op output_op = owner.kind == skippy_state_kind::recurrent_conv ? GGML_OP_GET_ROWS : GGML_OP_SSM_SCAN;
++        for (int i = zero_position + 1; i < copy_position; ++i) {
++            const ggml_tensor * node = ggml_graph_node(graph, i);
++            if (node != extra_read && node->op == output_op &&
++                    skippy_state_canonical_storage(node->src[0]) == owner.storage) {
++                output_position = i;
++                break;
++            }
++        }
++        if (!(zero_position >= 0 && zero_position < output_position && output_position < copy_position)) {
++            std::fprintf(stderr, "metadata-only %s layer %d lost zero/output/extra-copy order\n", profile_name, owner.layer);
++            return false;
++        }
++    }
++
+     // persistent state stays local: no state storage is an activation boundary
+     const ggml_tensor * activation_in  = skippy_state_canonical_storage(graph_result->get_skippy_activation_input());
+     const ggml_tensor * activation_out = skippy_state_canonical_storage(graph_result->get_skippy_activation_output());
+@@ -736,73 +784,97 @@ static bool check_boundary_validation_rejects() {
+ }
+ 
+ static bool check_state_validation_rejects() {
+-    // minimal real graph so effect nodes can be checked for membership
+-    std::vector<uint8_t> buf(ggml_tensor_overhead() * 16 + ggml_graph_overhead());
++    std::vector<uint8_t> buf(ggml_tensor_overhead() * 64 + ggml_graph_overhead());
+     ggml_init_params init = { buf.size(), buf.data(), true };
+     ggml_context * ctx = ggml_init(init);
+-    ggml_tensor * storage = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+-    ggml_tensor * value   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+-    ggml_tensor * node    = ggml_add(ctx, storage, value);
+-    ggml_tensor * node2   = ggml_sub(ctx, storage, value);
+-    ggml_tensor * stray   = ggml_mul(ctx, storage, value);
+-    ggml_cgraph * graph   = ggml_new_graph(ctx);
+-    ggml_build_forward_expand(graph, node);
+-    ggml_build_forward_expand(graph, node2);
++    ggml_tensor * storage = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * other = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * value = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * zero = ggml_scale_inplace(ctx, ggml_view_1d(ctx, storage, 0, 0), 0);
++    ggml_tensor * copy = ggml_cpy(ctx, value, storage);
++    ggml_tensor * ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, 2);
++    ggml_tensor * rows = ggml_set_rows(ctx, storage, value, ids);
++    ggml_tensor * stray = ggml_cpy(ctx, value, storage);
++    ggml_tensor * add = ggml_add(ctx, storage, value);
++    ggml_tensor * sub = ggml_sub(ctx, storage, value);
++    ggml_tensor * scale = ggml_scale(ctx, storage, 0);
++    ggml_cgraph * graph = ggml_new_graph(ctx);
++    for (auto * node : {zero, copy, rows, add, sub, scale}) {
++        ggml_build_forward_expand(graph, node);
++    }
+ 
+     std::string error;
+     const auto kv = skippy_state_kind::kv_key;
+     const auto rd = skippy_state_access::read;
+     const auto wr = skippy_state_access::write;
+-
+     const std::vector<skippy_state_effect> valid = {
++        {kv, wr, 0, storage, zero, 0},
++        {kv, wr, 0, storage, copy, 1},
++        {kv, wr, 0, storage, rows, 2},
+         {kv, rd, 0, storage, nullptr},
+-        {kv, wr, 0, storage, node},
+-    };
+-    if (!skippy_validate_state_effects(valid, graph, error)) {
+-        std::fprintf(stderr, "valid state effects rejected: %s\n", error.c_str());
+-        ggml_free(ctx);
+-        return false;
+-    }
+-
+-    // multiple ordered writes (rollback slots) with distinct exact nodes are valid
+-    const std::vector<skippy_state_effect> valid_multi_write = {
+-        {kv, rd, 0, storage, nullptr},
+-        {kv, wr, 0, storage, node},
+-        {kv, wr, 0, storage, node2},
+     };
+-    if (!skippy_validate_state_effects(valid_multi_write, graph, error)) {
+-        std::fprintf(stderr, "valid multi-write state effects rejected: %s\n", error.c_str());
+-        ggml_free(ctx);
+-        return false;
+-    }
+-
+-    const std::vector<std::vector<skippy_state_effect>> rejected = {
+-        // unknown kind
+-        {{static_cast<skippy_state_kind>(99), rd, 0, storage, nullptr}},
+-        // invalid layer
+-        {{kv, rd, -1, storage, nullptr}},
+-        // null storage
+-        {{kv, rd, 0, nullptr, nullptr}},
+-        // write without effect node
+-        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, nullptr}},
+-        // write whose effect node is not in the exact graph
+-        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, stray}},
+-        // duplicate (kind, layer) read owner
+-        {{kv, rd, 0, storage, nullptr}, {kv, rd, 0, storage, nullptr}},
+-        // duplicate exact write node
+-        {{kv, rd, 0, storage, nullptr}, {kv, wr, 0, storage, node}, {kv, wr, 0, storage, node}},
+-        // write without matching read owner
+-        {{kv, wr, 0, storage, node}},
+-    };
+-    for (size_t i = 0; i < rejected.size(); ++i) {
+-        if (skippy_validate_state_effects(rejected[i], graph, error)) {
+-            std::fprintf(stderr, "invalid state effect case %zu was accepted\n", i);
+-            ggml_free(ctx);
+-            return false;
++    bool ok = skippy_validate_state_effects(valid, graph, error);
++    if (!ok) {
++        std::fprintf(stderr, "valid zero-sized/multi-write/late-owner effects rejected: %s\n", error.c_str());
++    }
++    auto reject = [&](const char * name, const std::vector<skippy_state_effect> & effects) {
++        error.clear();
++        if (skippy_validate_state_effects(effects, graph, error) || error.empty()) {
++            std::fprintf(stderr, "invalid state case accepted: %s\n", name);
++            ok = false;
+         }
+-    }
++    };
++    auto changed = valid;
++    std::reverse(changed.begin(), changed.end());
++    if (!skippy_validate_state_effects(changed, graph, error)) { ok = false; }
++    changed = valid;
++    changed.erase(changed.begin());
++    reject("omitted preparation", changed);
++    changed[0].write_ordinal = 0;
++    changed[1].write_ordinal = 1;
++    reject("omitted preparation after renumbering", changed);
++    changed = valid; changed[0].write_ordinal = -1; reject("missing ordinal", changed);
++    changed = valid; changed[1].write_ordinal = 0; reject("duplicate ordinal", changed);
++    changed = valid; changed[2].write_ordinal = 3; reject("ordinal gap", changed);
++    changed = valid; std::swap(changed[0].write_ordinal, changed[1].write_ordinal); reject("reversed ordinals", changed);
++    const auto flags = zero->flags;
++    zero->flags &= ~GGML_TENSOR_FLAG_COMPUTE; reject("non-executing write", valid); zero->flags = flags;
++    changed = valid; changed[0].effect_node = stray; reject("stray write", changed);
++    changed = valid; changed[0].effect_node = nullptr; reject("missing node", changed);
++    changed = valid; changed[0].effect_node = copy; reject("duplicate node", changed);
++    for (auto * node : {add, sub, scale}) {
++        changed = valid; changed[0].effect_node = node; reject("non-mutation or allocating SCALE", changed);
++    }
++    changed = valid; changed.pop_back(); reject("missing owner", changed);
++    changed = valid; changed.push_back(valid.back()); reject("duplicate owner", changed);
++    changed = valid; changed.push_back({skippy_state_kind::kv_value, rd, 0, storage, nullptr}); reject("conflicting owner", changed);
++    changed = valid; changed[0].kind = static_cast<skippy_state_kind>(99); reject("unknown kind", changed);
++    changed = valid; changed[0].access = static_cast<skippy_state_access>(99); reject("unknown access", changed);
++    changed = valid; changed[0].layer = -1; reject("invalid layer", changed);
++    changed = valid; changed[0].storage = nullptr; reject("null storage", changed);
++    changed = valid; changed[0].storage = zero; reject("noncanonical storage", changed);
++    changed = valid; changed.back().effect_node = zero; reject("read event instead of owner", changed);
++    changed = valid; changed.back().write_ordinal = 0; reject("read has write ordinal", changed);
++    changed = valid; changed.push_back({kv, rd, 0, other, nullptr}); reject("conflicting kind/layer storage", changed);
++    changed = valid;
++    for (auto & effect : changed) { effect.storage = other; }
++    reject("wrong declared storage", changed);
++    auto * destination = copy->src[1];
++    copy->src[1] = other; reject("wrong CPY destination", valid); copy->src[1] = destination;
++    destination = rows->src[2];
++    rows->src[2] = value; reject("wrong SET_ROWS destination", valid); rows->src[2] = destination;
++    const size_t offset = zero->view_offs;
++    zero->view_offs = ggml_nbytes(storage) + 1; reject("invalid empty view", valid); zero->view_offs = offset;
++    const size_t stride = copy->nb[1];
++    copy->nb[1] = SIZE_MAX; reject("overflowing view span", valid); copy->nb[1] = stride;
++    const int64_t extent = copy->ne[1];
++    copy->ne[1] = -1; reject("negative view extent", valid); copy->ne[1] = extent;
++    const size_t nonempty_offset = copy->view_offs;
++    copy->view_offs = ggml_nbytes(storage); reject("nonempty view out of bounds", valid); copy->view_offs = nonempty_offset;
++    auto * base = zero->view_src;
++    zero->view_src = zero; reject("cyclic view", valid); zero->view_src = base;
+     ggml_free(ctx);
+-    return true;
++    return ok;
+ }
+ 
+ int main(int argc, char ** argv) {
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 7107d46f9..ea8b12a3f 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -60,7 +60,7 @@ static int check_middle_stage_selection() {
+     };
+     const std::vector<skippy_state_effect> effects = {
+         {skippy_state_kind::recurrent_conv, skippy_state_access::read, 1, state, nullptr},
+-        {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, state_write},
++        {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, state_write, 0},
+     };
+     const std::vector<skippy_parameter_binding> parameter_bindings = {
+         {parameter_0, "block.0.weight"},
+@@ -545,8 +545,86 @@ static int check_invalid_executable_slices() {
+     return 0;
+ }
+ 
++static int check_state_preparation_execution(bool empty_zero, bool empty_extra) {
++    ggml_init_params params = {ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * state = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, 2, 4);
++    ggml_tensor * input = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 2);
++    ggml_tensor * main_ids = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, 1);
++    ggml_tensor * extra_ids = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, empty_extra ? 0 : 1);
++    for (auto * request : {input, main_ids, extra_ids}) { ggml_set_input(request); }
++    ggml_tensor * zero = ggml_scale_inplace(ctx.get(), ggml_view_1d(ctx.get(), state, empty_zero ? 0 : 2, 0), 0);
++    ggml_tensor * main = ggml_get_rows(ctx.get(), state, main_ids);
++    ggml_tensor * extra = ggml_cpy(ctx.get(), ggml_get_rows(ctx.get(), state, extra_ids),
++            ggml_view_2d(ctx.get(), state, 2, empty_extra ? 0 : 1, state->nb[1], 4 * sizeof(float)));
++    ggml_tensor * entry = ggml_scale(ctx.get(), input, 1);
++    ggml_tensor * output = ggml_add(ctx.get(), entry, main);
++    ggml_tensor * final = ggml_cpy(ctx.get(), output, ggml_view_1d(ctx.get(), state, 2, 0));
++    ggml_tensor * rollback = ggml_cpy(ctx.get(), main, ggml_view_1d(ctx.get(), state, 2, 2 * sizeof(float)));
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 64, false);
++    for (auto * root : {zero, main, extra, final, rollback, output}) { ggml_build_forward_expand(graph, root); }
++    const auto kind = skippy_state_kind::recurrent_conv;
++    const auto write = skippy_state_access::write;
++    const std::vector<skippy_state_effect> effects = {
++        {kind, write, 0, state, zero, 0},
++        {kind, write, 0, state, extra, 1},
++        {kind, write, 0, state, final, 2},
++        {kind, write, 0, state, rollback, 3},
++        {kind, skippy_state_access::read, 0, state, nullptr},
++    };
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry},
++        {skippy_block_boundary_kind::exit, 0, output},
++    };
++    skippy_stage_slice_selection selection;
++    skippy_executable_graph slice;
++    std::string error;
++    if (!skippy_select_stage_slice(graph, boundaries, effects, {}, 1, 0, 1, selection, error) ||
++            !selection.activation_imports.empty() || selection.state_effects.size() != effects.size() ||
++            !skippy_build_executable_graph(graph, selection.node_indices,
++                    selection.activation_imports, selection.activation_exports, slice, error)) {
++        std::fprintf(stderr, "state preparation slice failed: %s\n", error.c_str());
++        return 50;
++    }
++    for (auto * root : {zero, main, extra, final, rollback}) {
++        if (!slice.tensors.count(root)) { return 51; }
++    }
++    ggml_backend_ptr cpu(ggml_backend_cpu_init());
++    ggml_backend_cpu_set_n_threads(cpu.get(), 1);
++    ggml_backend_t backends[] = {cpu.get()};
++    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, nullptr, 1, 64, false, true));
++    if (!ggml_backend_sched_alloc_graph(sched.get(), slice.graph)) { return 52; }
++    const float initial[] = {9, 10, 2, 3, 7, 8, 11, 12};
++    const float delta[] = {5, 6};
++    const int32_t main_id = 0;
++    const int32_t extra_id = 1;
++    ggml_backend_tensor_set(slice.tensors.at(state), initial, 0, sizeof(initial));
++    ggml_backend_tensor_set(slice.tensors.at(input), delta, 0, sizeof(delta));
++    ggml_backend_tensor_set(slice.tensors.at(main_ids), &main_id, 0, sizeof(main_id));
++    if (!empty_extra) { ggml_backend_tensor_set(slice.tensors.at(extra_ids), &extra_id, 0, sizeof(extra_id)); }
++    if (ggml_backend_sched_graph_compute(sched.get(), slice.graph) != GGML_STATUS_SUCCESS) { return 53; }
++    float actual[8];
++    ggml_backend_tensor_get(slice.tensors.at(state), actual, 0, sizeof(actual));
++    const float expected[] = {
++        empty_zero ? 14.0f : 5.0f, empty_zero ? 16.0f : 6.0f,
++        empty_zero ? 9.0f : 0.0f, empty_zero ? 10.0f : 0.0f,
++        empty_extra ? 7.0f : 2.0f, empty_extra ? 8.0f : 3.0f, 11, 12,
++    };
++    if (std::memcmp(actual, expected, sizeof(expected)) != 0) {
++        std::fprintf(stderr, "state preparation values changed (empty_zero=%d):", empty_zero);
++        for (float value : actual) { std::fprintf(stderr, " %g", value); }
++        std::fprintf(stderr, "\n");
++        return 54;
++    }
++    std::fprintf(stderr, "state preparation execution: empty_zero=%d empty_extra=%d ordered_writes=4 untouched_tail=2\n", empty_zero, empty_extra);
++    return 0;
++}
++
+ int main() {
+     int result = check_middle_stage_selection();
++    if (!result) { result = check_state_preparation_execution(false, false); }
++    if (!result) { result = check_state_preparation_execution(true, false); }
++    if (!result) { result = check_state_preparation_execution(true, true); }
+     if (!result) { result = check_executable_slice(false); }
+     if (!result) { result = check_executable_slice(true); }
+     if (!result) { result = check_invalid_executable_slices(); }
+-- 
+2.50.1 (Apple Git-155)
+
