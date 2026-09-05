@@ -730,10 +730,14 @@ No implementation or test edits begin until the owner signs off on these
 descriptions and the three shared contracts against one pinned base SHA. After
 approval, use separate local worktrees for isolation but one remote delivery
 branch: `feature/skippy_graph_filter_v2`. Do not open lane PRs or publish lane
-branches. Astrid and jy produce small linear commits in their worktrees and
-hand the commit SHAs to scama. Scama is the push-order authority: review,
-integrate, validate the combined head, and push only that shared branch. Never
-share uncommitted source edits or let multiple worktrees race to push it.
+branches. Each owner produces small linear commits in an isolated worktree,
+fetches and rebases onto the latest remote delivery head immediately before
+pushing, then pushes the completed unit directly to that shared branch. A
+non-fast-forward rejection requires another fetch, rebase, and validation pass;
+force-pushes are forbidden. Reviews use the remote branch rather than local-only
+objects or paths. Scama coordinates push order, resolves cross-tree conflicts,
+validates combined milestones, and retains final integration/release authority.
+Never share uncommitted source edits or let multiple worktrees race to push.
 
 ## Delivery Sequence
 
