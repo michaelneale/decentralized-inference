@@ -174,17 +174,17 @@
     "backend-vulkan": ["linux-vulkan", "windows-vulkan"]
   },
   "smoke_domain_rows": {
-    "runtime-product": ["product-integration-cpu", "qwen-recurrent-gate"],
-    "ui": ["product-integration-cpu"],
-    "native-abi": ["product-integration-cpu", "qwen-recurrent-gate"],
-    "protocol": ["product-integration-cpu", "qwen-recurrent-gate"],
-    "split-serving": ["product-integration-cpu", "qwen-recurrent-gate"],
+    "runtime-product": ["core", "two-node-client", "two-node-split"],
+    "ui": ["core"],
+    "native-abi": ["core"],
+    "protocol": ["two-node-client"],
+    "split-serving": ["two-node-split"],
     "model-download": ["model-download"],
     "platform-macos": ["metal-model-load"],
-    "platform-windows": ["product-integration-cpu"],
+    "platform-windows": ["core"],
     "backend-cuda": ["core-cuda"],
-    "backend-rocm": ["product-integration-cpu"],
-    "backend-vulkan": ["product-integration-cpu"]
+    "backend-rocm": ["core"],
+    "backend-vulkan": ["core"]
   },
   "platform_domain_rows": {
   "platform-macos": ["macos-portable", "macos-unit"],
@@ -219,11 +219,12 @@
     {"id": "swift", "language": "swift", "platform": "macos", "architecture": "arm64", "runner_role": "macos-build"}
   ],
   "smoke_rows": [
-    {"id": "product-integration-cpu", "kind": "product-integration", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-8"},
-    {"id": "qwen-recurrent-gate", "kind": "two-node-split", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-8"},
+    {"id": "core", "kind": "core", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-4"},
     {"id": "core-cuda", "kind": "core", "platform": "linux", "backend": "cuda", "runner_role": "gpu-nvidia"},
-    {"id": "model-download", "kind": "model-download", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-4"},
-    {"id": "metal-model-load", "kind": "metal-model-load", "platform": "macos", "backend": "metal", "runner_role": "macos-build"}
+    {"id": "two-node-client", "kind": "two-node-client", "runner_role": "linux-build-4"},
+    {"id": "two-node-split", "kind": "two-node-split", "runner_role": "linux-build-8"},
+    {"id": "model-download", "kind": "model-download", "runner_role": "linux-build-4"},
+    {"id": "metal-model-load", "kind": "metal-model-load", "runner_role": "macos-build"}
   ],
   "batch_limits": {"clippy": 3, "rust_tests": 4},
   "slices": [
