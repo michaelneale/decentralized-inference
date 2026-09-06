@@ -168,6 +168,29 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   command -v "$HF_DOWNLOAD_BIN" >/dev/null 2>&1 || { echo "hf CLI is required ($HF_DOWNLOAD_BIN)" >&2; exit 1; }
   [[ -n "$MESH_LLM_BIN" && -x "$MESH_LLM_BIN" ]] || {
     echo "MESH_LLM_BIN must point at an executable mesh-llm binary" >&2; exit 1; }
+  # Rows MUST run against this run's prepared bundle. Without this pin the
+  # smoke (and mesh-llm) silently fall back to any exe-adjacent
+  # native-runtimes directory, which can hold a stale same-version bundle
+  # (identical mesh_version and skippy_abi but older llama patches) and
+  # produce product-looking planner failures that are really stale-runtime
+  # artifacts. Producer provenance is authoritative: a supplied env bundle
+  # that disagrees with this run's recorded manifest is rejected (a stale
+  # inherited bundle must not override fresh provenance). Without
+  # provenance, an explicit env bundle is required (test seam).
+  provenance_bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["native_runtime"]["manifest"])' \
+    "$EVIDENCE_ROOT/live-matrix/producer-provenance.json" 2>/dev/null || true)"
+  if [[ -n "$provenance_bundle" && -f "$provenance_bundle" ]]; then
+    provenance_root="$(dirname "$(dirname "$provenance_bundle")")"
+    if [[ -n "${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR:-}" &&
+          "$(cd "${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR}" 2>/dev/null && pwd)" != "$(cd "$provenance_root" && pwd)" ]]; then
+      echo "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR (${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR}) does not match this run's producer provenance ($provenance_root)" >&2
+      exit 1
+    fi
+    export MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$provenance_root"
+  elif [[ -z "${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR:-}" ]]; then
+    echo "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR must be set: run --prepare in this environment before rows (see producer-provenance.json)" >&2
+    exit 1
+  fi
 fi
 
 build_tool() {

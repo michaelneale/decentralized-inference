@@ -159,6 +159,9 @@ class LiveMatrixScriptTests(unittest.TestCase):
                     "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
                     "STAGE_SERVER_BIN": "/usr/bin/true",
                     "MESH_LLM_BIN": "/usr/bin/true",
+                    # Mocked rows run without --prepare; satisfy the
+                    # prepared-bundle pin with an explicit bundle dir.
+                    "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(tmp),
                 },
             )
             self.assertEqual(
@@ -222,6 +225,9 @@ class LiveMatrixScriptTests(unittest.TestCase):
                     "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
                     "STAGE_SERVER_BIN": "/usr/bin/true",
                     "MESH_LLM_BIN": "/usr/bin/true",
+                    # Mocked rows run without --prepare; satisfy the
+                    # prepared-bundle pin with an explicit bundle dir.
+                    "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(tmp),
                 },
             )
             self.assertEqual(result.returncode, 1)
@@ -304,6 +310,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
                             "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
                             "STAGE_SERVER_BIN": "/usr/bin/true",
                             "MESH_LLM_BIN": "/usr/bin/true",
+                            "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(tmp),
                         },
                     )
                     self.assertEqual(
@@ -311,6 +318,84 @@ class LiveMatrixScriptTests(unittest.TestCase):
                         f"form={form!r} stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
                     )
                     self.assertIn("verified pinned source", result.stdout)
+
+    def test_mismatched_env_bundle_cannot_override_fresh_provenance(self):
+        """When producer provenance records this run's prepared bundle, a
+        different MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR (e.g. a stale inherited
+        one) must be rejected instead of silently selected — the original
+        Metal-row failure mode."""
+        import tempfile
+
+        payload = b"gguf"
+        import hashlib
+
+        blob = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            evidence = tmp / "evidence"
+            live_matrix = evidence / "live-matrix"
+            live_matrix.mkdir(parents=True)
+            # A prepared run recorded this manifest; the bundle dir it sits
+            # under is what rows must load.
+            prepared_root = tmp / "prepared" / "native-runtimes"
+            runtime_dir = prepared_root / "meshllm-native-runtime-darwin-aarch64-metal"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "manifest.json").write_text("{}")
+            (live_matrix / "producer-provenance.json").write_text(
+                json.dumps(
+                    {
+                        "native_runtime": {
+                            "manifest": str(runtime_dir / "manifest.json"),
+                        }
+                    }
+                )
+            )
+            stale_root = tmp / "stale" / "native-runtimes"
+            stale_root.mkdir(parents=True)
+
+            hf_mock = tmp / "hf-mock"
+            hf_mock.write_text("#!/usr/bin/env bash\nexit 9\n")
+            hf_mock.chmod(0o755)
+
+            manifest = tmp / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "llama_model": "mockfamily",
+                                "status": "certified",
+                                "model_pin": {
+                                    "repo": "org/mock-gguf",
+                                    "revision": "1" * 40,
+                                    "file": "model-Q4_K_M.gguf",
+                                    "size_bytes": len(payload),
+                                    "blob_sha256": blob,
+                                    "selector": "Q4_K_M",
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+            result = subprocess.run(
+                [str(SCRIPT), "--model", "mockfamily"],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "SKIPPY_PARITY_MANIFEST": str(manifest),
+                    "SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD": str(hf_mock),
+                    "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(evidence),
+                    "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                    "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(stale_root),
+                    "MESH_LLM_BIN": "/usr/bin/true",
+                    "STAGE_SERVER_BIN": "/usr/bin/true",
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match this run's producer provenance", result.stderr)
 
     def test_prepare_builds_exact_producers_and_records_provenance(self):
         """--prepare must build this run's host binary and patched native
