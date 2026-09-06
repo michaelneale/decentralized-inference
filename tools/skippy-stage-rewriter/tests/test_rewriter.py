@@ -132,6 +132,18 @@ def main() -> int:
             "block loop contains a non-local exit"
         )
 
+        trailing_work = run(
+            tool,
+            source_root,
+            Path(temporary) / "trailing-work.json",
+            source_name="trailing-work.cpp",
+            apply=False,
+        )["builders"][0]
+        assert trailing_work["verdict"] == "unsupported_shape"
+        assert trailing_work["unsupported_reason"] == (
+            "carried activation assignment is not the final block statement"
+        )
+
     return 0
 
 

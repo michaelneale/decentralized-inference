@@ -328,19 +328,36 @@ public:
   bool has_stage_filter = false;
 };
 
-std::vector<const BinaryOperator *>
-topLevelAssignmentsTo(const CompoundStmt *body, llvm::StringRef variable) {
+std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
+                                                  llvm::StringRef variable) {
+  class AssignmentVisitor final
+      : public RecursiveASTVisitor<AssignmentVisitor> {
+  public:
+    AssignmentVisitor(llvm::StringRef variable,
+                      std::vector<const BinaryOperator *> &results)
+        : variable_(variable), results_(results) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitBinaryOperator(BinaryOperator *binary) {
+      if (!binary->isAssignmentOp()) {
+        return true;
+      }
+      const auto lhs = referencedName(binary->getLHS());
+      if (lhs && *lhs == variable_) {
+        results_.push_back(binary);
+      }
+      return true;
+    }
+
+  private:
+    llvm::StringRef variable_;
+    std::vector<const BinaryOperator *> &results_;
+  };
+
   std::vector<const BinaryOperator *> assignments;
-  for (const Stmt *statement : body->body()) {
-    const auto *binary = llvm::dyn_cast<BinaryOperator>(statement);
-    if (binary == nullptr || !binary->isAssignmentOp()) {
-      continue;
-    }
-    const auto lhs = referencedName(binary->getLHS());
-    if (lhs && *lhs == variable) {
-      assignments.push_back(binary);
-    }
-  }
+  AssignmentVisitor visitor(variable, assignments);
+  visitor.TraverseStmt(const_cast<Stmt *>(root));
   return assignments;
 }
 
@@ -507,7 +524,7 @@ public:
     report.proof.activation_in = *activation;
     report.proof.embedding_owner = true;
 
-    const auto carries = topLevelAssignmentsTo(loop_body, *activation);
+    const auto carries = assignmentsTo(loop_body, *activation);
     if (carries.size() != 1) {
       refuse(report, carries.empty()
                          ? "no unique carried activation assignment"
@@ -516,6 +533,15 @@ public:
       return;
     }
     const BinaryOperator *carry = carries.front();
+    const Stmt *carry_statement =
+        directChildContaining(loop_body, carry, sm, lang);
+    if (carry_statement == nullptr || loop_body->body_empty() ||
+        carry_statement != loop_body->body_back()) {
+      refuse(report,
+             "carried activation assignment is not the final block statement");
+      reports_.push_back(std::move(report));
+      return;
+    }
     const auto output = referencedName(carry->getRHS());
     if (!output) {
       refuse(report, "carried activation output is not a named tensor");
