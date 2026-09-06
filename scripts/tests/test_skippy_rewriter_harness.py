@@ -56,7 +56,7 @@ class SkippyRewriterHarnessTests(unittest.TestCase):
 
     def test_valid_transformable_report_passes(self) -> None:
         report = make_report(
-            [{"file": "src/models/llama.cpp", "verdict": "transformable", "proof": PROOF, "edits": EDITS}]
+            [{"file": "src/models/llama.cpp", "constructor": "llama_build_graph", "verdict": "transformable", "proof": PROOF, "edits": EDITS}]
         )
         self.assertEqual(self.harness.validate_report(report), [])
 
@@ -89,7 +89,42 @@ class SkippyRewriterHarnessTests(unittest.TestCase):
         self.assertTrue(any("no edits" in e for e in errors))
 
     def test_duplicate_builder_record_rejected(self) -> None:
-        record = {"file": "src/models/llama.cpp", "verdict": "transformable", "proof": PROOF, "edits": EDITS}
+        record = {
+            "file": "src/models/llama.cpp",
+            "constructor": "llama_build_graph",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        report = make_report([record, dict(record)])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("duplicate" in e for e in errors))
+
+    def test_same_file_distinct_constructors_are_not_duplicates(self) -> None:
+        # 19 model files contain multiple graph constructors; the builder
+        # key is (file, constructor), so two records in one file with
+        # different constructor names must both validate.
+        first = {
+            "file": "src/models/granite.cpp",
+            "constructor": "build_graph_attention",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        second = {
+            "file": "src/models/granite.cpp",
+            "constructor": "build_graph_ffn",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        report = make_report([first, second])
+        self.assertEqual(self.harness.validate_report(report), [])
+
+    def test_duplicate_detected_on_file_with_missing_constructor(self) -> None:
+        # Two records in the same file that both omit `constructor` collide
+        # on the empty-name fallback -- still a duplicate.
+        record = {"file": "src/models/llama.cpp", "verdict": "already_transformed"}
         report = make_report([record, dict(record)])
         errors = self.harness.validate_report(report)
         self.assertTrue(any("duplicate" in e for e in errors))

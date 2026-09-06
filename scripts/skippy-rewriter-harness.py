@@ -65,12 +65,16 @@ def validate_report(report: dict[str, Any]) -> list[str]:
         errors.append("missing non-empty 'builders' array")
         return errors
 
-    seen_files: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
     for idx, builder in enumerate(builders):
         label = builder.get("file", f"<builders[{idx}]>")
-        if label in seen_files:
-            errors.append(f"duplicate builder record for {label}")
-        seen_files.add(label)
+        # (file, constructor) is the unique builder key: 19 model files
+        # contain multiple graph constructors, so file path alone is not
+        # unique. `file` alone remains the display label.
+        key = (label, str(builder.get("constructor", "")))
+        if key in seen_keys:
+            errors.append(f"duplicate builder record for {key[0]}::{key[1]}")
+        seen_keys.add(key)
 
         verdict = builder.get("verdict")
         if verdict not in VERDICTS:
@@ -78,6 +82,11 @@ def validate_report(report: dict[str, Any]) -> list[str]:
             continue
 
         if verdict == "transformable":
+            constructor = builder.get("constructor")
+            if not isinstance(constructor, str) or not constructor:
+                errors.append(
+                    f"{label}: transformable without qualified 'constructor' name"
+                )
             proof = builder.get("proof")
             if not isinstance(proof, dict):
                 errors.append(f"{label}: transformable without proof block")
