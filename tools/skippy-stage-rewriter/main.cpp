@@ -9,6 +9,7 @@
 #include "clang/Lex/Lexer.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -22,7 +23,6 @@
 #include <iterator>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -161,23 +161,6 @@ bool containsName(const Expr *expr, llvm::StringRef target) {
   } visitor(target);
   visitor.TraverseStmt(const_cast<Expr *>(expr));
   return visitor.found();
-}
-
-const Stmt *containingStatement(const clang::DynTypedNode &node,
-                                ASTContext &context) {
-  clang::DynTypedNode current = node;
-  for (unsigned depth = 0; depth < 32; ++depth) {
-    const auto parents = context.getParents(current);
-    if (parents.size() != 1) {
-      return nullptr;
-    }
-    const auto &parent = parents[0];
-    if (parent.get<CompoundStmt>() != nullptr) {
-      return current.get<Stmt>();
-    }
-    current = parent;
-  }
-  return nullptr;
 }
 
 const Stmt *directChildContaining(const CompoundStmt *body, const Stmt *needle,
@@ -424,7 +407,11 @@ public:
       return;
     }
 
-    const std::string file = sm.getFilename(location).str();
+    llvm::SmallString<256> canonical_file;
+    if (llvm::sys::fs::real_path(sm.getFilename(location), canonical_file)) {
+      return;
+    }
+    const std::string file = canonical_file.str().str();
     const std::string models_root = SourceRoot + "/src/models/";
     if (!llvm::StringRef(file).starts_with(models_root)) {
       return;
@@ -578,9 +565,8 @@ public:
         "const int il_start = stage_filtered ? stage_filter.layer_start : "
         "0;\n" +
         indent +
-        "const int il_end   = stage_filtered ? stage_filter.layer_end   : "
-        "n_layer;\n\n" +
-        indent;
+        "const int il_end   = stage_filtered ? stage_filter.layer_end   : " +
+        report.proof.loop_end + ";\n\n" + indent;
 
     bool valid = true;
     valid &= addInsert(report.edits, "insert_filter_declarations", report.file,
@@ -611,8 +597,8 @@ public:
                        sm);
 
     if (output_call != nullptr) {
-      const Stmt *output_statement = containingStatement(
-          clang::DynTypedNode::create(*output_call), context);
+      const Stmt *output_statement =
+          directChildContaining(constructor_body, output_call, sm, lang);
       if (output_statement == nullptr) {
         valid = false;
       } else {
@@ -657,6 +643,9 @@ public:
       n_layer_refs_.clear();
       n_layer_visitor.TraverseStmt(const_cast<Expr *>(terminal->getCond()));
       for (const Expr *ref : n_layer_refs_) {
+        if (sourceText(ref->getSourceRange(), sm, lang) != "n_layer") {
+          continue;
+        }
         valid &=
             addReplace(report.edits, "rewrite_terminal_endpoint", report.file,
                        ref->getSourceRange(), "il_end", sm, lang);
@@ -848,6 +837,15 @@ int main(int argc, const char **argv) {
     llvm::errs() << llvm::toString(parser.takeError());
     return 1;
   }
+
+  llvm::SmallString<256> canonical_source_root;
+  if (const std::error_code error =
+          llvm::sys::fs::real_path(SourceRoot, canonical_source_root)) {
+    llvm::errs() << "cannot resolve source root " << SourceRoot << ": "
+                 << error.message() << "\n";
+    return 1;
+  }
+  SourceRoot = canonical_source_root.str().str();
 
   clang::tooling::ClangTool tool(parser->getCompilations(),
                                  parser->getSourcePathList());
