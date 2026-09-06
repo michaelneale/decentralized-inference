@@ -22,6 +22,7 @@ pub(in crate::network::openai::response) struct RelayAttemptContext<'a> {
     pub(in crate::network::openai::response) route_observer: OpenAiRouteObserver<'a>,
 }
 
+/// Relay one probed upstream response through the adapter, error, or success path.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::network::openai::response) async fn relay_probed_response<R: AsyncRead + Unpin>(
     tcp_stream: &mut ClientStream,
@@ -51,7 +52,7 @@ pub(in crate::network::openai::response) async fn relay_probed_response<R: Async
         return Ok(RouteAttemptResult::RetryableContextOverflow);
     }
     if !(200..300).contains(&probe.status_code) {
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?

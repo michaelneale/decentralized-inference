@@ -23,6 +23,7 @@ const TRANSFORMED_RESPONSE_READ_LIMITS: ResponseBodyReadLimits = ResponseBodyRea
     idle_timeout: TRANSFORMED_RESPONSE_BODY_IDLE_TIMEOUT,
 };
 
+/// Relay a chat-completions upstream response translated into Responses-API JSON.
 pub(in crate::network::openai::response) async fn relay_translated_responses_json<
     R: AsyncRead + Unpin,
 >(
@@ -38,7 +39,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_jso
     }
 
     if !(200..300).contains(&probe.status_code) {
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
     let mut buffered = probe.buffered;
     let parsed = try_parse_response_headers(&buffered)?
@@ -80,6 +81,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_jso
     })
 }
 
+/// Relay a chat-completions upstream response through JSON body normalization.
 pub(in crate::network::openai::response) async fn relay_normalized_chat_completion_json<
     R: AsyncRead + Unpin,
 >(
@@ -95,7 +97,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     }
 
     if !(200..300).contains(&probe.status_code) {
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
     let mut buffered = probe.buffered;
     let parsed = try_parse_response_headers(&buffered)?

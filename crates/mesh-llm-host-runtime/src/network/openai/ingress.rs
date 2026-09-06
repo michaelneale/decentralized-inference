@@ -508,36 +508,23 @@ fn warn_pipeline_fallback(strong_name: &str) {
     tracing::warn!("pipeline: falling back to direct proxy for {strong_name}");
 }
 
+/// Route a request whose model is not being served from local candidates
+/// (either genuinely absent locally, or forced away from local by
+/// `x-mesh-target`/`x-mesh-exclude` -- see `route_request`), trying remote
+/// mesh peers, then local-unavailable/plugin fallbacks, then 404.
+#[allow(clippy::too_many_arguments)]
 async fn route_missing_local_model(
     tcp_stream: ClientStream,
     request: &proxy::BufferedHttpRequest,
     ctx: &IngressRouteContext<'_>,
     model_name: &str,
+    target: Option<iroh::EndpointId>,
+    excluded: &[iroh::EndpointId],
     required_tokens: Option<u32>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> proxy::RouteDispatchOutcome {
-    let (target_values, exclude_values) = request.mesh_routing_header_values();
-    let target = match parse_mesh_target_header(&target_values) {
-        Ok(target) => target,
-        Err(message) => {
-            return response_outcome(
-                400,
-                proxy::send_400_observed(tcp_stream, &message, route_observer).await,
-            );
-        }
-    };
-    let excluded = match parse_mesh_exclude_header(&exclude_values) {
-        Ok(excluded) => excluded,
-        Err(message) => {
-            return response_outcome(
-                400,
-                proxy::send_400_observed(tcp_stream, &message, route_observer).await,
-            );
-        }
-    };
-
     // Try remote mesh first.
-    match resolve_remote_mesh_route(ctx, model_name, target, &excluded).await {
+    match resolve_remote_mesh_route(ctx, model_name, target, excluded).await {
         RemoteMeshRoute::TargetUnavailable { target_hex } => {
             // Fail closed: never substitute another peer for an explicitly
             // named `x-mesh-target` that doesn't (or no longer) serve this
@@ -742,15 +729,15 @@ fn parse_mesh_target_header(values: &[String]) -> Result<Option<iroh::EndpointId
 }
 
 /// Parse the `x-mesh-exclude` header value(s), each a comma-separated list of
-/// `EndpointId`s. Any unparseable entry rejects the whole request rather than
-/// silently dropping an exclusion the client asked for.
+/// `EndpointId`s. Any unparseable OR empty entry rejects the whole request
+/// rather than silently dropping an exclusion the client asked for.
 fn parse_mesh_exclude_header(values: &[String]) -> Result<Vec<iroh::EndpointId>, String> {
     let mut excluded = Vec::new();
     for value in values {
         for part in value.split(',') {
             let part = part.trim();
             if part.is_empty() {
-                continue;
+                return Err("x-mesh-exclude contains an empty entry".to_string());
             }
             let id = parse_endpoint_id_hex(part)
                 .ok_or_else(|| format!("invalid x-mesh-exclude value '{part}'"))?;
@@ -758,6 +745,31 @@ fn parse_mesh_exclude_header(values: &[String]) -> Result<Vec<iroh::EndpointId>,
         }
     }
     Ok(excluded)
+}
+
+/// Parse and validate the raw `x-mesh-target` / `x-mesh-exclude` header
+/// values off `request` in one place, so every caller enforces them the same
+/// way before making a routing decision.
+fn parse_mesh_routing_headers(
+    request: &proxy::BufferedHttpRequest,
+) -> Result<(Option<iroh::EndpointId>, Vec<iroh::EndpointId>), String> {
+    let (target_values, exclude_values) = request.mesh_routing_header_values()?;
+    let target = parse_mesh_target_header(&target_values)?;
+    let excluded = parse_mesh_exclude_header(&exclude_values)?;
+    Ok((target, excluded))
+}
+
+/// Whether `x-mesh-target`/`x-mesh-exclude` must force this request away from
+/// local candidates: an exclude naming this node, or a target naming some
+/// other peer. A target naming this node is not forcing -- it is allowed to
+/// serve locally (checked by the ordinary local-candidate path) and only
+/// changes whether `x-mesh-served-by` is echoed.
+fn mesh_headers_force_remote(
+    self_id: iroh::EndpointId,
+    target: Option<iroh::EndpointId>,
+    excluded: &[iroh::EndpointId],
+) -> bool {
+    excluded.contains(&self_id) || target.is_some_and(|id| id != self_id)
 }
 
 async fn try_route_plugin_model(
@@ -900,6 +912,8 @@ async fn try_route_plugin_model(
     }
 }
 
+/// Route a model-bearing or model-less request: local candidates unless
+/// `x-mesh-target`/`x-mesh-exclude` force this node out of consideration.
 async fn route_request(
     tcp_stream: ClientStream,
     request: &mut proxy::BufferedHttpRequest,
@@ -910,20 +924,42 @@ async fn route_request(
 ) -> proxy::RouteDispatchOutcome {
     prepare_cache_routing_body(request, effective_model);
     if let Some(model_name) = effective_model {
-        // Model explicitly requested. Check local candidates first.
-        if !has_available_candidates(ctx.targets, model_name) {
+        // Model explicitly requested. Parse and enforce `x-mesh-target` /
+        // `x-mesh-exclude` BEFORE the local-candidate check below -- a
+        // targeted or excluded request must never be silently served from
+        // local candidates without ever consulting these headers.
+        let (target, excluded) = match parse_mesh_routing_headers(request) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return response_outcome(
+                    400,
+                    proxy::send_400_observed(tcp_stream, &message, route_observer).await,
+                );
+            }
+        };
+        let self_id = ctx.node.id();
+        let forced_remote = mesh_headers_force_remote(self_id, target, &excluded);
+
+        if forced_remote || !has_available_candidates(ctx.targets, model_name) {
             return route_missing_local_model(
                 tcp_stream,
                 request,
                 ctx,
                 model_name,
+                target,
+                &excluded,
                 required_tokens,
                 route_observer,
             )
             .await;
         }
 
-        // Local candidates available — route normally.
+        // Local candidates available and this node was neither excluded nor
+        // targeted at a different peer — route locally. Echo
+        // `x-mesh-served-by` only when the client explicitly named this node.
+        let served_by_hex = target
+            .filter(|id| *id == self_id)
+            .map(|id| hex::encode(id.as_bytes()));
         proxy::route_model_request(
             ctx.node.clone(),
             tcp_stream,
@@ -934,7 +970,7 @@ async fn route_request(
                 required_tokens,
                 affinity: ctx.affinity,
                 route_observer,
-                served_by_header: None,
+                served_by_header: served_by_hex.as_deref(),
             },
         )
         .await

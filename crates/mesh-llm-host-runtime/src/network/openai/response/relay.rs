@@ -91,10 +91,31 @@ fn oversized_error_http_response(status_code: u16) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Byte offset just past the terminating `\r\n\r\n` of a freshly-built
+/// response, for splicing an extra header into a buffer whose header block
+/// wasn't tracked through the branch that produced it (oversized / remapped /
+/// passthrough error bodies each build `outgoing` differently).
+fn response_header_end(response: &[u8]) -> usize {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map_or(response.len(), |pos| pos + 4)
+}
+
+/// Splice `x-mesh-served-by` into an already-built error response, when set.
+fn append_served_by_to_error_response(outgoing: &mut Vec<u8>, served_by: Option<&str>) {
+    if let Some(served_by) = served_by {
+        let header_end = response_header_end(outgoing);
+        insert_header_before_body(outgoing, header_end, MESH_SERVED_BY_HEADER, served_by);
+    }
+}
+
+/// Relay a non-2xx upstream response, echoing `x-mesh-served-by` when set.
 pub(in crate::network::openai::response) async fn relay_error_response<R: AsyncRead + Unpin>(
     tcp_stream: &mut ClientStream,
     reader: &mut R,
     probe: ResponseProbe,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     let status_code = probe.status_code;
@@ -104,7 +125,7 @@ pub(in crate::network::openai::response) async fn relay_error_response<R: AsyncR
     if let Err(err) = limited.read_to_end(&mut buffered).await {
         tracing::debug!("error response relay read ended before EOF: {err}");
     }
-    let outgoing = if buffered.len().saturating_sub(header_end) > MAX_ERROR_RESPONSE_BYTES {
+    let mut outgoing = if buffered.len().saturating_sub(header_end) > MAX_ERROR_RESPONSE_BYTES {
         tracing::warn!(
             "upstream error body exceeded {} bytes for status {}",
             MAX_ERROR_RESPONSE_BYTES,
@@ -114,6 +135,7 @@ pub(in crate::network::openai::response) async fn relay_error_response<R: AsyncR
     } else {
         remap_error_http_response(status_code, header_end, &buffered).unwrap_or(buffered)
     };
+    append_served_by_to_error_response(&mut outgoing, served_by);
     tcp_stream.write_all(&outgoing).await?;
     let media_kind = try_parse_response_headers(&outgoing)
         .ok()
@@ -456,6 +478,80 @@ mod tests {
             without_target_response, expected,
             "absent x-mesh-target must relay today's response byte-for-byte"
         );
+    }
+
+    #[tokio::test]
+    async fn relay_error_echoes_served_by_header_only_when_set() {
+        let body = br#"{"error":{"message":"boom","type":"server_error","param":null,"code":"upstream_failed"}}"#;
+        let header = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let probe_for = |header: &str| ResponseProbe {
+            buffered: header.as_bytes().to_vec(),
+            header_end: header.len(),
+            status_code: 500,
+            retryable_context_overflow: false,
+        };
+
+        // A non-2xx response from a resolved `x-mesh-target` peer must still
+        // echo `x-mesh-served-by` -- the client asked to reach that peer
+        // specifically and needs to know the error came from there.
+        let (mut upstream_writer, mut upstream_reader) = tokio::io::duplex(64 * 1024);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task_header = header.clone();
+        let task = tokio::spawn(async move {
+            let (client, _) = listener.accept().await.unwrap();
+            let mut client: ClientStream = client.into();
+            relay_error_response(
+                &mut client,
+                &mut upstream_reader,
+                probe_for(&task_header),
+                Some("ab12cd34"),
+                OpenAiRouteObserver::default(),
+            )
+            .await
+            .unwrap();
+        });
+        upstream_writer.write_all(body).await.unwrap();
+        drop(upstream_writer);
+        let mut socket = ClientStream::connect(address).await.unwrap();
+        let mut with_served_by = Vec::new();
+        socket.read_to_end(&mut with_served_by).await.unwrap();
+        task.await.unwrap();
+        let with_served_by_text = String::from_utf8_lossy(&with_served_by);
+        assert!(
+            with_served_by_text.contains("x-mesh-served-by: ab12cd34\r\n"),
+            "a non-2xx response from a resolved peer must echo x-mesh-served-by: {with_served_by_text}"
+        );
+        assert!(with_served_by.ends_with(body));
+
+        // Absent `served_by`: no header line added.
+        let (mut upstream_writer, mut upstream_reader) = tokio::io::duplex(64 * 1024);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task_header = header.clone();
+        let task = tokio::spawn(async move {
+            let (client, _) = listener.accept().await.unwrap();
+            let mut client: ClientStream = client.into();
+            relay_error_response(
+                &mut client,
+                &mut upstream_reader,
+                probe_for(&task_header),
+                None,
+                OpenAiRouteObserver::default(),
+            )
+            .await
+            .unwrap();
+        });
+        upstream_writer.write_all(body).await.unwrap();
+        drop(upstream_writer);
+        let mut socket = ClientStream::connect(address).await.unwrap();
+        let mut without_served_by = Vec::new();
+        socket.read_to_end(&mut without_served_by).await.unwrap();
+        task.await.unwrap();
+        assert!(!String::from_utf8_lossy(&without_served_by).contains("x-mesh-served-by"));
     }
 
     #[tokio::test]

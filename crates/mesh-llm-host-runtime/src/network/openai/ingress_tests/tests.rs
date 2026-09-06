@@ -1033,6 +1033,69 @@ fn parse_mesh_exclude_header_rejects_malformed_entry() {
     assert!(parse_mesh_exclude_header(&["not-a-hex-endpoint-id".to_string()]).is_err());
 }
 
+#[test]
+fn parse_mesh_exclude_header_rejects_an_empty_entry() {
+    assert!(parse_mesh_exclude_header(&["".to_string()]).is_err());
+}
+
+#[test]
+fn parse_mesh_exclude_header_rejects_an_empty_entry_between_valid_ones() {
+    let id_a = hex::encode(test_endpoint_id(0x11).as_bytes());
+    let id_b = hex::encode(test_endpoint_id(0x22).as_bytes());
+    assert!(parse_mesh_exclude_header(&[format!("{id_a},,{id_b}")]).is_err());
+}
+
+#[test]
+fn parse_mesh_exclude_header_rejects_a_trailing_comma() {
+    let id_a = hex::encode(test_endpoint_id(0x11).as_bytes());
+    assert!(parse_mesh_exclude_header(&[format!("{id_a},")]).is_err());
+}
+
+// --- the local-first bypass: `mesh_headers_force_remote` must be consulted
+// before a request is ever handed to the local-candidate path ---
+
+#[test]
+fn mesh_headers_force_remote_is_false_with_no_headers() {
+    let self_id = test_endpoint_id(0x01);
+    assert!(!mesh_headers_force_remote(self_id, None, &[]));
+}
+
+#[test]
+fn mesh_headers_force_remote_is_true_when_target_names_another_peer() {
+    let self_id = test_endpoint_id(0x01);
+    let peer_id = test_endpoint_id(0x02);
+    assert!(
+        mesh_headers_force_remote(self_id, Some(peer_id), &[]),
+        "a target naming a remote peer must force routing away from local candidates"
+    );
+}
+
+#[test]
+fn mesh_headers_force_remote_is_false_when_target_names_this_node() {
+    let self_id = test_endpoint_id(0x01);
+    assert!(
+        !mesh_headers_force_remote(self_id, Some(self_id), &[]),
+        "a target naming this node is allowed to serve locally"
+    );
+}
+
+#[test]
+fn mesh_headers_force_remote_is_true_when_excluding_this_node() {
+    let self_id = test_endpoint_id(0x01);
+    let other_id = test_endpoint_id(0x02);
+    assert!(
+        mesh_headers_force_remote(self_id, None, &[other_id, self_id]),
+        "excluding this node must remove the local candidate"
+    );
+}
+
+#[test]
+fn mesh_headers_force_remote_is_false_when_excluding_a_different_peer() {
+    let self_id = test_endpoint_id(0x01);
+    let other_id = test_endpoint_id(0x02);
+    assert!(!mesh_headers_force_remote(self_id, None, &[other_id]));
+}
+
 #[tokio::test]
 async fn resolve_remote_mesh_route_forces_single_candidate_for_serving_target() {
     let model = "acme/code-model:Q4_K_M";

@@ -67,6 +67,7 @@ impl ResponsesStreamRelayState {
     }
 }
 
+/// Relay a streaming chat-completions upstream response, normalizing tool-call ids.
 pub(in crate::network::openai::response) async fn relay_normalized_chat_completion_stream<
     R: AsyncRead + Unpin,
 >(
@@ -83,7 +84,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
 
     if !(200..300).contains(&probe.status_code) {
         route_observer.stream_error("upstream_status");
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?
@@ -212,6 +213,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     })
 }
 
+/// Relay a streaming chat-completions upstream response translated into Responses-API SSE.
 pub(in crate::network::openai::response) async fn relay_translated_responses_stream<
     R: AsyncRead + Unpin,
 >(
@@ -280,7 +282,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_str
 
     if !(200..300).contains(&probe.status_code) {
         route_observer.stream_error("upstream_status");
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?

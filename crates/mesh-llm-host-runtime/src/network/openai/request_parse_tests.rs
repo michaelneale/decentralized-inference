@@ -1070,7 +1070,7 @@ fn mesh_routing_header_values_absent_is_empty() {
         )
         .as_bytes(),
     );
-    let (target, exclude) = request.mesh_routing_header_values();
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
     assert!(target.is_empty());
     assert!(exclude.is_empty());
 }
@@ -1088,7 +1088,7 @@ fn mesh_routing_header_values_reads_both_headers_verbatim() {
         )
         .as_bytes(),
     );
-    let (target, exclude) = request.mesh_routing_header_values();
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
     assert_eq!(target, vec!["aabbcc".to_string()]);
     assert_eq!(exclude, vec!["112233,445566".to_string()]);
 }
@@ -1108,7 +1108,27 @@ fn mesh_routing_header_values_surfaces_every_duplicate_x_mesh_target() {
         )
         .as_bytes(),
     );
-    let (target, exclude) = request.mesh_routing_header_values();
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
     assert_eq!(target, vec!["aabbcc".to_string(), "ddeeff".to_string()]);
     assert!(exclude.is_empty());
+}
+
+#[test]
+fn mesh_routing_header_values_rejects_non_utf8_x_mesh_target() {
+    let mut raw =
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1\r\nx-mesh-target: ".to_vec();
+    raw.extend_from_slice(&[0xff, 0xfe]);
+    raw.extend_from_slice(b"\r\n\r\n{}");
+    let request = request_with_raw(&raw);
+    assert!(request.mesh_routing_header_values().is_err());
+}
+
+#[test]
+fn mesh_routing_header_values_rejects_non_utf8_x_mesh_exclude() {
+    let mut raw =
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1\r\nx-mesh-exclude: ".to_vec();
+    raw.extend_from_slice(&[0xff, 0xfe]);
+    raw.extend_from_slice(b"\r\n\r\n{}");
+    let request = request_with_raw(&raw);
+    assert!(request.mesh_routing_header_values().is_err());
 }
