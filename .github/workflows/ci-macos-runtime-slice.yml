@@ -101,6 +101,8 @@ jobs:
       - uses: ./.github/actions/resolve-native-toolchain-epoch
         with:
           include_tool_versions: "true"
+      - name: Install macOS native linker
+        uses: ./.github/actions/setup-macos-lld
       - uses: ./.github/actions/prepare-native-runtime-input
         with:
           backend: ${{ matrix.runtime.backend }}

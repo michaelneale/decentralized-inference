@@ -123,6 +123,13 @@ class CiLaneWorkflowTests(unittest.TestCase):
                     workflow,
                 )
 
+    def test_macos_runtime_configures_lld_before_building_packaged_tools(self) -> None:
+        workflow = self.workflow("ci-macos-runtime-slice.yml")
+        setup = "uses: ./.github/actions/setup-macos-lld"
+        prepare = "uses: ./.github/actions/prepare-native-runtime-input"
+        self.assertIn(setup, workflow)
+        self.assertLess(workflow.index(setup), workflow.index(prepare))
+
     def test_dispatched_lanes_pass_source_sha_only_to_product_workflows(
         self,
     ) -> None:
