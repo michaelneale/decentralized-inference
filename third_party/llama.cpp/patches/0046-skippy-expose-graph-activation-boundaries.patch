@@ -285,46 +285,6 @@ index 3a00c0e93..572d833ab 100644
  
      std::vector<ggml_tensor *> t_layer_inp;
  
-diff --git a/src/models/gemma3n.cpp b/src/models/gemma3n.cpp
-index 8e712f757..800a69b1b 100644
---- a/src/models/gemma3n.cpp
-+++ b/src/models/gemma3n.cpp
-@@ -110,6 +110,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
-         cb(inp->values, "inp_gemma3n_altup", -1);
-         ggml_set_input(inp->values);
-         inpL = inp->values;
-+        res->t_skippy_activation_input = inpL;
-         res->add_input(std::move(inp));
- 
-         const skippy_activation_tokens & activation_tokens = skippy_graph_get_activation_tokens();
-@@ -303,6 +304,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
-         cur = ggml_cont(ctx0, cur);
-         cb(cur, "stage_boundary_cont", il_end - 1);
-         res->t_skippy_gemma3n_altup = cur;
-+        res->t_skippy_activation_output = cur;
-         res->t_embd = ggml_view_2d_slice(ctx0, cur, i_altup_act);
-         ggml_build_forward_expand(gf, cur);
-         return;
-diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 6a9769dfc..683f96c8e 100644
---- a/src/models/qwen4exp.cpp
-+++ b/src/models/qwen4exp.cpp
-@@ -319,6 +319,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
-         cb(inp_hc->values, "hc_stage_input", -1);
-         ggml_set_input(inp_hc->values);
-         inpL = inp_hc->values;
-+        res->t_skippy_activation_input = inpL;
-         res->add_input(std::move(inp_hc));
-     } else {
-         inpL = build_inp_embd(model.tok_embd);
-@@ -422,6 +423,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
- 
-     if (stage_filtered && !stage_filter.include_output) {
-         cb(res_hc, "stage_boundary", il_end - 1);
-+        res->t_skippy_activation_output = res_hc;
-         res->t_embd = res_hc;
-         ggml_build_forward_expand(gf, res_hc);
-         return;
 diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
 index f48e56cb5..1c3574149 100644
 --- a/src/skippy/abi.cpp

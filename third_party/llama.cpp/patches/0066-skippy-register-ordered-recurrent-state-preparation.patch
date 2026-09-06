@@ -152,34 +152,6 @@ index fbda56aeb..ae95414e4 100644
      ggml_tensor * build_rwkv_token_shift_load(
          llm_graph_input_rs * inp,
          const llama_ubatch & ubatch,
-diff --git a/src/models/mamba-base.cpp b/src/models/mamba-base.cpp
-index 1c9b2536a..e70b31c14 100644
---- a/src/models/mamba-base.cpp
-+++ b/src/models/mamba-base.cpp
-@@ -179,11 +179,9 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
-     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
-     const int64_t state_slots     = ssm_states_all->ne[1];
- 
--    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
-+    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, skippy_state_kind::recurrent_conv, il);
-     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs);
- 
--    state_read(skippy_state_kind::recurrent_conv, conv_states_all, il);
--
-     // d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
- 
-     // Keep the projection 2D: with a {n_embd, 1, n_seqs} batch the CUDA backend
-@@ -266,9 +264,7 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
-             return ggml_ssm_scan(ctx, ssm, x, dt, A, B, C, ids, K);
-         };
- 
--        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
--
--        state_read(skippy_state_kind::recurrent_ssm, ssm_states_all, il);
-+        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, skippy_state_kind::recurrent_ssm, il, get_ssm_rows);
- 
-         const int64_t D            = d_state * d_inner;
-         const int64_t n_written    = std::min<int64_t>(n_seq_tokens, K);
 diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
 index a0456aef0..19b0f404e 100644
 --- a/src/skippy/state_effects.cpp

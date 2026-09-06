@@ -39,28 +39,6 @@ index 5572cfce9..a323bff2f 100644
  endif()
  
  if (BUILD_SHARED_LIBS)
-diff --git a/src/models/mamba.cpp b/src/models/mamba.cpp
-index 99e2c825e..50d4523f0 100644
---- a/src/models/mamba.cpp
-+++ b/src/models/mamba.cpp
-@@ -101,6 +101,8 @@ llama_model_mamba::graph::graph(const llama_model & model, const llm_graph_param
-     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
- 
-     for (int il = il_start; il < il_end; ++il) {
-+        begin_block(inpL, il);
-+
-         // norm
-         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
-         cb(cur, "attn_norm", il);
-@@ -122,6 +124,8 @@ llama_model_mamba::graph::graph(const llama_model & model, const llm_graph_param
-         cur = build_cvec(cur, il);
-         cb(cur, "l_out", il);
- 
-+        end_block(cur, il);
-+
-         // input for next layer
-         inpL = cur;
-     }
 diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
 index 04064fbf2..b8807005b 100644
 --- a/src/skippy/tests/noalloc_graph_planning.cpp

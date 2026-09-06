@@ -1451,7 +1451,7 @@ index 000000000..5dba09c1d
 +llama_model_inkling::graph::graph(const llama_model & model, const llm_graph_params & params) :
 +    llm_graph_context(params) {
 +
-+    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const skippy_graph_filter & stage_filter = build_inputs.filter;
 +    const bool stage_filtered = stage_filter.enabled;
 +    const bool is_mtp = params.gtype == LLM_GRAPH_TYPE_DECODER_MTP;
 +    const int mtp_il = n_layer + cparams.nextn_layer_offset;

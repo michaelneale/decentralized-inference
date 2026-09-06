@@ -38,28 +38,3 @@ index a46f32c13..9922906c8 100644
      add_test(
          NAME skippy_model_loader_accounting_dense
          COMMAND skippy-model-loader-accounting
-diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index 7535be893..9694a21cd 100644
---- a/src/models/qwen35.cpp
-+++ b/src/models/qwen35.cpp
-@@ -169,6 +169,8 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
- 
-     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
-     for (int il = il_start; il < il_end; ++il) {
-+        begin_block(inpL, il);
-+
-         res->t_layer_inp[il] = inpL;
- 
-         ggml_tensor * inpSA = inpL;
-@@ -214,6 +216,8 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
-         cur = build_cvec(cur, il);
-         cb(cur, "l_out", il);
- 
-+        end_block(cur, il);
-+
-         // Input for next layer
-         inpL = cur;
-     }
--- 
-2.54.0 (Apple Git-157)
-
