@@ -77,9 +77,13 @@ pub(super) fn split_runtime_kv_bytes_per_token(
         cache_type_k_override,
         cache_type_v_override,
     );
-    kv_cache_quant
-        .kv_cache_bytes_per_token(compact_meta)
-        .context("split topology planning requires KV cache byte metadata")
+    if let Some(bytes) = kv_cache_quant.kv_cache_bytes_per_token(compact_meta) {
+        return Ok(bytes);
+    }
+    if compact_meta.has_only_recurrent_layers_without_kv_cache() {
+        return Ok(0);
+    }
+    anyhow::bail!("split topology planning requires KV cache byte metadata")
 }
 
 /// Resolve the K/V cache types that split stages will actually load with.

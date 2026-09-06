@@ -1958,6 +1958,32 @@ fn split_planning_uses_family_kv_defaults_for_inkling() {
     assert!(overridden > planned);
 }
 
+#[test]
+fn split_planning_allows_zero_kv_only_for_proven_pure_recurrent_metadata() {
+    let identity = package(24);
+    let pure_recurrent = crate::models::gguf::GgufCompactMeta {
+        architecture: "mamba".to_string(),
+        context_length: 2048,
+        layer_count: 24,
+        ssm_conv_kernel: 4,
+        ssm_inner_size: 1536,
+        ssm_state_size: 16,
+        ..Default::default()
+    };
+    assert_eq!(
+        split_runtime_kv_bytes_per_token(&identity, &pure_recurrent, None, None).unwrap(),
+        0
+    );
+
+    let dense_missing_heads = crate::models::gguf::GgufCompactMeta {
+        architecture: "future_dense".to_string(),
+        context_length: 2048,
+        layer_count: 24,
+        ..Default::default()
+    };
+    assert!(split_runtime_kv_bytes_per_token(&identity, &dense_missing_heads, None, None).is_err());
+}
+
 /// The family default must get the same metadata guard as the size-tiered
 /// policy: an Inkling variant whose per-head widths are not q4_0-block-aligned
 /// cannot load quantised K/V, so planning must budget f16 bytes instead of

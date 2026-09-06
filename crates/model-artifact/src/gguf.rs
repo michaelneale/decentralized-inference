@@ -348,6 +348,36 @@ impl GgufCompactMeta {
         }
     }
 
+    /// Whether metadata proves that every layer is recurrent and allocates no
+    /// attention KV cache.
+    ///
+    /// Zero head counts alone are not enough: malformed dense GGUF metadata
+    /// can omit the same fields. Require positive recurrent state allocation,
+    /// a complete all-recurrent layer mask, and no residual attention widths
+    /// or MLA rank before topology planning may price KV bytes as zero.
+    pub fn has_only_recurrent_layers_without_kv_cache(&self) -> bool {
+        let layer_count = self.layer_count as usize;
+        if layer_count == 0
+            || self.ssm_inner_size == 0
+            || (self.ssm_state_size == 0 && self.ssm_conv_kernel <= 1)
+            || self.head_count != 0
+            || self.kv_head_count != 0
+            || self.kv_head_counts.iter().any(|count| *count != 0)
+            || self.key_length != 0
+            || self.value_length != 0
+            || self.kv_lora_rank != 0
+        {
+            return false;
+        }
+
+        let recurrent_layers = self.recurrent_layer_mask();
+        let recurrent_bytes = self.recurrent_bytes_per_configured_lane_by_layer();
+        recurrent_layers.len() == layer_count
+            && recurrent_layers.into_iter().all(|recurrent| recurrent)
+            && recurrent_bytes.len() == layer_count
+            && recurrent_bytes.into_iter().all(|bytes| bytes > 0)
+    }
+
     /// F32 recurrent-state bytes allocated for one native sequence, per layer.
     ///
     /// Skippy enables two rollback snapshots for recurrent/hybrid runtimes, so
@@ -1116,6 +1146,58 @@ mod tests {
 
         assert_eq!(recurrent.recurrent_layer_mask(), vec![true; 3]);
         assert_eq!(dense.recurrent_layer_mask(), vec![false; 3]);
+    }
+
+    #[test]
+    fn pure_recurrent_metadata_proves_zero_kv_without_family_knowledge() {
+        let pure_recurrent = GgufCompactMeta {
+            architecture: "future_recurrent_arch".to_string(),
+            layer_count: 3,
+            ssm_conv_kernel: 4,
+            ssm_inner_size: 1536,
+            ssm_state_size: 16,
+            ..Default::default()
+        };
+        let dense_missing_heads = GgufCompactMeta {
+            architecture: "future_dense_arch".to_string(),
+            layer_count: 3,
+            ..Default::default()
+        };
+        let hybrid = GgufCompactMeta {
+            architecture: "future_hybrid_arch".to_string(),
+            layer_count: 3,
+            head_count: 8,
+            kv_head_count: 2,
+            key_length: 64,
+            value_length: 64,
+            ssm_conv_kernel: 4,
+            ssm_inner_size: 1536,
+            ssm_state_size: 16,
+            recurrent_layers: vec![true, false, true],
+            ..Default::default()
+        };
+
+        assert!(pure_recurrent.has_only_recurrent_layers_without_kv_cache());
+        assert!(!dense_missing_heads.has_only_recurrent_layers_without_kv_cache());
+        assert!(!hybrid.has_only_recurrent_layers_without_kv_cache());
+    }
+
+    #[test]
+    fn zero_kv_proof_rejects_residual_attention_metadata() {
+        let mut meta = GgufCompactMeta {
+            architecture: "future_recurrent_arch".to_string(),
+            layer_count: 3,
+            ssm_conv_kernel: 4,
+            ssm_inner_size: 1536,
+            ssm_state_size: 16,
+            ..Default::default()
+        };
+
+        meta.key_length = 64;
+        assert!(!meta.has_only_recurrent_layers_without_kv_cache());
+        meta.key_length = 0;
+        meta.kv_head_counts = vec![0, 1, 0];
+        assert!(!meta.has_only_recurrent_layers_without_kv_cache());
     }
 
     #[test]
