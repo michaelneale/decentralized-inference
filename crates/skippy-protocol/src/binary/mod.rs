@@ -8,6 +8,7 @@ pub use activation::{
     activation_wire_bytes_for_codec_with_state_flags, activation_wire_bytes_with_state_flags,
     encode_activation_payload_with_state_flags, encode_f32_activation_payload,
     encode_f32_activation_payload_with_state_flags,
+    select_lossless_activation_codec_with_state_flags,
 };
 pub use codec::{
     read_stage_message, read_stage_message_for_codec, recv_ready, recv_reply, send_ready,

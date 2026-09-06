@@ -114,6 +114,75 @@ pub(crate) fn encoded_len(
     }
 }
 
+/// Selects the smallest permitted activation encoding that reconstructs the
+/// realized F32 values bit-for-bit. RawF32 is mandatory so the caller always
+/// has an admitted lossless fallback. BF16 wins an equal-size exact tie with
+/// F16; otherwise F16 is selected when it alone is exact. A compact codec is
+/// selected only when the complete payload is smaller.
+#[cfg(test)]
+pub(crate) fn select_lossless_activation_codec(
+    shape: ActivationShape,
+    values: &[f32],
+    permitted_codecs: &[StageActivationCodec],
+) -> io::Result<StageActivationCodec> {
+    let elements = shape.elements()?;
+    shape.validate_decoded_limit()?;
+    if values.len() != elements {
+        return Err(invalid_data("activation value count does not match shape"));
+    }
+    select_lossless_activation_codec_from_values(shape, values.iter().copied(), permitted_codecs)
+}
+
+pub(crate) fn select_lossless_activation_codec_from_f32_payload(
+    shape: ActivationShape,
+    f32_payload: &[u8],
+    permitted_codecs: &[StageActivationCodec],
+) -> io::Result<StageActivationCodec> {
+    let elements = shape.elements()?;
+    shape.validate_decoded_limit()?;
+    validate_payload_bytes(f32_payload.len(), checked_wire_bytes(elements, 4)?)?;
+    select_lossless_activation_codec_from_values(
+        shape,
+        f32_payload
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes)),
+        permitted_codecs,
+    )
+}
+
+fn select_lossless_activation_codec_from_values(
+    shape: ActivationShape,
+    values: impl Iterator<Item = f32>,
+    permitted_codecs: &[StageActivationCodec],
+) -> io::Result<StageActivationCodec> {
+    if !permitted_codecs.contains(&StageActivationCodec::RawF32V1) {
+        return Err(invalid_data(
+            "lossless activation selection requires RawF32 fallback",
+        ));
+    }
+
+    let mut bf16_exact = permitted_codecs.contains(&StageActivationCodec::Bf16RneV1);
+    let mut f16_exact = permitted_codecs.contains(&StageActivationCodec::F16RneV1);
+    for value in values {
+        if !value.is_finite() {
+            return Err(invalid_data("activation values must be finite"));
+        }
+        bf16_exact &= value.to_bits() & 0xffff == 0;
+        f16_exact &= f16_bits_to_f32(f32_to_f16_bits(value)).to_bits() == value.to_bits();
+    }
+
+    let raw_len = encoded_len(StageActivationCodec::RawF32V1, shape)?;
+    if bf16_exact && encoded_len(StageActivationCodec::Bf16RneV1, shape)? < raw_len {
+        return Ok(StageActivationCodec::Bf16RneV1);
+    }
+    if f16_exact && encoded_len(StageActivationCodec::F16RneV1, shape)? < raw_len {
+        return Ok(StageActivationCodec::F16RneV1);
+    }
+    Ok(StageActivationCodec::RawF32V1)
+}
+
 fn encode_raw_f32(values: &[f32]) -> io::Result<Vec<u8>> {
     let wire_bytes = checked_wire_bytes(values.len(), std::mem::size_of::<f32>())?;
     let mut out = Vec::with_capacity(wire_bytes);
@@ -532,6 +601,184 @@ mod tests {
         assert_invalid(
             decode_activation(StageActivationCodec::S8RowF32RneV1, s8_wire_too_large, &[]),
             "activation payload byte count exceeds maximum",
+        );
+    }
+
+    #[test]
+    fn lossless_selector_uses_bf16_only_for_exactly_representable_values() {
+        let shape = ActivationShape::new(1, 1, 3);
+        let exact = [1.0, -2.5, 0.0, -0.0, f32::MIN_POSITIVE, 8.0];
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::Bf16RneV1,
+        ];
+
+        let codec = select_lossless_activation_codec(shape, &exact, &permitted).unwrap();
+        assert_eq!(codec, StageActivationCodec::Bf16RneV1);
+        let encoded = encode_activation(codec, shape, &exact).unwrap();
+        let decoded = decode_activation(codec, shape, &encoded).unwrap();
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            exact
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+
+        let mut mixed = exact;
+        mixed[4] = 1.000_001;
+        assert_eq!(
+            select_lossless_activation_codec(shape, &mixed, &permitted).unwrap(),
+            StageActivationCodec::RawF32V1
+        );
+    }
+
+    #[test]
+    fn lossless_selector_round_trips_every_finite_bf16_value_exactly() {
+        let values = (0_u16..=u16::MAX)
+            .map(|bits| f32::from_bits(u32::from(bits) << 16))
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        let shape = ActivationShape::new(values.len(), 0, 1);
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::Bf16RneV1,
+        ];
+
+        let codec = select_lossless_activation_codec(shape, &values, &permitted).unwrap();
+        assert_eq!(codec, StageActivationCodec::Bf16RneV1);
+        let encoded = encode_activation(codec, shape, &values).unwrap();
+        let decoded = decode_activation(codec, shape, &encoded).unwrap();
+        assert!(
+            decoded
+                .iter()
+                .zip(&values)
+                .all(|(decoded, original)| decoded.to_bits() == original.to_bits())
+        );
+    }
+
+    #[test]
+    fn lossless_selector_round_trips_every_finite_f16_value_exactly() {
+        let values = (0_u16..=u16::MAX)
+            .map(f16_bits_to_f32)
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        let shape = ActivationShape::new(values.len(), 0, 1);
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::F16RneV1,
+        ];
+
+        let codec = select_lossless_activation_codec(shape, &values, &permitted).unwrap();
+        assert_eq!(codec, StageActivationCodec::F16RneV1);
+        let encoded = encode_activation(codec, shape, &values).unwrap();
+        let decoded = decode_activation(codec, shape, &encoded).unwrap();
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lossless_selector_uses_bf16_tie_break_and_f16_when_it_alone_is_exact() {
+        let shape = ActivationShape::new(1, 0, 1);
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::F16RneV1,
+            StageActivationCodec::Bf16RneV1,
+        ];
+
+        assert_eq!(
+            select_lossless_activation_codec(shape, &[1.0], &permitted).unwrap(),
+            StageActivationCodec::Bf16RneV1
+        );
+        assert_eq!(
+            select_lossless_activation_codec(shape, &[1.0 + 2.0_f32.powi(-10)], &permitted)
+                .unwrap(),
+            StageActivationCodec::F16RneV1
+        );
+        assert_eq!(
+            select_lossless_activation_codec(shape, &[65_536.0], &permitted).unwrap(),
+            StageActivationCodec::Bf16RneV1
+        );
+    }
+
+    #[test]
+    fn lossless_selector_requires_one_codec_to_cover_the_whole_frame() {
+        let shape = ActivationShape::new(1, 1, 1);
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::F16RneV1,
+            StageActivationCodec::Bf16RneV1,
+        ];
+        let f16_only_primary = 1.0 + 2.0_f32.powi(-10);
+        let bf16_only_sideband = 65_536.0;
+
+        assert_eq!(
+            select_lossless_activation_codec(
+                shape,
+                &[f16_only_primary, bf16_only_sideband],
+                &permitted,
+            )
+            .unwrap(),
+            StageActivationCodec::RawF32V1
+        );
+    }
+
+    #[test]
+    fn lossless_selector_requires_raw_and_never_selects_unpermitted_lossy_codecs() {
+        let shape = ActivationShape::new(1, 0, 2);
+        let values = [1.0, -2.0];
+
+        assert_invalid(
+            select_lossless_activation_codec(shape, &values, &[StageActivationCodec::Bf16RneV1]),
+            "lossless activation selection requires RawF32 fallback",
+        );
+        assert_eq!(
+            select_lossless_activation_codec(
+                shape,
+                &values,
+                &[
+                    StageActivationCodec::RawF32V1,
+                    StageActivationCodec::S8RowF32RneV1,
+                ],
+            )
+            .unwrap(),
+            StageActivationCodec::RawF32V1
+        );
+    }
+
+    #[test]
+    fn lossless_selector_validates_shape_values_and_empty_payload_cost() {
+        let permitted = [
+            StageActivationCodec::RawF32V1,
+            StageActivationCodec::Bf16RneV1,
+        ];
+        assert_invalid(
+            select_lossless_activation_codec(ActivationShape::new(1, 0, 2), &[1.0], &permitted),
+            "activation value count does not match shape",
+        );
+        assert_invalid(
+            select_lossless_activation_codec(
+                ActivationShape::new(1, 0, 1),
+                &[f32::NAN],
+                &permitted,
+            ),
+            "activation values must be finite",
+        );
+        assert_eq!(
+            select_lossless_activation_codec(ActivationShape::new(0, 0, 4), &[], &permitted,)
+                .unwrap(),
+            StageActivationCodec::RawF32V1
         );
     }
 }
