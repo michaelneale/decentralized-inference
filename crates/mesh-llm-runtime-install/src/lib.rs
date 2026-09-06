@@ -422,6 +422,22 @@ mod tests {
     }
 
     #[test]
+    fn manifest_diagnostic_urls_redact_fragments() {
+        // A fragment can carry a token just like a query; catalog reports
+        // must not echo either.
+        assert_eq!(
+            url_without_query(
+                "https://example.invalid/native-runtimes.json?token=secret#access=abc"
+            ),
+            "https://example.invalid/native-runtimes.json"
+        );
+        assert_eq!(
+            url_without_query("https://example.invalid/native-runtimes.json#access=abc"),
+            "https://example.invalid/native-runtimes.json"
+        );
+    }
+
+    #[test]
     fn manifest_diagnostic_urls_redact_userinfo() {
         let redacted =
             url_without_query("https://user:secret@example.invalid/native-runtimes.json?token=abc");

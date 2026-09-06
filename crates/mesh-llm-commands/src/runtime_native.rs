@@ -75,23 +75,17 @@ pub async fn run_native_runtime_list(
                 ..Default::default()
             })
             .await?;
-        if !json_output {
-            eprintln!("🔎 Catalogs consulted");
-            for line in sources.describe() {
-                eprintln!("   {line}");
-            }
-        }
         let profile = host_runtime_profile();
         let cache = native_runtime_cache(cache_dir)?;
         let mut resolver =
             NativeRuntimeResolver::new(mesh_version, profile.clone(), manifest.clone(), cache)
-                .with_bundle_dirs(sources.bundle_dirs);
+                .with_bundle_dirs(sources.bundle_dirs.clone());
         if let Some(skippy_abi_version) = configured.skippy_abi_version {
             resolver = resolver.with_skippy_abi_version(skippy_abi_version);
         }
         let evaluated = resolver.evaluate(&selection)?;
         let rows = available_runtime_rows(&manifest, &evaluated);
-        return formatter.render_available(&rows);
+        return formatter.render_available(&rows, &sources);
     }
 
     let installed = discover_local_native_runtimes(bundle_dirs, &cache)?;

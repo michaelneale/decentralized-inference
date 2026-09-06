@@ -2,7 +2,9 @@ use anyhow::{Error, Result};
 use mesh_llm_native_runtime::{
     CachePrunePlan, CandidateRejection, HostRuntimeProfile, InstalledNativeRuntime,
 };
-use mesh_llm_runtime_install::{NativeRuntimeInstallOutcome, NativeRuntimeInstallStatus};
+use mesh_llm_runtime_install::{
+    NativeRuntimeCatalogSources, NativeRuntimeInstallOutcome, NativeRuntimeInstallStatus,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -42,7 +44,14 @@ pub(crate) struct NativeRuntimeDoctorReport {
 }
 
 pub(crate) trait RuntimeNativeFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()>;
+    /// Renders the available runtimes together with the catalogs that were
+    /// consulted to list them, so both output modes explain where the rows
+    /// came from.
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()>;
     fn render_installed(
         &self,
         installed: &[InstalledNativeRuntime],
@@ -72,7 +81,15 @@ pub(crate) fn runtime_native_formatter(json_output: bool) -> Box<dyn RuntimeNati
 }
 
 impl RuntimeNativeFormatter for HumanFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()> {
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()> {
+        eprintln!("🔎 Catalogs consulted");
+        for line in sources.describe() {
+            eprintln!("   {line}");
+        }
         print_available_human(rows);
         Ok(())
     }
@@ -146,8 +163,15 @@ impl RuntimeNativeFormatter for HumanFormatter {
 }
 
 impl RuntimeNativeFormatter for JsonFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()> {
-        print_json(rows)
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()> {
+        print_json(&json!({
+            "catalogs": sources,
+            "runtimes": rows,
+        }))
     }
 
     fn render_installed(

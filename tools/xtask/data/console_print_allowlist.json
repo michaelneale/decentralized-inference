@@ -1121,19 +1121,23 @@
       "macro_name": "eprintln!"
     },
     {
-      "line": 79,
+      "line": 148,
       "macro_name": "eprintln!"
     },
     {
-      "line": 81,
+      "line": 151,
       "macro_name": "eprintln!"
     },
     {
-      "line": 154,
+      "line": 192,
       "macro_name": "eprintln!"
     },
     {
-      "line": 157,
+      "line": 193,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 195,
       "macro_name": "eprintln!"
     },
     {
@@ -1141,97 +1145,73 @@
       "macro_name": "eprintln!"
     },
     {
-      "line": 199,
+      "line": 226,
       "macro_name": "eprintln!"
     },
     {
-      "line": 201,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 204,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 232,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 268,
+      "line": 262,
       "macro_name": "eprint!"
     },
     {
-      "line": 272,
+      "line": 266,
       "macro_name": "eprint!"
     },
     {
-      "line": 280,
+      "line": 274,
       "macro_name": "eprintln!"
     }
   ],
   "crates/mesh-llm-commands/src/runtime_native/formatters.rs": [
     {
-      "line": 95,
+      "line": 89,
       "macro_name": "eprintln!"
     },
     {
-      "line": 102,
+      "line": 91,
       "macro_name": "eprintln!"
     },
     {
-      "line": 105,
+      "line": 112,
       "macro_name": "eprintln!"
     },
     {
-      "line": 107,
+      "line": 119,
       "macro_name": "eprintln!"
     },
     {
-      "line": 118,
+      "line": 122,
       "macro_name": "eprintln!"
     },
     {
-      "line": 120,
+      "line": 124,
       "macro_name": "eprintln!"
     },
     {
-      "line": 129,
+      "line": 135,
       "macro_name": "eprintln!"
     },
     {
-      "line": 131,
+      "line": 137,
       "macro_name": "eprintln!"
     },
     {
-      "line": 136,
+      "line": 146,
       "macro_name": "eprintln!"
     },
     {
-      "line": 204,
+      "line": 148,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 153,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 228,
       "macro_name": "println!"
     },
     {
-      "line": 217,
-      "macro_name": "println!"
-    },
-    {
-      "line": 218,
-      "macro_name": "println!"
-    },
-    {
-      "line": 221,
-      "macro_name": "println!"
-    },
-    {
-      "line": 229,
-      "macro_name": "println!"
-    },
-    {
-      "line": 234,
-      "macro_name": "println!"
-    },
-    {
-      "line": 239,
+      "line": 241,
       "macro_name": "println!"
     },
     {
@@ -1239,11 +1219,7 @@
       "macro_name": "println!"
     },
     {
-      "line": 249,
-      "macro_name": "println!"
-    },
-    {
-      "line": 250,
+      "line": 245,
       "macro_name": "println!"
     },
     {
@@ -1251,95 +1227,87 @@
       "macro_name": "println!"
     },
     {
-      "line": 254,
+      "line": 258,
       "macro_name": "println!"
     },
     {
-      "line": 256,
+      "line": 263,
       "macro_name": "println!"
     },
     {
-      "line": 260,
+      "line": 266,
       "macro_name": "println!"
-    },
-    {
-      "line": 267,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 271,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 272,
-      "macro_name": "eprintln!"
     },
     {
       "line": 273,
-      "macro_name": "eprintln!"
+      "macro_name": "println!"
     },
     {
-      "line": 276,
-      "macro_name": "eprintln!"
+      "line": 274,
+      "macro_name": "println!"
     },
     {
       "line": 277,
-      "macro_name": "eprintln!"
+      "macro_name": "println!"
     },
     {
       "line": 278,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 279,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 283,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 288,
       "macro_name": "println!"
     },
     {
-      "line": 289,
+      "line": 280,
       "macro_name": "println!"
     },
     {
-      "line": 290,
+      "line": 284,
       "macro_name": "println!"
     },
     {
       "line": 291,
-      "macro_name": "println!"
+      "macro_name": "eprintln!"
     },
     {
-      "line": 292,
-      "macro_name": "println!"
+      "line": 295,
+      "macro_name": "eprintln!"
     },
     {
-      "line": 293,
-      "macro_name": "println!"
+      "line": 296,
+      "macro_name": "eprintln!"
     },
     {
-      "line": 298,
-      "macro_name": "println!"
+      "line": 297,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 300,
+      "macro_name": "eprintln!"
     },
     {
       "line": 301,
-      "macro_name": "println!"
+      "macro_name": "eprintln!"
     },
     {
-      "line": 304,
-      "macro_name": "println!"
+      "line": 302,
+      "macro_name": "eprintln!"
     },
     {
-      "line": 306,
-      "macro_name": "println!"
+      "line": 303,
+      "macro_name": "eprintln!"
     },
     {
       "line": 307,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 312,
+      "macro_name": "println!"
+    },
+    {
+      "line": 313,
+      "macro_name": "println!"
+    },
+    {
+      "line": 314,
       "macro_name": "println!"
     },
     {
@@ -1347,19 +1315,23 @@
       "macro_name": "println!"
     },
     {
-      "line": 318,
+      "line": 316,
       "macro_name": "println!"
     },
     {
-      "line": 320,
+      "line": 317,
       "macro_name": "println!"
     },
     {
-      "line": 323,
+      "line": 322,
       "macro_name": "println!"
     },
     {
-      "line": 327,
+      "line": 325,
+      "macro_name": "println!"
+    },
+    {
+      "line": 328,
       "macro_name": "println!"
     },
     {
@@ -1371,19 +1343,11 @@
       "macro_name": "println!"
     },
     {
-      "line": 336,
-      "macro_name": "println!"
-    },
-    {
-      "line": 337,
-      "macro_name": "println!"
-    },
-    {
       "line": 339,
       "macro_name": "println!"
     },
     {
-      "line": 343,
+      "line": 342,
       "macro_name": "println!"
     },
     {
@@ -1391,7 +1355,43 @@
       "macro_name": "println!"
     },
     {
-      "line": 346,
+      "line": 347,
+      "macro_name": "println!"
+    },
+    {
+      "line": 351,
+      "macro_name": "println!"
+    },
+    {
+      "line": 354,
+      "macro_name": "println!"
+    },
+    {
+      "line": 355,
+      "macro_name": "println!"
+    },
+    {
+      "line": 360,
+      "macro_name": "println!"
+    },
+    {
+      "line": 361,
+      "macro_name": "println!"
+    },
+    {
+      "line": 363,
+      "macro_name": "println!"
+    },
+    {
+      "line": 367,
+      "macro_name": "println!"
+    },
+    {
+      "line": 368,
+      "macro_name": "println!"
+    },
+    {
+      "line": 370,
       "macro_name": "println!"
     }
   ],

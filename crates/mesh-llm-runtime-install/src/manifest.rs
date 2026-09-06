@@ -268,12 +268,16 @@ pub(crate) fn release_manifest_checksum_url(url: &str) -> String {
     }
 }
 
-/// Strips the query string and redacts any userinfo (`user:pass@`) from a
-/// URL before it is surfaced in error context or progress events. Mirrors
-/// `redact_url_userinfo` in `mesh-llm-host-runtime::logging::policy`; kept
-/// local because this crate does not otherwise depend on host-runtime.
+/// Strips the query string and the fragment, and redacts any userinfo
+/// (`user:pass@`) from a URL before it is surfaced in error context,
+/// progress events or catalog reports. Mirrors `redact_url_userinfo` in
+/// `mesh-llm-host-runtime::logging::policy`; kept local because this crate
+/// does not otherwise depend on host-runtime.
 pub(crate) fn url_without_query(url: &str) -> String {
-    let without_query = url.split_once('?').map_or(url, |(base, _)| base);
+    let without_fragment = url.split_once('#').map_or(url, |(base, _)| base);
+    let without_query = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(base, _)| base);
     redact_url_userinfo(without_query)
 }
 
