@@ -539,5 +539,67 @@ class ModelPinTests(unittest.TestCase):
         self.assertEqual(self.parity.validate_model_pins(rows), 1)
 
 
+class PinManifestJoinTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+        self.certified_dir = ROOT / "ci/llama-canary"
+        self._original = (self.certified_dir / "family-certified.json").read_text(
+            encoding="utf-8"
+        )
+        self.addCleanup(
+            lambda: (self.certified_dir / "family-certified.json").write_text(
+                self._original, encoding="utf-8"
+            )
+        )
+
+    def _write_certified(self, models: list[dict]) -> None:
+        import json
+
+        (self.certified_dir / "family-certified.json").write_text(
+            json.dumps({"schema_version": 1, "policy": {}, "models": models}),
+            encoding="utf-8",
+        )
+
+    def _pin(self, size=10, blob="a" * 64, repo="org/some-gguf", revision="0" * 40):
+        return {
+            "llama_model": "somearch",
+            "status": "certified",
+            "model_pin": {
+                "repo": repo,
+                "revision": revision,
+                "file": "model.gguf",
+                "size_bytes": size,
+                "blob_sha256": blob,
+            },
+        }
+
+    def _artifact(self, size=10, blob="a" * 64, repo="org/some-gguf", revision="0" * 40):
+        return {
+            "artifact": {
+                "repo": repo,
+                "revision": revision,
+                "file_integrity": {
+                    "model.gguf": {"size_bytes": size, "blob_id": blob}
+                },
+            }
+        }
+
+    def test_matching_pin_joins(self):
+        self._write_certified([self._artifact()])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 0)
+
+    def test_unknown_pin_fails(self):
+        self._write_certified([])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 1)
+
+    def test_disagreeing_integrity_fails(self):
+        self._write_certified([self._artifact(size=999)])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 1)
+
+    def test_pin_without_manifest_entry_passes_when_no_pin_rows(self):
+        self._write_certified([])
+        self.assertEqual(self.parity.validate_pin_manifest_join([]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

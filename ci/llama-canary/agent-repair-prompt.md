@@ -99,3 +99,12 @@ models. For each one:
 A new upstream model file with no manifest row at all still fails validation
 as `missing_candidate` — the repair PR must classify every new family before
 the battery can pass.
+
+The canary also runs `scripts/skippy-canary-live-matrix.sh` after the smoke
+gates: every runnable `model_pin` row must resolve its pinned GGUF, pass
+size/sha256 verification, package as source-complete package-v2, pass
+independent `verify-package-v2`, and pass the two-node split smoke. Its
+per-row evidence lives under `target/family-battery/<run>/live-matrix/` in
+the uploaded battery artifact; a failed row routes here. The repair loop
+attempts hooks plus a smallest immutable model before a non-runnable
+classification is acceptable.

@@ -432,7 +432,61 @@ def validate_inventory(
         rows, boundary_registered_models(llama_src)
     )
     failures += validate_model_pins(rows)
+    failures += validate_pin_manifest_join(rows)
 
+    return failures
+
+
+def validate_pin_manifest_join(rows: list[dict[str, Any]]) -> int:
+    """A parity model_pin must join an identical family-certified artifact.
+
+    The family-certified manifest's `file_integrity` is the certification
+    source of truth; a parity row that pins a model the certification
+    manifest does not know about (or disagrees with on repo, revision,
+    file, size, or blob sha256) fails closed. This keeps the two manifests
+    from drifting apart on the same immutable model.
+    """
+    certified_path = ROOT / "ci/llama-canary/family-certified.json"
+    try:
+        certified = json.loads(certified_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"cannot read {certified_path}: {error}", file=sys.stderr)
+        return 1
+    # (repo, revision, file) -> (size_bytes, blob_sha256)
+    certified_index: dict[tuple[str, str, str], tuple[int, str]] = {}
+    for model in certified.get("models", []):
+        artifact = model.get("artifact") or {}
+        integrity = artifact.get("file_integrity") or {}
+        for file_name, record in integrity.items():
+            key = (artifact.get("repo", ""), artifact.get("revision", ""), file_name)
+            certified_index[key] = (
+                record.get("size_bytes", -1),
+                record.get("blob_id", ""),
+            )
+
+    failures = 0
+    for row in rows:
+        pin = row.get("model_pin")
+        if pin is None:
+            continue
+        key = (pin.get("repo", ""), pin.get("revision", ""), pin.get("file", ""))
+        record = certified_index.get(key)
+        if record is None:
+            failures += 1
+            print(
+                f"model_pin for {row['llama_model']} does not join any "
+                f"family-certified.json artifact: {key[0]}@{key[1][:12]} {key[2]}",
+                file=sys.stderr,
+            )
+            continue
+        size, blob = record
+        if pin.get("size_bytes") != size or pin.get("blob_sha256") != blob:
+            failures += 1
+            print(
+                f"model_pin for {row['llama_model']} disagrees with "
+                f"family-certified.json integrity for {key[2]}",
+                file=sys.stderr,
+            )
     return failures
 
 
@@ -722,9 +776,16 @@ def validate_runtime_slice_admission(llama_root: Path | None = None) -> int:
 
     source = model_loading.read_text(encoding="utf-8")
     executable_source = executable_cpp(source)
-    function_start = executable_source.find(
-        "static enum skippy_status skippy_finish_model_open("
-    )
+    # Match the admission function with or without internal-linkage
+    # qualifiers: upstream revisions have carried both spellings.
+    function_start = -1
+    for needle in (
+        "static enum skippy_status skippy_finish_model_open(",
+        "enum skippy_status skippy_finish_model_open(",
+    ):
+        function_start = executable_source.find(needle)
+        if function_start >= 0:
+            break
     function_end = executable_source.find(
         "enum skippy_status skippy_model_open_impl(", function_start
     )

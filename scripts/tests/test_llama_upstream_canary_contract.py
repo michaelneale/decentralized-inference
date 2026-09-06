@@ -254,6 +254,19 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("steps.parity_validate.outcome == 'failure'", battery_repair)
         self.assertIn("steps.parity_validate.outcome == 'failure'", fail_step)
 
+        # The live package-v2 two-node matrix makes model_pin rows executable
+        # evidence and routes failures to the same repair loop.
+        live_matrix = _step_block(
+            workflow, "Live package-v2 two-node matrix (model_pin proof)"
+        )
+        self.assertIn("scripts/skippy-canary-live-matrix.sh", live_matrix)
+        self.assertIn("continue-on-error: true", live_matrix)
+        self.assertIn("steps.live_matrix.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.live_matrix.outcome == 'failure'", fail_step)
+        # Live-matrix evidence lands under the uploaded battery evidence root.
+        upload = _step_block(workflow, "Upload supported-families battery evidence")
+        self.assertIn("target/family-battery/", upload)
+
     def test_post_green_agent_review_is_wired_and_opt_out(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         # After a certified repair, the wrapper runs one fresh-context review
