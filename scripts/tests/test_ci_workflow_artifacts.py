@@ -242,22 +242,20 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("-evidence", workflow)
         self.assertIn("if-no-files-found: error", workflow)
 
-    def test_protected_catalog_enables_cross_backend_product_integration(self):
+    def test_protected_catalog_defers_product_integration_rollout(self):
         slices = json.loads(SLICES.read_text())
         smoke_ids = {row["id"] for row in slices["smoke_rows"]}
         linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
 
-        self.assertIn("product-integration-cpu", smoke_ids)
+        self.assertNotIn("product-integration-cpu", smoke_ids)
         self.assertNotIn("qwen-recurrent-gate", smoke_ids)
         self.assertIn("core", smoke_ids)
         self.assertIn("two-node-client", smoke_ids)
         self.assertIn("two-node-split", smoke_ids)
         self.assertIn("Qwen3.5-0.8B-Q4_K_M.gguf", linux)
         self.assertIn("expected_exact_payload_kind: kv-recurrent", linux)
-        self.assertIn("product-integration-cuda", smoke_ids)
-        self.assertIn("product-integration-vulkan", smoke_ids)
-        self.assertIn("product-integration-rocm", smoke_ids)
-        self.assertIn("product-integration-metal", smoke_ids)
+        self.assertNotIn("product-integration-cuda", smoke_ids)
+        self.assertNotIn("product-integration-metal", smoke_ids)
         self.assertIn("core-cuda", smoke_ids)
         self.assertIn("metal-model-load", smoke_ids)
 
