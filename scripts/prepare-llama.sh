@@ -173,6 +173,9 @@ if [[ -f "$GENERATED_SERIES" ]]; then
   generated_expected=1
   generated_count=0
   while IFS= read -r filename || [[ -n "$filename" ]]; do
+    # Git for Windows may check this text manifest out with CRLF endings.
+    # Bash read removes the newline but retains the carriage return.
+    filename="${filename%$'\r'}"
     if [[ ! "$filename" =~ ^([0-9]{4})-family-[a-z0-9.-]+(--[a-z0-9.-]+)*\.patch$ ]]; then
       echo "invalid generated family patch filename in series: $filename" >&2
       exit 1
