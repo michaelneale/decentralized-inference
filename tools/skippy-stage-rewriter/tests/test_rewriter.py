@@ -80,6 +80,36 @@ def main() -> int:
         assert second["summary"]["already_transformed"] == 1
         assert second["builders"][0]["edits"] == []
 
+        filter_only = run(
+            tool,
+            source_root,
+            Path(temporary) / "filter-only.json",
+            source_name="filter-only.cpp",
+            apply=False,
+        )["builders"][0]
+        assert filter_only["verdict"] == "transformable"
+        assert {edit["kind"] for edit in filter_only["edits"]} == {
+            "insert_begin_block",
+            "insert_end_block",
+        }
+
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "filter-only-applied.json",
+            source_name="filter-only.cpp",
+            apply=True,
+        )
+        filter_only_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "filter-only-second.json",
+            source_name="filter-only.cpp",
+            apply=False,
+        )["builders"][0]
+        assert filter_only_second["verdict"] == "already_transformed"
+        assert filter_only_second["edits"] == []
+
         two_loops = run(
             tool,
             source_root,

@@ -310,7 +310,8 @@ public:
       return true;
     }
     if (!containsName(condition->getLHS(), variable->getNameAsString()) ||
-        !containsName(condition->getRHS(), "n_layer")) {
+        (!containsName(condition->getRHS(), "n_layer") &&
+         !containsName(condition->getRHS(), "il_end"))) {
       return true;
     }
     layer_loops.push_back(loop);
@@ -431,15 +432,18 @@ public:
 
     const bool has_begin = facts.calls["begin_block"].size() == 1;
     const bool has_end = facts.calls["end_block"].size() == 1;
-    if (facts.has_stage_filter || has_begin || has_end) {
-      if (facts.has_stage_filter && has_begin && has_end) {
-        report.verdict = "already_transformed";
-      } else {
-        refuse(report, "partial stage transformation");
-      }
+    if (facts.has_stage_filter && has_begin && has_end) {
+      report.verdict = "already_transformed";
       reports_.push_back(std::move(report));
       return;
     }
+    if (has_begin != has_end ||
+        (!facts.has_stage_filter && (has_begin || has_end))) {
+      refuse(report, "partial stage transformation");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    const bool completing_filter = facts.has_stage_filter;
 
     if (facts.layer_loops.size() != 1) {
       refuse(report, facts.layer_loops.empty()
@@ -458,10 +462,14 @@ public:
         sourceText(loop_var->getInit()->getSourceRange(), sm, lang);
     report.proof.loop_end =
         sourceText(condition->getRHS()->getSourceRange(), sm, lang);
-    if (loop_body == nullptr || report.proof.loop_start != "0") {
-      refuse(report, loop_body == nullptr
-                         ? "block loop body is not compound"
-                         : "block loop does not start at literal zero");
+    const std::string expected_loop_start =
+        completing_filter ? "il_start" : "0";
+    if (loop_body == nullptr ||
+        report.proof.loop_start != expected_loop_start) {
+      refuse(report,
+             loop_body == nullptr
+                 ? "block loop body is not compound"
+                 : "block loop start does not match transformation state");
       reports_.push_back(std::move(report));
       return;
     }
@@ -569,19 +577,22 @@ public:
         report.proof.loop_end + ";\n\n" + indent;
 
     bool valid = true;
-    valid &= addInsert(report.edits, "insert_filter_declarations", report.file,
-                       embedding_statement->getBeginLoc(), declarations, sm);
-    valid &= addReplace(report.edits, "rewrite_embedding_owner", report.file,
-                        embedding->getArg(0)->getSourceRange(),
-                        "stage_filtered && il_start > 0 ? nullptr : " +
-                            original_embedding,
-                        sm, lang);
-    valid &=
-        addReplace(report.edits, "rewrite_loop_start", report.file,
-                   loop_var->getInit()->getSourceRange(), "il_start", sm, lang);
-    valid &=
-        addReplace(report.edits, "rewrite_loop_end", report.file,
-                   condition->getRHS()->getSourceRange(), "il_end", sm, lang);
+    if (!completing_filter) {
+      valid &=
+          addInsert(report.edits, "insert_filter_declarations", report.file,
+                    embedding_statement->getBeginLoc(), declarations, sm);
+      valid &= addReplace(report.edits, "rewrite_embedding_owner", report.file,
+                          embedding->getArg(0)->getSourceRange(),
+                          "stage_filtered && il_start > 0 ? nullptr : " +
+                              original_embedding,
+                          sm, lang);
+      valid &= addReplace(report.edits, "rewrite_loop_start", report.file,
+                          loop_var->getInit()->getSourceRange(), "il_start", sm,
+                          lang);
+      valid &=
+          addReplace(report.edits, "rewrite_loop_end", report.file,
+                     condition->getRHS()->getSourceRange(), "il_end", sm, lang);
+    }
 
     const auto body_begin = clang::Lexer::getLocForEndOfToken(
         loop_body->getLBracLoc(), 0, sm, lang);
@@ -596,7 +607,7 @@ public:
                            ");\n\n" + inner_indent,
                        sm);
 
-    if (output_call != nullptr) {
+    if (!completing_filter && output_call != nullptr) {
       const Stmt *output_statement =
           directChildContaining(constructor_body, output_call, sm, lang);
       if (output_statement == nullptr) {
@@ -652,17 +663,19 @@ public:
       }
     }
 
-    const SourceLocation after_loop =
-        clang::Lexer::getLocForEndOfToken(loop->getEndLoc(), 0, sm, lang);
-    const std::string boundary =
-        "\n" + indent +
-        "if (stage_filtered && !stage_filter.include_output) {\n" + indent +
-        "    cb(" + *activation + ", \"stage_boundary\", il_end - 1);\n" +
-        indent + "    res->t_embd = " + *activation + ";\n" + indent +
-        "    ggml_build_forward_expand(gf, " + *activation + ");\n" + indent +
-        "    return;\n" + indent + "}\n";
-    valid &= addInsert(report.edits, "insert_stage_boundary", report.file,
-                       after_loop, boundary, sm);
+    if (!completing_filter) {
+      const SourceLocation after_loop =
+          clang::Lexer::getLocForEndOfToken(loop->getEndLoc(), 0, sm, lang);
+      const std::string boundary =
+          "\n" + indent +
+          "if (stage_filtered && !stage_filter.include_output) {\n" + indent +
+          "    cb(" + *activation + ", \"stage_boundary\", il_end - 1);\n" +
+          indent + "    res->t_embd = " + *activation + ";\n" + indent +
+          "    ggml_build_forward_expand(gf, " + *activation + ");\n" + indent +
+          "    return;\n" + indent + "}\n";
+      valid &= addInsert(report.edits, "insert_stage_boundary", report.file,
+                         after_loop, boundary, sm);
+    }
 
     if (!valid || !nonOverlapping(report.edits)) {
       report.edits.clear();
