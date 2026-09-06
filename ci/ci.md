@@ -307,7 +307,8 @@ runtime producers are not duplicated.
   `phase-results.json`, and rejects missing, modified, or self-inconsistent
   evidence. All JSON snapshots and reconciled evidence upload with the phase
   logs on success or failure. The existing Qwen3.5 recurrent job remains
-  required until Granite passes that live contract. The typed runner supports CPU, CUDA, and Metal,
+  required until Granite passes that live contract. The typed runner supports
+  CPU, CUDA, Metal, Vulkan, and ROCm,
   but only CPU is selected during the first qualification stage; the existing
   CUDA inference and Metal model-load signals remain required until their typed
   product rows pass live qualification in that order. CUDA and Metal request
@@ -320,9 +321,12 @@ runtime producers are not duplicated.
   group. Its PR runtime is compiled for both sm86 and sm120 because the scale
   set currently contains RTX 3080 and RTX 5090 workers. The smoke installs the
   pinned CUDA 12.9 user-space runtime libraries required by the host-linked
-  product before inference.
-  ROCm and Vulkan products remain package-verified until eligible inference
-  runners are registered.
+  product before inference. Vulkan uses the same approved `gpu-nvidia` host
+  with the explicit `Vulkan0` device. ROCm uses `ROCm0` and its reusable job is
+  skipped unless `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; the
+  corresponding repository-scoped `gpu-amd` runner could not be verified from
+  the current GitHub token. Accelerator product-integration rows remain absent
+  from the checked plan until their live qualification is accepted.
 - `ci-linux-sdk-slice.yml` and `ci-macos-sdk-slice.yml` — platform-local
   Rust, Kotlin and Swift consumers. Each smoke downloads the matching
   platform lane's immutable UI artifact before packaging SDK resources;
@@ -438,8 +442,10 @@ from being duplicated into every composed product artifact.
 Fork pull requests use GitHub-hosted runners. Eligible same-repository PRs may
 use Depot while the repository-wide gate and time-bounded cache-risk exception
 in `ci/DEPOT_PR_RISK_EXCEPTION.md` are active. The
-other exception is uncredentialed CUDA smoke on the approved ephemeral
-`gpu-nvidia` scale set described above. PRs use the same protected reusable
+other current exception is uncredentialed CUDA or Vulkan smoke on the approved
+ephemeral `gpu-nvidia` scale set described above. A future ROCm row uses the
+repository-scoped `gpu-amd` role only when
+`MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`. PRs use the same protected reusable
 lanes and receive no repository secrets. On routine trusted-`main` pushes,
 Linux roles may use Depot only when `DEPOT_RUNNERS_ENABLED` is exactly `true`;
 macOS, Windows, credential-bearing smokes and other hardware-qualified work

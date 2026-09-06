@@ -177,6 +177,21 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("cuda-cudart-12-9", product_smoke)
         self.assertIn("libcublas-12-9", product_smoke)
 
+    def test_product_integration_supports_accelerator_backends(self):
+        product_smoke = (WORKFLOWS / "product-integration-smoke.yml").read_text()
+        linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
+        product_script = (ROOT / "scripts/ci-product-integration-smoke.sh").read_text()
+
+        self.assertIn("inputs.backend == 'vulkan'", product_smoke)
+        self.assertIn("MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true'", product_smoke)
+        self.assertIn('"gpu-amd"', product_smoke)
+        self.assertIn("vulkaninfo --summary", product_smoke)
+        self.assertIn("rocminfo", product_smoke)
+        self.assertIn("product_integration_vulkan:", linux)
+        self.assertIn("product_integration_rocm:", linux)
+        self.assertIn("linux/vulkan) DEVICE=Vulkan0", product_script)
+        self.assertIn("linux/rocm) DEVICE=ROCm0", product_script)
+
     def test_two_node_split_smoke_covers_dense_and_recurrent_models(self):
         workflow = (WORKFLOWS / "product-integration-smoke.yml").read_text()
         restore = (ROOT / ".github/actions/restore-product-integration-inputs/action.yml").read_text()

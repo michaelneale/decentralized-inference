@@ -57,6 +57,32 @@ jobs:
       backend: cuda
       timeout_minutes: ${{ inputs.timeout_minutes }}
 
+  product_integration_vulkan:
+    name: Vulkan product integration suite
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-vulkan') }}
+    uses: ./.github/workflows/product-integration-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-vulkan
+      artifact_path: ci-artifacts/linux-vulkan
+      staged_binary_path: ${{ inputs.binary_target }}
+      platform: linux
+      backend: vulkan
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+
+  product_integration_rocm:
+    name: ROCm product integration suite
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-rocm') && vars.MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true' }}
+    uses: ./.github/workflows/product-integration-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-rocm
+      artifact_path: ci-artifacts/linux-rocm
+      staged_binary_path: ${{ inputs.binary_target }}
+      platform: linux
+      backend: rocm
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+
   qwen_recurrent_gate:
     name: Qwen3.5 recurrent migration gate
     if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'qwen-recurrent-gate') }}

@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       backend:
-        description: "Typed backend selector: cpu, cuda, or metal."
+        description: "Typed backend selector: cpu, cuda, metal, vulkan, or rocm."
         required: true
         type: string
       timeout_minutes:
@@ -38,7 +38,8 @@ permissions:
 jobs:
   product_integration:
     name: Product integration (${{ inputs.platform }}/${{ inputs.backend }})
-    runs-on: ${{ inputs.platform == 'macos' && 'macos-15' || inputs.backend == 'cuda' && fromJSON('["self-hosted","Linux","X64","amd64","gpu-nvidia","mesh-llm-amd64","mesh-llm"]') || 'ubuntu-24.04' }}
+    if: ${{ inputs.backend != 'rocm' || vars.MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true' }}
+    runs-on: ${{ inputs.platform == 'macos' && 'macos-15' || (inputs.backend == 'cuda' || inputs.backend == 'vulkan') && fromJSON('["self-hosted","Linux","X64","amd64","gpu-nvidia","mesh-llm-amd64","mesh-llm"]') || inputs.backend == 'rocm' && fromJSON('["self-hosted","Linux","X64","amd64","gpu-amd","mesh-llm-amd64","mesh-llm"]') || 'ubuntu-24.04' }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     container:
       image: ${{ inputs.platform == 'linux' && inputs.backend == 'cpu' && 'ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d' || '' }}
@@ -57,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${PLATFORM}/${BACKEND}" in
-            linux/cpu|linux/cuda|macos/metal) ;;
+            linux/cpu|linux/cuda|linux/vulkan|linux/rocm|macos/metal) ;;
             *) echo "unsupported product integration platform/backend: ${PLATFORM}/${BACKEND}" >&2; exit 2 ;;
           esac
 
@@ -95,6 +96,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cuda-cudart-12-9 libcublas-12-9 curl jq lsof
           nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
+
+      - name: Record Vulkan device provenance
+        if: inputs.platform == 'linux' && inputs.backend == 'vulkan'
+        run: vulkaninfo --summary
+
+      - name: Record ROCm device provenance
+        if: inputs.platform == 'linux' && inputs.backend == 'rocm'
+        run: |
+          rocminfo
+          rocm-smi --showproductname --showdriverversion
 
       - name: Install product smoke dependencies
         run: python -m pip install --upgrade pip -r ci/requirements-ci-python.txt

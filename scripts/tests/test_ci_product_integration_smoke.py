@@ -110,6 +110,8 @@ fi
         self,
         failure_phase: str | None = None,
         *,
+        platform: str = "linux",
+        backend: str = "cpu",
         dense_artifact_id: str = DENSE_ARTIFACT_ID,
         dense_sha256: str | None = None,
         recurrent_artifact_id: str = RECURRENT_ARTIFACT_ID,
@@ -137,7 +139,7 @@ fi
             artifact_dir = root / "artifact"
             artifact_dir.mkdir()
             (artifact_dir / "product-manifest.json").write_text(
-                '{"backend":"cpu"}\n', encoding="utf-8"
+                json.dumps({"backend": backend}) + "\n", encoding="utf-8"
             )
             dense_model = root / "dense.gguf"
             recurrent_model = root / "recurrent.gguf"
@@ -165,8 +167,8 @@ fi
                     str(artifact_dir),
                     str(dense_model),
                     str(recurrent_model),
-                    "linux",
-                    "cpu",
+                    platform,
+                    backend,
                     dense_artifact_id,
                     dense_sha256,
                     recurrent_artifact_id,
@@ -253,6 +255,21 @@ fi
                 self.assertLessEqual(
                     phase["started_at_unix_ns"], phase["ended_at_unix_ns"]
                 )
+
+    def test_typed_backend_selectors_drive_the_expected_device(self) -> None:
+        cases = {
+            ("linux", "cpu"): "CPU",
+            ("linux", "cuda"): "CUDA0",
+            ("linux", "vulkan"): "Vulkan0",
+            ("linux", "rocm"): "ROCm0",
+            ("macos", "metal"): "MTL0",
+        }
+        for (platform, backend), expected_device in cases.items():
+            with self.subTest(platform=platform, backend=backend):
+                result, manifest = self.run_suite(platform=platform, backend=backend)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                assert manifest is not None
+                self.assertEqual(manifest["provenance"]["device"], expected_device)
 
     def test_failed_phase_is_recorded_and_reconciliation_fails_closed(self) -> None:
         result, manifest = self.run_suite("dense-openai-sdk")

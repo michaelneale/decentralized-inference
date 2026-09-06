@@ -35,6 +35,8 @@ readonly -a REQUIRED_PHASES=(
 case "${PLATFORM}/${BACKEND}" in
     linux/cpu) DEVICE=CPU ;;
     linux/cuda) DEVICE=CUDA0 ;;
+    linux/vulkan) DEVICE=Vulkan0 ;;
+    linux/rocm) DEVICE=ROCm0 ;;
     macos/metal) DEVICE=MTL0 ;;
     *)
         echo "unsupported typed product suite combination: ${PLATFORM}/${BACKEND}" >&2
