@@ -158,11 +158,11 @@
     {"domain": "runner-infra", "slices": ["runner-contract"]}
   ],
   "domain_rows": {
-    "runtime-product": ["linux-cpu"],
+    "runtime-product": ["linux-cpu", "linux-cuda", "linux-rocm", "linux-vulkan", "macos-metal"],
     "ui": ["linux-cpu"],
-    "native-abi": ["linux-cpu"],
-    "protocol": ["linux-cpu"],
-    "split-serving": ["linux-cpu"],
+    "native-abi": ["linux-cpu", "linux-cuda", "linux-rocm", "linux-vulkan", "macos-metal"],
+    "protocol": ["linux-cpu", "linux-cuda", "linux-rocm", "linux-vulkan", "macos-metal"],
+    "split-serving": ["linux-cpu", "linux-cuda", "linux-rocm", "linux-vulkan", "macos-metal"],
     "model-download": ["linux-cpu"],
     "sdk-rust": ["linux-cpu"],
     "sdk-kotlin": ["linux-cpu"],
@@ -174,17 +174,17 @@
     "backend-vulkan": ["linux-vulkan", "windows-vulkan"]
   },
   "smoke_domain_rows": {
-    "runtime-product": ["core", "two-node-client", "two-node-split"],
+    "runtime-product": ["core", "two-node-client", "two-node-split", "product-integration-cpu", "product-integration-cuda", "product-integration-vulkan", "product-integration-rocm", "product-integration-metal"],
     "ui": ["core"],
-    "native-abi": ["core"],
-    "protocol": ["two-node-client"],
-    "split-serving": ["two-node-split"],
+    "native-abi": ["core", "product-integration-cpu", "product-integration-cuda", "product-integration-vulkan", "product-integration-rocm", "product-integration-metal"],
+    "protocol": ["two-node-client", "product-integration-cpu", "product-integration-cuda", "product-integration-vulkan", "product-integration-rocm", "product-integration-metal"],
+    "split-serving": ["two-node-split", "product-integration-cpu", "product-integration-cuda", "product-integration-vulkan", "product-integration-rocm", "product-integration-metal"],
     "model-download": ["model-download"],
-    "platform-macos": ["metal-model-load"],
+    "platform-macos": ["metal-model-load", "product-integration-metal"],
     "platform-windows": ["core"],
-    "backend-cuda": ["core-cuda"],
-    "backend-rocm": ["core"],
-    "backend-vulkan": ["core"]
+    "backend-cuda": ["core-cuda", "product-integration-cuda"],
+    "backend-rocm": ["product-integration-rocm"],
+    "backend-vulkan": ["product-integration-vulkan"]
   },
   "platform_domain_rows": {
   "platform-macos": ["macos-portable", "macos-unit"],
@@ -224,7 +224,12 @@
     {"id": "two-node-client", "kind": "two-node-client", "runner_role": "linux-build-4"},
     {"id": "two-node-split", "kind": "two-node-split", "runner_role": "linux-build-8"},
     {"id": "model-download", "kind": "model-download", "runner_role": "linux-build-4"},
-    {"id": "metal-model-load", "kind": "metal-model-load", "runner_role": "macos-build"}
+    {"id": "metal-model-load", "kind": "metal-model-load", "runner_role": "macos-build"},
+    {"id": "product-integration-cpu", "kind": "product-integration", "platform": "linux", "backend": "cpu", "runner_role": "linux-build-8"},
+    {"id": "product-integration-cuda", "kind": "product-integration", "platform": "linux", "backend": "cuda", "runner_role": "gpu-nvidia"},
+    {"id": "product-integration-vulkan", "kind": "product-integration", "platform": "linux", "backend": "vulkan", "runner_role": "gpu-nvidia"},
+    {"id": "product-integration-rocm", "kind": "product-integration", "platform": "linux", "backend": "rocm", "runner_role": "gpu-amd"},
+    {"id": "product-integration-metal", "kind": "product-integration", "platform": "macos", "backend": "metal", "runner_role": "macos-build"}
   ],
   "batch_limits": {"clippy": 3, "rust_tests": 4},
   "slices": [

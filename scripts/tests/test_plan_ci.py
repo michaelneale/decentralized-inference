@@ -262,7 +262,7 @@ class PlanCiTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["runtime_products"]],
-            ["linux-cpu"],
+            ["linux-cpu", "linux-cuda", "linux-rocm", "linux-vulkan", "macos-metal"],
         )
         self.assertEqual(
             plan["dependencies"]["runtime-product"],
@@ -288,7 +288,7 @@ class PlanCiTests(unittest.TestCase):
         self.assertTrue(plan["signals"]["cli_surface_changed"])
         self.assertFalse(plan["signals"]["website_docs_changed"])
 
-    def test_backend_change_adds_only_the_owned_backend_rows(self) -> None:
+    def test_backend_change_adds_runtime_matrix_and_owned_backend_rows(self) -> None:
         payload = fixture("runtime.json")
         payload["changed_files"] = ["scripts/build-linux-rocm.sh"]
         payload["affected_crates"] = ["mesh-llm"]
@@ -301,11 +301,27 @@ class PlanCiTests(unittest.TestCase):
         )
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["runtime_products"]],
-            ["linux-cpu", "linux-rocm", "windows-rocm"],
+            [
+                "linux-cpu",
+                "linux-cuda",
+                "linux-rocm",
+                "linux-vulkan",
+                "macos-metal",
+                "windows-rocm",
+            ],
         )
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["smoke"]],
-            ["core", "two-node-client", "two-node-split"],
+            [
+                "core",
+                "two-node-client",
+                "two-node-split",
+                "product-integration-cpu",
+                "product-integration-cuda",
+                "product-integration-vulkan",
+                "product-integration-rocm",
+                "product-integration-metal",
+            ],
         )
 
     def test_cuda_change_selects_the_gpu_smoke_row(self) -> None:
@@ -317,7 +333,7 @@ class PlanCiTests(unittest.TestCase):
 
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["smoke"]],
-            ["core-cuda"],
+            ["core-cuda", "product-integration-cuda"],
         )
 
     def test_macos_platform_change_selects_portable_and_unit_rows(self) -> None:
@@ -369,6 +385,11 @@ class PlanCiTests(unittest.TestCase):
                 "two-node-split",
                 "model-download",
                 "metal-model-load",
+                "product-integration-cpu",
+                "product-integration-cuda",
+                "product-integration-vulkan",
+                "product-integration-rocm",
+                "product-integration-metal",
             },
         )
         self.assertIn(

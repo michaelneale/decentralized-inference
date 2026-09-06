@@ -302,6 +302,8 @@ class CiLaneWorkflowTests(unittest.TestCase):
             "ci-linux-product-smoke-slice.yml": (
                 "product-integration-cpu",
                 "product-integration-cuda",
+                "product-integration-vulkan",
+                "product-integration-rocm",
                 "qwen-recurrent-gate",
                 "core-cuda",
                 "model-download",
