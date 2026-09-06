@@ -236,9 +236,23 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             self.assertNotIn("github.event.inputs", run_body)
             self.assertNotIn("steps.sha.outputs", run_body)
 
-        # The workflow's battery step tees its evidence log so a battery-mode
-        # repair turn reuses it instead of re-running the battery.
-        self.assertIn("tee .deps/llama-canary-repair-battery.log", battery)
+        # The workflow's battery step appends its evidence log (the parity
+        # validation gate writes the head of the same file) so a
+        # battery-mode repair turn reuses it instead of re-running.
+        self.assertIn("tee -a .deps/llama-canary-repair-battery.log", battery)
+
+        # The parity manifest validation gate runs before the family plan,
+        # fail-closed, and its failure feeds the same battery repair loop.
+        parity_gate = _step_block(
+            workflow, "Parity manifest validation (boundary registration gate)"
+        )
+        self.assertIn("skippy-llama-parity.py validate --llama-src .deps/llama.cpp", parity_gate)
+        self.assertIn("continue-on-error: true", parity_gate)
+        gate_idx = workflow.index("Parity manifest validation (boundary registration gate)")
+        plan_idx = workflow.index("Plan and verify family certification cache")
+        self.assertLess(gate_idx, plan_idx, "parity gate must run before the family plan")
+        self.assertIn("steps.parity_validate.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.parity_validate.outcome == 'failure'", fail_step)
 
     def test_post_green_agent_review_is_wired_and_opt_out(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

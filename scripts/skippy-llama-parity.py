@@ -439,9 +439,10 @@ def validate_inventory(
 def boundary_registered_models(llama_src: Path | None) -> set[str]:
     """Model implementations that register stage block boundaries.
 
-    A model file counts as registered when it calls `begin_block` (the
-    entry half of the per-layer boundary pair; the exit half is always
-    added in the same edit per the llama-patch-changes skill).
+    A model file counts as registered only when it calls both `begin_block`
+    and `end_block` (the per-layer boundary pair is always added in the same
+    edit per the llama-patch-changes skill). A file with only one half of
+    the pair cannot certify.
     """
     source = llama_src or ROOT / ".deps/llama.cpp"
     models_dir = source / "src/models"
@@ -453,7 +454,7 @@ def boundary_registered_models(llama_src: Path | None) -> set[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if "begin_block" in text:
+        if "begin_block" in text and "end_block" in text:
             registered.add(path.stem)
     return registered
 
@@ -501,21 +502,23 @@ def validate_boundary_registration(
 
     Rows whose llama model does not register `begin_block`/`end_block` must
     carry an explicit `unsupported_reason` so the gap is classified rather
-    than silently certified. Certified rows may never carry an unsupported
-    reason — that combination is a manifest error.
+    than silently certified. Only a non-runnable classification may carry a
+    reason: a `certified` row with `unsupported_reason` is a manifest error
+    regardless of hook state.
     """
     failures = 0
     for row in rows:
         status = row.get("status")
         if status not in {"certified", "candidate", "candidate_stateful"}:
             continue
+        if status == "certified" and row.get("unsupported_reason"):
+            failures += 1
+            print(
+                f"certified row carries unsupported_reason: {row['llama_model']}",
+                file=sys.stderr,
+            )
+            continue
         if row["llama_model"] in registered:
-            if row.get("unsupported_reason"):
-                failures += 1
-                print(
-                    f"certified row carries unsupported_reason: {row['llama_model']}",
-                    file=sys.stderr,
-                )
             continue
         reason = row.get("unsupported_reason")
         if not reason:

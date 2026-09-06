@@ -118,6 +118,32 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
+      - name: Parity manifest validation (boundary registration gate)
+        id: parity_validate
+        # Fail closed when llama-parity-candidates.json is not fully
+        # classified: runnable rows must register begin_block/end_block (or
+        # carry an explicit unsupported_reason on a non-runnable
+        # classification), and every model_pin must be immutable. A failure
+        # here is a manifest defect, not an upstream defect — route it to
+        # the same battery-mode agent repair loop so the manifests get
+        # fixed in the repair PR instead of silently certifying.
+        # continue-on-error mirrors the battery step: the "Fail when the
+        # canary needs human attention" step keeps the job red unless the
+        # repair resolves it.
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p .deps
+          # Tee into the head of the repair wrapper's battery evidence log
+          # so a battery-mode repair turn sees the manifest failures without
+          # re-running anything; the battery step below appends to the same
+          # log. The wrapper clears this file at the start of its own runs.
+          echo "=== parity manifest validation (boundary registration gate) ===" \
+            | tee .deps/llama-canary-repair-battery.log
+          python3 scripts/skippy-llama-parity.py validate --llama-src .deps/llama.cpp 2>&1 \
+            | tee -a .deps/llama-canary-repair-battery.log
+
       - name: Plan and verify family certification cache
         id: family_plan
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
@@ -185,8 +211,10 @@ jobs:
           # battery-failure repair turn reuses this run's evidence instead of
           # re-running the (up to 720-minute) battery before its first agent
           # turn. The wrapper clears this file at the start of its own runs.
+          # Append: the parity validation gate above may have already
+          # written its failures to the head of this log.
           scripts/skippy-family-battery.sh --skip-build --plan "${{ steps.family_plan.outputs.plan_path }}" 2>&1 \
-            | tee .deps/llama-canary-repair-battery.log
+            | tee -a .deps/llama-canary-repair-battery.log
 
       - name: Upload supported-families battery evidence
         if: ${{ !cancelled() && steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' }}
@@ -270,14 +298,16 @@ jobs:
 
       - name: Agent repair loop (battery failure)
         id: repair_battery
-        # The queue applied but a certification lane failed: hand the failing
-        # battery output to the same repair loop. Skipped when the patch-queue
-        # repair already ran or passed everything.
+        # The queue applied but a certification lane (or the parity manifest
+        # validation gate) failed: hand the failing battery output to the
+        # same repair loop. Skipped when the patch-queue repair already ran
+        # or passed everything.
         if: >
           steps.prepare.outcome == 'success'
           && steps.sha.outputs.certify == 'true'
           && steps.sha.outputs.cadence != 'nightly'
-          && steps.battery.outcome == 'failure'
+          && (steps.battery.outcome == 'failure'
+              || steps.parity_validate.outcome == 'failure')
         timeout-minutes: 720
         continue-on-error: true
         env:
@@ -300,6 +330,7 @@ jobs:
           contains(fromJSON('["success", "failure"]'), steps.repair_queue.outcome)
           || contains(fromJSON('["success", "failure"]'), steps.repair_battery.outcome)
           || steps.battery.outcome == 'failure'
+          || steps.parity_validate.outcome == 'failure'
         env:
           CANARY_CADENCE: ${{ steps.sha.outputs.cadence }}
         run: |

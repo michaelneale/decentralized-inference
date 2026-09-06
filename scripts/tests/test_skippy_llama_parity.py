@@ -413,11 +413,24 @@ class BoundaryRegistrationTests(unittest.TestCase):
         failures = self.parity.validate_boundary_registration(rows, set())
         self.assertEqual(failures, 1)
 
-    def test_unregistered_row_with_reason_passes(self):
+    def test_certified_row_with_reason_fails_even_when_registered(self):
         rows = [
             {
                 "llama_model": "somearch",
                 "status": "certified",
+                "unsupported_reason": "non-causal encoder",
+            }
+        ]
+        # Certified rows may never carry an unsupported_reason, regardless
+        # of hook state — that combination is a manifest error.
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
+
+    def test_unregistered_candidate_row_with_reason_passes(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "candidate",
                 "unsupported_reason": "non-causal encoder",
             }
         ]
@@ -454,6 +467,29 @@ class BoundaryRegistrationTests(unittest.TestCase):
         ]
         pending = self.parity.needs_boundary_registration_rows(rows, {"ddd"})
         self.assertEqual(pending, ["aaa", "bbb"])
+
+
+class BoundaryRegisteredModelsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def _models_dir(self, tmp: Path):
+        models = tmp / "src" / "models"
+        models.mkdir(parents=True)
+        return models
+
+    def test_both_hooks_required(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            models = self._models_dir(tmp)
+            (models / "full.cpp").write_text("begin_block(inpL, il);\nend_block(cur, il);\n")
+            (models / "half.cpp").write_text("begin_block(inpL, il);\n")
+            registered = self.parity.boundary_registered_models(tmp)
+        self.assertEqual(registered, {"full"})
+
+    def test_missing_models_dir_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            self.assertEqual(self.parity.boundary_registered_models(Path(tmp_name)), set())
 
 
 class ModelPinTests(unittest.TestCase):

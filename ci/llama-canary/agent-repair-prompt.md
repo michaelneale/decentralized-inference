@@ -63,6 +63,11 @@ Notes:
 - Do not modify files outside `third_party/llama.cpp/patches/` unless the
   Rust ABI mirrors in `crates/` genuinely need to track a patch ABI change
   (bump `PREPARE_SCHEMA`/ABI version together in that case).
+  EXCEPTION: the model-manifest repair described under "New upstream model
+  families" below — `docs/skippy/llama-parity-candidates.json` and
+  `ci/llama-canary/family-certified.json` may (and, for family
+  registration, must) be edited in the repair PR. The patch-only boundary
+  still forbids all other tree edits.
 
 ## New upstream model families (boundary registration)
 
