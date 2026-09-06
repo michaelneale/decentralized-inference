@@ -1,4 +1,4 @@
-From 44e50d81cfa48ad04fdbd8613299b7c0300c4c32 Mon Sep 17 00:00:00 2001
+From 35cd7c4e31abb7d904bcd9d5a9a7e598cf728076 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:35 +1000
 Subject: [PATCH 09/11] ggml: optimize Apple Metal staging paths
@@ -372,6 +372,3 @@ index 49102afe9..a018165de 100644
  typedef struct {
      int32_t  n_tokens;
      int32_t  n_iter;
--- 
-2.54.0 (Apple Git-157)
-

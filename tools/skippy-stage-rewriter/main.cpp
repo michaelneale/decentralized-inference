@@ -4,6 +4,7 @@
 #include "clang/AST/ParentMapContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/StmtCXX.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
@@ -44,6 +45,7 @@ using clang::RecursiveASTVisitor;
 using clang::SourceLocation;
 using clang::SourceManager;
 using clang::Stmt;
+using clang::StringLiteral;
 using clang::VarDecl;
 using clang::ast_matchers::cxxConstructorDecl;
 using clang::ast_matchers::isDefinition;
@@ -93,6 +95,8 @@ struct Proof {
   bool output_owner = false;
   std::vector<std::string> terminal_predicates;
   std::vector<std::string> nonlocal_exits;
+  std::string execution_scope = "partitioned_decoder";
+  std::vector<std::string> scope_evidence;
 };
 
 struct BuilderReport {
@@ -138,7 +142,19 @@ std::optional<std::pair<uint64_t, uint64_t>>
 tokenRange(clang::SourceRange range, const SourceManager &sm,
            const clang::LangOptions &lang);
 
-bool containsName(const Expr *expr, llvm::StringRef target) {
+std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
+                                                   llvm::StringRef variable);
+
+struct HyperconnectionPrelude {
+  const VarDecl *carried_decl = nullptr;
+  const BinaryOperator *repeat_assignment = nullptr;
+  const Stmt *repeat_statement = nullptr;
+  std::string width;
+  std::string multiplicity;
+  std::string tokens;
+};
+
+bool containsName(const Stmt *statement, llvm::StringRef target) {
   class Visitor final : public RecursiveASTVisitor<Visitor> {
   public:
     explicit Visitor(llvm::StringRef target) : target_(target) {}
@@ -159,8 +175,49 @@ bool containsName(const Expr *expr, llvm::StringRef target) {
     llvm::StringRef target_;
     bool found_ = false;
   } visitor(target);
-  visitor.TraverseStmt(const_cast<Expr *>(expr));
+  visitor.TraverseStmt(const_cast<Stmt *>(statement));
   return visitor.found();
+}
+
+bool containsLayerBound(const Expr *expression) {
+  class Visitor final : public RecursiveASTVisitor<Visitor> {
+  public:
+    bool VisitDeclRefExpr(DeclRefExpr *ref) {
+      found_ |= llvm::StringRef(ref->getDecl()->getNameAsString())
+                    .contains("n_layer");
+      return !found_;
+    }
+
+    bool VisitMemberExpr(clang::MemberExpr *member) {
+      found_ |= llvm::StringRef(member->getMemberDecl()->getNameAsString())
+                    .contains("n_layer");
+      return !found_;
+    }
+
+    bool found() const { return found_; }
+
+  private:
+    bool found_ = false;
+  } visitor;
+  visitor.TraverseStmt(const_cast<Expr *>(expression));
+  return visitor.found();
+}
+
+std::string stableLoopEnd(const Expr *expression, const SourceManager &sm,
+                          const clang::LangOptions &lang) {
+  const Expr *normalized = expression->IgnoreParenImpCasts();
+  if (const auto *reference = llvm::dyn_cast<DeclRefExpr>(normalized)) {
+    if (const auto *variable = llvm::dyn_cast<VarDecl>(reference->getDecl())) {
+      if (variable->getType().isConstQualified() && variable->hasInit()) {
+        const std::string initializer =
+            sourceText(variable->getInit()->getSourceRange(), sm, lang);
+        if (!initializer.empty()) {
+          return initializer;
+        }
+      }
+    }
+  }
+  return sourceText(expression->getSourceRange(), sm, lang);
 }
 
 const Stmt *directChildContaining(const CompoundStmt *body, const Stmt *needle,
@@ -253,6 +310,9 @@ std::string indentationAt(SourceLocation location, const SourceManager &sm) {
 
 class ExitVisitor final : public RecursiveASTVisitor<ExitVisitor> {
 public:
+  ExitVisitor(ASTContext &context, const ForStmt *target)
+      : context_(context), target_(target) {}
+
   bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
 
   bool VisitReturnStmt(clang::ReturnStmt *) {
@@ -270,18 +330,164 @@ public:
     return true;
   }
 
-  bool VisitBreakStmt(clang::BreakStmt *) {
-    exits.emplace_back("break");
+  bool VisitBreakStmt(clang::BreakStmt *statement) {
+    if (targetsLayerLoop(statement, true)) {
+      exits.emplace_back("break");
+    }
     return true;
   }
 
-  bool VisitContinueStmt(clang::ContinueStmt *) {
-    exits.emplace_back("continue");
+  bool VisitContinueStmt(clang::ContinueStmt *statement) {
+    if (targetsLayerLoop(statement, false)) {
+      continues.push_back(statement);
+    }
     return true;
   }
 
   std::vector<std::string> exits;
+  std::vector<const clang::ContinueStmt *> continues;
+
+private:
+  bool targetsLayerLoop(const Stmt *statement, bool breakable) const {
+    clang::DynTypedNode current = clang::DynTypedNode::create(*statement);
+    for (unsigned depth = 0; depth < 48; ++depth) {
+      const auto parents = context_.getParents(current);
+      if (parents.size() != 1) {
+        return false;
+      }
+      const auto &parent = parents[0];
+      if (const auto *loop = parent.get<ForStmt>()) {
+        return loop == target_;
+      }
+      if (parent.get<clang::WhileStmt>() != nullptr ||
+          parent.get<clang::DoStmt>() != nullptr ||
+          (breakable && parent.get<clang::SwitchStmt>() != nullptr)) {
+        return false;
+      }
+      current = parent;
+    }
+    return false;
+  }
+
+  ASTContext &context_;
+  const ForStmt *target_;
 };
+
+int layerLoopScore(const ForStmt *loop, llvm::StringRef activation,
+                   const SourceManager &sm,
+                   const clang::LangOptions &lang) {
+  const auto *body = llvm::dyn_cast<CompoundStmt>(loop->getBody());
+  const auto *condition = llvm::dyn_cast_or_null<BinaryOperator>(loop->getCond());
+  if (body == nullptr || condition == nullptr) {
+    return -1;
+  }
+
+  class Visitor final : public RecursiveASTVisitor<Visitor> {
+  public:
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitCallExpr(CallExpr *call) {
+      const auto *callee = directCallee(call);
+      if (callee == nullptr) {
+        return true;
+      }
+      const std::string name = callee->getNameAsString();
+      has_cvec |= name == "build_cvec";
+      if (name == "cb" && call->getNumArgs() >= 2) {
+        const auto *label = llvm::dyn_cast<StringLiteral>(
+            call->getArg(1)->IgnoreParenImpCasts());
+        if (label != nullptr) {
+          const llvm::StringRef value = label->getString();
+          has_layer_output |= value == "l_out" || value == "l_last";
+        }
+      }
+      return true;
+    }
+
+    bool has_cvec = false;
+    bool has_layer_output = false;
+  } visitor;
+  visitor.TraverseStmt(const_cast<CompoundStmt *>(body));
+
+  int score = 0;
+  score += visitor.has_cvec ? 16 : 0;
+  score += visitor.has_layer_output ? 16 : 0;
+  score += containsName(body, "layers") ? 4 : 0;
+  score += assignmentsTo(body, activation).empty() ? 0 : 8;
+  score += sourceText(condition->getRHS()->getSourceRange(), sm, lang) ==
+                   "il_end"
+               ? 2
+               : 0;
+  return score;
+}
+
+std::optional<std::string>
+layerCarriedName(const CompoundStmt *body, llvm::StringRef embedding_activation,
+                 ASTContext &context, const SourceManager &sm,
+                 const clang::LangOptions &lang) {
+  if (!assignmentsTo(body, embedding_activation).empty()) {
+    return embedding_activation.str();
+  }
+
+  struct Candidate {
+    uint64_t offset;
+    std::string name;
+  };
+  class Visitor final : public RecursiveASTVisitor<Visitor> {
+  public:
+    Visitor(ASTContext &context, const SourceManager &sm,
+            const clang::LangOptions &lang, std::vector<Candidate> &candidates)
+        : context_(context), sm_(sm), lang_(lang), candidates_(candidates) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitCallExpr(CallExpr *call) {
+      const auto *callee = directCallee(call);
+      if (callee == nullptr) {
+        return true;
+      }
+      const std::string callee_name = callee->getNameAsString();
+      std::optional<std::string> name;
+      if (callee_name == "build_cvec") {
+        name = assignedName(call, context_);
+        if (!name && call->getNumArgs() > 0) {
+          name = referencedName(call->getArg(0));
+        }
+      } else if (callee_name == "cb" && call->getNumArgs() >= 2) {
+        const auto *label = llvm::dyn_cast<StringLiteral>(
+            call->getArg(1)->IgnoreParenImpCasts());
+        if (label != nullptr &&
+            (label->getString() == "l_out" ||
+             label->getString() == "l_last")) {
+          name = referencedName(call->getArg(0));
+        }
+      }
+      const auto offset = fileOffset(call->getBeginLoc(), sm_);
+      if (name && offset) {
+        candidates_.push_back(Candidate{*offset, *name});
+      }
+      return true;
+    }
+
+  private:
+    ASTContext &context_;
+    const SourceManager &sm_;
+    const clang::LangOptions &lang_;
+    std::vector<Candidate> &candidates_;
+  };
+
+  std::vector<Candidate> candidates;
+  Visitor output_visitor(context, sm, lang, candidates);
+  output_visitor.TraverseStmt(const_cast<CompoundStmt *>(body));
+  if (candidates.empty()) {
+    return std::nullopt;
+  }
+  return std::max_element(candidates.begin(), candidates.end(),
+                          [](const Candidate &left, const Candidate &right) {
+                            return left.offset < right.offset;
+                          })
+      ->name;
+}
 
 class FactVisitor final : public RecursiveASTVisitor<FactVisitor> {
 public:
@@ -310,7 +516,7 @@ public:
       return true;
     }
     if (!containsName(condition->getLHS(), variable->getNameAsString()) ||
-        (!containsName(condition->getRHS(), "n_layer") &&
+        (!containsLayerBound(condition->getRHS()) &&
          !containsName(condition->getRHS(), "il_end"))) {
       return true;
     }
@@ -395,6 +601,96 @@ std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
   AssignmentVisitor visitor(variable, assignments);
   visitor.TraverseStmt(const_cast<Stmt *>(root));
   return assignments;
+}
+
+std::optional<HyperconnectionPrelude> hyperconnectionPrelude(
+    const CompoundStmt *constructor_body, const ForStmt *loop,
+    llvm::StringRef embedding_activation, llvm::StringRef carried,
+    const SourceManager &sm, const clang::LangOptions &lang) {
+  if (embedding_activation == carried) {
+    return std::nullopt;
+  }
+  const auto loop_offset = fileOffset(loop->getBeginLoc(), sm);
+  if (!loop_offset) {
+    return std::nullopt;
+  }
+
+  const VarDecl *carried_decl = nullptr;
+  class DeclVisitor final : public RecursiveASTVisitor<DeclVisitor> {
+  public:
+    DeclVisitor(llvm::StringRef carried, uint64_t loop_offset,
+                const SourceManager &sm, const VarDecl *&result)
+        : carried_(carried), loop_offset_(loop_offset), sm_(sm), result_(result) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitVarDecl(VarDecl *decl) {
+      const auto offset = fileOffset(decl->getBeginLoc(), sm_);
+      if (decl->getName() == carried_ && decl->hasInit() && offset &&
+          *offset < loop_offset_) {
+        result_ = result_ == nullptr ? decl : nullptr;
+        ambiguous_ |= result_ == nullptr;
+      }
+      return true;
+    }
+
+    bool ambiguous() const { return ambiguous_; }
+
+  private:
+    llvm::StringRef carried_;
+    uint64_t loop_offset_;
+    const SourceManager &sm_;
+    const VarDecl *&result_;
+    bool ambiguous_ = false;
+  } decl_visitor(carried, *loop_offset, sm, carried_decl);
+  decl_visitor.TraverseStmt(const_cast<CompoundStmt *>(constructor_body));
+  if (decl_visitor.ambiguous() || carried_decl == nullptr) {
+    return std::nullopt;
+  }
+
+  const BinaryOperator *repeat_assignment = nullptr;
+  const CallExpr *repeat_call = nullptr;
+  for (const BinaryOperator *assignment : assignmentsTo(constructor_body, carried)) {
+    const auto offset = fileOffset(assignment->getBeginLoc(), sm);
+    if (!offset || *offset >= *loop_offset) {
+      continue;
+    }
+    const auto *call = llvm::dyn_cast<CallExpr>(
+        assignment->getRHS()->IgnoreParenImpCasts());
+    const auto *callee = call == nullptr ? nullptr : directCallee(call);
+    if (callee == nullptr || callee->getNameAsString() != "ggml_repeat_4d" ||
+        call->getNumArgs() != 6 ||
+        sourceText(call->getArg(5)->getSourceRange(), sm, lang) != "1" ||
+        !containsName(call->getArg(1), carried)) {
+      return std::nullopt;
+    }
+    if (repeat_assignment != nullptr) {
+      return std::nullopt;
+    }
+    repeat_assignment = assignment;
+    repeat_call = call;
+  }
+  if (repeat_assignment == nullptr || repeat_call == nullptr) {
+    return std::nullopt;
+  }
+  const Stmt *repeat_statement =
+      directChildContaining(constructor_body, repeat_assignment, sm, lang);
+  if (repeat_statement == nullptr) {
+    return std::nullopt;
+  }
+
+  HyperconnectionPrelude result;
+  result.carried_decl = carried_decl;
+  result.repeat_assignment = repeat_assignment;
+  result.repeat_statement = repeat_statement;
+  result.width = sourceText(repeat_call->getArg(2)->getSourceRange(), sm, lang);
+  result.multiplicity =
+      sourceText(repeat_call->getArg(3)->getSourceRange(), sm, lang);
+  result.tokens = sourceText(repeat_call->getArg(4)->getSourceRange(), sm, lang);
+  if (result.width.empty() || result.multiplicity.empty() || result.tokens.empty()) {
+    return std::nullopt;
+  }
+  return result;
 }
 
 bool addReplace(std::vector<Edit> &edits, llvm::StringRef kind,
@@ -483,8 +779,13 @@ public:
     FactVisitor facts;
     facts.TraverseStmt(const_cast<Stmt *>(constructor->getBody()));
 
+    const auto *constructor_body =
+        llvm::dyn_cast<CompoundStmt>(constructor->getBody());
+
     const bool has_begin = facts.calls["begin_block"].size() == 1;
-    const bool has_end = facts.calls["end_block"].size() == 1;
+    // A transformed loop has one terminal end marker plus one marker on each
+    // loop-level continue path. More than one end marker is therefore valid.
+    const bool has_end = !facts.calls["end_block"].empty();
     if (facts.has_stage_filter && has_begin && has_end) {
       report.verdict = "already_transformed";
       reports_.push_back(std::move(report));
@@ -496,16 +797,126 @@ public:
       reports_.push_back(std::move(report));
       return;
     }
-    const bool completing_filter = facts.has_stage_filter;
 
-    if (facts.layer_loops.size() != 1) {
-      refuse(report, facts.layer_loops.empty()
-                         ? "no unique n_layer block loop"
-                         : "multiple n_layer block loops");
+    // MTP/draft heads and encoder sidecars execute in a distinct context
+    // attached to the final pipeline stage. They do not consume the primary
+    // decoder's [layer_start, layer_end) interval and must never receive the
+    // generic stage-loop rewrite. Prove that role from the builder type or its
+    // graph inputs/results rather than from an architecture or file name.
+    const bool typed_mtp_builder =
+        llvm::StringRef(qualified).contains("::graph_mtp::graph_mtp");
+    const bool context_sidecar =
+        constructor_body != nullptr && containsName(constructor_body, "ctx_other");
+    const bool encoder_sidecar =
+        facts.calls["build_inp_embd_enc"].size() == 1 &&
+        constructor_body != nullptr &&
+        containsName(constructor_body, "t_h_nextn");
+    if (!facts.has_stage_filter &&
+        (typed_mtp_builder || context_sidecar || encoder_sidecar)) {
+      report.verdict = "supported_auxiliary";
+      report.proof.execution_scope = "final_stage_sidecar";
+      if (typed_mtp_builder) {
+        report.proof.scope_evidence.emplace_back("typed_mtp_builder");
+      }
+      if (context_sidecar) {
+        report.proof.scope_evidence.emplace_back("cross_context_input");
+      }
+      if (encoder_sidecar) {
+        report.proof.scope_evidence.emplace_back("encoder_sidecar_output");
+      }
       reports_.push_back(std::move(report));
       return;
     }
-    const ForStmt *loop = facts.layer_loops.front();
+    const bool completing_filter = facts.has_stage_filter;
+
+    const auto &embedding_calls = facts.calls["build_inp_embd"];
+    const CallExpr *embedding = nullptr;
+    bool standard_embedding = false;
+    if (embedding_calls.size() == 1 &&
+        embedding_calls.front()->getNumArgs() > 0) {
+      embedding = embedding_calls.front();
+      standard_embedding = true;
+    } else if (embedding_calls.empty()) {
+      std::vector<const CallExpr *> token_gathers;
+      for (const CallExpr *call : facts.calls["ggml_get_rows"]) {
+        if (call->getNumArgs() >= 2 &&
+            containsName(call->getArg(1), "tok_embd")) {
+          token_gathers.push_back(call);
+        }
+      }
+      if (token_gathers.size() == 1) {
+        embedding = token_gathers.front();
+      }
+    }
+    if (embedding == nullptr) {
+      refuse(report, "cannot prove a unique token embedding producer");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    const auto activation = assignedName(embedding, context);
+    const Stmt *embedding_statement =
+        constructor_body == nullptr
+            ? nullptr
+            : directChildContaining(constructor_body, embedding, sm, lang);
+    if (!activation || embedding_statement == nullptr) {
+      refuse(report, "cannot prove the embedding activation owner");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    report.proof.embedding_owner = true;
+
+    if (facts.layer_loops.empty()) {
+      refuse(report, "no layer block loop");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    std::vector<std::pair<int, const ForStmt *>> scored_loops;
+    for (const ForStmt *candidate : facts.layer_loops) {
+      scored_loops.emplace_back(
+          layerLoopScore(candidate, *activation, sm, lang), candidate);
+    }
+    const int best_score =
+        std::max_element(scored_loops.begin(), scored_loops.end(),
+                         [](const auto &left, const auto &right) {
+                           return left.first < right.first;
+                         })
+            ->first;
+    std::vector<const ForStmt *> best_loops;
+    for (const auto &[score, candidate] : scored_loops) {
+      if (score == best_score) {
+        best_loops.push_back(candidate);
+      }
+    }
+    if (best_score <= 0 || best_loops.size() != 1) {
+      if (best_score > 0 && best_loops.size() > 1) {
+        std::vector<std::string> domains;
+        for (const ForStmt *candidate : best_loops) {
+          const auto *candidate_condition =
+              llvm::dyn_cast_or_null<BinaryOperator>(candidate->getCond());
+          if (candidate_condition == nullptr) {
+            domains.clear();
+            break;
+          }
+          domains.push_back(sourceText(
+              candidate_condition->getRHS()->getSourceRange(), sm, lang));
+        }
+        std::sort(domains.begin(), domains.end());
+        domains.erase(std::unique(domains.begin(), domains.end()), domains.end());
+        if (domains.size() > 1) {
+          report.verdict = "supported_whole_model";
+          report.proof.execution_scope = "multiple_sequential_layer_domains";
+          report.proof.scope_evidence = std::move(domains);
+          reports_.push_back(std::move(report));
+          return;
+        }
+      }
+      refuse(report, best_loops.size() == 1
+                         ? "cannot prove selected layer block loop"
+                         : "multiple equally ranked layer block loops");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    const ForStmt *loop = best_loops.front();
     const auto *loop_body = llvm::dyn_cast<CompoundStmt>(loop->getBody());
     const auto *init = llvm::cast<clang::DeclStmt>(loop->getInit());
     const auto *loop_var = llvm::cast<VarDecl>(init->getSingleDecl());
@@ -513,8 +924,7 @@ public:
     report.proof.loop_var = loop_var->getNameAsString();
     report.proof.loop_start =
         sourceText(loop_var->getInit()->getSourceRange(), sm, lang);
-    report.proof.loop_end =
-        sourceText(condition->getRHS()->getSourceRange(), sm, lang);
+    report.proof.loop_end = stableLoopEnd(condition->getRHS(), sm, lang);
     const std::string expected_loop_start =
         completing_filter ? "il_start" : "0";
     if (loop_body == nullptr ||
@@ -527,7 +937,7 @@ public:
       return;
     }
 
-    ExitVisitor exits;
+    ExitVisitor exits(context, loop);
     exits.TraverseStmt(const_cast<CompoundStmt *>(loop_body));
     report.proof.nonlocal_exits = exits.exits;
     if (!exits.exits.empty()) {
@@ -536,92 +946,64 @@ public:
       return;
     }
 
-    const auto &embedding_calls = facts.calls["build_inp_embd"];
-    if (embedding_calls.size() != 1 ||
-        embedding_calls.front()->getNumArgs() != 1) {
+    const auto carried =
+        layerCarriedName(loop_body, *activation, context, sm, lang);
+    if (!carried) {
+      refuse(report, "cannot prove the layer-carried activation");
+      reports_.push_back(std::move(report));
+      return;
+    }
+    report.proof.activation_in = *carried;
+    report.proof.activation_out = *carried;
+
+    const auto hyperconnection =
+        hyperconnectionPrelude(constructor_body, loop, *activation, *carried,
+                               sm, lang);
+    if (!completing_filter && *activation != *carried && !hyperconnection) {
       refuse(report,
-             "expected exactly one single-argument build_inp_embd call");
+             "layer-carried activation differs from the embedding without a "
+             "proven hyperconnection prelude");
       reports_.push_back(std::move(report));
       return;
     }
-    const CallExpr *embedding = embedding_calls.front();
-    const auto activation = assignedName(embedding, context);
-    const auto *constructor_body =
-        llvm::dyn_cast<CompoundStmt>(constructor->getBody());
-    const Stmt *embedding_statement =
-        constructor_body == nullptr
-            ? nullptr
-            : directChildContaining(constructor_body, embedding, sm, lang);
-    if (!activation || embedding_statement == nullptr) {
-      refuse(report, "cannot prove the embedding activation owner");
-      reports_.push_back(std::move(report));
-      return;
-    }
-    report.proof.activation_in = *activation;
-    report.proof.embedding_owner = true;
-
-    const auto carries = assignmentsTo(loop_body, *activation);
-    if (carries.empty()) {
-      refuse(report, "no carried activation assignment");
-      reports_.push_back(std::move(report));
-      return;
+    if (hyperconnection) {
+      report.proof.scope_evidence.emplace_back(
+          "hyperconnection_activation_frontier");
     }
 
-    // Builders commonly reuse the carried activation inside a block. Select
-    // the last unconditional top-level assignment. Statements after it may
-    // only be graph-label callbacks; state/effect work still causes refusal.
-    size_t carry_index = 0;
-    bool found_carry_statement = false;
-    std::vector<const BinaryOperator *> final_statement_carries;
-    for (size_t index = 0; index < loop_body->size(); ++index) {
-      const Stmt *statement = *(loop_body->body_begin() + index);
-      std::vector<const BinaryOperator *> statement_carries;
-      for (const BinaryOperator *candidate : carries) {
-        if (directChildContaining(loop_body, candidate, sm, lang) == statement) {
-          statement_carries.push_back(candidate);
-        }
-      }
-      if (!statement_carries.empty()) {
-        carry_index = index;
-        found_carry_statement = true;
-        final_statement_carries = std::move(statement_carries);
-      }
-    }
-    if (!found_carry_statement || final_statement_carries.size() != 1) {
-      refuse(report, !found_carry_statement
-                         ? "no top-level carried activation assignment"
-                         : "multiple carried activation assignments in final carry statement");
-      reports_.push_back(std::move(report));
-      return;
-    }
-
-    const BinaryOperator *carry = final_statement_carries.front();
-    if (*(loop_body->body_begin() + carry_index) != carry) {
-      refuse(report, "final carried activation assignment is conditional or nested");
-      reports_.push_back(std::move(report));
-      return;
-    }
-    for (size_t index = carry_index + 1; index < loop_body->size(); ++index) {
-      if (!isCallbackOnly(*(loop_body->body_begin() + index))) {
-        refuse(report, "non-callback work follows the final carried activation assignment");
+    std::vector<const BinaryOperator *> preloop_activation_assignments;
+    if (!completing_filter && !hyperconnection && *activation == *carried) {
+      const auto embedding_end = tokenRange(embedding_statement->getSourceRange(), sm, lang);
+      const auto loop_begin = fileOffset(loop->getBeginLoc(), sm);
+      if (!embedding_end || !loop_begin) {
+        refuse(report, "cannot locate the pre-loop activation region");
         reports_.push_back(std::move(report));
         return;
       }
+      const uint64_t prelude_begin = embedding_end->first + embedding_end->second;
+      for (const BinaryOperator *assignment :
+           assignmentsTo(constructor_body, *carried)) {
+        const auto offset = fileOffset(assignment->getBeginLoc(), sm);
+        if (offset && *offset >= prelude_begin && *offset < *loop_begin) {
+          preloop_activation_assignments.push_back(assignment);
+        }
+      }
+      if (!preloop_activation_assignments.empty()) {
+        report.proof.scope_evidence.emplace_back(
+            "guarded_embedding_prelude");
+      }
     }
 
-    const auto named_output = referencedName(carry->getRHS());
-    const std::string output = named_output.value_or(*activation);
-    report.proof.activation_out = output;
-
     const auto &output_calls = facts.calls["build_inp_out_ids"];
-    if (output_calls.size() > 1) {
+    if (output_calls.size() > 1 && !completing_filter) {
       refuse(report, "multiple build_inp_out_ids calls");
       reports_.push_back(std::move(report));
       return;
     }
-    const CallExpr *output_call =
-        output_calls.empty() ? nullptr : output_calls.front();
-    report.proof.output_owner = output_call != nullptr;
+    const CallExpr *output_call = output_calls.size() == 1
+                                      ? output_calls.front()
+                                      : nullptr;
+    report.proof.output_owner = !output_calls.empty();
 
     std::vector<const IfStmt *> terminal_ifs;
     class TerminalVisitor final : public RecursiveASTVisitor<TerminalVisitor> {
@@ -652,9 +1034,10 @@ public:
 
     const std::string indent =
         indentationAt(embedding_statement->getBeginLoc(), sm);
-    const std::string inner_indent = indentationAt(carry->getBeginLoc(), sm);
+    const std::string inner_indent =
+        indentationAt((*loop_body->body_begin())->getBeginLoc(), sm);
     const std::string original_embedding =
-        sourceText(embedding->getArg(0)->getSourceRange(), sm, lang);
+        sourceText(embedding->getSourceRange(), sm, lang);
     const std::string declarations =
         "const skippy_graph_filter & stage_filter = build_inputs.filter;\n" +
         indent + "const bool stage_filtered = stage_filter.enabled;\n" +
@@ -670,11 +1053,102 @@ public:
       valid &=
           addInsert(report.edits, "insert_filter_declarations", report.file,
                     embedding_statement->getBeginLoc(), declarations, sm);
-      valid &= addReplace(report.edits, "rewrite_embedding_owner", report.file,
-                          embedding->getArg(0)->getSourceRange(),
-                          "stage_filtered && il_start > 0 ? nullptr : " +
-                              original_embedding,
-                          sm, lang);
+      if (hyperconnection) {
+        valid &= addReplace(
+            report.edits, "rewrite_hyperconnection_embedding_owner",
+            report.file, embedding->getSourceRange(),
+            "(!stage_filtered || il_start == 0) ? " + original_embedding +
+                " : nullptr",
+            sm, lang);
+
+        const Expr *carried_initializer = hyperconnection->carried_decl->getInit();
+        const std::string original_initializer =
+            sourceText(carried_initializer->getSourceRange(), sm, lang);
+        valid &= addReplace(
+            report.edits, "rewrite_hyperconnection_initializer", report.file,
+            carried_initializer->getSourceRange(),
+            "stage_filtered && il_start > 0 ? nullptr : " +
+                original_initializer,
+            sm, lang);
+
+        const std::string repeat_indent =
+            indentationAt(hyperconnection->repeat_statement->getBeginLoc(), sm);
+        const std::string import =
+            "if (stage_filtered && il_start > 0) {\n" + repeat_indent +
+            "    auto stage_inp = "
+            "std::make_unique<llm_graph_input_hyperconnection>(" +
+            hyperconnection->width + ", " + hyperconnection->multiplicity +
+            ");\n" + repeat_indent +
+            "    stage_inp->values = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, " +
+            hyperconnection->width + ", " + hyperconnection->multiplicity +
+            ", " + hyperconnection->tokens + ");\n" + repeat_indent +
+            "    cb(stage_inp->values, \"hc_stage_input\", -1);\n" +
+            repeat_indent + "    ggml_set_input(stage_inp->values);\n" +
+            repeat_indent + "    " + *carried + " = stage_inp->values;\n" +
+            repeat_indent + "    res->t_skippy_activation_input = " + *carried +
+            ";\n" + repeat_indent +
+            "    res->add_input(std::move(stage_inp));\n" + repeat_indent +
+            "}\n" + repeat_indent;
+        valid &= addInsert(report.edits, "insert_hyperconnection_import",
+                           report.file,
+                           hyperconnection->repeat_statement->getBeginLoc(),
+                           import, sm);
+
+        const Expr *repeat_rhs = hyperconnection->repeat_assignment->getRHS();
+        const std::string original_repeat =
+            sourceText(repeat_rhs->getSourceRange(), sm, lang);
+        valid &= addReplace(
+            report.edits, "guard_hyperconnection_repeat", report.file,
+            repeat_rhs->getSourceRange(),
+            "stage_filtered && il_start > 0 ? " + *carried + " : " +
+                original_repeat,
+            sm, lang);
+      } else if (standard_embedding) {
+        const std::string original_argument =
+            sourceText(embedding->getArg(0)->getSourceRange(), sm, lang);
+        valid &= addReplace(report.edits, "rewrite_embedding_owner",
+                            report.file,
+                            embedding->getArg(0)->getSourceRange(),
+                            "stage_filtered && il_start > 0 ? nullptr : " +
+                                original_argument,
+                            sm, lang);
+      } else {
+        valid &= addReplace(
+            report.edits, "rewrite_manual_embedding_owner", report.file,
+            embedding->getSourceRange(),
+            "stage_filtered && il_start > 0 ? build_inp_embd(nullptr) : " +
+                original_embedding,
+            sm, lang);
+      }
+
+      std::set<const IfStmt *> guarded_ifs;
+      for (const BinaryOperator *assignment : preloop_activation_assignments) {
+        const Stmt *statement = directChildContaining(
+            constructor_body, assignment, sm, lang);
+        if (const auto *conditional = llvm::dyn_cast_or_null<IfStmt>(statement)) {
+          if (guarded_ifs.insert(conditional).second) {
+            const Expr *condition = conditional->getCond();
+            valid &= addReplace(
+                report.edits, "guard_embedding_prelude", report.file,
+                condition->getSourceRange(),
+                "(!stage_filtered || il_start == 0) && (" +
+                    sourceText(condition->getSourceRange(), sm, lang) + ")",
+                sm, lang);
+          }
+          continue;
+        }
+        if (statement != assignment) {
+          valid = false;
+          continue;
+        }
+        const Expr *rhs = assignment->getRHS();
+        valid &= addReplace(
+            report.edits, "guard_embedding_prelude", report.file,
+            rhs->getSourceRange(),
+            "stage_filtered && il_start > 0 ? " + *carried + " : " +
+                sourceText(rhs->getSourceRange(), sm, lang),
+            sm, lang);
+      }
       valid &= addReplace(report.edits, "rewrite_loop_start", report.file,
                           loop_var->getInit()->getSourceRange(), "il_start", sm,
                           lang);
@@ -687,20 +1161,27 @@ public:
         loop_body->getLBracLoc(), 0, sm, lang);
     valid &=
         addInsert(report.edits, "insert_begin_block", report.file, body_begin,
-                  "\n" + inner_indent + "begin_block(" + *activation + ", " +
+                  "\n" + inner_indent + "begin_block(" + *carried + ", " +
                       report.proof.loop_var + ");\n",
                   sm);
-    if (named_output) {
-      valid &= addInsert(report.edits, "insert_end_block", report.file,
-                         carry->getBeginLoc(),
-                         "end_block(" + output + ", " + report.proof.loop_var +
-                             ");\n\n" + inner_indent,
-                         sm);
-    } else {
-      valid &= addInsert(report.edits, "insert_end_block", report.file,
-                         loop_body->getRBracLoc(),
-                         inner_indent + "end_block(" + output + ", " +
-                             report.proof.loop_var + ");\n",
+    const std::string loop_indent =
+        indentationAt(loop_body->getRBracLoc(), sm);
+    const std::string end_block_indent =
+        llvm::StringRef(inner_indent).starts_with(loop_indent)
+            ? llvm::StringRef(inner_indent).drop_front(loop_indent.size()).str()
+            : inner_indent;
+    valid &= addInsert(report.edits, "insert_end_block", report.file,
+                       loop_body->getRBracLoc(),
+                       end_block_indent + "end_block(" + *carried + ", " +
+                           report.proof.loop_var + ");\n" + loop_indent,
+                       sm);
+    for (const clang::ContinueStmt *statement : exits.continues) {
+      const std::string continue_indent =
+          indentationAt(statement->getBeginLoc(), sm);
+      valid &= addInsert(report.edits, "insert_end_block_before_continue",
+                         report.file, statement->getBeginLoc(),
+                         "end_block(" + *carried + ", " +
+                             report.proof.loop_var + ");\n" + continue_indent,
                          sm);
     }
 
@@ -766,9 +1247,9 @@ public:
       const std::string boundary =
           "\n" + indent +
           "if (stage_filtered && !stage_filter.include_output) {\n" + indent +
-          "    cb(" + *activation + ", \"stage_boundary\", il_end - 1);\n" +
-          indent + "    res->t_embd = " + *activation + ";\n" + indent +
-          "    ggml_build_forward_expand(gf, " + *activation + ");\n" + indent +
+          "    cb(" + *carried + ", \"stage_boundary\", il_end - 1);\n" +
+          indent + "    res->t_embd = " + *carried + ";\n" + indent +
+          "    ggml_build_forward_expand(gf, " + *carried + ");\n" + indent +
           "    return;\n" + indent + "}\n";
       valid &= addInsert(report.edits, "insert_stage_boundary", report.file,
                          after_loop, boundary, sm);
@@ -854,6 +1335,8 @@ private:
     int64_t transformable = 0;
     int64_t already_transformed = 0;
     int64_t unsupported_shape = 0;
+    int64_t supported_auxiliary = 0;
+    int64_t supported_whole_model = 0;
     int64_t errors = 0;
     for (const auto &report : reports_) {
       if (report.verdict == "transformable") {
@@ -862,6 +1345,10 @@ private:
         ++already_transformed;
       } else if (report.verdict == "unsupported_shape") {
         ++unsupported_shape;
+      } else if (report.verdict == "supported_auxiliary") {
+        ++supported_auxiliary;
+      } else if (report.verdict == "supported_whole_model") {
+        ++supported_whole_model;
       } else {
         ++errors;
       }
@@ -893,6 +1380,14 @@ private:
                                       {"start", report.proof.loop_start},
                                       {"var", report.proof.loop_var}}},
           {"nonlocal_exits", std::move(exits)},
+          {"execution_scope", report.proof.execution_scope},
+          {"scope_evidence", [&report]() {
+             llvm::json::Array evidence;
+             for (const auto &item : report.proof.scope_evidence) {
+               evidence.push_back(item);
+             }
+             return evidence;
+           }()},
           {"output_owner", report.proof.output_owner},
           {"terminal_predicates", std::move(predicates)},
       };
@@ -921,13 +1416,15 @@ private:
         "{0:2}\n",
         llvm::json::Value(llvm::json::Object{
             {"builders", std::move(builders)},
-            {"generator_version", "0.1.0"},
+            {"generator_version", "0.2.0"},
             {"llama_cpp_commit", LlamaCommit},
-            {"schema_version", 0},
+            {"schema_version", 1},
             {"source_root", SourceRoot},
             {"summary",
              llvm::json::Object{{"already_transformed", already_transformed},
                                 {"error", errors},
+                                {"supported_auxiliary", supported_auxiliary},
+                                {"supported_whole_model", supported_whole_model},
                                 {"transformable", transformable},
                                 {"unsupported_shape", unsupported_shape}}},
         }));

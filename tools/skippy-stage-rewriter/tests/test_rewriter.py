@@ -49,12 +49,14 @@ def main() -> int:
         assert first["summary"] == {
             "already_transformed": 0,
             "error": 0,
+            "supported_auxiliary": 0,
+            "supported_whole_model": 0,
             "transformable": 1,
             "unsupported_shape": 0,
         }
         assert builder["verdict"] == "transformable"
         assert builder["proof"]["activation_in"] == "inpL"
-        assert builder["proof"]["activation_out"] == "cur"
+        assert builder["proof"]["activation_out"] == "inpL"
         assert {edit["kind"] for edit in builder["edits"]} == {
             "insert_filter_declarations",
             "rewrite_embedding_owner",
@@ -72,7 +74,7 @@ def main() -> int:
             encoding="utf-8"
         )
         assert "begin_block(inpL, il);" in transformed
-        assert "end_block(cur, il);" in transformed
+        assert "end_block(inpL, il);" in transformed
         assert "for (int il = il_start; il < il_end; ++il)" in transformed
 
         second = run(tool, source_root, Path(temporary) / "second.json", apply=False)
@@ -119,7 +121,7 @@ def main() -> int:
         )["builders"][0]
         assert multiple_assignments["verdict"] == "transformable"
         assert multiple_assignments["proof"]["loop"]["var"] == "layer_index"
-        assert multiple_assignments["proof"]["activation_out"] == "cur"
+        assert multiple_assignments["proof"]["activation_out"] == "inpL"
 
         self_carried = run(
             tool,
@@ -140,7 +142,9 @@ def main() -> int:
             apply=False,
         )["builders"][0]
         assert two_loops["verdict"] == "unsupported_shape"
-        assert two_loops["unsupported_reason"] == "multiple n_layer block loops"
+        assert two_loops["unsupported_reason"] == (
+            "multiple equally ranked layer block loops"
+        )
 
         nonlocal_exit = run(
             tool,
@@ -161,10 +165,177 @@ def main() -> int:
             source_name="trailing-work.cpp",
             apply=False,
         )["builders"][0]
-        assert trailing_work["verdict"] == "unsupported_shape"
-        assert trailing_work["unsupported_reason"] == (
-            "non-callback work follows the final carried activation assignment"
+        assert trailing_work["verdict"] == "transformable"
+        assert trailing_work["proof"]["activation_out"] == "inpL"
+
+        auxiliary = run(
+            tool,
+            source_root,
+            Path(temporary) / "auxiliary.json",
+            source_name="auxiliary.cpp",
+            apply=False,
+        )["builders"][0]
+        assert auxiliary["verdict"] == "supported_auxiliary"
+        assert auxiliary["proof"]["execution_scope"] == "final_stage_sidecar"
+        assert auxiliary["proof"]["scope_evidence"] == ["typed_mtp_builder"]
+        assert auxiliary["edits"] == []
+
+        multiple_domains = run(
+            tool,
+            source_root,
+            Path(temporary) / "multiple-domains.json",
+            source_name="multiple-domains.cpp",
+            apply=False,
+        )["builders"][0]
+        assert multiple_domains["verdict"] == "supported_whole_model"
+        assert multiple_domains["proof"]["execution_scope"] == (
+            "multiple_sequential_layer_domains"
         )
+        assert multiple_domains["proof"]["scope_evidence"] == [
+            "first.n_layer",
+            "second.n_layer",
+        ]
+        assert multiple_domains["edits"] == []
+
+        local_loop_bound = run(
+            tool,
+            source_root,
+            Path(temporary) / "local-loop-bound.json",
+            source_name="local-loop-bound.cpp",
+            apply=False,
+        )["builders"][0]
+        assert local_loop_bound["verdict"] == "transformable"
+        assert local_loop_bound["proof"]["loop"]["end"] == (
+            "hparams.dec_n_layer"
+        )
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "local-loop-bound-applied.json",
+            source_name="local-loop-bound.cpp",
+            apply=True,
+        )
+        local_loop_source = (
+            source_root / "src/models/local-loop-bound.cpp"
+        ).read_text(encoding="utf-8")
+        assert "stage_filter.layer_end   : hparams.dec_n_layer" in local_loop_source
+        assert "\n    end_block(inpL, il);\n  }" in local_loop_source
+
+        continue_path = run(
+            tool,
+            source_root,
+            Path(temporary) / "continue-path.json",
+            source_name="continue-path.cpp",
+            apply=False,
+        )["builders"][0]
+        assert continue_path["verdict"] == "transformable"
+        assert "continue" not in continue_path["proof"]["nonlocal_exits"]
+        assert sum(
+            edit["kind"] == "insert_end_block_before_continue"
+            for edit in continue_path["edits"]
+        ) == 1
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "continue-path-applied.json",
+            source_name="continue-path.cpp",
+            apply=True,
+        )
+        continue_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "continue-path-second.json",
+            source_name="continue-path.cpp",
+            apply=False,
+        )["builders"][0]
+        assert continue_second["verdict"] == "already_transformed"
+
+        switch_break = run(
+            tool,
+            source_root,
+            Path(temporary) / "switch-break.json",
+            source_name="switch-break.cpp",
+            apply=False,
+        )["builders"][0]
+        assert switch_break["verdict"] == "transformable"
+        assert switch_break["proof"]["nonlocal_exits"] == []
+
+        hyperconnection = run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection.json",
+            source_name="hyperconnection.cpp",
+            apply=False,
+        )["builders"][0]
+        assert hyperconnection["verdict"] == "transformable"
+        assert hyperconnection["proof"]["activation_in"] == "inpL"
+        assert hyperconnection["proof"]["scope_evidence"] == [
+            "hyperconnection_activation_frontier"
+        ]
+        assert {
+            "rewrite_hyperconnection_embedding_owner",
+            "rewrite_hyperconnection_initializer",
+            "insert_hyperconnection_import",
+            "guard_hyperconnection_repeat",
+        }.issubset({edit["kind"] for edit in hyperconnection["edits"]})
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection-applied.json",
+            source_name="hyperconnection.cpp",
+            apply=True,
+        )
+        hyperconnection_source = (
+            source_root / "src/models/hyperconnection.cpp"
+        ).read_text(encoding="utf-8")
+        assert "std::make_unique<llm_graph_input_hyperconnection>" in hyperconnection_source
+        assert "res->t_skippy_activation_input = inpL;" in hyperconnection_source
+        hyperconnection_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection-second.json",
+            source_name="hyperconnection.cpp",
+            apply=False,
+        )["builders"][0]
+        assert hyperconnection_second["verdict"] == "already_transformed"
+
+        embedding_prelude = run(
+            tool,
+            source_root,
+            Path(temporary) / "embedding-prelude.json",
+            source_name="embedding-prelude.cpp",
+            apply=False,
+        )["builders"][0]
+        assert embedding_prelude["verdict"] == "transformable"
+        assert embedding_prelude["proof"]["scope_evidence"] == [
+            "guarded_embedding_prelude"
+        ]
+        assert any(
+            edit["kind"] == "guard_embedding_prelude"
+            for edit in embedding_prelude["edits"]
+        )
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "embedding-prelude-applied.json",
+            source_name="embedding-prelude.cpp",
+            apply=True,
+        )
+        embedding_prelude_source = (
+            source_root / "src/models/embedding-prelude.cpp"
+        ).read_text(encoding="utf-8")
+        assert (
+            "if ((!stage_filtered || il_start == 0) && (scale_embeddings))"
+            in embedding_prelude_source
+        )
+        embedding_prelude_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "embedding-prelude-second.json",
+            source_name="embedding-prelude.cpp",
+            apply=False,
+        )["builders"][0]
+        assert embedding_prelude_second["verdict"] == "already_transformed"
 
     return 0
 

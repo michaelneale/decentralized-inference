@@ -27,6 +27,8 @@ PROOF = {
     "output_owner": True,
     "terminal_predicates": ["il == il_end - 1 && inp_out_ids"],
     "nonlocal_exits": [],
+    "execution_scope": "partitioned_decoder",
+    "scope_evidence": [],
 }
 
 EDITS = [{"kind": "insert", "file": "src/models/llama.cpp", "range": [1, 2], "text_ref": "a"}]
@@ -34,14 +36,21 @@ EDITS = [{"kind": "insert", "file": "src/models/llama.cpp", "range": [1, 2], "te
 
 def make_report(builders, **overrides):
     report = {
-        "schema_version": 0,
+        "schema_version": 1,
         "llama_cpp_commit": "cc83d7b4824f73cfdda4dfbb47ee39804f71b328",
-        "generator_version": "0.1.0",
+        "generator_version": "0.2.0",
         "builders": builders,
         "summary": {},
     }
     report.update(overrides)
-    counts = {v: 0 for v in {"transformable", "already_transformed", "unsupported_shape", "error"}}
+    counts = {v: 0 for v in {
+        "transformable",
+        "already_transformed",
+        "supported_auxiliary",
+        "supported_whole_model",
+        "unsupported_shape",
+        "error",
+    }}
     for builder in builders:
         verdict = builder.get("verdict")
         if verdict in counts:
@@ -87,6 +96,37 @@ class SkippyRewriterHarnessTests(unittest.TestCase):
         )
         errors = self.harness.validate_report(report)
         self.assertTrue(any("no edits" in e for e in errors))
+
+    def test_supported_auxiliary_requires_scope_proof(self) -> None:
+        report = make_report([
+            {
+                "file": "src/models/example.cpp",
+                "constructor": "model::graph_mtp::graph_mtp",
+                "verdict": "supported_auxiliary",
+                "proof": {
+                    "execution_scope": "final_stage_sidecar",
+                    "scope_evidence": ["typed_mtp_builder"],
+                },
+                "edits": [],
+            }
+        ])
+        self.assertEqual(self.harness.validate_report(report), [])
+
+    def test_supported_whole_model_rejects_missing_domain_evidence(self) -> None:
+        report = make_report([
+            {
+                "file": "src/models/example.cpp",
+                "constructor": "model::graph::graph",
+                "verdict": "supported_whole_model",
+                "proof": {
+                    "execution_scope": "multiple_sequential_layer_domains",
+                    "scope_evidence": [],
+                },
+                "edits": [],
+            }
+        ])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("scope evidence" in e for e in errors))
 
     def test_duplicate_builder_record_rejected(self) -> None:
         record = {

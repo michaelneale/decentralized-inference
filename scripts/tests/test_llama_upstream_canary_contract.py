@@ -129,12 +129,18 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             native_build,
         )
 
+        family_selection = _step_block(workflow, "Select changed generated families")
+        self.assertIn("select-skippy-family-shards.py", family_selection)
+        self.assertIn("--include-sentinels", family_selection)
+        self.assertIn("core-or-policy-change", family_selection)
+
         family_plan = _step_block(workflow, "Plan and verify family certification cache")
         self.assertIn("python3 scripts/plan-family-battery.py", family_plan)
         self.assertIn('--cadence "${{ steps.sha.outputs.cadence }}"', family_plan)
         self.assertIn("--check-cache", family_plan)
         self.assertIn('--cache-root "$HF_CACHE"', family_plan)
         self.assertIn('--github-output "$GITHUB_OUTPUT"', family_plan)
+        self.assertIn('family_args=(--families "${{ steps.family_selection.outputs.families }}")', family_plan)
         self.assertLess(workflow.index(family_plan), workflow.index(native_build))
 
         build = _step_block(workflow, "Build stage runtime crates")
@@ -355,7 +361,9 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         generated_patch_check = ROOT / "scripts" / "check-skippy-generated-family-patch.sh"
         generated_patch_check_text = generated_patch_check.read_text(encoding="utf-8")
         self.assertIn("llvm@22", generated_patch_check_text)
-        self.assertIn("0012-skippy-generate-model-family-stage-controls.patch", generated_patch_check_text)
+        self.assertIn("patches/generated", generated_patch_check_text)
+        self.assertIn("generated-family-map.json", generated_patch_check_text)
+        self.assertIn("select-skippy-family-shards.py", generated_patch_check_text)
         self.assertIn("generate-skippy-family-patch.py", generated_patch_check_text)
         self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
         self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)

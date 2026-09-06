@@ -1,27 +1,27 @@
-From dc865e253527270d9f89f711b61472c26cb518db Mon Sep 17 00:00:00 2001
+From 105bd8a2463da1ca25465dcccf027aaccd7953d0 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:09 +1000
 Subject: [PATCH 05/11] skippy: derive and verify executable graph slices
 
 ---
- src/skippy/block_boundaries.cpp   |  64 ++
- src/skippy/block_boundaries.h     |  42 ++
- src/skippy/executable_graph.cpp   | 329 ++++++++++
- src/skippy/executable_graph.h     |  37 ++
- src/skippy/glm_dsa.cpp            | 857 ++++++++++++++++++++++++++
- src/skippy/glm_dsa.h              |  14 +
- src/skippy/graph_build_inputs.h   | 134 ++++
- src/skippy/graph_dependencies.cpp |  57 ++
- src/skippy/graph_dependencies.h   |  11 +
- src/skippy/graph_identity.cpp     | 972 ++++++++++++++++++++++++++++++
- src/skippy/graph_identity.h       |  59 ++
- src/skippy/stage_plan.cpp         | 516 ++++++++++++++++
- src/skippy/stage_slice_plan.cpp   | 720 ++++++++++++++++++++++
- src/skippy/stage_slice_plan.h     |  98 +++
- src/skippy/state_effects.cpp      | 264 ++++++++
- src/skippy/state_effects.h        |  56 ++
- src/skippy/verification.cpp       | 265 ++++++++
- 17 files changed, 4495 insertions(+)
+ src/skippy/block_boundaries.cpp   |   64 ++
+ src/skippy/block_boundaries.h     |   42 ++
+ src/skippy/executable_graph.cpp   |  329 ++++++++++
+ src/skippy/executable_graph.h     |   37 ++
+ src/skippy/glm_dsa.cpp            |  857 ++++++++++++++++++++++++
+ src/skippy/glm_dsa.h              |   14 +
+ src/skippy/graph_build_inputs.h   |  134 ++++
+ src/skippy/graph_dependencies.cpp |   57 ++
+ src/skippy/graph_dependencies.h   |   11 +
+ src/skippy/graph_identity.cpp     | 1009 +++++++++++++++++++++++++++++
+ src/skippy/graph_identity.h       |   59 ++
+ src/skippy/stage_plan.cpp         |  516 +++++++++++++++
+ src/skippy/stage_slice_plan.cpp   |  748 +++++++++++++++++++++
+ src/skippy/stage_slice_plan.h     |   98 +++
+ src/skippy/state_effects.cpp      |  352 ++++++++++
+ src/skippy/state_effects.h        |   68 ++
+ src/skippy/verification.cpp       |  265 ++++++++
+ 17 files changed, 4660 insertions(+)
  create mode 100644 src/skippy/block_boundaries.cpp
  create mode 100644 src/skippy/block_boundaries.h
  create mode 100644 src/skippy/executable_graph.cpp
@@ -1421,7 +1421,7 @@ index 000000000..7d7f5cc0d
 +void skippy_glm_dsa_op_timing_end(skippy_session * session);
 diff --git a/src/skippy/graph_build_inputs.h b/src/skippy/graph_build_inputs.h
 new file mode 100644
-index 000000000..8d0712c96
+index 000000000..9b9678226
 --- /dev/null
 +++ b/src/skippy/graph_build_inputs.h
 @@ -0,0 +1,134 @@
@@ -1501,17 +1501,17 @@ index 000000000..8d0712c96
 +    }
 +}
 +
-+inline void skippy_graph_build_inputs_set_qwen4exp_hc(
++inline void skippy_graph_build_inputs_set_hyperconnection(
 +        skippy_graph_build_inputs & inputs,
 +        const void * payload,
 +        uint32_t token_count,
 +        int32_t n_embd,
 +        int32_t n_hc) {
 +    if (payload != nullptr && token_count > 0 && n_embd > 0 && n_hc > 0) {
-+        inputs.qwen4exp_hc.values = static_cast<const float *>(payload);
-+        inputs.qwen4exp_hc.token_count = token_count;
-+        inputs.qwen4exp_hc.n_embd = static_cast<uint32_t>(n_embd);
-+        inputs.qwen4exp_hc.n_hc = static_cast<uint32_t>(n_hc);
++        inputs.hyperconnection.values = static_cast<const float *>(payload);
++        inputs.hyperconnection.token_count = token_count;
++        inputs.hyperconnection.n_embd = static_cast<uint32_t>(n_embd);
++        inputs.hyperconnection.n_hc = static_cast<uint32_t>(n_hc);
 +    }
 +}
 +
@@ -1641,10 +1641,10 @@ index 000000000..d34f53fe4
 +        const llama_model * model);
 diff --git a/src/skippy/graph_identity.cpp b/src/skippy/graph_identity.cpp
 new file mode 100644
-index 000000000..cd5c9129f
+index 000000000..e9db18dc8
 --- /dev/null
 +++ b/src/skippy/graph_identity.cpp
-@@ -0,0 +1,972 @@
+@@ -0,0 +1,1009 @@
 +#include "graph_identity.h"
 +
 +#include "block_boundaries.h"
@@ -1841,6 +1841,7 @@ index 000000000..cd5c9129f
 +    parameter = 1,
 +    request = 2,
 +    state = 3,
++    immutable_constant = 4,
 +};
 +
 +struct leaf_identity {
@@ -1848,6 +1849,8 @@ index 000000000..cd5c9129f
 +    std::string identity;
 +    skippy_state_kind state_kind = skippy_state_kind::kv_key;
 +    int32_t layer = -1;
++    uint32_t state_ordinal = 0;
++    uint32_t constant_ordinal = 0;
 +};
 +
 +bool valid_tensor_metadata(const ggml_tensor * tensor, std::string & error) {
@@ -1910,6 +1913,11 @@ index 000000000..cd5c9129f
 +    if (leaf.kind == leaf_class::state) {
 +        out.i32(static_cast<int32_t>(leaf.state_kind));
 +        out.i32(leaf.layer);
++        out.u32(leaf.state_ordinal);
++        return true;
++    }
++    if (leaf.kind == leaf_class::immutable_constant) {
++        out.u32(leaf.constant_ordinal);
 +        return true;
 +    }
 +    return out.text(leaf.identity);
@@ -1964,6 +1972,14 @@ index 000000000..cd5c9129f
 +                error = "semantic graph has null or duplicate nodes";
 +                return false;
 +            }
++        }
++        for (int32_t index = 0; index < graph->n_leafs; ++index) {
++            const ggml_tensor * leaf = skippy_state_canonical_storage(graph->leafs[index]);
++            if (leaf == nullptr) {
++                error = "semantic graph has a cyclic leaf view";
++                return false;
++            }
++            graph_leaves.insert(leaf);
 +        }
 +        return true;
 +    }
@@ -2029,6 +2045,7 @@ index 000000000..cd5c9129f
 +    }
 +
 +    bool bind_state() {
++        std::map<std::pair<int32_t, int32_t>, uint32_t> ordinals;
 +        for (const auto & effect : effects) {
 +            if (effect.access != skippy_state_access::read) {
 +                continue;
@@ -2037,6 +2054,7 @@ index 000000000..cd5c9129f
 +            leaf.kind = leaf_class::state;
 +            leaf.state_kind = effect.kind;
 +            leaf.layer = effect.layer;
++            leaf.state_ordinal = ordinals[{static_cast<int32_t>(effect.kind), effect.layer}]++;
 +            if (!add_binding(effect.storage, leaf, "state owner binding is incomplete")) {
 +                return false;
 +            }
@@ -2065,11 +2083,28 @@ index 000000000..cd5c9129f
 +            return false;
 +        }
 +        const auto leaf = leaves.find(canonical);
-+        if (leaf == leaves.end()) {
-+            error = (tensor->flags & GGML_TENSOR_FLAG_INPUT) != 0 ||
++        if (leaf == leaves.end() && graph_leaves.find(canonical) != graph_leaves.end() &&
++                canonical->op == GGML_OP_NONE && canonical->buffer == nullptr &&
++                (canonical->flags & GGML_TENSOR_FLAG_INPUT) == 0) {
++            leaf_identity constant;
++            constant.kind = leaf_class::immutable_constant;
++            constant.constant_ordinal = next_constant_ordinal++;
++            leaves.emplace(canonical, constant);
++        }
++        const auto classified_leaf = leaves.find(canonical);
++        if (classified_leaf == leaves.end()) {
++            error = ((tensor->flags & GGML_TENSOR_FLAG_INPUT) != 0 ||
 +                    (canonical->flags & GGML_TENSOR_FLAG_INPUT) != 0
 +                    ? "semantic graph has an unregistered request input"
-+                    : "semantic graph has an unresolved structural leaf";
++                    : "semantic graph has an unresolved structural leaf") +
++                    std::string(": ") + ggml_get_name(canonical) +
++                    " type=" + std::to_string(static_cast<int>(canonical->type)) +
++                    " ne=" + std::to_string(canonical->ne[0]) + "x" +
++                    std::to_string(canonical->ne[1]) + "x" +
++                    std::to_string(canonical->ne[2]) + "x" +
++                    std::to_string(canonical->ne[3]) +
++                    " flags=" + std::to_string(canonical->flags) +
++                    " buffered=" + (canonical->buffer != nullptr ? "1" : "0");
 +            return false;
 +        }
 +        if (tensor != canonical) {
@@ -2109,7 +2144,7 @@ index 000000000..cd5c9129f
 +        encoding value;
 +        value.text("skippy.semantic.leaf");
 +        value.u32(identity_version);
-+        encode_leaf(value, leaf->second);
++        encode_leaf(value, classified_leaf->second);
 +        encode_tensor_metadata(value, tensor);
 +        identity = value.digest("skippy-value");
 +        result.value_identities.emplace(tensor, identity);
@@ -2222,7 +2257,9 @@ index 000000000..cd5c9129f
 +    skippy_graph_semantics & result;
 +    std::string & error;
 +    std::unordered_map<const ggml_tensor *, int32_t> node_indices;
++    std::unordered_set<const ggml_tensor *> graph_leaves;
 +    std::unordered_map<const ggml_tensor *, leaf_identity> leaves;
++    uint32_t next_constant_ordinal = 0;
 +    std::unordered_set<const ggml_tensor *> bound_tensors;
 +    std::set<std::pair<uint8_t, std::string>> binding_identities;
 +    std::unordered_set<const ggml_tensor *> external_visiting;
@@ -3206,13 +3243,14 @@ index 000000000..f8ae80b65
 +}
 diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
 new file mode 100644
-index 000000000..d79874210
+index 000000000..4d103d8a0
 --- /dev/null
 +++ b/src/skippy/stage_slice_plan.cpp
-@@ -0,0 +1,720 @@
+@@ -0,0 +1,748 @@
 +#include "stage_slice_plan.h"
 +
 +#include "ggml.h"
++#include "../../ggml/src/ggml-impl.h"
 +
 +#include <algorithm>
 +#include <set>
@@ -3269,6 +3307,7 @@ index 000000000..d79874210
 +    const ggml_tensor * explicit_output;
 +
 +    std::unordered_map<const ggml_tensor *, int32_t> node_index;
++    std::unordered_set<const ggml_tensor *> graph_leaves;
 +    std::unordered_set<int32_t> core_selected_nodes;
 +    std::unordered_map<const ggml_tensor *, int8_t> core_dependency_cache;
 +    std::unordered_set<const ggml_tensor *> core_dependency_visiting;
@@ -3296,12 +3335,17 @@ index 000000000..d79874210
 +            return 0;
 +        }
 +        const ggml_tensor * canonical = canonical_storage(tensor);
-+        int count = 0;
-+        count += parameter_names.find(tensor) != parameter_names.end() ||
-+                 parameter_names.find(canonical) != parameter_names.end();
-+        count += request_names.find(tensor) != request_names.end() ||
-+                 request_names.find(canonical) != request_names.end();
-+        count += state_storage.find(canonical) != state_storage.end();
++        const bool is_parameter = parameter_names.find(tensor) != parameter_names.end() ||
++                                  parameter_names.find(canonical) != parameter_names.end();
++        const bool is_request = request_names.find(tensor) != request_names.end() ||
++                                request_names.find(canonical) != request_names.end();
++        const bool is_state = state_storage.find(canonical) != state_storage.end();
++        const bool is_constant = !is_parameter && !is_request && !is_state && canonical != nullptr &&
++                                 graph_leaves.find(canonical) != graph_leaves.end() &&
++                                 canonical->op == GGML_OP_NONE && canonical->buffer == nullptr &&
++                                 (canonical->flags & GGML_TENSOR_FLAG_INPUT) == 0;
++        const int count = static_cast<int>(is_parameter) + static_cast<int>(is_request) +
++                          static_cast<int>(is_state) + static_cast<int>(is_constant);
 +        return count;
 +    }
 +
@@ -3336,7 +3380,12 @@ index 000000000..d79874210
 +        const bool is_request = exact_request != request_names.end() ||
 +                                canonical_request != request_names.end();
 +        const bool is_state = state_storage.find(canonical) != state_storage.end();
-+        const int count = static_cast<int>(is_parameter) + static_cast<int>(is_request) + static_cast<int>(is_state);
++        const bool is_constant = !is_parameter && !is_request && !is_state && canonical != nullptr &&
++                                 graph_leaves.find(canonical) != graph_leaves.end() &&
++                                 canonical->op == GGML_OP_NONE && canonical->buffer == nullptr &&
++                                 (canonical->flags & GGML_TENSOR_FLAG_INPUT) == 0;
++        const int count = static_cast<int>(is_parameter) + static_cast<int>(is_request) +
++                          static_cast<int>(is_state) + static_cast<int>(is_constant);
 +        if (count > 1) {
 +            error = "graph dependency has multiple structural leaf classes";
 +            return false;
@@ -3350,6 +3399,9 @@ index 000000000..d79874210
 +        }
 +        if (is_request) {
 +            append_once(result.request_inputs, request_inputs, canonical);
++            return true;
++        }
++        if (is_constant) {
 +            return true;
 +        }
 +        return is_state && state_owned_by_slice(canonical);
@@ -3608,6 +3660,14 @@ index 000000000..d79874210
 +            const ggml_tensor * tensor = ggml_graph_node(graph, index);
 +            node_index.emplace(tensor, index);
 +        }
++        for (int32_t index = 0; index < graph->n_leafs; ++index) {
++            const ggml_tensor * leaf = canonical_storage(graph->leafs[index]);
++            if (leaf == nullptr) {
++                error = "graph has a cyclic leaf view";
++                return false;
++            }
++            graph_leaves.insert(leaf);
++        }
 +        for (const auto & effect : effects) {
 +            const ggml_tensor * storage = canonical_storage(effect.storage);
 +            state_storage.insert(storage);
@@ -3743,15 +3803,20 @@ index 000000000..d79874210
 +        const ggml_tensor * explicit_output) {
 +    selection = {};
 +    error.clear();
++    std::vector<skippy_state_effect> effective_state_effects;
++    if (!skippy_infer_state_effects(
++                state_effects, graph, boundaries, effective_state_effects, error)) {
++        return false;
++    }
 +    skippy_graph_semantics semantics;
 +    if (!skippy_build_graph_semantics(
-+                graph, boundaries, state_effects, parameters, request_inputs, semantics, error)) {
++                graph, boundaries, effective_state_effects, parameters, request_inputs, semantics, error)) {
 +        return false;
 +    }
 +    selector state(
 +        graph,
 +        boundaries,
-+        state_effects,
++        effective_state_effects,
 +        layer_count,
 +        layer_start,
 +        layer_end,
@@ -4036,11 +4101,13 @@ index 000000000..f5517646a
 +        std::string & error);
 diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
 new file mode 100644
-index 000000000..19b0f404e
+index 000000000..69db4f530
 --- /dev/null
 +++ b/src/skippy/state_effects.cpp
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,352 @@
 +#include "state_effects.h"
++
++#include "block_boundaries.h"
 +
 +#include "ggml.h"
 +
@@ -4081,6 +4148,7 @@ index 000000000..19b0f404e
 +        case skippy_state_kind::kv_value:
 +        case skippy_state_kind::recurrent_conv:
 +        case skippy_state_kind::recurrent_ssm:
++        case skippy_state_kind::derived_persistent:
 +            return true;
 +    }
 +    return false;
@@ -4220,7 +4288,7 @@ index 000000000..19b0f404e
 +    }
 +
 +    using owner = std::tuple<int32_t, int32_t, const ggml_tensor *>;
-+    std::set<std::tuple<int32_t, int32_t>> seen_reads;
++    std::set<owner> seen_reads;
 +    std::unordered_set<const ggml_tensor *> seen_write_nodes;
 +    std::unordered_map<const ggml_tensor *, owner> storage_owners;
 +    std::set<owner> reads;
@@ -4245,7 +4313,7 @@ index 000000000..19b0f404e
 +        }
 +        if (effect.access == skippy_state_access::read) {
 +            if (effect.effect_node != nullptr || effect.write_ordinal != -1 ||
-+                    !seen_reads.insert({static_cast<int32_t>(effect.kind), effect.layer}).second) {
++                    !seen_reads.insert(key).second) {
 +                error = effect_error("state effect %zu has an invalid or duplicate read owner", i);
 +                return false;
 +            }
@@ -4304,12 +4372,97 @@ index 000000000..19b0f404e
 +    }
 +    return true;
 +}
++
++bool skippy_infer_state_effects(
++        const std::vector<skippy_state_effect> & explicit_effects,
++        const ggml_cgraph * graph,
++        const std::vector<skippy_block_boundary> & boundaries,
++        std::vector<skippy_state_effect> & effects,
++        std::string & error) {
++    effects = explicit_effects;
++    error.clear();
++    if (graph == nullptr || boundaries.empty() || boundaries.size() % 2 != 0) {
++        error = "state inference requires an exact graph and paired block boundaries";
++        return false;
++    }
++
++    std::unordered_map<const ggml_tensor *, int32_t> positions;
++    for (int32_t index = 0; index < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++index) {
++        positions.emplace(ggml_graph_node(const_cast<ggml_cgraph *>(graph), index), index);
++    }
++
++    std::unordered_set<const ggml_tensor *> explicit_storage;
++    for (const auto & effect : explicit_effects) {
++        explicit_storage.insert(effect.storage);
++    }
++
++    struct inferred_owner {
++        int32_t layer = -1;
++        std::vector<const ggml_tensor *> writes;
++    };
++    std::unordered_map<const ggml_tensor *, inferred_owner> inferred;
++    std::vector<const ggml_tensor *> storage_order;
++
++    for (int32_t index = 0; index < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++index) {
++        const ggml_tensor * node = ggml_graph_node(const_cast<ggml_cgraph *>(graph), index);
++        if (node->op != GGML_OP_CPY && node->op != GGML_OP_SET_ROWS && node->op != GGML_OP_SCALE) {
++            continue;
++        }
++        const ggml_tensor * storage = skippy_state_canonical_storage(write_destination(node));
++        if (storage == nullptr || storage->buffer == nullptr ||
++                positions.find(storage) != positions.end() || explicit_storage.count(storage) != 0) {
++            continue;
++        }
++        if (!valid_write_destination(node, storage)) {
++            error = effect_error("graph node %zu has an unsupported external-storage mutation", index);
++            return false;
++        }
++
++        int32_t owner_layer = -1;
++        for (size_t layer = 0; layer < boundaries.size() / 2; ++layer) {
++            const auto entry = positions.find(boundaries[2 * layer].tensor);
++            const auto exit = positions.find(boundaries[2 * layer + 1].tensor);
++            if (entry == positions.end() || exit == positions.end()) {
++                error = "state inference could not locate a block boundary in the exact graph";
++                return false;
++            }
++            if (index >= entry->second && index <= exit->second) {
++                owner_layer = static_cast<int32_t>(layer);
++                break;
++            }
++        }
++        if (owner_layer < 0) {
++            error = effect_error("graph node %zu mutates external storage outside a block", index);
++            return false;
++        }
++        const auto inserted = inferred.emplace(storage, inferred_owner{owner_layer, {}});
++        if (inserted.second) {
++            storage_order.push_back(storage);
++        } else if (inserted.first->second.layer != owner_layer) {
++            error = "inferred persistent storage spans multiple blocks";
++            return false;
++        }
++        inserted.first->second.writes.push_back(node);
++    }
++
++    for (const ggml_tensor * storage : storage_order) {
++        const auto & owner = inferred.at(storage);
++        effects.push_back({skippy_state_kind::derived_persistent,
++                skippy_state_access::read, owner.layer, storage, nullptr, -1});
++        for (size_t ordinal = 0; ordinal < owner.writes.size(); ++ordinal) {
++            effects.push_back({skippy_state_kind::derived_persistent,
++                    skippy_state_access::write, owner.layer, storage,
++                    owner.writes[ordinal], static_cast<int64_t>(ordinal)});
++        }
++    }
++    return skippy_validate_state_effects(effects, graph, error);
++}
 diff --git a/src/skippy/state_effects.h b/src/skippy/state_effects.h
 new file mode 100644
-index 000000000..9fecf5df3
+index 000000000..ae3460ba5
 --- /dev/null
 +++ b/src/skippy/state_effects.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,68 @@
 +#pragma once
 +
 +// Stage-independent persistent-state access/effect records for the
@@ -4328,12 +4481,14 @@ index 000000000..9fecf5df3
 +
 +struct ggml_cgraph;
 +struct ggml_tensor;
++struct skippy_block_boundary;
 +
 +enum class skippy_state_kind : int32_t {
 +    kv_key         = 0,
 +    kv_value       = 1,
 +    recurrent_conv = 2,
 +    recurrent_ssm  = 3,
++    derived_persistent = 4,
 +};
 +
 +enum class skippy_state_access : int32_t {
@@ -4365,6 +4520,16 @@ index 000000000..9fecf5df3
 +bool skippy_validate_state_effects(
 +        const std::vector<skippy_state_effect> & effects,
 +        const ggml_cgraph * graph,
++        std::string & error);
++
++// Infer ownership for external buffered storage mutated by recognized GGML
++// operations. Existing semantic annotations win; inferred owners are assigned
++// to the enclosing block from exact executable order.
++bool skippy_infer_state_effects(
++        const std::vector<skippy_state_effect> & explicit_effects,
++        const ggml_cgraph * graph,
++        const std::vector<skippy_block_boundary> & boundaries,
++        std::vector<skippy_state_effect> & effects,
 +        std::string & error);
 diff --git a/src/skippy/verification.cpp b/src/skippy/verification.cpp
 new file mode 100644
@@ -4637,6 +4802,3 @@ index 000000000..b91d87021
 +
 +
 +} // extern "C"
--- 
-2.54.0 (Apple Git-157)
-

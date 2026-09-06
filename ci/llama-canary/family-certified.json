@@ -229,6 +229,16 @@
       "notes": "cheap hybrid boundary sweep"
     },
     {
+      "family": "lfm2-vl",
+      "profile": "full",
+      "cadences": ["llama-bump", "manual-full"],
+      "artifact": {"repo": "ggml-org/LFM2-VL-450M-GGUF", "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05", "files": ["LFM2-VL-450M-Q8_0.gguf"], "file_integrity": {"LFM2-VL-450M-Q8_0.gguf": {"size_bytes": 379215264, "blob_id": "e97704a0cf0a1d00ca604b4c672c82f4234318dba9d43a7f7a4c0d2df6747844"}}, "selector": "Q8_0"},
+      "mmproj_artifact": {"repo": "ggml-org/LFM2-VL-450M-GGUF", "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05", "files": ["mmproj-LFM2-VL-450M-Q8_0.gguf"], "file_integrity": {"mmproj-LFM2-VL-450M-Q8_0.gguf": {"size_bytes": 103890016, "blob_id": "a6a813fae4ba3f90852a990fdd4786a017dba0e80e599a366853ba539ee2b5ef"}}, "selector": "Q8_0"},
+      "execution": {"trunk_layers": 16, "mtp_layers": 0, "activation_width": 1024, "boundary_sweep_period": 2, "speculative_policy": "mtp-if-present"},
+      "resources": {"runner_role": "family-certify", "cache_policy": "immutable-local", "estimated_model_bytes": 379215264},
+      "notes": "small official multimodal hybrid model; text, recurrent, and mmproj lanes"
+    },
+    {
       "family": "laguna",
       "profile": "full",
       "cadences": ["llama-bump", "manual-full"],

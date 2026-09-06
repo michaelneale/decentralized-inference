@@ -1,4 +1,4 @@
-From 0d3c137c1fa062b3f908f36318fa9c616a996740 Mon Sep 17 00:00:00 2001
+From 15da005af4dd9fa334f034e5862057b5e11e7cd4 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:22 +1000
 Subject: [PATCH 07/11] skippy: add chat, tokenization, and prompt support
@@ -1649,6 +1649,3 @@ index 000000000..95874d23d
 +  {{- '<|message_model|>' -}}
 +{%- endif -%}
 +{#- Unsloth translation to jinja from TML's parser #}
--- 
-2.54.0 (Apple Git-157)
-

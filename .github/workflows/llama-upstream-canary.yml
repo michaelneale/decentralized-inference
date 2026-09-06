@@ -153,6 +153,47 @@ jobs:
           python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp validate 2>&1 \
             | tee -a .deps/llama-canary-repair-battery.log
 
+      - name: Select changed generated families
+        id: family_selection
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p target/skippy-stage-rewriter-check
+          selection=target/skippy-stage-rewriter-check/family-selection.json
+          mode=full
+          families=""
+          if [[ "${{ steps.sha.outputs.cadence }}" == "llama-bump" ]] \
+              && git rev-parse HEAD^ >/dev/null 2>&1 \
+              && git show HEAD^:third_party/llama.cpp/patches/generated/series.json > /tmp/base-family-series.json 2>/dev/null \
+              && git diff --quiet HEAD^ HEAD -- \
+                   'third_party/llama.cpp/patches/*.patch' \
+                   ci/llama-canary/family-certified.json \
+                   ci/llama-canary/generated-family-map.json \
+                   scripts/check-skippy-generated-family-patch.sh \
+                   scripts/generate-skippy-family-patch.py \
+                   scripts/prepare-llama.sh \
+                   scripts/select-skippy-family-shards.py \
+                   scripts/skippy-rewriter-harness.py \
+                   tools/skippy-stage-rewriter; then
+            python3 scripts/select-skippy-family-shards.py \
+              --base /tmp/base-family-series.json \
+              --current third_party/llama.cpp/patches/generated/series.json \
+              --include-sentinels \
+              --output "$selection"
+            mode="$(jq -r .mode "$selection")"
+            families="$(jq -r '.families | join(",")' "$selection")"
+            if [[ "$mode" != "targeted" || -z "$families" ]]; then
+              mode=full
+              families=""
+            fi
+          else
+            printf '%s\n' '{"families": [], "mode": "full", "reason": "core-or-policy-change"}' > "$selection"
+          fi
+          {
+            echo "mode=$mode"
+            echo "families=$families"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Plan and verify family certification cache
         id: family_plan
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
@@ -161,9 +202,14 @@ jobs:
         run: |
           set -euo pipefail
           plan="target/family-battery/$FAMILY_BATTERY_RUN_ID/policy-plan.json"
+          family_args=()
+          if [[ "${{ steps.family_selection.outputs.mode }}" == "targeted" ]]; then
+            family_args=(--families "${{ steps.family_selection.outputs.families }}")
+          fi
           python3 scripts/plan-family-battery.py \
             --manifest ci/llama-canary/family-certified.json \
             --cadence "${{ steps.sha.outputs.cadence }}" \
+            "${family_args[@]}" \
             --shard-count 1 \
             --check-cache \
             --cache-root "$HF_CACHE" \

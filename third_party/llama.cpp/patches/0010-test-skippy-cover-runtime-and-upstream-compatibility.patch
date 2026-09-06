@@ -1,4 +1,4 @@
-From ee76a0c0545ae31301306dad224e690a994e8bf2 Mon Sep 17 00:00:00 2001
+From 8a1087cea8a82abcc001509d50c8f0b22b90a5d7 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:40 +1000
 Subject: [PATCH 10/11] test(skippy): cover runtime and upstream compatibility
@@ -8,13 +8,13 @@ Subject: [PATCH 10/11] test(skippy): cover runtime and upstream compatibility
  tests/test-chat-auto-parser.cpp               |  47 +++
  tests/test-chat.cpp                           | 285 +++++++++++++++++-
  tests/test-llama-archs.cpp                    | 122 +++++++-
- tests/test-skippy-activation-layout.cpp       |  46 +++
+ tests/test-skippy-activation-layout.cpp       |  64 ++++
  tests/test-skippy-kv-cells-contiguous.cpp     |  20 ++
  tests/test-skippy-kv-page-export.cpp          | 261 ++++++++++++++++
  tests/test-skippy-model-loader-accounting.cpp | 260 ++++++++++++++++
  .../test-skippy-recurrent-state-roundtrip.cpp | 159 ++++++++++
  ...st-skippy-verify-checkpoint-retirement.cpp |  26 ++
- 10 files changed, 1234 insertions(+), 14 deletions(-)
+ 10 files changed, 1252 insertions(+), 14 deletions(-)
  create mode 100644 tests/test-skippy-activation-layout.cpp
  create mode 100644 tests/test-skippy-kv-cells-contiguous.cpp
  create mode 100644 tests/test-skippy-kv-page-export.cpp
@@ -707,10 +707,10 @@ index 35a3286e4..b8a8400da 100644
                          model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode);
 diff --git a/tests/test-skippy-activation-layout.cpp b/tests/test-skippy-activation-layout.cpp
 new file mode 100644
-index 000000000..9afdf673c
+index 000000000..42a518677
 --- /dev/null
 +++ b/tests/test-skippy-activation-layout.cpp
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,64 @@
 +#include "../src/llama-model.h"
 +#include "../src/skippy/activation_internal.h"
 +#include "../src/skippy/runtime_types.h"
@@ -718,13 +718,19 @@ index 000000000..9afdf673c
 +#include <cstdio>
 +#include <memory>
 +
-+static bool expect_hidden_bytes(llm_arch arch, uint32_t n_embd, uint32_t n_embd_out, size_t expected) {
++static bool expect_hidden_bytes(
++        llm_arch arch,
++        uint32_t n_embd,
++        uint32_t n_embd_out,
++        uint32_t hyperconnection_count,
++        size_t expected) {
 +    std::unique_ptr<llama_model> model(llama_model_create(arch, llama_model_default_params()));
 +    if (!model) {
 +        return false;
 +    }
 +    model->hparams.n_embd = n_embd;
 +    model->hparams.n_embd_out_impl = n_embd_out;
++    model->hparams.dsv4_hc_mult = hyperconnection_count;
 +
 +    skippy_model stage_model = {};
 +    stage_model.model = model.get();
@@ -741,6 +747,7 @@ index 000000000..9afdf673c
 +                LLM_ARCH_QWEN4EXP,
 +                2560,
 +                10240,
++                4,
 +                tokens * 10240 * f32_bytes)) {
 +        std::fprintf(stderr, "Qwen4Exp activation frame did not use the wide hyper-connected residual\n");
 +        return 1;
@@ -750,9 +757,20 @@ index 000000000..9afdf673c
 +                LLM_ARCH_DEEPSEEK4,
 +                2560,
 +                10240,
-+                tokens * 2560 * f32_bytes)) {
-+        std::fprintf(stderr, "non-Qwen4Exp activation frame unexpectedly used model output width\n");
++                4,
++                tokens * 10240 * f32_bytes)) {
++        std::fprintf(stderr, "DeepSeek4 activation frame did not use the wide hyper-connected residual\n");
 +        return 2;
++    }
++
++    if (!expect_hidden_bytes(
++                LLM_ARCH_LLAMA,
++                2560,
++                10240,
++                0,
++                tokens * 2560 * f32_bytes)) {
++        std::fprintf(stderr, "ordinary activation frame unexpectedly used model output width\n");
++        return 3;
 +    }
 +
 +    return 0;
@@ -1513,6 +1531,3 @@ index 000000000..d09acccb4
 +    if (skippy_retire_verify_checkpoint_exact(checkpoints, 10, 3)) return 6;
 +    return 0;
 +}
--- 
-2.54.0 (Apple Git-157)
-

@@ -1,4 +1,4 @@
-From 57823713ce528a0a5f8b94921ef2f7c6995ae6fb Mon Sep 17 00:00:00 2001
+From 9d97cf792ddbc4b0fcfa9ef045a77dbdeb99c7fd Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:29 +1000
 Subject: [PATCH 08/11] skippy: add Inkling conversion and multimodal support
@@ -1330,6 +1330,3 @@ index 5b306180d..8ea35863d 100644
                  } else {
                      // other models, we only need the total number of tokens
                      image_tokens->nx = n_tokens;
--- 
-2.54.0 (Apple Git-157)
-

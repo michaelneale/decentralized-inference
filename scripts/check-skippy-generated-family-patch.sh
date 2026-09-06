@@ -4,10 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ROOT="${SKIPPY_REWRITER_SOURCE_ROOT:-$ROOT/.deps/llama.cpp}"
 LLAMA_BUILD_DIR="${LLAMA_STAGE_BUILD_DIR:-${LLAMA_BUILD_DIR:-$ROOT/.deps/llama-build/build-stage-abi-static-metal}}"
-CHECKED_PATCH="${SKIPPY_REWRITER_PATCH:-$ROOT/third_party/llama.cpp/patches/0012-skippy-generate-model-family-stage-controls.patch}"
+CHECKED_PATCH_DIR="${SKIPPY_REWRITER_PATCH_DIR:-$ROOT/third_party/llama.cpp/patches/generated}"
+FAMILY_SOURCE_MAP="${SKIPPY_REWRITER_FAMILY_MAP:-$ROOT/ci/llama-canary/generated-family-map.json}"
+FAMILY_MANIFEST="${SKIPPY_REWRITER_FAMILY_MANIFEST:-$ROOT/ci/llama-canary/family-certified.json}"
 ARTIFACT_ROOT="${SKIPPY_REWRITER_ARTIFACT_ROOT:-$ROOT/target/skippy-stage-rewriter-check}"
 TOOL_BUILD="$ARTIFACT_ROOT/tool-build"
 GENERATED_PATCH="$ARTIFACT_ROOT/generated-family.patch"
+GENERATED_PATCH_DIR="$ARTIFACT_ROOT/generated-family-shards"
 FIRST_REPORT="$ARTIFACT_ROOT/report.json"
 SECOND_REPORT="$ARTIFACT_ROOT/report-second.json"
 
@@ -24,8 +27,8 @@ if [[ ! -x "$LLAMA_BUILD_DIR/bin/skippy-noalloc-graph-planning" ]]; then
   echo "build with LLAMA_STAGE_BUILD_TESTS=ON before checking the generated patch" >&2
   exit 1
 fi
-if [[ ! -f "$CHECKED_PATCH" ]]; then
-  echo "checked-in generated family patch not found: $CHECKED_PATCH" >&2
+if [[ ! -f "$CHECKED_PATCH_DIR/series" || ! -f "$CHECKED_PATCH_DIR/series.json" ]]; then
+  echo "checked-in generated family patch series not found: $CHECKED_PATCH_DIR" >&2
   exit 1
 fi
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no)" ]]; then
@@ -68,13 +71,20 @@ python3 "$ROOT/scripts/generate-skippy-family-patch.py" \
   --report "$FIRST_REPORT" \
   --diff-base "$(tr -d '[:space:]' < "$SOURCE_ROOT/.mesh-llm-upstream-sha")" \
   --output "$GENERATED_PATCH" \
+  --shard-output-dir "$GENERATED_PATCH_DIR" \
+  --family-source-map "$FAMILY_SOURCE_MAP" \
+  --family-manifest "$FAMILY_MANIFEST" \
   "${EXTRA_ARGS[@]}"
 
-if cmp -s "$GENERATED_PATCH" "$CHECKED_PATCH"; then
+if diff -qr "$CHECKED_PATCH_DIR" "$GENERATED_PATCH_DIR" >/dev/null; then
   patch_result=pass
 else
   patch_result=fail
-  diff -u "$CHECKED_PATCH" "$GENERATED_PATCH" > "$ARTIFACT_ROOT/patch-drift.diff" || true
+  diff -ru "$CHECKED_PATCH_DIR" "$GENERATED_PATCH_DIR" > "$ARTIFACT_ROOT/patch-drift.diff" || true
+  python3 "$ROOT/scripts/select-skippy-family-shards.py" \
+    --base "$CHECKED_PATCH_DIR/series.json" \
+    --current "$GENERATED_PATCH_DIR/series.json" \
+    --output "$ARTIFACT_ROOT/changed-family-selection.json"
 fi
 
 python3 "$ROOT/scripts/skippy-rewriter-harness.py" \
@@ -88,4 +98,4 @@ python3 "$ROOT/scripts/skippy-rewriter-harness.py" \
   --report "$SECOND_REPORT" \
   --mode idempotence
 
-echo "generated family patch is deterministic and current: $CHECKED_PATCH"
+echo "generated family patch series is deterministic and current: $CHECKED_PATCH_DIR"

@@ -3070,6 +3070,3 @@ index 000000000..a82b64408
 +    bool reset_required = false;
 +    std::vector<skippy_verify_checkpoint> verify_checkpoints;
 +};
--- 
-2.54.0 (Apple Git-157)
-

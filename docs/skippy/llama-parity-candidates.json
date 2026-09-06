@@ -9,11 +9,12 @@
   },
   "support_priority": {
     "policy": "Use P0/P1 as the active support queue. Keep the full llama.cpp inventory classified, but do not block Skippy parity on P2 long-tail, non-causal auxiliary, or implementation-base rows unless a user-visible demand signal appears.",
-    "last_reviewed": "2026-05-07",
+    "last_reviewed": "2026-09-07",
     "sources": [
       "Hugging Face GGUF text-generation search sorted by downloads",
       "Mesh deployment demand for Qwen3.6, DeepSeek V3, Qwen Coder, MiniMax, Falcon-H1, and staged package serving",
-      "llama.cpp architecture inventory from the pinned upstream checkout"
+      "llama.cpp architecture inventory from the pinned upstream checkout",
+      "Explicit Skippy review demand for broader multimodal and OCR coverage"
     ],
     "p0": {
       "meaning": "must support: very popular GGUF ecosystems, current Mesh deployment targets, or strategic staged/package/multimodal families",
@@ -99,7 +100,8 @@
         "kimi-linear",
         "seed-oss",
         "gpt2",
-        "mpt"
+        "mpt",
+        "paddleocr"
       ]
     },
     "p2": {
@@ -290,6 +292,28 @@
       "repo": "ggml-org/gemma-3-1b-it-GGUF",
       "include": "*Q4_K_M.gguf",
       "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
+    },
+    {
+      "llama_model": "gemma3",
+      "family": "gemma3_vl",
+      "status": "candidate_multimodal",
+      "repo": "ggml-org/gemma-3-4b-it-GGUF",
+      "include": [
+        "gemma-3-4b-it-Q4_K_M.gguf",
+        "mmproj-model-f16.gguf"
+      ],
+      "notes": "Official Gemma 3 vision model/projector pair; certify text split, projector image prefill, media sideband forwarding, sampled decode, and non-midpoint cuts",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
+      "file_integrity": {
+        "gemma-3-4b-it-Q4_K_M.gguf": {
+          "size_bytes": 2489757856,
+          "blob_id": "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863"
+        },
+        "mmproj-model-f16.gguf": {
+          "size_bytes": 851251104,
+          "blob_id": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb"
+        }
+      }
     },
     {
       "llama_model": "gemma4",
@@ -576,6 +600,29 @@
       "notes": "text lane passed in llama-parity-lfm2-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
+      "llama_model": "lfm2",
+      "family": "lfm2_vl",
+      "status": "candidate_multimodal",
+      "repo": "ggml-org/LFM2-VL-450M-GGUF",
+      "include": [
+        "LFM2-VL-450M-Q8_0.gguf",
+        "mmproj-LFM2-VL-450M-Q8_0.gguf"
+      ],
+      "recurrent": "all",
+      "notes": "Small official 450M model/projector pair for cheap multimodal staged coverage; certify text split, recurrent state, projector prefill, media sideband forwarding, and sampled decode",
+      "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+      "file_integrity": {
+        "LFM2-VL-450M-Q8_0.gguf": {
+          "size_bytes": 379215264,
+          "blob_id": "e97704a0cf0a1d00ca604b4c672c82f4234318dba9d43a7f7a4c0d2df6747844"
+        },
+        "mmproj-LFM2-VL-450M-Q8_0.gguf": {
+          "size_bytes": 103890016,
+          "blob_id": "a6a813fae4ba3f90852a990fdd4786a017dba0e80e599a366853ba539ee2b5ef"
+        }
+      }
+    },
+    {
       "llama_model": "hunyuan-dense",
       "family": "hunyuan_dense",
       "status": "needs_boundary_registration",
@@ -748,7 +795,16 @@
       "llama_model": "chameleon",
       "family": "chameleon",
       "status": "candidate_multimodal",
-      "notes": "multimodal family; needs projector/media sideband certification before causal text or multimodal promotion"
+      "notes": "Integrated-image-token multimodal family; use the smallest public Q2_K GGUF for graph/load and staged text-path coverage before media-token parity promotion",
+      "repo": "mradermacher/chameleon-7b-GGUF",
+      "include": "chameleon-7b.Q2_K.gguf",
+      "revision": "ec8b2ed4a4e62316ad114fa9f23eff91962c7938",
+      "file_integrity": {
+        "chameleon-7b.Q2_K.gguf": {
+          "size_bytes": 2694131072,
+          "blob_id": "922fe8edc88bc653ebf7be53b456b391cc7358a79a07f0d003329cc0bbb5e2b3"
+        }
+      }
     },
     {
       "llama_model": "chatglm",
@@ -772,7 +828,16 @@
       "llama_model": "cogvlm",
       "family": "cogvlm",
       "status": "candidate_multimodal",
-      "notes": "vision-language family; needs projector/media sideband certification before promotion"
+      "notes": "Vision-language family; only a 26 GB F16 public GGUF is currently available, so keep this as an opt-in P2 download and certify projector/media sidebands on larger hardware",
+      "repo": "PandaExpressPatron/cogvlm-chat-gguf",
+      "include": "cogvlm-13B-chat-v1.1-F16.gguf",
+      "revision": "8076a26b5563f170569805cf17e22401f5c790e8",
+      "file_integrity": {
+        "cogvlm-13B-chat-v1.1-F16.gguf": {
+          "size_bytes": 26430130112,
+          "blob_id": "d3f5db973166dbfc39355c85480c9413fa5b67122f87de9f1c08421640acee38"
+        }
+      }
     },
     {
       "llama_model": "dbrx",
@@ -1077,7 +1142,23 @@
       "llama_model": "paddleocr",
       "family": "paddleocr",
       "status": "candidate_multimodal",
-      "notes": "OCR multimodal family; needs OCR/media serving lane certification before promotion"
+      "notes": "Official compact OCR multimodal model/projector pair; run split text, projector prefill, media sideband, and sampled decode lanes before promotion",
+      "repo": "PaddlePaddle/PaddleOCR-VL-1.6-GGUF",
+      "include": [
+        "PaddleOCR-VL-1.6-GGUF.gguf",
+        "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
+      ],
+      "revision": "511b09642bb324401f15f97cc23bc67e8f0a291d",
+      "file_integrity": {
+        "PaddleOCR-VL-1.6-GGUF.gguf": {
+          "size_bytes": 935769056,
+          "blob_id": "f3ae46ec885050acf4b3d31944431e1fd90d50664fb09126af4a3c050ba14ee8"
+        },
+        "PaddleOCR-VL-1.6-GGUF-mmproj.gguf": {
+          "size_bytes": 881770560,
+          "blob_id": "204d757d7610d9b3faab10d506d69e5b244e32bf765e2bab2d0167e65e0a058a"
+        }
+      }
     },
     {
       "llama_model": "pangu-embed",

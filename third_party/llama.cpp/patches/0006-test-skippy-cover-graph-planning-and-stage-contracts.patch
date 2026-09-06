@@ -1,17 +1,18 @@
-From 5c68a3ca9b429a76b02c71163e561b0154646a0b Mon Sep 17 00:00:00 2001
+From c62a532a4d33561c48cddbb1feef3deea5975064 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:13 +1000
 Subject: [PATCH 06/11] test(skippy): cover graph planning and stage contracts
 
 ---
+ src/CMakeLists.txt                            |  310 +++++
  src/skippy/tests/graph_build_inputs.cpp       |  320 +++++
  .../tests/hardware_application_probe.cpp      |   64 +
- src/skippy/tests/noalloc_graph_planning.cpp   | 1023 ++++++++++++++++
+ src/skippy/tests/noalloc_graph_planning.cpp   | 1066 +++++++++++++++++
  .../tests/renamed_multishard_planning.cpp     |  882 ++++++++++++++
  src/skippy/tests/stage_plan_header.c          |   10 +
  src/skippy/tests/stage_plan_header.cpp        |   13 +
- src/skippy/tests/stage_slice_plan.cpp         | 1036 +++++++++++++++++
- 7 files changed, 3348 insertions(+)
+ src/skippy/tests/stage_slice_plan.cpp         | 1036 ++++++++++++++++
+ 8 files changed, 3701 insertions(+)
  create mode 100644 src/skippy/tests/graph_build_inputs.cpp
  create mode 100644 src/skippy/tests/hardware_application_probe.cpp
  create mode 100644 src/skippy/tests/noalloc_graph_planning.cpp
@@ -20,9 +21,339 @@ Subject: [PATCH 06/11] test(skippy): cover graph planning and stage contracts
  create mode 100644 src/skippy/tests/stage_plan_header.cpp
  create mode 100644 src/skippy/tests/stage_slice_plan.cpp
 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 8922dc12a..3ba863063 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -39,6 +39,32 @@ add_library(llama
+             llama-model.cpp
+             llama-quant.cpp
+             llama-sampler.cpp
++            skippy/activation.cpp
++            skippy/activation_layout.cpp
++            skippy/execution-batch.cpp
++            skippy/execution-single.cpp
++            skippy/model_load_config.cpp
++            skippy/model_lifecycle.cpp
++            skippy/model_loading.cpp
++            skippy/model_source.cpp
++            skippy/session.cpp
++            skippy/verification.cpp
++            skippy/abi.cpp
++            skippy/block_boundaries.cpp
++            skippy/devices.cpp
++            skippy/glm_dsa.cpp
++            skippy/graph_dependencies.cpp
++            skippy/graph_identity.cpp
++            skippy/executable_graph.cpp
++            skippy/model_package.cpp
++            skippy/package_tensor_binding.cpp
++            skippy/sampling.cpp
++            skippy/stage_slice_plan.cpp
++            skippy/stage_plan.cpp
++            skippy/state.cpp
++            skippy/state_effects.cpp
++            skippy/speculative_decoding.cpp
++            skippy/tokenization.cpp
+             llama-vocab.cpp
+             unicode-data.cpp
+             unicode.cpp
+@@ -63,8 +89,292 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+ 
+ target_link_libraries(llama PUBLIC ggml)
+ 
++if (LLAMA_STAGE_BUILD_TESTS)
++    target_compile_definitions(llama PRIVATE LLAMA_STAGE_BUILD_TESTS)
++
++    add_executable(skippy-hardware-application-probe
++        skippy/tests/hardware_application_probe.cpp)
++    target_include_directories(skippy-hardware-application-probe PRIVATE .)
++    target_compile_features(skippy-hardware-application-probe PRIVATE cxx_std_17)
++    target_link_libraries(skippy-hardware-application-probe PRIVATE llama)
++    add_test(
++        NAME skippy_hardware_application_probe
++        COMMAND skippy-hardware-application-probe)
++
++    set(SKIPPY_MODEL_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/skippy/test-models")
++    file(MAKE_DIRECTORY "${SKIPPY_MODEL_FIXTURE_DIR}")
++
++    add_executable(skippy-model-fixture-generator
++        ../tests/test-llama-archs.cpp)
++    target_compile_features(skippy-model-fixture-generator PRIVATE cxx_std_17)
++    target_link_libraries(skippy-model-fixture-generator PRIVATE llama-common)
++
++    add_executable(skippy-model-loader-accounting
++        ../tests/test-skippy-model-loader-accounting.cpp)
++    target_include_directories(skippy-model-loader-accounting PRIVATE .)
++    target_compile_features(skippy-model-loader-accounting PRIVATE cxx_std_17)
++    target_link_libraries(skippy-model-loader-accounting PRIVATE llama-common)
++
++    add_executable(skippy-noalloc-graph-planning
++        skippy/tests/noalloc_graph_planning.cpp)
++    target_include_directories(skippy-noalloc-graph-planning PRIVATE .)
++    target_compile_features(skippy-noalloc-graph-planning PRIVATE cxx_std_17)
++    target_link_libraries(skippy-noalloc-graph-planning PRIVATE llama)
++
++    add_executable(skippy-renamed-multishard-planning
++        skippy/tests/renamed_multishard_planning.cpp)
++    target_include_directories(skippy-renamed-multishard-planning PRIVATE .)
++    target_compile_definitions(skippy-renamed-multishard-planning PRIVATE LLAMA_STAGE_BUILD_TESTS)
++    target_compile_features(skippy-renamed-multishard-planning PRIVATE cxx_std_17)
++    target_link_libraries(skippy-renamed-multishard-planning PRIVATE llama)
++    add_dependencies(skippy-noalloc-graph-planning skippy-renamed-multishard-planning)
++
++    add_executable(skippy-stage-plan-header-c
++        skippy/tests/stage_plan_header.c)
++    target_compile_features(skippy-stage-plan-header-c PRIVATE c_std_11)
++    target_include_directories(skippy-stage-plan-header-c PRIVATE ../include ../ggml/include)
++
++    add_executable(skippy-stage-plan-header-cpp
++        skippy/tests/stage_plan_header.cpp)
++    target_compile_features(skippy-stage-plan-header-cpp PRIVATE cxx_std_17)
++    target_include_directories(skippy-stage-plan-header-cpp PRIVATE ../include ../ggml/include)
++
++    add_test(NAME skippy_stage_plan_header_c COMMAND skippy-stage-plan-header-c)
++    add_test(NAME skippy_stage_plan_header_cpp COMMAND skippy-stage-plan-header-cpp)
++
++    add_executable(skippy-stage-slice-plan
++        skippy/tests/stage_slice_plan.cpp)
++    target_include_directories(skippy-stage-slice-plan PRIVATE .)
++    target_compile_features(skippy-stage-slice-plan PRIVATE cxx_std_17)
++    target_link_libraries(skippy-stage-slice-plan PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-stage-plan-header-c skippy-stage-plan-header-cpp)
++
++    add_test(
++        NAME skippy_stage_slice_plan
++        COMMAND skippy-stage-slice-plan)
++
++    add_executable(skippy-graph-build-inputs
++        skippy/tests/graph_build_inputs.cpp)
++    target_include_directories(skippy-graph-build-inputs PRIVATE .)
++    target_compile_features(skippy-graph-build-inputs PRIVATE cxx_std_17)
++    target_link_libraries(skippy-graph-build-inputs PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-graph-build-inputs)
++
++    add_test(
++        NAME skippy_graph_build_inputs
++        COMMAND skippy-graph-build-inputs
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/dream-dense.gguf")
++    set_tests_properties(skippy_graph_build_inputs PROPERTIES
++        FIXTURES_REQUIRED "skippy-model-loader-fixtures;skippy-graph-build-input-fixtures")
++
++    add_test(
++        NAME skippy_generate_graph_build_input_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch dream
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_graph_build_input_fixture PROPERTIES
++        FIXTURES_SETUP skippy-graph-build-input-fixtures)
++
++    add_test(
++        NAME skippy_generate_gemma_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch gemma
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_gemma_fixture PROPERTIES
++        FIXTURES_SETUP skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_generate_qwen3_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen3
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen3_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen3-fixture)
++
++    add_test(
++        NAME skippy_generate_qwen2moe_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen2moe
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen2moe_fixture PROPERTIES
++        FIXTURES_SETUP skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_generate_granite_hybrid_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch granitehybrid
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_granite_hybrid_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_generate_qwen35_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen35
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen35_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen35-fixture)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_qwen35
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen35-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-qwen35"
++            1)
++    set_tests_properties(skippy_renamed_multishard_planning_qwen35 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen35-fixture)
++
++    add_test(
++        NAME skippy_model_loader_accounting_dense
++        COMMAND skippy-model-loader-accounting
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf")
++    set_tests_properties(skippy_model_loader_accounting_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_model_loader_accounting_moe
++        COMMAND skippy-model-loader-accounting
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen2moe-moe.gguf")
++    set_tests_properties(skippy_model_loader_accounting_moe PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_dense
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            0
++            "kv,kv")
++    set_tests_properties(skippy_noalloc_graph_planning_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_qwen3
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen3-dense.gguf"
++            0
++            "kv,kv"
++            0
++            "token-kv")
++    set_tests_properties(skippy_noalloc_graph_planning_qwen3 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen3-fixture)
++
++    add_test(
++        NAME skippy_generate_deepseek4_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch deepseek4
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_deepseek4_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-deepseek4-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_deepseek4_hyperconnection
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/deepseek4-moe.gguf"
++            0
++            "none,none,none,none"
++            0
++            "unchecked"
++            2048)
++    set_tests_properties(skippy_noalloc_graph_planning_deepseek4_hyperconnection PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-deepseek4-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_granite_hybrid
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/granitehybrid-dense.gguf"
++            1
++            "kv,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_granite_hybrid PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_dense
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-gemma"
++            0)
++    set_tests_properties(skippy_renamed_multishard_planning_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_granite_hybrid
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/granitehybrid-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-granite-hybrid"
++            1)
++    set_tests_properties(skippy_renamed_multishard_planning_granite_hybrid PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_generate_nemotron_h_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch nemotron_h
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_nemotron_h_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-nemotron-h-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_recurrent_rollback
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/nemotron_h-dense.gguf"
++            1
++            "kv,recurrent,none"
++            2)
++    set_tests_properties(skippy_noalloc_graph_planning_recurrent_rollback PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-nemotron-h-fixture)
++
++    add_test(
++        NAME skippy_generate_mamba2_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch mamba2
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_mamba2_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-mamba2-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_recurrent_source
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/mamba2-dense.gguf"
++            1
++            "recurrent,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_recurrent_source PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-mamba2-fixture)
++
++    add_test(
++        NAME skippy_generate_mamba_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch mamba
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_mamba_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-mamba-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_mamba_state_ownership
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/mamba-dense.gguf"
++            1
++            "recurrent,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_mamba_state_ownership PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-mamba-fixture)
++endif()
++
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
+     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+     target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
+ endif()
++if (APPLE)
++    find_library(SKIPPY_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
++    target_link_libraries(llama PRIVATE ${SKIPPY_ACCELERATE_FRAMEWORK})
++endif()
 diff --git a/src/skippy/tests/graph_build_inputs.cpp b/src/skippy/tests/graph_build_inputs.cpp
 new file mode 100644
-index 000000000..bfea3d5ca
+index 000000000..b6007e395
 --- /dev/null
 +++ b/src/skippy/tests/graph_build_inputs.cpp
 @@ -0,0 +1,320 @@
@@ -77,10 +408,10 @@ index 000000000..bfea3d5ca
 +    inputs.gemma3n_altup.token_count = id + 7;
 +    inputs.gemma3n_altup.n_embd = id + 8;
 +    inputs.gemma3n_altup.n_altup = id + 9;
-+    inputs.qwen4exp_hc.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 10));
-+    inputs.qwen4exp_hc.token_count = id + 11;
-+    inputs.qwen4exp_hc.n_embd = id + 12;
-+    inputs.qwen4exp_hc.n_hc = id + 13;
++    inputs.hyperconnection.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 10));
++    inputs.hyperconnection.token_count = id + 11;
++    inputs.hyperconnection.n_embd = id + 12;
++    inputs.hyperconnection.n_hc = id + 13;
 +    inputs.glm_dsa_top_k.values = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(id + 14));
 +    inputs.glm_dsa_top_k.token_count = id + 15;
 +    inputs.glm_dsa_top_k.n_top_k = id + 16;
@@ -102,7 +433,7 @@ index 000000000..bfea3d5ca
 +           inputs.activation_tokens.token_count == expected.activation_tokens.token_count &&
 +           inputs.rwkv7_v_first.values == expected.rwkv7_v_first.values &&
 +           inputs.gemma3n_altup.values == expected.gemma3n_altup.values &&
-+           inputs.qwen4exp_hc.values == expected.qwen4exp_hc.values &&
++           inputs.hyperconnection.values == expected.hyperconnection.values &&
 +           inputs.glm_dsa_top_k.values == expected.glm_dsa_top_k.values &&
 +           inputs.mtp_embeddings.values == expected.mtp_embeddings.values;
 +}
@@ -418,15 +749,16 @@ index 000000000..1a1bb0ca5
 +}
 diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
 new file mode 100644
-index 000000000..f46288a22
+index 000000000..70fe2a283
 --- /dev/null
 +++ b/src/skippy/tests/noalloc_graph_planning.cpp
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1066 @@
 +#include "ggml-backend.h"
 +#include "ggml.h"
 +#include "gguf.h"
 +#include "llama-context.h"
 +#include "llama-kv-cache.h"
++#include "llama-kv-cache-dsv4.h"
 +#include "llama-memory-hybrid.h"
 +#include "llama-memory-recurrent.h"
 +#include "llama-model.h"
@@ -531,6 +863,14 @@ index 000000000..f46288a22
 +    }
 +    if (auto * recurrent = dynamic_cast<llama_memory_recurrent *>(memory)) {
 +        return check_recurrent_buffers(recurrent);
++    }
++    if (auto * dsv4 = dynamic_cast<llama_kv_cache_dsv4 *>(memory)) {
++        auto * raw = dsv4->get_raw();
++        return raw != nullptr &&
++               check_kv_buffers(raw->get_swa()) &&
++               check_kv_buffers(dsv4->get_csa()) &&
++               check_kv_buffers(dsv4->get_hca()) &&
++               check_kv_buffers(dsv4->get_lid());
 +    }
 +    if (expect_recurrent) {
 +        std::fprintf(stderr, "fixture did not construct recurrent memory\n");
@@ -696,7 +1036,8 @@ index 000000000..f46288a22
 +        uint32_t n_seqs,
 +        uint32_t n_outputs,
 +        uint32_t n_rs_seq,
-+        request_contract contract) {
++        request_contract contract,
++        uint32_t expected_activation_width) {
 +    std::vector<skippy_parameter_binding> parameters;
 +    std::map<std::string, uint32_t> parameter_ordinals;
 +    for (const auto & [name, tensor] : llama_internal_get_tensor_map(model)) {
@@ -814,6 +1155,30 @@ index 000000000..f46288a22
 +            std::fprintf(stderr, "metadata-only %s layer %d slice has no activation export\n",
 +                    profile_name, layer);
 +            return false;
++        }
++        if (expected_activation_width > 0) {
++            for (const auto * boundary : selection.activation_imports) {
++                if (ggml_nelements(boundary) % n_tokens != 0 ||
++                        ggml_nelements(boundary) / n_tokens != expected_activation_width) {
++                    std::fprintf(stderr,
++                            "metadata-only %s layer %d activation import width is %lld, expected %u\n",
++                            profile_name, layer,
++                            static_cast<long long>(ggml_nelements(boundary) / n_tokens),
++                            expected_activation_width);
++                    return false;
++                }
++            }
++            for (const auto * boundary : selection.activation_exports) {
++                if (ggml_nelements(boundary) % n_tokens != 0 ||
++                        ggml_nelements(boundary) / n_tokens != expected_activation_width) {
++                    std::fprintf(stderr,
++                            "metadata-only %s layer %d activation export width is %lld, expected %u\n",
++                            profile_name, layer,
++                            static_cast<long long>(ggml_nelements(boundary) / n_tokens),
++                            expected_activation_width);
++                    return false;
++                }
++            }
 +        }
 +        for (const auto & effect : graph_result->get_state_effects()) {
 +            if (effect.layer != layer || effect.access != skippy_state_access::write) {
@@ -1106,6 +1471,7 @@ index 000000000..f46288a22
 +        const std::vector<layer_state_class> & layer_classes,
 +        uint32_t n_rs_seq,
 +        request_contract contract,
++        uint32_t expected_activation_width,
 +        graph_profile_result & result) {
 +    llama_context_params context_params = llama_context_default_params();
 +    context_params.n_ctx = 32;
@@ -1195,7 +1561,8 @@ index 000000000..f46288a22
 +                n_seqs,
 +                n_outputs,
 +                n_rs_seq,
-+                contract)) {
++                contract,
++                expected_activation_width)) {
 +        llama_free(context);
 +        return false;
 +    }
@@ -1208,7 +1575,8 @@ index 000000000..f46288a22
 +        bool expect_recurrent,
 +        const std::vector<layer_state_class> & layer_classes,
 +        uint32_t n_rs_seq,
-+        request_contract contract) {
++        request_contract contract,
++        uint32_t expected_activation_width) {
 +    llama_model * model = load_metadata_only_model(model_path);
 +    if (model == nullptr) {
 +        std::fprintf(stderr, "failed to load metadata-only model\n");
@@ -1222,9 +1590,9 @@ index 000000000..f46288a22
 +    graph_profile_result prefill;
 +    graph_profile_result batched;
 +    graph_profile_result decode;
-+    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, contract, prefill) ||
-+            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, contract, batched) ||
-+            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, contract, decode)) {
++    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, contract, expected_activation_width, prefill) ||
++            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, contract, expected_activation_width, batched) ||
++            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, contract, expected_activation_width, decode)) {
 +        llama_model_free(model);
 +        return 3;
 +    }
@@ -1393,7 +1761,12 @@ index 000000000..f46288a22
 +    changed = valid; changed[0].storage = zero; reject("noncanonical storage", changed);
 +    changed = valid; changed.back().effect_node = zero; reject("read event instead of owner", changed);
 +    changed = valid; changed.back().write_ordinal = 0; reject("read has write ordinal", changed);
-+    changed = valid; changed.push_back({kv, rd, 0, other, nullptr}); reject("conflicting kind/layer storage", changed);
++    changed = valid;
++    changed.push_back({kv, rd, 0, other, nullptr});
++    if (!skippy_validate_state_effects(changed, graph, error)) {
++        std::fprintf(stderr, "distinct same-kind state owners rejected: %s\n", error.c_str());
++        ok = false;
++    }
 +    changed = valid;
 +    for (auto & effect : changed) { effect.storage = other; }
 +    reject("wrong declared storage", changed);
@@ -1416,8 +1789,8 @@ index 000000000..f46288a22
 +}
 +
 +int main(int argc, char ** argv) {
-+    if (argc < 4 || argc > 6) {
-+        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ] [REQUEST_CONTRACT]\n", argv[0]);
++    if (argc < 4 || argc > 7) {
++        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ] [REQUEST_CONTRACT] [ACTIVATION_WIDTH]\n", argv[0]);
 +        return 64;
 +    }
 +    if (!check_boundary_validation_rejects()) {
@@ -1433,15 +1806,16 @@ index 000000000..f46288a22
 +    }
 +    const uint32_t n_rs_seq = argc >= 5 ? static_cast<uint32_t>(std::atoi(argv[4])) : 0;
 +    request_contract contract = request_contract::unchecked;
-+    if (argc == 6) {
-+        if (std::string(argv[5]) != "token-kv") {
++    if (argc >= 6) {
++        if (std::string(argv[5]) != "token-kv" && std::string(argv[5]) != "unchecked") {
 +            std::fprintf(stderr, "invalid request contract: %s\n", argv[5]);
 +            return 64;
 +        }
-+        contract = request_contract::token_kv;
++        contract = std::string(argv[5]) == "token-kv" ? request_contract::token_kv : request_contract::unchecked;
 +    }
++    const uint32_t expected_activation_width = argc == 7 ? static_cast<uint32_t>(std::atoi(argv[6])) : 0;
 +    llama_backend_init();
-+    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq, contract);
++    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq, contract, expected_activation_width);
 +    llama_backend_free();
 +    return result;
 +}
@@ -3410,6 +3784,3 @@ index 000000000..380cf4976
 +    if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
 +    return result;
 +}
--- 
-2.54.0 (Apple Git-157)
-

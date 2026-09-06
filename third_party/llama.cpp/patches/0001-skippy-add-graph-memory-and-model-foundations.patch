@@ -5373,6 +5373,3 @@ index 000000000..8793000c1
 +    checkpoints.erase(it);
 +    return true;
 +}
--- 
-2.54.0 (Apple Git-157)
-

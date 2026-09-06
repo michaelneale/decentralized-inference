@@ -1,0 +1,438 @@
+{
+  "full_patch_sha256": "eea0c4da04910b7661a0ad6c6d31883617d2c7c3be0d43be7ac59c905770469e",
+  "generator_version": "0.3.0",
+  "schema_version": 1,
+  "shards": [
+    {
+      "families": [
+        "cohere2"
+      ],
+      "file": "0001-family-cohere2.patch",
+      "sha256": "65953a59d2da21810f7a8337359f06e8e7cb7f9e9194008980cdb9f9903b1de9",
+      "sources": [
+        "src/models/cohere2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "deepseek2"
+      ],
+      "file": "0002-family-deepseek2.patch",
+      "sha256": "0bbbaaf72d4229bb42a99976cc635ce9d080bd067bafe836b84df4b76735ef74",
+      "sources": [
+        "src/models/deepseek2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "falcon-dense"
+      ],
+      "file": "0003-family-falcon-dense.patch",
+      "sha256": "9eaba30d161ffe5e9e4a788b031e856941116df108620f9d798faec4e36ac926",
+      "sources": [
+        "src/models/falcon.cpp"
+      ]
+    },
+    {
+      "families": [
+        "falcon-h1"
+      ],
+      "file": "0004-family-falcon-h1.patch",
+      "sha256": "c4d126d2e2af6f739341d4784a68c1c0c1e20d91a4d362371ee3749cffc7f79c",
+      "sources": [
+        "src/models/falcon-h1.cpp"
+      ]
+    },
+    {
+      "families": [
+        "gemma2"
+      ],
+      "file": "0005-family-gemma2.patch",
+      "sha256": "6a9712b12edf4718e82823520621456bb7836a85cd1b35b61b687f191fa83266",
+      "sources": [
+        "src/models/gemma2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm4"
+      ],
+      "file": "0006-family-glm4.patch",
+      "sha256": "69c424862f0a9eeb9bdcd95caedaa3eff6db6042179853b26e33bd099500789d",
+      "sources": [
+        "src/models/glm4.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm45-air",
+        "glm47-flash"
+      ],
+      "file": "0007-family-glm45-air--glm47-flash.patch",
+      "sha256": "8c25797b916422ac206d98e70ed601172d03548d4209d7dd45671d57181d6d8b",
+      "sources": [
+        "src/models/glm4-moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm47-flash",
+        "qwen4exp"
+      ],
+      "file": "0008-family-glm47-flash--qwen4exp.patch",
+      "sha256": "c56887a61dfe4371ac0f1db454cc4cebe0b5c80a73ad6cc1dab35425554fc4c6",
+      "sources": [
+        "src/models/glm-dsa.cpp"
+      ]
+    },
+    {
+      "families": [
+        "gpt-oss"
+      ],
+      "file": "0009-family-gpt-oss.patch",
+      "sha256": "246a1dbf91e950bb17dde2cf31bef4310c6fc6989c6adfa5001d90d3ed9c9bf1",
+      "sources": [
+        "src/models/openai-moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "granite-dense"
+      ],
+      "file": "0010-family-granite-dense.patch",
+      "sha256": "dcd2b180f0ccfd6ae37911c2dd656b3eb8a25d51050a073a819a4bcd8c6af89f",
+      "sources": [
+        "src/models/granite.cpp"
+      ]
+    },
+    {
+      "families": [
+        "granite-hybrid"
+      ],
+      "file": "0011-family-granite-hybrid.patch",
+      "sha256": "6eaa881b446c42edaaa3a75a51ff03b0284bbad05eda36f53e66065a56781aaf",
+      "sources": [
+        "src/models/granite-hybrid.cpp"
+      ]
+    },
+    {
+      "families": [
+        "internlm2"
+      ],
+      "file": "0012-family-internlm2.patch",
+      "sha256": "dead0c00880f7c09b7fd76631cd6478b65a652da3daea4394ea7a6e7fa0fb4a1",
+      "sources": [
+        "src/models/internlm2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "jamba2"
+      ],
+      "file": "0013-family-jamba2.patch",
+      "sha256": "965e263b32fd26c0e752b921283321abd68e82462fd2961d82d1e53688113800",
+      "sources": [
+        "src/models/jamba.cpp"
+      ]
+    },
+    {
+      "families": [
+        "kimi-linear"
+      ],
+      "file": "0014-family-kimi-linear.patch",
+      "sha256": "d5cfdee171c1a784b4c596925fb5365213f99ae705959083b433f3ee2424ffff",
+      "sources": [
+        "src/models/kimi-linear.cpp"
+      ]
+    },
+    {
+      "families": [
+        "laguna"
+      ],
+      "file": "0015-family-laguna.patch",
+      "sha256": "8591b83d2dbee60ee743b640b8e1ae878afc1f9f90e3edf9731f7cac88d7462a",
+      "sources": [
+        "src/models/laguna.cpp"
+      ]
+    },
+    {
+      "families": [
+        "lfm2",
+        "lfm2-vl"
+      ],
+      "file": "0016-family-lfm2--lfm2-vl.patch",
+      "sha256": "8df768f910d9921936bec0e1fee6122001e2b4d1fb9941e6820028b73f150b3d",
+      "sources": [
+        "src/models/lfm2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "llama"
+      ],
+      "file": "0017-family-llama.patch",
+      "sha256": "3cc5af6044ee214e41cc1d07eb02e00369394e4607eb27547612889c2a906ce5",
+      "sources": [
+        "src/models/llama.cpp",
+        "src/models/olmo2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "mamba",
+        "mamba2"
+      ],
+      "file": "0018-family-mamba--mamba2.patch",
+      "sha256": "c4d5503a88fcb04399cc376db6686063d804137daa21199bc1602dcc807a1438",
+      "sources": [
+        "src/models/mamba-base.cpp",
+        "src/models/mamba.cpp"
+      ]
+    },
+    {
+      "families": [
+        "mistral-small"
+      ],
+      "file": "0019-family-mistral-small.patch",
+      "sha256": "452f7cf09e22beca5aa215ac64a485fe4d8e75674e1f1678f52409201853d929",
+      "sources": [
+        "src/models/mistral3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "nemotron"
+      ],
+      "file": "0020-family-nemotron.patch",
+      "sha256": "084eb511dc7df114403d571354da707964b901ffd491cfcb05bce23abe4ea29c",
+      "sources": [
+        "src/models/nemotron-h-moe.cpp",
+        "src/models/nemotron-h.cpp"
+      ]
+    },
+    {
+      "families": [
+        "phi3",
+        "phi4"
+      ],
+      "file": "0021-family-phi3--phi4.patch",
+      "sha256": "c57db786802f859a0a7251a7ddb0f8149bffb2a7718df254326d413054072ff6",
+      "sources": [
+        "src/models/phi3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen2-moe"
+      ],
+      "file": "0022-family-qwen2-moe.patch",
+      "sha256": "d9d7e955ec1f3fea6a707caf0ec46c7e06258d65285ea522081879e3acb714c3",
+      "sources": [
+        "src/models/qwen2moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen2-vl"
+      ],
+      "file": "0023-family-qwen2-vl.patch",
+      "sha256": "c7de0af09e1e7184f0321e103391908eb01caf4a4ac8a429b856904123da83b6",
+      "sources": [
+        "src/models/qwen2vl.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-dense"
+      ],
+      "file": "0024-family-qwen3-dense.patch",
+      "sha256": "eacc5c28f80a66d56cec4162bdf38d835da1f266d2273a2c10bb76f571812e67",
+      "sources": [
+        "src/models/qwen3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-moe"
+      ],
+      "file": "0025-family-qwen3-moe.patch",
+      "sha256": "9070242d8b2509849ebe7b73d2a993c4859cc513567d7fce176a94f0e03fc743",
+      "sources": [
+        "src/models/qwen3moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-next"
+      ],
+      "file": "0026-family-qwen3-next.patch",
+      "sha256": "2f44c8cbe84bda7603331ba3592c64f7f69667589e06df8a7e434ec2c786063a",
+      "sources": [
+        "src/models/qwen3next.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-vl"
+      ],
+      "file": "0027-family-qwen3-vl.patch",
+      "sha256": "4fe270914a00fbbb99bc7763022735c58821719784c6dc6178a99a8fba0a1e5c",
+      "sources": [
+        "src/models/qwen3vl.cpp",
+        "src/models/qwen3vlmoe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen35"
+      ],
+      "file": "0028-family-qwen35.patch",
+      "sha256": "a689ca22da54d2975f9a576044e79339ada793075890a54b9b4d8acc8e145708",
+      "sources": [
+        "src/models/qwen35.cpp",
+        "src/models/qwen35moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen4exp"
+      ],
+      "file": "0029-family-qwen4exp.patch",
+      "sha256": "960559e043b116ca89d2a8fbc70eb7187efdb13a2a55932f297f7b4d3bdeda3e",
+      "sources": [
+        "src/models/qwen4exp.cpp"
+      ]
+    },
+    {
+      "families": [
+        "rwkv6"
+      ],
+      "file": "0030-family-rwkv6.patch",
+      "sha256": "0da3a4b6aace2cad5de6fedbc1344ce5e0979b7a8304666c4702951160d19a0c",
+      "sources": [
+        "src/models/rwkv6.cpp",
+        "src/models/rwkv6qwen2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "rwkv7"
+      ],
+      "file": "0031-family-rwkv7.patch",
+      "sha256": "b612ca9e32429fd2bb06802d979167635bbeb111891e50879f244dc02f452062",
+      "sources": [
+        "src/models/arwkv7.cpp",
+        "src/models/rwkv7.cpp"
+      ]
+    },
+    {
+      "families": [
+        "smollm3"
+      ],
+      "file": "0032-family-smollm3.patch",
+      "sha256": "1b77df65e74a1be956592482960698a3895c4993b4b77d813e28bc92b047ca79",
+      "sources": [
+        "src/models/smollm3.cpp"
+      ]
+    },
+    {
+      "families": [],
+      "file": "0033-family-unmapped.patch",
+      "sha256": "fbad5fffde611e52d4d06bb6e3b7063f797dfc9791ab1ce10046e92f99307f34",
+      "sources": [
+        "src/models/afmoe.cpp",
+        "src/models/apertus.cpp",
+        "src/models/arcee.cpp",
+        "src/models/arctic.cpp",
+        "src/models/baichuan.cpp",
+        "src/models/bailingmoe.cpp",
+        "src/models/bailingmoe2.cpp",
+        "src/models/bailingmoe3.cpp",
+        "src/models/bert.cpp",
+        "src/models/bitnet.cpp",
+        "src/models/bloom.cpp",
+        "src/models/chameleon.cpp",
+        "src/models/chatglm.cpp",
+        "src/models/codeshell.cpp",
+        "src/models/cogvlm.cpp",
+        "src/models/cohere2moe.cpp",
+        "src/models/command-r.cpp",
+        "src/models/dbrx.cpp",
+        "src/models/deci.cpp",
+        "src/models/deepseek.cpp",
+        "src/models/deepseek32.cpp",
+        "src/models/deepseek4.cpp",
+        "src/models/delta-net-base.cpp",
+        "src/models/dots1.cpp",
+        "src/models/dots3note.cpp",
+        "src/models/dream.cpp",
+        "src/models/ernie4-5-moe.cpp",
+        "src/models/ernie4-5.cpp",
+        "src/models/eurobert.cpp",
+        "src/models/exaone-moe.cpp",
+        "src/models/exaone.cpp",
+        "src/models/exaone4.cpp",
+        "src/models/gemma-embedding.cpp",
+        "src/models/gemma.cpp",
+        "src/models/gemma3.cpp",
+        "src/models/gemma3n.cpp",
+        "src/models/gemma4.cpp",
+        "src/models/gpt2.cpp",
+        "src/models/gptneox.cpp",
+        "src/models/granite-swa.cpp",
+        "src/models/granite-switch.cpp",
+        "src/models/grok.cpp",
+        "src/models/grovemoe.cpp",
+        "src/models/hunyuan-moe.cpp",
+        "src/models/hunyuan-vl.cpp",
+        "src/models/hy-v3.cpp",
+        "src/models/inkling.cpp",
+        "src/models/jais.cpp",
+        "src/models/jais2.cpp",
+        "src/models/kimi-k3.cpp",
+        "src/models/llada-moe.cpp",
+        "src/models/llada.cpp",
+        "src/models/llama4.cpp",
+        "src/models/maincoder.cpp",
+        "src/models/mellum.cpp",
+        "src/models/mimo2.cpp",
+        "src/models/minicpm3.cpp",
+        "src/models/minimax-01.cpp",
+        "src/models/minimax-m2.cpp",
+        "src/models/minimax-m3.cpp",
+        "src/models/models.h",
+        "src/models/modern-bert.cpp",
+        "src/models/mpt.cpp",
+        "src/models/muse-glimmer.cpp",
+        "src/models/nanbeige.cpp",
+        "src/models/nemotron.cpp",
+        "src/models/neo-bert.cpp",
+        "src/models/olmo.cpp",
+        "src/models/olmoe.cpp",
+        "src/models/openelm.cpp",
+        "src/models/orion.cpp",
+        "src/models/paddleocr.cpp",
+        "src/models/pangu-embed.cpp",
+        "src/models/phi2.cpp",
+        "src/models/plamo.cpp",
+        "src/models/plamo2.cpp",
+        "src/models/plamo3.cpp",
+        "src/models/plm.cpp",
+        "src/models/pockettts.cpp",
+        "src/models/qwen.cpp",
+        "src/models/qwen2.cpp",
+        "src/models/refact.cpp",
+        "src/models/rnd1.cpp",
+        "src/models/seed-oss.cpp",
+        "src/models/smallthinker.cpp",
+        "src/models/stablelm.cpp",
+        "src/models/starcoder.cpp",
+        "src/models/starcoder2.cpp",
+        "src/models/step35.cpp",
+        "src/models/t5.cpp",
+        "src/models/talkie.cpp",
+        "src/models/xverse.cpp"
+      ]
+    }
+  ]
+}

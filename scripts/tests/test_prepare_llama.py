@@ -246,7 +246,7 @@ class PrepareLlamaTests(unittest.TestCase):
                     (workdir / ".mesh-llm-prepare-schema")
                     .read_text(encoding="utf-8")
                     .strip(),
-                    "3",
+                    "4",
                 )
                 self.assertFalse(hook_marker.exists())
 

@@ -23,8 +23,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 0
-VERDICTS = {"transformable", "already_transformed", "unsupported_shape", "error"}
+SCHEMA_VERSION = 1
+VERDICTS = {
+    "transformable",
+    "already_transformed",
+    "supported_auxiliary",
+    "supported_whole_model",
+    "unsupported_shape",
+    "error",
+}
 # Proof fields required for every transformable builder. The enforcement
 # matrix hangs off these; a missing field is a contract violation, not a
 # soft warning.
@@ -36,6 +43,8 @@ REQUIRED_PROOF_FIELDS = (
     "output_owner",
     "terminal_predicates",
     "nonlocal_exits",
+    "execution_scope",
+    "scope_evidence",
 )
 
 
@@ -103,12 +112,31 @@ def validate_report(report: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"{label}: unsupported_shape without unsupported_reason"
                 )
-        elif verdict == "already_transformed":
+        elif verdict in {
+            "already_transformed",
+            "supported_auxiliary",
+            "supported_whole_model",
+        }:
             edits = builder.get("edits")
             if edits:
                 errors.append(
-                    f"{label}: already_transformed must carry no edits"
+                    f"{label}: {verdict} must carry no edits"
                 )
+            if verdict.startswith("supported_"):
+                proof = builder.get("proof")
+                expected_scope = {
+                    "supported_auxiliary": "final_stage_sidecar",
+                    "supported_whole_model": "multiple_sequential_layer_domains",
+                }[verdict]
+                if not isinstance(proof, dict):
+                    errors.append(f"{label}: {verdict} without proof block")
+                elif proof.get("execution_scope") != expected_scope:
+                    errors.append(
+                        f"{label}: {verdict} requires execution_scope "
+                        f"{expected_scope!r}"
+                    )
+                elif not proof.get("scope_evidence"):
+                    errors.append(f"{label}: {verdict} without scope evidence")
         else:  # error
             errors.append(f"{label}: error verdict present in report")
 

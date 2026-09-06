@@ -1,15 +1,17 @@
-From 22169a89cd18bb03066bcccc2423f526995f726e Mon Sep 17 00:00:00 2001
+From 26d0422f05926f785591a894c46ed2758bb8f33c Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:03 +1000
 Subject: [PATCH 04/11] skippy: implement staged execution and state runtime
 
 ---
- src/skippy/activation.cpp           | 1054 ++++++++++++++++++++++++++
- src/skippy/activation_internal.h    |   93 +++
- src/skippy/activation_layout.cpp    |  431 +++++++++++
+ src/llama-graph.cpp                 |   44 +-
+ src/llama-graph.h                   |   13 +-
+ src/skippy/activation.cpp           | 1050 ++++++++++++++++++++++++++
+ src/skippy/activation_internal.h    |   94 +++
+ src/skippy/activation_layout.cpp    |  449 +++++++++++
  src/skippy/environment.h            |   49 ++
  src/skippy/errors.h                 |   44 ++
- src/skippy/execution-batch.cpp      |  723 ++++++++++++++++++
+ src/skippy/execution-batch.cpp      |  717 ++++++++++++++++++
  src/skippy/execution-single.cpp     |  612 +++++++++++++++
  src/skippy/execution_internal.h     |   20 +
  src/skippy/sampling.cpp             |  961 +++++++++++++++++++++++
@@ -19,7 +21,7 @@ Subject: [PATCH 04/11] skippy: implement staged execution and state runtime
  src/skippy/speculative_internal.h   |   28 +
  src/skippy/state.cpp                | 1089 +++++++++++++++++++++++++++
  src/skippy/tokenization.cpp         |  179 +++++
- 15 files changed, 6354 insertions(+)
+ 17 files changed, 6406 insertions(+), 14 deletions(-)
  create mode 100644 src/skippy/activation.cpp
  create mode 100644 src/skippy/activation_internal.h
  create mode 100644 src/skippy/activation_layout.cpp
@@ -36,12 +38,150 @@ Subject: [PATCH 04/11] skippy: implement staged execution and state runtime
  create mode 100644 src/skippy/state.cpp
  create mode 100644 src/skippy/tokenization.cpp
 
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index a9ef9d1d0..c2953aac3 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -46,10 +46,10 @@ bool skippy_graph_build_inputs::topology_equal(const skippy_graph_build_inputs &
+            gemma3n_altup.token_count == other.gemma3n_altup.token_count &&
+            gemma3n_altup.n_embd == other.gemma3n_altup.n_embd &&
+            gemma3n_altup.n_altup == other.gemma3n_altup.n_altup &&
+-           (qwen4exp_hc.values != nullptr) == (other.qwen4exp_hc.values != nullptr) &&
+-           qwen4exp_hc.token_count == other.qwen4exp_hc.token_count &&
+-           qwen4exp_hc.n_embd == other.qwen4exp_hc.n_embd &&
+-           qwen4exp_hc.n_hc == other.qwen4exp_hc.n_hc &&
++           (hyperconnection.values != nullptr) == (other.hyperconnection.values != nullptr) &&
++           hyperconnection.token_count == other.hyperconnection.token_count &&
++           hyperconnection.n_embd == other.hyperconnection.n_embd &&
++           hyperconnection.n_hc == other.hyperconnection.n_hc &&
+            (glm_dsa_top_k.values != nullptr) == (other.glm_dsa_top_k.values != nullptr) &&
+            glm_dsa_top_k.token_count == other.glm_dsa_top_k.token_count &&
+            glm_dsa_top_k.n_top_k == other.glm_dsa_top_k.n_top_k &&
+@@ -173,7 +173,7 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
+     return res;
+ }
+ 
+-void llm_graph_input_qwen4exp_hc::set_input(const llama_ubatch * ubatch) {
++void llm_graph_input_hyperconnection::set_input(const llama_ubatch * ubatch) {
+     GGML_ASSERT(sideband.values != nullptr);
+     GGML_ASSERT(sideband.token_count == ubatch->n_tokens);
+     GGML_ASSERT(sideband.n_embd == n_embd);
+@@ -186,11 +186,11 @@ void llm_graph_input_qwen4exp_hc::set_input(const llama_ubatch * ubatch) {
+             sideband.token_count*n_embd*n_hc*ggml_element_size(values));
+ }
+ 
+-void llm_graph_input_qwen4exp_hc::set_build_inputs(const skippy_graph_build_inputs & inputs) {
+-    sideband = inputs.qwen4exp_hc;
++void llm_graph_input_hyperconnection::set_build_inputs(const skippy_graph_build_inputs & inputs) {
++    sideband = inputs.hyperconnection;
+ }
+ 
+-bool llm_graph_input_qwen4exp_hc::can_reuse(const llm_graph_params & params) {
++bool llm_graph_input_hyperconnection::can_reuse(const llm_graph_params & params) {
+     return values &&
+            values->ne[0] == n_embd &&
+            values->ne[1] == n_hc &&
+@@ -1775,6 +1775,32 @@ void llm_graph_context::request_inputs(llm_graph_input_rs * input) const {
+     request_input(input->s_copy, "recurrent.copy_indices");
+ }
+ 
++void llm_graph_context::request_inputs(llm_graph_input_dsv4 * input) const {
++    const auto register_comp = [&](const llm_graph_input_dsv4::comp_input & comp, const char * plane) {
++        const std::string prefix = std::string("dsv4.") + plane + ".";
++        request_input(comp.state_pos, (prefix + "state_positions").c_str());
++        request_input(comp.state_persist_src_idxs, (prefix + "persist_source_indices").c_str());
++        request_input(comp.state_persist_dst_idxs, (prefix + "persist_destination_indices").c_str());
++        request_input(comp.state_restore_src_idxs, (prefix + "restore_source_indices").c_str());
++        request_input(comp.state_restore_dst_idxs, (prefix + "restore_destination_indices").c_str());
++        request_input(comp.state_snapshot_src_idxs, (prefix + "snapshot_source_indices").c_str());
++        request_input(comp.state_snapshot_dst_idxs, (prefix + "snapshot_destination_indices").c_str());
++        request_input(comp.state_read_idxs, (prefix + "read_indices").c_str());
++        request_input(comp.state_write_idxs, (prefix + "write_indices").c_str());
++        request_input(comp.state_write_pos, (prefix + "write_positions").c_str());
++        request_input(comp.kq_mask, (prefix + "attention_mask").c_str());
++        request_input(comp.k_rot, (prefix + "key_rotation").c_str());
++    };
++
++    auto * raw = input->get_raw();
++    request_input(raw->self_k_idxs, "dsv4.raw.key_indices");
++    request_input(raw->self_kq_mask, "dsv4.raw.attention_mask");
++    request_input(raw->self_k_rot, "dsv4.raw.key_rotation");
++    register_comp(input->get_csa(), "csa");
++    register_comp(input->get_hca(), "hca");
++    register_comp(input->get_lid(), "lid");
++}
++
+ 
+ 
+ ggml_tensor * llm_graph_context::build_cvec(
+@@ -3738,6 +3764,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
+     inp->inp_hca.k_rot = mctx_cur->get_hca()->build_input_k_rot(ctx0);
+     inp->inp_lid.k_rot = mctx_cur->get_lid()->build_input_k_rot(ctx0);
+ 
++    request_inputs(inp.get());
++
+     return (llm_graph_input_dsv4 *) res->add_input(std::move(inp));
+ }
+ 
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 368c4798c..97fb5ac86 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -76,7 +76,7 @@ struct skippy_activation_gemma3n_altup {
+     uint32_t n_altup = 0;
+ };
+ 
+-struct skippy_activation_qwen4exp_hc {
++struct skippy_activation_hyperconnection {
+     const float * values = nullptr;
+     uint32_t token_count = 0;
+     uint32_t n_embd = 0;
+@@ -103,7 +103,7 @@ struct skippy_graph_build_inputs {
+     skippy_activation_tokens activation_tokens;
+     skippy_activation_rwkv7_v_first rwkv7_v_first;
+     skippy_activation_gemma3n_altup gemma3n_altup;
+-    skippy_activation_qwen4exp_hc qwen4exp_hc;
++    skippy_activation_hyperconnection hyperconnection;
+     skippy_activation_glm_dsa_top_k glm_dsa_top_k;
+     skippy_activation_mtp_embeddings mtp_embeddings;
+ 
+@@ -242,10 +242,10 @@ private:
+     skippy_activation_mtp_embeddings mtp_embeddings;
+ };
+ 
+-class llm_graph_input_qwen4exp_hc : public llm_graph_input_i {
++class llm_graph_input_hyperconnection : public llm_graph_input_i {
+ public:
+-    llm_graph_input_qwen4exp_hc(int64_t n_embd, int64_t n_hc) : n_embd(n_embd), n_hc(n_hc) {}
+-    virtual ~llm_graph_input_qwen4exp_hc() = default;
++    llm_graph_input_hyperconnection(int64_t n_embd, int64_t n_hc) : n_embd(n_embd), n_hc(n_hc) {}
++    virtual ~llm_graph_input_hyperconnection() = default;
+ 
+     void set_input(const llama_ubatch * ubatch) override;
+ 
+@@ -259,7 +259,7 @@ public:
+     const int64_t n_hc;
+ 
+ private:
+-    skippy_activation_qwen4exp_hc sideband;
++    skippy_activation_hyperconnection sideband;
+ };
+ 
+ class llm_graph_input_stage_tokens : public llm_graph_input_i {
+@@ -1271,6 +1271,7 @@ struct llm_graph_context {
+     void request_inputs(llm_graph_input_attn_kv * input) const;
+     void request_inputs(llm_graph_input_attn_k * input) const;
+     void request_inputs(llm_graph_input_rs * input) const;
++    void request_inputs(llm_graph_input_dsv4 * input) const;
+ 
+     //
+     // common
 diff --git a/src/skippy/activation.cpp b/src/skippy/activation.cpp
 new file mode 100644
-index 000000000..3df7204be
+index 000000000..a9f495a00
 --- /dev/null
 +++ b/src/skippy/activation.cpp
-@@ -0,0 +1,1054 @@
+@@ -0,0 +1,1050 @@
 +#include "skippy.h"
 +#include "skippy/activation_internal.h"
 +#include "skippy/graph_build_inputs.h"
@@ -672,7 +812,8 @@ index 000000000..3df7204be
 +    const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
 +    const bool token_ids_required =
 +            (skippy_activation_required_sidebands(session->stage_model) & SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS) != 0;
-+    const bool qwen4exp_activation_input = session->stage_model->model->arch == LLM_ARCH_QWEN4EXP;
++    const int32_t hyperconnection_count = skippy_activation_hyperconnection_count(session);
++    const bool hyperconnection_activation_input = hyperconnection_count > 0;
 +    if (token_ids_required && token_ids == nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation boundary requires token-id sideband");
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
@@ -714,7 +855,7 @@ index 000000000..3df7204be
 +        }
 +    } else {
 +        const float * input = static_cast<const float *>(input_payload);
-+        const size_t input_row_width = qwen4exp_activation_input
++        const size_t input_row_width = hyperconnection_activation_input
 +            ? static_cast<size_t>(llama_model_n_embd_out(session->stage_model->model))
 +            : static_cast<size_t>(n_embd);
 +        for (int32_t i = 0; i < n_tokens; ++i) {
@@ -747,7 +888,7 @@ index 000000000..3df7204be
 +
 +    llama_batch batch = {
 +        /*n_tokens =*/ n_tokens,
-+        /*token    =*/ qwen4exp_activation_input ? const_cast<llama_token *>(token_ids) : nullptr,
++        /*token    =*/ token_ids_required ? const_cast<llama_token *>(token_ids) : nullptr,
 +        /*embd     =*/ embd_storage.data(),
 +        /*pos      =*/ pos_storage.data(),
 +        /*n_seq_id =*/ n_seq_id_storage.data(),
@@ -757,15 +898,12 @@ index 000000000..3df7204be
 +
 +    skippy_graph_build_inputs graph_build_inputs;
 +    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, token_count);
-+    const int32_t qwen4exp_hc = qwen4exp_activation_input
-+        ? static_cast<int32_t>(session->stage_model->model->hparams.dsv4_hc_mult)
-+        : 0;
-+    skippy_graph_build_inputs_set_qwen4exp_hc(
++    skippy_graph_build_inputs_set_hyperconnection(
 +            graph_build_inputs,
-+            qwen4exp_activation_input ? input_payload : nullptr,
++            hyperconnection_activation_input ? input_payload : nullptr,
 +            static_cast<uint32_t>(token_count),
 +            n_embd,
-+            qwen4exp_hc);
++            hyperconnection_count);
 +    skippy_graph_build_inputs_set_rwkv7_v_first(graph_build_inputs, input_desc, input_payload, hidden_bytes, n_embd);
 +    skippy_graph_build_inputs_set_gemma3n_altup(graph_build_inputs, input_desc, input_payload, n_embd, n_altup);
 +    const llama_pos token_start = pos_storage.empty() ? session->n_past : pos_storage[0];
@@ -817,7 +955,8 @@ index 000000000..3df7204be
 +    const int32_t n_embd = llama_model_n_embd(session->stage_model->model);
 +    const bool token_ids_required =
 +            (skippy_activation_required_sidebands(session->stage_model) & SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS) != 0;
-+    const bool qwen4exp_activation_input = session->stage_model->model->arch == LLM_ARCH_QWEN4EXP;
++    const int32_t hyperconnection_count = skippy_activation_hyperconnection_count(session);
++    const bool hyperconnection_activation_input = hyperconnection_count > 0;
 +    if (token_ids_required && token_ids == nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "activation verification requires token-id sideband");
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
@@ -840,7 +979,7 @@ index 000000000..3df7204be
 +        logits_storage.resize(n_tokens, 1);
 +        batch = {
 +            /*n_tokens =*/ n_tokens,
-+            /*token    =*/ qwen4exp_activation_input ? const_cast<llama_token *>(token_ids) : nullptr,
++            /*token    =*/ token_ids_required ? const_cast<llama_token *>(token_ids) : nullptr,
 +            /*embd     =*/ const_cast<float *>(static_cast<const float *>(input_payload)),
 +            /*pos      =*/ pos_storage.data(),
 +            /*n_seq_id =*/ n_seq_id_storage.data(),
@@ -851,7 +990,7 @@ index 000000000..3df7204be
 +        batch = llama_batch_init(n_tokens, n_embd, 1);
 +        const size_t batch_embd_bytes = static_cast<size_t>(n_tokens)*n_embd*sizeof(float);
 +        std::memcpy(batch.embd, input_payload, std::min(hidden_bytes, batch_embd_bytes));
-+        if (qwen4exp_activation_input) {
++        if (token_ids_required) {
 +            batch.token = const_cast<llama_token *>(token_ids);
 +        }
 +    }
@@ -866,15 +1005,12 @@ index 000000000..3df7204be
 +
 +    skippy_graph_build_inputs graph_build_inputs;
 +    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, token_count);
-+    const int32_t qwen4exp_hc = qwen4exp_activation_input
-+        ? static_cast<int32_t>(session->stage_model->model->hparams.dsv4_hc_mult)
-+        : 0;
-+    skippy_graph_build_inputs_set_qwen4exp_hc(
++    skippy_graph_build_inputs_set_hyperconnection(
 +            graph_build_inputs,
-+            qwen4exp_activation_input ? input_payload : nullptr,
++            hyperconnection_activation_input ? input_payload : nullptr,
 +            static_cast<uint32_t>(token_count),
 +            n_embd,
-+            qwen4exp_hc);
++            hyperconnection_count);
 +    skippy_graph_build_inputs_set_rwkv7_v_first(graph_build_inputs, input_desc, input_payload, hidden_bytes, n_embd);
 +    skippy_graph_build_inputs_set_gemma3n_altup(graph_build_inputs, input_desc, input_payload, n_embd, n_altup);
 +    const llama_pos token_start = session->n_past;
@@ -1098,10 +1234,10 @@ index 000000000..3df7204be
 +}
 diff --git a/src/skippy/activation_internal.h b/src/skippy/activation_internal.h
 new file mode 100644
-index 000000000..6eb4a66d5
+index 000000000..1bebb87e1
 --- /dev/null
 +++ b/src/skippy/activation_internal.h
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,94 @@
 +#pragma once
 +
 +#include "skippy/activation.h"
@@ -1122,6 +1258,7 @@ index 000000000..6eb4a66d5
 +bool skippy_glm_dsa_stage_starts_in_consumer_group(const skippy_session * session);
 +bool skippy_is_inkling_activation_model(const skippy_session * session);
 +size_t skippy_activation_hidden_bytes(const skippy_session * session, size_t token_count);
++int32_t skippy_activation_hyperconnection_count(const skippy_session * session);
 +uint32_t skippy_glm_dsa_sideband_top_k_count_for_n_kv(
 +        const skippy_session * session,
 +        uint64_t n_kv);
@@ -1197,10 +1334,10 @@ index 000000000..6eb4a66d5
 +        skippy_error ** out_error);
 diff --git a/src/skippy/activation_layout.cpp b/src/skippy/activation_layout.cpp
 new file mode 100644
-index 000000000..ceabdab46
+index 000000000..8d60b6087
 --- /dev/null
 +++ b/src/skippy/activation_layout.cpp
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,449 @@
 +#include "skippy.h"
 +#include "skippy/activation_internal.h"
 +#include "skippy/errors.h"
@@ -1417,10 +1554,28 @@ index 000000000..ceabdab46
 +    }
 +
 +    const llama_model * model = session->stage_model->model;
-+    const size_t activation_width = model->arch == LLM_ARCH_QWEN4EXP ?
-+            static_cast<size_t>(llama_model_n_embd_out(model)) :
++    const int32_t hyperconnection_count = skippy_activation_hyperconnection_count(session);
++    const size_t activation_width = hyperconnection_count > 0 ?
++            static_cast<size_t>(llama_model_n_embd(model)) * static_cast<size_t>(hyperconnection_count) :
 +            static_cast<size_t>(llama_model_n_embd(model));
 +    return token_count * activation_width * sizeof(float);
++}
++
++int32_t skippy_activation_hyperconnection_count(const skippy_session * session) {
++    if (session == nullptr || session->stage_model == nullptr || session->stage_model->model == nullptr) {
++        return 0;
++    }
++    const llama_model * model = session->stage_model->model;
++    const uint32_t count = model->hparams.dsv4_hc_mult;
++    if (count == 0) {
++        return 0;
++    }
++    const int32_t n_embd = llama_model_n_embd(model);
++    const int32_t n_embd_out = llama_model_n_embd_out(model);
++    if (n_embd <= 0 || n_embd_out != n_embd * static_cast<int64_t>(count)) {
++        return 0;
++    }
++    return static_cast<int32_t>(count);
 +}
 +
 +static uint32_t skippy_glm_dsa_top_k_count_for_n_kv(const skippy_session * session, uint64_t n_kv) {
@@ -1739,10 +1894,10 @@ index 000000000..e3e7cb38d
 +}
 diff --git a/src/skippy/execution-batch.cpp b/src/skippy/execution-batch.cpp
 new file mode 100644
-index 000000000..e6a7a1c79
+index 000000000..b66e25499
 --- /dev/null
 +++ b/src/skippy/execution-batch.cpp
-@@ -0,0 +1,723 @@
+@@ -0,0 +1,717 @@
 +#include "skippy.h"
 +#include "skippy/activation_internal.h"
 +#include "skippy/graph_build_inputs.h"
@@ -1806,13 +1961,10 @@ index 000000000..e6a7a1c79
 +    }
 +
 +    const bool activation_input = skippy_is_filtered(first) && first->stage_model->config.layer_start > 0;
-+    const bool qwen4exp_activation_input =
-+            activation_input && first->stage_model->model->arch == LLM_ARCH_QWEN4EXP;
-+    const int32_t qwen4exp_hc = qwen4exp_activation_input
-+        ? static_cast<int32_t>(first->stage_model->model->hparams.dsv4_hc_mult)
-+        : 0;
-+    const size_t activation_width = qwen4exp_activation_input
-+        ? static_cast<size_t>(n_embd) * static_cast<size_t>(qwen4exp_hc)
++    const int32_t hyperconnection = skippy_activation_hyperconnection_count(first);
++    const bool hyperconnection_activation_input = activation_input && hyperconnection > 0;
++    const size_t activation_width = hyperconnection_activation_input
++        ? static_cast<size_t>(n_embd) * static_cast<size_t>(hyperconnection)
 +        : static_cast<size_t>(n_embd);
 +    const bool request_logits = first->stage_model->config.include_output;
 +    const bool request_embeddings = skippy_emits_activation_frame(first);
@@ -1921,12 +2073,12 @@ index 000000000..e6a7a1c79
 +    const int32_t n_tokens = static_cast<int32_t>(total_token_count);
 +    std::vector<llama_token> token_storage(total_token_count);
 +    std::vector<float> embd_storage;
-+    std::vector<float> qwen4exp_hc_storage;
++    std::vector<float> hyperconnection_storage;
 +    std::vector<int32_t> glm_dsa_input_top_k_storage;
 +    if (activation_input) {
 +        embd_storage.resize(total_token_count * static_cast<size_t>(n_embd_inp));
-+        if (qwen4exp_activation_input) {
-+            qwen4exp_hc_storage.resize(total_token_count * activation_width);
++        if (hyperconnection_activation_input) {
++            hyperconnection_storage.resize(total_token_count * activation_width);
 +        }
 +        if ((batch_input_flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
 +            glm_dsa_input_top_k_storage.resize(
@@ -1961,9 +2113,9 @@ index 000000000..e6a7a1c79
 +                            static_cast<size_t>(n_embd_inp - n_embd) * sizeof(float));
 +                }
 +            }
-+            if (!qwen4exp_hc_storage.empty()) {
++            if (!hyperconnection_storage.empty()) {
 +                std::memcpy(
-+                        qwen4exp_hc_storage.data() + offset * activation_width,
++                        hyperconnection_storage.data() + offset * activation_width,
 +                        request.input_payload,
 +                        hidden_bytes);
 +            }
@@ -2011,12 +2163,12 @@ index 000000000..e6a7a1c79
 +            &first->stage_model->config,
 +            SKIPPY_GLM_DSA_PHASE_HINT_AUTO);
 +    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_storage.data(), total_token_count);
-+    skippy_graph_build_inputs_set_qwen4exp_hc(
++    skippy_graph_build_inputs_set_hyperconnection(
 +            graph_build_inputs,
-+            qwen4exp_hc_storage.empty() ? nullptr : qwen4exp_hc_storage.data(),
++            hyperconnection_storage.empty() ? nullptr : hyperconnection_storage.data(),
 +            static_cast<uint32_t>(total_token_count),
 +            n_embd,
-+            qwen4exp_hc);
++            hyperconnection);
 +    const llama_pos batch_pos_start = pos_storage.empty() ? first->n_past : pos_storage[0];
 +    skippy_graph_build_inputs_set_glm_dsa_top_k(
 +            graph_build_inputs,
@@ -2172,13 +2324,10 @@ index 000000000..e6a7a1c79
 +    const int32_t n_embd_inp = llama_model_n_embd_inp(first->stage_model->model);
 +    const int32_t n_pos_per_embd = first->stage_model->model->hparams.n_pos_per_embd();
 +    const bool activation_input = skippy_is_filtered(first) && first->stage_model->config.layer_start > 0;
-+    const bool qwen4exp_activation_input =
-+            activation_input && first->stage_model->model->arch == LLM_ARCH_QWEN4EXP;
-+    const int32_t qwen4exp_hc = qwen4exp_activation_input
-+        ? static_cast<int32_t>(first->stage_model->model->hparams.dsv4_hc_mult)
-+        : 0;
-+    const size_t activation_width = qwen4exp_activation_input
-+        ? static_cast<size_t>(n_embd) * static_cast<size_t>(qwen4exp_hc)
++    const int32_t hyperconnection = skippy_activation_hyperconnection_count(first);
++    const bool hyperconnection_activation_input = activation_input && hyperconnection > 0;
++    const size_t activation_width = hyperconnection_activation_input
++        ? static_cast<size_t>(n_embd) * static_cast<size_t>(hyperconnection)
 +        : static_cast<size_t>(n_embd);
 +    const bool request_logits = first->stage_model->config.include_output;
 +    const bool request_embeddings = skippy_emits_activation_frame(first);
@@ -2243,13 +2392,13 @@ index 000000000..e6a7a1c79
 +    }
 +
 +    std::vector<float> embd_storage;
-+    std::vector<float> qwen4exp_hc_storage;
++    std::vector<float> hyperconnection_storage;
 +    std::vector<int32_t> glm_dsa_input_top_k_storage;
 +    std::vector<llama_token> token_storage;
 +    if (activation_input) {
 +        embd_storage.resize(static_cast<size_t>(n_tokens)*n_embd_inp);
-+        if (qwen4exp_activation_input) {
-+            qwen4exp_hc_storage.resize(request_count*activation_width);
++        if (hyperconnection_activation_input) {
++            hyperconnection_storage.resize(request_count*activation_width);
 +        }
 +        if ((batch_input_flags & SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0) {
 +            glm_dsa_input_top_k_storage.resize(request_count*batch_input_top_k);
@@ -2261,13 +2410,13 @@ index 000000000..e6a7a1c79
 +            if ((input_desc->flags & SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0) {
 +                skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "batched activation decode does not support Gemma3n AltUp sidebands yet");
 +                return SKIPPY_STATUS_UNSUPPORTED;
-+            } else if (qwen4exp_activation_input) {
++            } else if (hyperconnection_activation_input) {
 +                std::memcpy(dst, input_payload, static_cast<size_t>(n_embd)*sizeof(float));
 +                if (n_embd_inp > n_embd) {
 +                    std::memset(dst + n_embd, 0, static_cast<size_t>(n_embd_inp - n_embd)*sizeof(float));
 +                }
 +                std::memcpy(
-+                        qwen4exp_hc_storage.data() + static_cast<size_t>(i)*activation_width,
++                        hyperconnection_storage.data() + static_cast<size_t>(i)*activation_width,
 +                        input_payload,
 +                        hidden_bytes_per_request);
 +            } else if (n_embd_inp == n_embd) {
@@ -2324,12 +2473,12 @@ index 000000000..e6a7a1c79
 +            &first->stage_model->config,
 +            SKIPPY_GLM_DSA_PHASE_HINT_DECODE);
 +    skippy_graph_build_inputs_set_activation_tokens(graph_build_inputs, token_ids, request_count);
-+    skippy_graph_build_inputs_set_qwen4exp_hc(
++    skippy_graph_build_inputs_set_hyperconnection(
 +            graph_build_inputs,
-+            qwen4exp_hc_storage.empty() ? nullptr : qwen4exp_hc_storage.data(),
++            hyperconnection_storage.empty() ? nullptr : hyperconnection_storage.data(),
 +            static_cast<uint32_t>(request_count),
 +            n_embd,
-+            qwen4exp_hc);
++            hyperconnection);
 +    const llama_pos batch_pos_start = pos_storage.empty() ? first->n_past : pos_storage[0];
 +    skippy_graph_build_inputs_set_glm_dsa_top_k(
 +            graph_build_inputs,
@@ -6480,6 +6629,3 @@ index 000000000..54753a161
 +
 +
 +} // extern "C"
--- 
-2.54.0 (Apple Git-157)
-

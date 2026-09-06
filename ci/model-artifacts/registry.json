@@ -1119,6 +1119,64 @@
       }
     },
     {
+      "id": "family-lfm2-vl",
+      "family": "lfm2-vl",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "recurrent",
+        "multimodal",
+        "projector"
+      ],
+      "artifact": {
+        "repo": "ggml-org/LFM2-VL-450M-GGUF",
+        "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+        "selector": "Q8_0",
+        "files": [
+          {
+            "path": "LFM2-VL-450M-Q8_0.gguf",
+            "size_bytes": 379215264,
+            "sha256": "e97704a0cf0a1d00ca604b4c672c82f4234318dba9d43a7f7a4c0d2df6747844"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 16,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 2,
+          "speculative_policy": "mtp-if-present"
+        },
+        "mmproj_artifact": {
+          "repo": "ggml-org/LFM2-VL-450M-GGUF",
+          "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+          "selector": "Q8_0",
+          "files": [
+            {
+              "path": "mmproj-LFM2-VL-450M-Q8_0.gguf",
+              "size_bytes": 103890016,
+              "sha256": "a6a813fae4ba3f90852a990fdd4786a017dba0e80e599a366853ba539ee2b5ef"
+            }
+          ]
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 379215264
+        },
+        "notes": "small official multimodal hybrid model; text, recurrent, and mmproj lanes"
+      }
+    },
+    {
       "id": "family-laguna",
       "family": "laguna",
       "suites": [
