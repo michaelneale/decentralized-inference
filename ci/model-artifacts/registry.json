@@ -1026,7 +1026,7 @@
         "resources": {
           "runner_role": "family-certify",
           "cache_policy": "immutable-local",
-          "estimated_model_bytes": 507833344
+          "estimated_model_bytes": 521555200
         },
         "notes": "smallest public Qwen3.5 dense GGUF; hybrid gated-delta-net family with full-attention interval 4; coverage-expansion repair from the failed CI fixture row"
       }
@@ -1171,7 +1171,7 @@
         "resources": {
           "runner_role": "family-certify",
           "cache_policy": "immutable-local",
-          "estimated_model_bytes": 379215264
+          "estimated_model_bytes": 376830976
         },
         "notes": "small official multimodal hybrid model; text, recurrent, and mmproj lanes"
       }
