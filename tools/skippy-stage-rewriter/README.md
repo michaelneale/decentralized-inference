@@ -37,7 +37,9 @@ over the result to prove idempotence: every edited builder must report
 `already_transformed` with no edits.
 
 The checked-in family patch is produced from a clean llama.cpp tree containing
-the central Skippy patches, but not the generated family patch itself:
+the existing PR family behavior. The rewriter adds any newly proven edits, and
+the generator diffs the result against the pinned upstream revision so the
+complete model-family delta is consolidated into one patch:
 
 ```sh
 python3 scripts/generate-skippy-family-patch.py \
@@ -45,6 +47,7 @@ python3 scripts/generate-skippy-family-patch.py \
   --build-dir .scratch/llama-central-build \
   --rewriter .scratch/skippy-stage-rewriter-build/skippy-stage-rewriter \
   --report .scratch/skippy-stage-rewriter-report.json \
+  --diff-base "$(cat .scratch/llama-full/.mesh-llm-upstream-sha)" \
   --output third_party/llama.cpp/patches/0076-skippy-generate-model-family-stage-controls.patch
 ```
 

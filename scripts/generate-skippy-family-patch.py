@@ -99,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument(
+        "--diff-base",
+        default="HEAD",
+        help=(
+            "git revision used as the patch base; use the pinned upstream "
+            "revision to consolidate existing and newly generated model edits"
+        ),
+    )
+    parser.add_argument(
         "--extra-arg",
         action="append",
         default=[],
@@ -159,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             "--no-ext-diff",
             "--binary",
             "--full-index",
-            "HEAD",
+            args.diff_base,
             "--",
             "src/models",
             capture=True,
