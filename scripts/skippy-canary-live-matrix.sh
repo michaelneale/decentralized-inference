@@ -184,7 +184,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # ABSENCE is the explicit test seam: an env bundle must then be set.
   provenance_file="$EVIDENCE_ROOT/live-matrix/producer-provenance.json"
   if [[ -f "$provenance_file" ]]; then
-    if ! provenance_bundle="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["native_runtime"]["manifest"]; assert isinstance(m,str) and m; print(m)' \
+    if ! provenance_bundle="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["native_runtime"]["manifest"]; assert isinstance(m,str) and m.strip(); print(m)' \
         "$provenance_file" 2>/dev/null)"; then
       echo "producer provenance $provenance_file is malformed or lacks native_runtime.manifest: rerun --prepare (an existing provenance file must not fall back to any other bundle)" >&2
       exit 1

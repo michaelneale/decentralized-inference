@@ -475,6 +475,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
             "{ not json",
             json.dumps({"native_runtime": {}}),
             json.dumps({"native_runtime": {"manifest": ""}}),
+            json.dumps({"native_runtime": {"manifest": "\n"}}),
         ]:
             with self.subTest(content=content):
                 import tempfile
