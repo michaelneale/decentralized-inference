@@ -46,6 +46,7 @@ pub(super) struct SplitTopologyGeneration {
     pub(super) stages: Vec<RuntimeSliceStagePlan>,
     pub(super) admissions: BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
     pub(super) activation_codec: skippy_protocol::StageActivationCodec,
+    pub(super) activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
 }
 
 impl SplitTopologyGeneration {
@@ -66,6 +67,7 @@ impl SplitTopologyGeneration {
             stages,
             admissions: BTreeMap::new(),
             activation_codec: skippy_protocol::StageActivationCodec::default(),
+            activation_codec_policy: Default::default(),
         }
     }
 

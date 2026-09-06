@@ -58,6 +58,7 @@ pub(crate) fn remote_stage_load_request(
         participant_set_hash: context.participant_set_hash.to_string(),
         topology_hash: context.topology_hash.to_string(),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         topology_stages: vec![super::StageTopologyStageDescriptor {
             stage_id: stage.stage_id.clone(),
             stage_index: stage.stage_index,
@@ -134,6 +135,7 @@ pub(crate) fn stage0_config(
         glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
         generation_signal_window: None,
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: context.runtime_settings.activation_codec_policy,
         stage_id: stage0.stage_id.clone(),
         stage_index: stage0.stage_index,
         layer_start: stage0.layer_start,
@@ -312,6 +314,7 @@ mod tests {
                 kv_unified: Some(true),
                 swa_full: Some(false),
                 cache_idle_slots: Some(3),
+                activation_codec_policy: Default::default(),
             },
         };
         let request = remote_stage_load_request(

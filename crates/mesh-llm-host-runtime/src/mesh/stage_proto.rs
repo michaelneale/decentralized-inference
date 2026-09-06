@@ -70,6 +70,7 @@ pub(super) fn stage_runtime_status_from_snapshot(
         layer_end: status.layer_end,
         admission: status.admission,
         activation_codec: status.activation_codec,
+        activation_codec_policy: Default::default(),
         state: status.state,
         bind_addr: status.bind_addr,
         input_activation_boundary: status.input_activation_boundary,
@@ -113,6 +114,7 @@ pub(crate) fn stage_snapshot_from_runtime_status(
         layer_end: status.layer_end,
         admission: status.admission.clone(),
         activation_codec: status.activation_codec,
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: status.bind_addr.clone(),
         input_activation_boundary: status.input_activation_boundary,
@@ -316,6 +318,9 @@ pub(super) fn stage_load_to_proto(
         participant_set_hash: load.participant_set_hash,
         topology_hash: load.topology_hash,
         activation_codec: stage_activation_codec_to_proto(load.activation_codec) as i32,
+        activation_codec_policy: stage_activation_codec_policy_to_proto(
+            load.activation_codec_policy,
+        ) as i32,
         topology_stages: load
             .topology_stages
             .into_iter()
@@ -358,6 +363,9 @@ fn stage_runtime_settings_to_proto(
         kv_unified: settings.kv_unified,
         swa_full: settings.swa_full,
         cache_idle_slots: settings.cache_idle_slots,
+        activation_codec_policy: stage_activation_codec_policy_to_proto(
+            settings.activation_codec_policy,
+        ) as i32,
     }
 }
 
@@ -523,6 +531,9 @@ pub(super) fn stage_load_from_proto(
         participant_set_hash: load.participant_set_hash,
         topology_hash: load.topology_hash,
         activation_codec: stage_activation_codec_from_proto(load.activation_codec)?,
+        activation_codec_policy: stage_activation_codec_policy_from_proto(
+            load.activation_codec_policy,
+        )?,
         topology_stages: load
             .topology_stages
             .into_iter()
@@ -560,7 +571,7 @@ pub(super) fn stage_load_from_proto(
         cache_type_k: load.cache_type_k,
         cache_type_v: load.cache_type_v,
         flash_attn_type: stage_flash_attn_type_from_proto(load.flash_attn_type),
-        runtime_settings: stage_runtime_settings_from_proto(load.runtime_settings),
+        runtime_settings: stage_runtime_settings_from_proto(load.runtime_settings)?,
         native_mtp_enabled: load.native_mtp_enabled.unwrap_or(true),
         shutdown_generation: load.shutdown_generation,
         coordinator_term: load.coordinator_term,
@@ -591,11 +602,11 @@ fn stage_topology_stage_from_proto(
 
 fn stage_runtime_settings_from_proto(
     settings: Option<skippy_stage_proto::StageLoadRuntimeSettings>,
-) -> crate::inference::skippy::StageLoadRuntimeSettings {
+) -> anyhow::Result<crate::inference::skippy::StageLoadRuntimeSettings> {
     let Some(settings) = settings else {
-        return crate::inference::skippy::StageLoadRuntimeSettings::default();
+        return Ok(crate::inference::skippy::StageLoadRuntimeSettings::default());
     };
-    crate::inference::skippy::StageLoadRuntimeSettings {
+    Ok(crate::inference::skippy::StageLoadRuntimeSettings {
         repack: settings.repack.unwrap_or(false),
         op_offload: settings.op_offload,
         no_host_buffer: settings.no_host_buffer.unwrap_or(false),
@@ -613,7 +624,10 @@ fn stage_runtime_settings_from_proto(
         kv_unified: settings.kv_unified,
         swa_full: settings.swa_full,
         cache_idle_slots: settings.cache_idle_slots,
-    }
+        activation_codec_policy: stage_activation_codec_policy_from_proto(
+            settings.activation_codec_policy,
+        )?,
+    })
 }
 
 pub(super) fn stage_coordinator_claim_from_proto(
@@ -717,6 +731,37 @@ fn stage_activation_codec_from_proto(
     }
 }
 
+fn stage_activation_codec_policy_to_proto(
+    policy: skippy_protocol::StageActivationCodecPolicy,
+) -> skippy_stage_proto::StageActivationCodecPolicy {
+    match policy {
+        skippy_protocol::StageActivationCodecPolicy::Fixed => {
+            skippy_stage_proto::StageActivationCodecPolicy::FixedV1
+        }
+        skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1 => {
+            skippy_stage_proto::StageActivationCodecPolicy::AutoLosslessV1
+        }
+    }
+}
+
+fn stage_activation_codec_policy_from_proto(
+    value: i32,
+) -> anyhow::Result<skippy_protocol::StageActivationCodecPolicy> {
+    match skippy_stage_proto::StageActivationCodecPolicy::try_from(value) {
+        // Legacy peer that never sent the policy field.
+        Ok(skippy_stage_proto::StageActivationCodecPolicy::Unspecified) => {
+            Ok(skippy_protocol::StageActivationCodecPolicy::Fixed)
+        }
+        Ok(skippy_stage_proto::StageActivationCodecPolicy::FixedV1) => {
+            Ok(skippy_protocol::StageActivationCodecPolicy::Fixed)
+        }
+        Ok(skippy_stage_proto::StageActivationCodecPolicy::AutoLosslessV1) => {
+            Ok(skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1)
+        }
+        _ => anyhow::bail!("unsupported generation-8 activation codec policy {value}"),
+    }
+}
+
 pub(super) fn stage_control_unavailable_response(
     request: crate::inference::skippy::StageControlRequest,
 ) -> crate::inference::skippy::StageControlResponse {
@@ -756,6 +801,7 @@ pub(super) fn stage_control_unavailable_response(
                 layer_end: 0,
                 admission: None,
                 activation_codec: skippy_protocol::StageActivationCodec::default(),
+                activation_codec_policy: Default::default(),
                 state: crate::inference::skippy::StageRuntimeState::Failed,
                 bind_addr: String::new(),
                 input_activation_boundary: None,
@@ -864,6 +910,7 @@ pub(crate) fn stage_status_from_load(
         layer_end: load.layer_end,
         admission: Some(load.admission.clone()),
         activation_codec: load.activation_codec,
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: load.bind_addr.clone(),
         input_activation_boundary: None,
@@ -900,6 +947,7 @@ pub(super) fn stage_preparation_status_from_load(
         layer_end: load.layer_end,
         admission: Some(load.admission.clone()),
         activation_codec: load.activation_codec,
+        activation_codec_policy: Default::default(),
         state,
         bytes_done: None,
         bytes_total: None,
@@ -930,6 +978,7 @@ pub(super) fn stage_preparation_status_from_cancel(
         layer_end: 0,
         admission: None,
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bytes_done: None,
         bytes_total: None,
@@ -1246,6 +1295,9 @@ pub(super) fn stage_preparation_status_to_proto(
         lease_until_unix_ms: status.lease_until_unix_ms,
         admission: status.admission.map(Into::into),
         activation_codec: stage_activation_codec_to_proto(status.activation_codec) as i32,
+        activation_codec_policy: stage_activation_codec_policy_to_proto(
+            status.activation_codec_policy,
+        ) as i32,
     }
 }
 
@@ -1283,6 +1335,9 @@ pub(super) fn stage_preparation_status_from_proto(
         layer_end: status.layer_end,
         admission,
         activation_codec: stage_activation_codec_from_proto(status.activation_codec)?,
+        activation_codec_policy: stage_activation_codec_policy_from_proto(
+            status.activation_codec_policy,
+        )?,
         state: stage_preparation_state_from_proto(status.state),
         bytes_done: status.bytes_done,
         bytes_total: status.bytes_total,
@@ -1338,6 +1393,9 @@ pub(super) fn stage_status_to_proto(
         lease_until_unix_ms: status.lease_until_unix_ms,
         admission: status.admission.map(Into::into),
         activation_codec: stage_activation_codec_to_proto(status.activation_codec) as i32,
+        activation_codec_policy: stage_activation_codec_policy_to_proto(
+            status.activation_codec_policy,
+        ) as i32,
     }
 }
 
@@ -1362,6 +1420,9 @@ pub(super) fn stage_status_from_proto(
         layer_end: status.layer_end,
         admission,
         activation_codec: stage_activation_codec_from_proto(status.activation_codec)?,
+        activation_codec_policy: stage_activation_codec_policy_from_proto(
+            status.activation_codec_policy,
+        )?,
         state: stage_runtime_state_from_proto(status.state),
         bind_addr: status.bind_addr,
         input_activation_boundary: status
@@ -1647,6 +1708,7 @@ mod tests {
         let load = skippy_stage_proto::LoadStage {
             admission: Some(crate::inference::skippy::test_stage_admission(0, 1).into()),
             activation_codec: skippy_stage_proto::StageActivationCodec::F16RneV1 as i32,
+            activation_codec_policy: Default::default(),
             ..Default::default()
         };
         let mut encoded = load.encode_to_vec();
@@ -1671,7 +1733,7 @@ mod tests {
 
         assert_eq!(observed, settings);
         assert_eq!(
-            stage_runtime_settings_from_proto(None),
+            stage_runtime_settings_from_proto(None).unwrap(),
             crate::inference::skippy::StageLoadRuntimeSettings::default()
         );
     }

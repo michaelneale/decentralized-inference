@@ -56,6 +56,7 @@ fn topology_hash_commits_exact_stage_admission() {
         &stages,
         &admissions,
         skippy_protocol::StageActivationCodec::F16RneV1,
+        skippy_protocol::StageActivationCodecPolicy::default(),
     );
     admissions.get_mut(&stages[0].stage_id).unwrap().plan_id =
         format!("skippy-plan:v1:{}", "c7".repeat(32));
@@ -65,6 +66,7 @@ fn topology_hash_commits_exact_stage_admission() {
             &stages,
             &admissions,
             skippy_protocol::StageActivationCodec::F16RneV1,
+            skippy_protocol::StageActivationCodecPolicy::default(),
         )
     );
 }
@@ -81,11 +83,13 @@ fn topology_hash_commits_activation_codec() {
             &stages,
             &admissions,
             skippy_protocol::StageActivationCodec::RawF32V1,
+            skippy_protocol::StageActivationCodecPolicy::default(),
         ),
         split_topology_hash(
             &stages,
             &admissions,
             skippy_protocol::StageActivationCodec::F16RneV1,
+            skippy_protocol::StageActivationCodecPolicy::default(),
         )
     );
 }

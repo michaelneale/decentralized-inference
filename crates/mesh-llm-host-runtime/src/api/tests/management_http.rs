@@ -498,6 +498,7 @@ fn health_test_stage_status(
         layer_end: 1,
         admission: None,
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: "127.0.0.1:9000".to_string(),
         input_activation_boundary: None,

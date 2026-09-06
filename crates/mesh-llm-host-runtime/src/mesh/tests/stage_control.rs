@@ -28,6 +28,7 @@ fn test_stage_status(
             (stage_index + 1) * 12,
         )),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: bind_addr.to_string(),
         input_activation_boundary: None,
@@ -60,6 +61,7 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         participant_set_hash: "participants".to_string(),
         topology_hash: "topology".to_string(),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         topology_stages: vec![
             crate::inference::skippy::StageTopologyStageDescriptor {
                 stage_id: "stage-0".to_string(),
@@ -115,6 +117,7 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
             kv_unified: Some(true),
             swa_full: Some(false),
             cache_idle_slots: Some(5),
+            activation_codec_policy: Default::default(),
         },
         native_mtp_enabled: true,
         shutdown_generation: 7,
@@ -178,6 +181,7 @@ fn test_preparation_status(
         layer_end: 24,
         admission: Some(crate::inference::skippy::test_stage_admission(12, 24)),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bytes_done: Some(1024),
         bytes_total: Some(4096),

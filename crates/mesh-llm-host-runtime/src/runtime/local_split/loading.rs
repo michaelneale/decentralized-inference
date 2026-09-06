@@ -692,8 +692,10 @@ pub(super) fn split_runtime_stage_load_request(
             &spec.generation.stages,
             &spec.generation.admissions,
             spec.generation.activation_codec,
+            spec.generation.activation_codec_policy,
         ),
         activation_codec: spec.generation.activation_codec,
+        activation_codec_policy: spec.generation.activation_codec_policy,
         topology_stages: spec
             .generation
             .stages
@@ -761,6 +763,7 @@ pub(super) fn split_runtime_stage_load_request(
             kv_unified: resolved_config.kv_unified,
             swa_full: resolved_config.swa_full,
             cache_idle_slots: resolved_config.cache_idle_slots,
+            activation_codec_policy: resolved_config.activation_codec_policy,
         },
         native_mtp_enabled: resolved_config.native_mtp_enabled,
         shutdown_generation: spec.generation.generation,
@@ -1110,6 +1113,7 @@ pub(super) fn split_coordinator_claim(
             &generation.stages,
             &generation.admissions,
             generation.activation_codec,
+            generation.activation_codec_policy,
         ),
         lease_until_unix_ms: generation.lease_until_unix_ms,
     }

@@ -42,6 +42,7 @@ pub enum StageFrameError {
     MissingStageAdmissionDescriptor,
     MissingLoadClaimHashes,
     InvalidActivationCodec { got: i32 },
+    InvalidActivationCodecPolicy { got: i32 },
     InvalidTopologyStages(&'static str),
     InvalidStageAdmissionDescriptor(&'static str),
     MissingStageTransportTarget,
@@ -121,6 +122,9 @@ impl std::fmt::Display for StageFrameError {
             }
             StageFrameError::InvalidActivationCodec { got } => {
                 write!(f, "unsupported generation-8 activation codec {got}")
+            }
+            StageFrameError::InvalidActivationCodecPolicy { got } => {
+                write!(f, "unsupported generation-8 activation codec policy {got}")
             }
             StageFrameError::InvalidTopologyStages(reason) => {
                 write!(f, "invalid generation-8 topology stage list: {reason}")
@@ -283,6 +287,7 @@ fn validate_load_stage_admission(load: &proto::stage::LoadStage) -> Result<(), S
         ));
     }
     validate_activation_codec(load.activation_codec)?;
+    validate_activation_codec_policy(load.activation_codec, load.activation_codec_policy)?;
     validate_topology_stages(load)?;
     Ok(())
 }
@@ -371,6 +376,7 @@ fn validate_status_stage_admission(
         ));
     }
     validate_activation_codec(status.activation_codec)?;
+    validate_activation_codec_policy(status.activation_codec, status.activation_codec_policy)?;
     Ok(())
 }
 
@@ -390,6 +396,7 @@ fn validate_preparation_stage_admission(
         ));
     }
     validate_activation_codec(status.activation_codec)?;
+    validate_activation_codec_policy(status.activation_codec, status.activation_codec_policy)?;
     Ok(())
 }
 
@@ -400,6 +407,27 @@ fn validate_activation_codec(value: i32) -> Result<(), StageFrameError> {
         | Ok(proto::stage::StageActivationCodec::Bf16RneV1)
         | Ok(proto::stage::StageActivationCodec::S8RowF32RneV1) => Ok(()),
         _ => Err(StageFrameError::InvalidActivationCodec { got: value }),
+    }
+}
+
+/// `UNSPECIFIED` means a legacy peer that never sent the field; it maps to
+/// `Fixed` at the conversion boundary. Any unknown numeric value fails closed.
+/// `FIXED_V1` must agree with the load's codec, and `AUTO_LOSSLESS_V1` must
+/// configure RawF32V1 as its fallback codec.
+fn validate_activation_codec_policy(load_codec: i32, value: i32) -> Result<(), StageFrameError> {
+    use proto::stage::StageActivationCodec as C;
+    use proto::stage::StageActivationCodecPolicy as P;
+    match P::try_from(value) {
+        Ok(P::Unspecified) => Ok(()),
+        Ok(P::FixedV1) => Ok(()),
+        Ok(P::AutoLosslessV1) => {
+            if C::try_from(load_codec) == Ok(C::RawF32V1) {
+                Ok(())
+            } else {
+                Err(StageFrameError::InvalidActivationCodecPolicy { got: value })
+            }
+        }
+        _ => Err(StageFrameError::InvalidActivationCodecPolicy { got: value }),
     }
 }
 

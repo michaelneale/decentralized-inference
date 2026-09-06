@@ -76,7 +76,12 @@ fn update_layout_identity(hasher: &mut blake3::Hasher, config: &StageConfig) {
     // numerical state seen by downstream stages, so it must produce a distinct
     // cache namespace even when the model, layers, and KV layout are equal.
     hasher.update(b"activation-codec:");
-    hasher.update(config.activation_codec.identity().as_bytes());
+    hasher.update(
+        config
+            .activation_codec_policy
+            .identity(config.activation_codec)
+            .as_bytes(),
+    );
     hasher.update(config.cache_type_k.as_bytes());
     hasher.update(b"/");
     hasher.update(config.cache_type_v.as_bytes());
@@ -286,6 +291,7 @@ mod identity_completeness_tests {
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
             activation_codec: Default::default(),
+            activation_codec_policy: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,
@@ -349,10 +355,12 @@ mod identity_completeness_tests {
     fn activation_codec_changes_page_identity() {
         let f16 = StageConfig {
             activation_codec: skippy_protocol::StageActivationCodec::F16RneV1,
+            activation_codec_policy: Default::default(),
             ..test_config()
         };
         let exact = StageConfig {
             activation_codec: skippy_protocol::StageActivationCodec::RawF32V1,
+            activation_codec_policy: Default::default(),
             ..test_config()
         };
 
@@ -584,6 +592,7 @@ mod identity_stability_tests {
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
             activation_codec: Default::default(),
+            activation_codec_policy: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,

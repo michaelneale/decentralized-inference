@@ -100,6 +100,79 @@ impl StageActivationCodec {
     }
 }
 
+/// Admitted activation-codec rules for a topology.
+///
+/// The per-frame encoding remains [`StageActivationCodec`] (it rides the binary
+/// frame header) and `activation_codec` stays the fixed codec for
+/// [`StageActivationCodecPolicy::Fixed`] or the mandatory RawF32 fallback
+/// codec for [`StageActivationCodecPolicy::AutoLosslessV1`]. The policy only
+/// decides which encodings a receiver must admit. Lossless selection under
+/// `AutoLosslessV1` decodes bit-identically to raw, so one policy namespace is
+/// enough for topology and cache identity; a future lossy policy must
+/// additionally namespace per realized frame codec and accumulated error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageActivationCodecPolicy {
+    /// Legacy behavior: every frame uses exactly the configured codec.
+    #[default]
+    #[serde(rename = "fixed")]
+    Fixed,
+    /// Policy v1: the producer selects RawF32, byte-exact BF16, or byte-exact
+    /// F16 per realized frame (BF16 wins ties); every receiver must admit all
+    /// three. Requires the configured codec to be RawF32V1 (the mandatory
+    /// fallback). Fail closed on any other codec.
+    #[serde(rename = "auto-lossless-v1")]
+    AutoLosslessV1,
+}
+
+impl StageActivationCodecPolicy {
+    /// Fail-closed admission of a realized frame codec under this policy.
+    /// `AutoLosslessV1` also fails when the configured fallback codec is not
+    /// RawF32V1, so no caller can admit an Auto frame under an invalid
+    /// fallback.
+    pub fn permits(
+        self,
+        configured_codec: StageActivationCodec,
+        frame_codec: StageActivationCodec,
+    ) -> bool {
+        match self {
+            Self::Fixed => configured_codec == frame_codec,
+            // F16 is lossy and S8 stays excluded until its reported
+            // conformance defects are resolved.
+            Self::AutoLosslessV1 => {
+                configured_codec == StageActivationCodec::RawF32V1
+                    && matches!(
+                        frame_codec,
+                        StageActivationCodec::RawF32V1
+                            | StageActivationCodec::Bf16RneV1
+                            | StageActivationCodec::F16RneV1
+                    )
+            }
+        }
+    }
+
+    /// Whether this policy is admissible with the configured codec.
+    /// `AutoLosslessV1` requires RawF32V1 as its fallback codec.
+    pub const fn compatible(self, configured_codec: StageActivationCodec) -> bool {
+        match self {
+            Self::Fixed => true,
+            Self::AutoLosslessV1 => {
+                matches!(configured_codec, StageActivationCodec::RawF32V1)
+            }
+        }
+    }
+
+    /// Identity string for topology and cache binding. `Fixed` returns the
+    /// configured codec's identity byte-for-byte so existing digests are
+    /// unchanged.
+    pub const fn identity(self, configured_codec: StageActivationCodec) -> &'static str {
+        match self {
+            Self::Fixed => configured_codec.identity(),
+            Self::AutoLosslessV1 => "auto-lossless-v1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct StageConfig {
     pub run_id: String,
@@ -151,6 +224,11 @@ pub struct StageConfig {
     /// binary data plane starts.
     #[serde(default)]
     pub activation_codec: StageActivationCodec,
+    /// Admitted activation-codec rules for this topology. Defaults to
+    /// `Fixed(activation_codec)`, which reproduces the legacy single-codec
+    /// behavior and identity exactly.
+    #[serde(default)]
+    pub activation_codec_policy: StageActivationCodecPolicy,
     pub stage_id: String,
     pub stage_index: u32,
     pub layer_start: u32,

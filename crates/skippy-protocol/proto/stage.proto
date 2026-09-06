@@ -115,6 +115,7 @@ message LoadStage {
   string participant_set_hash = 49;
   string topology_hash = 50;
   StageActivationCodec activation_codec = 51;
+  StageActivationCodecPolicy activation_codec_policy = 53;
   repeated StageTopologyStage topology_stages = 52;
 }
 
@@ -139,6 +140,7 @@ message StageLoadRuntimeSettings {
   optional bool kv_unified = 9;
   optional bool swa_full = 10;
   optional uint32 cache_idle_slots = 11;
+  StageActivationCodecPolicy activation_codec_policy = 36;
 }
 
 message StopStage {
@@ -262,6 +264,7 @@ message StageStatus {
   optional ActivationBoundaryDescriptor output_activation_boundary = 33;
   StageAdmissionDescriptor admission = 34;
   StageActivationCodec activation_codec = 35;
+  StageActivationCodecPolicy activation_codec_policy = 36;
 }
 
 message StageStatusList {
@@ -316,6 +319,7 @@ message StagePreparationStatus {
   uint64 lease_until_unix_ms = 19;
   StageAdmissionDescriptor admission = 20;
   StageActivationCodec activation_codec = 21;
+  StageActivationCodecPolicy activation_codec_policy = 22;
 }
 
 enum StageActivationCodec {
@@ -324,6 +328,12 @@ enum StageActivationCodec {
   STAGE_ACTIVATION_CODEC_F16_RNE_V1 = 2;
   STAGE_ACTIVATION_CODEC_BF16_RNE_V1 = 3;
   STAGE_ACTIVATION_CODEC_S8_ROW_F32_RNE_V1 = 4;
+}
+
+enum StageActivationCodecPolicy {
+  STAGE_ACTIVATION_CODEC_POLICY_UNSPECIFIED = 0;
+  STAGE_ACTIVATION_CODEC_POLICY_FIXED_V1 = 1;
+  STAGE_ACTIVATION_CODEC_POLICY_AUTO_LOSSLESS_V1 = 2;
 }
 
 message StageAdmissionDescriptor {

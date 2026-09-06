@@ -1301,6 +1301,7 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         glm_dsa_policy: options.glm_dsa_policy,
         generation_signal_window: options.generation_signal_window,
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::default(),
         stage_id: "stage-0".to_string(),
         stage_index: 0,
         layer_start,

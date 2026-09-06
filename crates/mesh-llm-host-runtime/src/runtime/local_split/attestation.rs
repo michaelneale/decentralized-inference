@@ -39,6 +39,7 @@ pub(super) fn split_stage_source_is_ready(
             && status.manifest_sha256 == load.manifest_sha256
             && status.admission.as_ref() == Some(&load.admission)
             && status.activation_codec == load.activation_codec
+            && status.activation_codec_policy == load.activation_codec_policy
             && status.layer_start <= load.layer_start
             && status.layer_end >= load.layer_end
             && matches!(
@@ -72,6 +73,7 @@ pub(super) fn strict_ready_status_matches(
         && status.layer_end == load.layer_end
         && status.admission.as_ref() == Some(&load.admission)
         && status.activation_codec == load.activation_codec
+        && status.activation_codec_policy == load.activation_codec_policy
         && status.shutdown_generation == load.shutdown_generation
         && status.coordinator_term == load.coordinator_term
         && status.coordinator_id == load.coordinator_id

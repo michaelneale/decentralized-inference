@@ -299,6 +299,7 @@ fn stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         participant_set_hash: "participants".to_string(),
         topology_hash: "topology".to_string(),
         activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         topology_stages: Vec::new(),
         model_path: Some("/models/demo.gguf".to_string()),
         source_model_bytes: Some(123_456_789),

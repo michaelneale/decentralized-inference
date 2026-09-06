@@ -25,8 +25,9 @@ pub use admission::{
 };
 pub use config::{
     ActivationDType, ActivationDescriptor, ActivationLayout, FlashAttentionType, GlmDsaPolicy,
-    LoadMode, PeerConfig, SplitMode, StageActivationCodec, StageConfig, StageDevice, StageIdentity,
-    StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload, StageTopology, StageTopologyEntry,
+    LoadMode, PeerConfig, SplitMode, StageActivationCodec, StageActivationCodecPolicy, StageConfig,
+    StageDevice, StageIdentity, StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload,
+    StageTopology, StageTopologyEntry,
 };
 pub use messages::{
     AckMessage, DecodeTokenMessage, ErrorMessage, FinalPrefillChunkMessage, MessageBase,
@@ -107,6 +108,118 @@ mod tests {
         assert_eq!(
             super::StageActivationCodec::default(),
             super::StageActivationCodec::RawF32V1
+        );
+    }
+
+    #[test]
+    fn activation_codec_policy_defaults_to_fixed_raw_f32() {
+        assert_eq!(
+            super::StageActivationCodecPolicy::default(),
+            super::StageActivationCodecPolicy::Fixed
+        );
+    }
+
+    #[test]
+    fn activation_codec_policy_fixed_identity_matches_codec_identity_byte_for_byte() {
+        for codec in [
+            super::StageActivationCodec::RawF32V1,
+            super::StageActivationCodec::F16RneV1,
+            super::StageActivationCodec::Bf16RneV1,
+            super::StageActivationCodec::S8RowF32RneV1,
+        ] {
+            assert_eq!(
+                super::StageActivationCodecPolicy::Fixed.identity(codec),
+                codec.identity()
+            );
+        }
+        assert_eq!(
+            super::StageActivationCodecPolicy::AutoLosslessV1
+                .identity(super::StageActivationCodec::RawF32V1),
+            "auto-lossless-v1"
+        );
+    }
+
+    #[test]
+    fn activation_codec_policy_permits_is_fail_closed() {
+        use super::StageActivationCodec as C;
+        use super::StageActivationCodecPolicy as P;
+        // Fixed admits only the configured codec.
+        for codec in [C::RawF32V1, C::F16RneV1, C::Bf16RneV1, C::S8RowF32RneV1] {
+            for frame in [C::RawF32V1, C::F16RneV1, C::Bf16RneV1, C::S8RowF32RneV1] {
+                assert_eq!(P::Fixed.permits(codec, frame), codec == frame);
+            }
+        }
+        // AutoLosslessV1 admits RawF32, byte-exact BF16, and byte-exact F16
+        // frames only, and only when RawF32 is the configured fallback.
+        assert!(P::AutoLosslessV1.permits(C::RawF32V1, C::RawF32V1));
+        assert!(P::AutoLosslessV1.permits(C::RawF32V1, C::Bf16RneV1));
+        assert!(P::AutoLosslessV1.permits(C::RawF32V1, C::F16RneV1));
+        assert!(!P::AutoLosslessV1.permits(C::RawF32V1, C::S8RowF32RneV1));
+        for fallback in [C::F16RneV1, C::Bf16RneV1, C::S8RowF32RneV1] {
+            for frame in [C::RawF32V1, C::F16RneV1, C::Bf16RneV1, C::S8RowF32RneV1] {
+                assert!(!P::AutoLosslessV1.permits(fallback, frame));
+            }
+        }
+    }
+
+    #[test]
+    fn activation_codec_policy_auto_lossless_requires_raw_f32_fallback() {
+        use super::StageActivationCodec as C;
+        use super::StageActivationCodecPolicy as P;
+        assert!(P::AutoLosslessV1.compatible(C::RawF32V1));
+        assert!(!P::AutoLosslessV1.compatible(C::F16RneV1));
+        assert!(!P::AutoLosslessV1.compatible(C::Bf16RneV1));
+        assert!(!P::AutoLosslessV1.compatible(C::S8RowF32RneV1));
+        for codec in [C::RawF32V1, C::F16RneV1, C::Bf16RneV1, C::S8RowF32RneV1] {
+            assert!(P::Fixed.compatible(codec));
+        }
+    }
+
+    #[test]
+    fn stage_config_policy_defaults_do_not_depend_on_sibling_fields() {
+        // A legacy config that sets F16 without naming a policy must keep the
+        // fixed F16 behavior after serde round-trip.
+        let legacy = format!(
+            "{}",
+            serde_json::json!({
+                "run_id": "run",
+                "topology_id": "topology",
+                "model_id": "model",
+                "activation_codec": "f16-rne-v1",
+                "stage_id": "stage-0",
+                "stage_index": 0,
+                "layer_start": 0,
+                "layer_end": 1,
+                "ctx_size": 512,
+                "lane_count": 1,
+                "n_gpu_layers": 0,
+                "mlock": false,
+                "check_tensors": false,
+                "direct_io": false,
+                "repack": false,
+                "load_mode": "runtime-slice",
+                "bind_addr": "127.0.0.1:0",
+                "split_mode": "none",
+                "flash_attn_type": "auto",
+                "glm_dsa_policy": "auto",
+                "cache_type_k": "f16",
+                "cache_type_v": "f16",
+            })
+        );
+        let config: super::StageConfig = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(
+            config.activation_codec,
+            super::StageActivationCodec::F16RneV1
+        );
+        assert_eq!(
+            config.activation_codec_policy,
+            super::StageActivationCodecPolicy::Fixed
+        );
+        assert_eq!(
+            config
+                .activation_codec_policy
+                .identity(config.activation_codec),
+            "f16-rne-v1"
         );
     }
     use super::{

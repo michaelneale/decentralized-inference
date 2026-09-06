@@ -425,6 +425,7 @@ pub struct StageRuntimeStatus {
     pub layer_end: u32,
     pub admission: Option<skippy_protocol::StageAdmissionDescriptor>,
     pub activation_codec: skippy_protocol::StageActivationCodec,
+    pub activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
     pub state: crate::inference::skippy::StageRuntimeState,
     pub bind_addr: String,
     pub input_activation_boundary: Option<skippy_runtime::ActivationBoundaryDesc>,

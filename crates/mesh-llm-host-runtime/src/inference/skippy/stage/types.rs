@@ -64,6 +64,7 @@ pub(crate) struct StageLoadRequest {
     pub(crate) participant_set_hash: String,
     pub(crate) topology_hash: String,
     pub(crate) activation_codec: skippy_protocol::StageActivationCodec,
+    pub(crate) activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
     /// Canonical generation-wide stage list. Every participant receives the
     /// same identities, ownership, and ranges; readiness updates replace any
     /// provisional `:0` endpoint with the observed bound address.
@@ -152,6 +153,7 @@ pub(crate) struct StageLoadRuntimeSettings {
     pub(crate) kv_unified: Option<bool>,
     pub(crate) swa_full: Option<bool>,
     pub(crate) cache_idle_slots: Option<u32>,
+    pub(crate) activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +285,7 @@ pub(crate) struct StageStatusSnapshot {
     pub(crate) layer_end: u32,
     pub(crate) admission: Option<skippy_protocol::StageAdmissionDescriptor>,
     pub(crate) activation_codec: skippy_protocol::StageActivationCodec,
+    pub(crate) activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
     pub(crate) state: StageRuntimeState,
     pub(crate) bind_addr: String,
     pub(crate) input_activation_boundary: Option<skippy_runtime::ActivationBoundaryDesc>,
@@ -314,6 +317,7 @@ pub(crate) struct StagePreparationStatus {
     pub(crate) layer_end: u32,
     pub(crate) admission: Option<skippy_protocol::StageAdmissionDescriptor>,
     pub(crate) activation_codec: skippy_protocol::StageActivationCodec,
+    pub(crate) activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
     pub(crate) state: StagePreparationState,
     pub(crate) bytes_done: Option<u64>,
     pub(crate) bytes_total: Option<u64>,
