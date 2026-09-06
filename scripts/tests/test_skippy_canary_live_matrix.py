@@ -471,7 +471,11 @@ class LiveMatrixScriptTests(unittest.TestCase):
         cannot be extracted (malformed JSON / missing field) must hard-fail
         rows; only provenance-file ABSENCE permits the explicit env-bundle
         test seam."""
-        for content in ["{ not json", json.dumps({"native_runtime": {}})]:
+        for content in [
+            "{ not json",
+            json.dumps({"native_runtime": {}}),
+            json.dumps({"native_runtime": {"manifest": ""}}),
+        ]:
             with self.subTest(content=content):
                 import tempfile
 
