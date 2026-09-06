@@ -271,7 +271,11 @@ fn encode_s8_rows(shape: ActivationShape, values: &[f32]) -> io::Result<Vec<u8>>
         let max_abs = row
             .iter()
             .fold(0.0_f32, |max_abs, value| max_abs.max(value.abs()));
-        let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 127.0 };
+        let scale = if max_abs == 0.0 {
+            1.0
+        } else {
+            ((f64::from(max_abs) / 127.0) as f32).max(f32::from_bits(1))
+        };
         if !scale.is_finite() || scale <= 0.0 {
             return Err(invalid_data(
                 "S8 activation row scale is not finite and positive",
@@ -279,7 +283,11 @@ fn encode_s8_rows(shape: ActivationShape, values: &[f32]) -> io::Result<Vec<u8>>
         }
         out.extend_from_slice(&scale.to_le_bytes());
         for value in row {
-            out.push(round_to_even_i8(*value / scale) as u8);
+            let quantized = round_to_even_i8(f64::from(*value) / f64::from(scale));
+            if !(f32::from(quantized) * scale).is_finite() {
+                return Err(invalid_data("S8 activation value is out of range"));
+            }
+            out.push(quantized as u8);
         }
     }
     Ok(out)
@@ -302,7 +310,13 @@ fn decode_s8_rows(shape: ActivationShape, payload: &[u8]) -> io::Result<Vec<f32>
             ));
         }
         for value in &row[4..] {
-            let decoded = (*value as i8) as f32 * scale;
+            let quantized = *value as i8;
+            if quantized == i8::MIN {
+                return Err(invalid_data(
+                    "S8 activation payload contains reserved -128 value",
+                ));
+            }
+            let decoded = f32::from(quantized) * scale;
             if !decoded.is_finite() {
                 return Err(invalid_data("activation payload contains non-finite value"));
             }
@@ -338,14 +352,14 @@ fn validate_payload_bytes(actual: usize, expected: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn round_to_even_i8(value: f32) -> i8 {
+fn round_to_even_i8(value: f64) -> i8 {
     let floor = value.floor();
     let fraction = value - floor;
     let rounded = if fraction < 0.5 {
         floor
     } else if fraction > 0.5 {
         floor + 1.0
-    } else if (floor as i32) & 1 == 0 {
+    } else if (floor as i64) & 1 == 0 {
         floor
     } else {
         floor + 1.0
@@ -501,6 +515,51 @@ mod tests {
         assert_eq!(round_to_even_i8(-1.5), -2);
         assert_eq!(round_to_even_i8(1.5), 2);
         assert_eq!(round_to_even_i8(2.5), 2);
+    }
+
+    #[test]
+    fn s8_encoder_only_emits_frames_the_decoder_can_reconstruct() {
+        let shape = ActivationShape::new(1, 0, 1);
+        for value in [f32::MAX, -f32::MAX] {
+            assert_invalid(
+                encode_activation(StageActivationCodec::S8RowF32RneV1, shape, &[value]),
+                "S8 activation value is out of range",
+            );
+        }
+    }
+
+    #[test]
+    fn s8_decoder_rejects_reserved_negative_128() {
+        let shape = ActivationShape::new(1, 0, 1);
+        let mut payload = 1.0_f32.to_le_bytes().to_vec();
+        payload.push(i8::MIN as u8);
+        assert_invalid(
+            decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &payload),
+            "S8 activation payload contains reserved -128 value",
+        );
+    }
+
+    #[test]
+    fn s8_tiny_rows_use_the_minimum_positive_subnormal_scale() {
+        let shape = ActivationShape::new(1, 0, 2);
+        let values = [f32::from_bits(1), f32::from_bits(63)];
+        let payload =
+            encode_activation(StageActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
+        assert_eq!(&payload[..4], &f32::from_bits(1).to_le_bytes());
+        assert_eq!(&payload[4..], &[1, 63]);
+        assert_eq!(
+            decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &payload).unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn s8_quantization_uses_f64_quotients_before_rounding() {
+        let shape = ActivationShape::new(1, 0, 2);
+        let values = [1.0, f32::from_bits(0x3e0d_1a34)];
+        let payload =
+            encode_activation(StageActivationCodec::S8RowF32RneV1, shape, &values).unwrap();
+        assert_eq!(&payload[4..], &[127, 17]);
     }
 
     #[test]
