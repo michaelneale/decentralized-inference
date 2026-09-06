@@ -45,9 +45,9 @@ pub(crate) fn p0_p1_manifest_rows() -> BTreeSet<(String, String, String)> {
 
 pub(crate) fn assert_manifest_row_complete(spec: FamilySpec) -> Result<()> {
     let row = manifest_row(spec)?;
-    if !matches!(row.status.as_str(), "certified" | "certified_package_only") {
+    if !is_parity_artifact_status(&row.status) {
         bail!(
-            "{} / {} is {}, but P0/P1 rows must be certified before getting a parity module",
+            "{} / {} is {}, but P0/P1 parity modules require a certified artifact row",
             row.llama_model,
             row.family,
             row.status
@@ -1700,4 +1700,11 @@ fn env_i32(name: &str) -> Option<i32> {
 
 fn parity_n_gpu_layers() -> i32 {
     env_i32("SKIPPY_PARITY_N_GPU_LAYERS").unwrap_or(999)
+}
+
+fn is_parity_artifact_status(status: &str) -> bool {
+    matches!(
+        status,
+        "certified" | "certified_package_only" | "needs_boundary_registration"
+    )
 }

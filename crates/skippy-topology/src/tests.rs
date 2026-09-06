@@ -1387,6 +1387,7 @@ fn parity_candidate_manifest_uses_known_statuses() {
                     | "certified_package_only"
                     | "implementation_base"
                     | "needs_candidate"
+                    | "needs_boundary_registration"
                     | "needs_runtime_slice_support"
                     | "no_public_gguf_candidate"
                     | "non_causal_aux"
