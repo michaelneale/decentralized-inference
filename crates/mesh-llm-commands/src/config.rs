@@ -648,6 +648,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn config_validate_file_accepts_schema_driven_valid_fixture() {
         let (_dir, path) = write_fixture_file(VALID_FIXTURE);
 
@@ -659,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn config_validate_file_matches_validator_signatures_for_schema_driven_invalid_fixture() {
         let (_dir, path) = write_fixture_file(INVALID_FIXTURE);
 
@@ -675,6 +677,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn config_validate_file_reports_diagnostics_for_semantically_invalid_file_without_hard_erroring()
      {
         let (_dir, path) = write_fixture_file(INVALID_FIXTURE);
