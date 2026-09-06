@@ -1905,19 +1905,19 @@
   ],
   "crates/mesh-llm-host-runtime/src/runtime/local_split/tests.rs": [
     {
-      "line": 2013,
+      "line": 2063,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2018,
+      "line": 2068,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2030,
+      "line": 2080,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2051,
+      "line": 2101,
       "macro_name": "eprintln!"
     }
   ],
@@ -4099,19 +4099,19 @@
   ],
   "crates/skippy-prompt/src/prompt_cli/stage_config.rs": [
     {
-      "line": 355,
+      "line": 356,
       "macro_name": "eprintln!"
     },
     {
-      "line": 395,
+      "line": 396,
       "macro_name": "eprintln!"
     },
     {
-      "line": 461,
+      "line": 462,
       "macro_name": "eprintln!"
     },
     {
-      "line": 475,
+      "line": 476,
       "macro_name": "eprint!"
     }
   ],
@@ -4299,7 +4299,7 @@
       "macro_name": "eprintln!"
     },
     {
-      "line": 556,
+      "line": 557,
       "macro_name": "eprintln!"
     }
   ],

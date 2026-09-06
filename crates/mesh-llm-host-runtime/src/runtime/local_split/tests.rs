@@ -1237,6 +1237,26 @@ fn split_participant_signature_includes_package_signals_for_claim_identity() {
 }
 
 #[test]
+fn new_split_generation_uses_automatic_lossless_activation_codecs() {
+    let generation = SplitTopologyGeneration::new(
+        "topology-a".into(),
+        "run-a".into(),
+        1,
+        vec![participant(1), participant(2)],
+        vec![stage(1, 0, 0, 20), stage(2, 1, 20, 40)],
+    );
+
+    assert_eq!(
+        generation.activation_codec,
+        skippy_protocol::StageActivationCodec::RawF32V1
+    );
+    assert_eq!(
+        generation.activation_codec_policy,
+        skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1
+    );
+}
+
+#[test]
 fn split_missing_active_stage_nodes_ignores_unused_lost_nodes() {
     let active = SplitTopologyGeneration::new(
         "topology-a".into(),

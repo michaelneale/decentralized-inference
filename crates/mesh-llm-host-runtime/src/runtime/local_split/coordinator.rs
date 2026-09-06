@@ -67,7 +67,11 @@ impl SplitTopologyGeneration {
             stages,
             admissions: BTreeMap::new(),
             activation_codec: skippy_protocol::StageActivationCodec::default(),
-            activation_codec_policy: Default::default(),
+            // New split generations negotiate a lossless codec per realized
+            // activation frame. RawF32 remains the mandatory fallback, so
+            // frames only compact when their complete payload (including
+            // sidebands) round-trips exactly through BF16 or F16.
+            activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1,
         }
     }
 
