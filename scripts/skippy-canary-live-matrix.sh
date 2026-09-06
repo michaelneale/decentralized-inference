@@ -177,8 +177,25 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # that disagrees with this run's recorded manifest is rejected (a stale
   # inherited bundle must not override fresh provenance). Without
   # provenance, an explicit env bundle is required (test seam).
-  provenance_bundle="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["native_runtime"]["manifest"])' \
-    "$EVIDENCE_ROOT/live-matrix/producer-provenance.json" 2>/dev/null || true)"
+  # Producer provenance is authoritative when its file EXISTS: any failure
+  # to extract the runtime manifest path from an existing provenance file
+  # (malformed JSON, absent/non-string native_runtime.manifest) is a hard
+  # failure — never a fall-through to another bundle. Provenance-file
+  # ABSENCE is the explicit test seam: an env bundle must then be set.
+  provenance_file="$EVIDENCE_ROOT/live-matrix/producer-provenance.json"
+  if [[ -f "$provenance_file" ]]; then
+    if ! provenance_bundle="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["native_runtime"]["manifest"]; assert isinstance(m,str); print(m)' \
+        "$provenance_file" 2>/dev/null)"; then
+      echo "producer provenance $provenance_file is malformed or lacks native_runtime.manifest: rerun --prepare (an existing provenance file must not fall back to any other bundle)" >&2
+      exit 1
+    fi
+  else
+    provenance_bundle=""
+  fi
+  if [[ -n "$provenance_bundle" && ! -f "$provenance_bundle" ]]; then
+    echo "producer provenance records runtime manifest $provenance_bundle but it is missing: rerun --prepare (a prepared run must not fall back to any other bundle)" >&2
+    exit 1
+  fi
   if [[ -n "$provenance_bundle" && -f "$provenance_bundle" ]]; then
     provenance_root="$(dirname "$(dirname "$provenance_bundle")")"
     if [[ -n "${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR:-}" &&

@@ -397,6 +397,141 @@ class LiveMatrixScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not match this run's producer provenance", result.stderr)
 
+    def test_missing_provenance_manifest_fails_closed(self):
+        """If producer provenance exists but its recorded runtime manifest is
+        missing, rows must fail immediately — never fall through to an
+        inherited MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR."""
+        import tempfile
+
+        payload = b"gguf"
+        import hashlib
+
+        blob = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            evidence = tmp / "evidence"
+            live_matrix = evidence / "live-matrix"
+            live_matrix.mkdir(parents=True)
+            # Provenance points at a manifest that no longer exists (e.g. the
+            # prepared work root was cleaned between --prepare and rows).
+            (live_matrix / "producer-provenance.json").write_text(
+                json.dumps(
+                    {"native_runtime": {"manifest": str(tmp / "gone" / "manifest.json")}}
+                )
+            )
+            other_root = tmp / "other" / "native-runtimes"
+            other_root.mkdir(parents=True)
+
+            hf_mock = tmp / "hf-mock"
+            hf_mock.write_text("#!/usr/bin/env bash\nexit 9\n")
+            hf_mock.chmod(0o755)
+
+            manifest = tmp / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "llama_model": "mockfamily",
+                                "status": "certified",
+                                "model_pin": {
+                                    "repo": "org/mock-gguf",
+                                    "revision": "1" * 40,
+                                    "file": "model-Q4_K_M.gguf",
+                                    "size_bytes": len(payload),
+                                    "blob_sha256": blob,
+                                    "selector": "Q4_K_M",
+                                },
+                            }
+                        ]
+                    }
+                )
+            )
+            result = subprocess.run(
+                [str(SCRIPT), "--model", "mockfamily"],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "SKIPPY_PARITY_MANIFEST": str(manifest),
+                    "SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD": str(hf_mock),
+                    "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(evidence),
+                    "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                    "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(other_root),
+                    "MESH_LLM_BIN": "/usr/bin/true",
+                    "STAGE_SERVER_BIN": "/usr/bin/true",
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("but it is missing: rerun --prepare", result.stderr)
+
+    def test_malformed_provenance_fails_closed(self):
+        """An existing producer-provenance.json whose native_runtime.manifest
+        cannot be extracted (malformed JSON / missing field) must hard-fail
+        rows; only provenance-file ABSENCE permits the explicit env-bundle
+        test seam."""
+        for content in ["{ not json", json.dumps({"native_runtime": {}})]:
+            with self.subTest(content=content):
+                import tempfile
+
+                payload = b"gguf"
+                import hashlib
+
+                blob = hashlib.sha256(payload).hexdigest()
+                with tempfile.TemporaryDirectory() as tmp_name:
+                    tmp = Path(tmp_name)
+                    evidence = tmp / "evidence"
+                    live_matrix = evidence / "live-matrix"
+                    live_matrix.mkdir(parents=True)
+                    (live_matrix / "producer-provenance.json").write_text(content)
+                    other_root = tmp / "other" / "native-runtimes"
+                    other_root.mkdir(parents=True)
+
+                    hf_mock = tmp / "hf-mock"
+                    hf_mock.write_text("#!/usr/bin/env bash\nexit 9\n")
+                    hf_mock.chmod(0o755)
+
+                    manifest = tmp / "manifest.json"
+                    manifest.write_text(
+                        json.dumps(
+                            {
+                                "candidates": [
+                                    {
+                                        "llama_model": "mockfamily",
+                                        "status": "certified",
+                                        "model_pin": {
+                                            "repo": "org/mock-gguf",
+                                            "revision": "1" * 40,
+                                            "file": "model-Q4_K_M.gguf",
+                                            "size_bytes": len(payload),
+                                            "blob_sha256": blob,
+                                            "selector": "Q4_K_M",
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                    result = subprocess.run(
+                        [str(SCRIPT), "--model", "mockfamily"],
+                        capture_output=True,
+                        text=True,
+                        cwd=tmp,
+                        env={
+                            **os.environ,
+                            "SKIPPY_PARITY_MANIFEST": str(manifest),
+                            "SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD": str(hf_mock),
+                            "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(evidence),
+                            "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                            "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(other_root),
+                            "MESH_LLM_BIN": "/usr/bin/true",
+                            "STAGE_SERVER_BIN": "/usr/bin/true",
+                        },
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("malformed or lacks native_runtime.manifest", result.stderr)
+
     def test_prepare_builds_exact_producers_and_records_provenance(self):
         """--prepare must build this run's host binary and patched native
         runtime and write producer-provenance.json; the provenance writer
