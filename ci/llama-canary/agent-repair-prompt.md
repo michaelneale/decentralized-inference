@@ -29,6 +29,13 @@ in those skills are hard requirements for this repair, not suggestions.
    semantic fix in the broken ones. Regenerate the series so
    `scripts/prepare-llama.sh` runs clean end to end.
 
+   Model-builder stage controls live in the single generated family patch.
+   Run the Clang rewriter and `scripts/generate-skippy-family-patch.py`; do not
+   hand-edit per-family stage-filter or `begin_block`/`end_block` patches. A
+   conventional builder must be regenerated from its proven source shape. An
+   irregular builder remains unchanged with the rewriter's precise
+   `unsupported_shape` reason until a sound general rule exists.
+
 3. **Build.** `scripts/build-llama.sh` then
    `cargo check -p skippy-ffi -p skippy-runtime -p skippy-server`.
 
@@ -62,49 +69,29 @@ Notes:
   the pin file yourself.
 - Do not modify files outside `third_party/llama.cpp/patches/` unless the
   Rust ABI mirrors in `crates/` genuinely need to track a patch ABI change
-  (bump `PREPARE_SCHEMA`/ABI version together in that case).
-  EXCEPTION: the model-manifest repair described under "New upstream model
-  families" below — `docs/skippy/llama-parity-candidates.json` and
-  `ci/llama-canary/family-certified.json` may (and, for family
-  registration, must) be edited in the repair PR. The patch-only boundary
-  still forbids all other tree edits.
+  (bump `PREPARE_SCHEMA`/ABI version together in that case). Existing
+  model-manifest rows may be corrected when a battery failure proves they are
+  stale. Do not add a checkpoint merely because an upstream builder is new;
+  the source rewriter supplies structural stage-control coverage.
 
-## New upstream model families (boundary registration)
+## New upstream model families
 
-`scripts/skippy-llama-parity.py validate` fails when a runnable parity row
-(status `certified`, `candidate`, or `candidate_stateful`) refers to a model
-file in `.deps/llama.cpp/src/models/` that does not register per-layer
-`begin_block`/`end_block` stage boundaries. Use
-`scripts/skippy-llama-parity.py classify-boundaries` to list exactly those
-models. For each one:
+Run the source rewriter across every `src/models/*.cpp` translation unit. A
+new conventional builder should appear in the consolidated generated patch
+without a family-specific rule or checkpoint. If it reports
+`unsupported_shape`, preserve the refusal and add a general AST rule only when
+the activation loop and ownership edits can be proved. Never use an
+architecture name or tensor spelling as the eligibility predicate.
 
-1. **Either register the family**: add `begin_block(inpL, il)` /
-   `end_block(cur, il)` hooks in the model's build loop following the
-   existing registrations (see `src/models/qwen3.cpp`, patch 0072, and the
-   llama-patch-changes skill), AND pin the smallest practical GGUF for the
-   family as an immutable `model_pin` row in
-   `docs/skippy/llama-parity-candidates.json` (repo, 40-hex revision, file,
-   size_bytes, 64-hex blob_sha256 — the `file_integrity` schema of
-   `ci/llama-canary/family-certified.json`), AND mirror the same model in
-   `ci/llama-canary/family-certified.json`. The repair PR must update both
-   manifests in the same commit and rerun the row via
-   `scripts/skippy-family-battery.sh`; a family cannot be marked supported
-   without executable evidence. Floating refs (repo without revision, or a
-   moving tag) are rejected by `validate`.
-2. **Or classify it explicitly**: set the row's status to
-   `needs_boundary_registration` (support work queued, not yet runnable) and
-   leave the certification untouched, or add an `unsupported_reason` string
-   for families we deliberately do not serve.
+The family manifests remain the executable numeric battery. New source
+coverage does not automatically create a new model row and does not trigger a
+download. Add or change a row only when there is an independent numeric,
+backend, or state-pattern reason and immutable artifact evidence is available.
 
-A new upstream model file with no manifest row at all still fails validation
-as `missing_candidate` — the repair PR must classify every new family before
-the battery can pass.
-
-The canary also runs `scripts/skippy-canary-live-matrix.sh` after the smoke
+The canary continues to run `scripts/skippy-canary-live-matrix.sh` after the smoke
 gates: every runnable `model_pin` row must resolve its pinned GGUF, pass
 size/sha256 verification, package as source-complete package-v2, pass
 independent `verify-package-v2`, and pass the two-node split smoke. Its
 per-row evidence lives under `target/family-battery/<run>/live-matrix/` in
-the uploaded battery artifact; a failed row routes here. The repair loop
-attempts hooks plus a smallest immutable model before a non-runnable
-classification is acceptable.
+the uploaded battery artifact; a failed existing row routes here for a
+semantic patch or manifest repair backed by that evidence.

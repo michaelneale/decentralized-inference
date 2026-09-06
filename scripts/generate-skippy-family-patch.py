@@ -86,8 +86,6 @@ def validate_report(report_path: Path, *, idempotence: bool) -> dict:
                 "second rewriter pass still has edits for: "
                 + ", ".join(remaining[:10])
             )
-    elif not any(builder.get("verdict") == "transformable" for builder in builders):
-        raise RuntimeError("first rewriter pass produced no edits")
     return report
 
 

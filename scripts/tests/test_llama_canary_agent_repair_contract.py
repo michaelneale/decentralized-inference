@@ -84,7 +84,7 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         self.assertIn("scripts/prepare-llama.sh pinned || return 1", wrapper)
         self.assertIn('prepared_upstream="$(tr -d \'[:space:]\' < "$ROOT/.deps/llama.cpp/.mesh-llm-upstream-sha")"', wrapper)
         self.assertIn('[[ "$prepared_upstream" != "$UPSTREAM_SHA" ]]', wrapper)
-        self.assertIn("  prepare_repair_target || return 1\n  # Coverage-expansion certification", wrapper)
+        self.assertIn("  prepare_repair_target || return 1\n  # Battery-mode repairs", wrapper)
 
         # Both entry modes establish the pinned target before the first
         # publish_work_in_progress call can create or update the repair PR.
@@ -235,7 +235,8 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         # use the same arch -arm64 guard as the workflow's own build step,
         # and refuse to certify a non-arm64 archive (run 33140672269 rebuilt
         # x86_64 from a plain build-llama.sh call).
-        self.assertIn("arch -arm64 scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64", wrapper)
+        self.assertIn("LLAMA_STAGE_BUILD_TESTS=ON arch -arm64 scripts/build-llama.sh", wrapper)
+        self.assertIn("-DCMAKE_OSX_ARCHITECTURES=arm64 || return 1", wrapper)
         self.assertIn("refusing to certify: native archive is not arm64", wrapper)
 
     def test_push_failure_names_the_likely_permission_cause(self) -> None:
@@ -285,30 +286,22 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         )
         self.assertEqual(0, script.returncode, script.stderr)
 
-    def test_battery_mode_certification_executes_the_selected_live_row(self) -> None:
-        """A battery-mode repair cannot certify without executing the
-        coverage-expansion target's live package-v2 row."""
+    def test_battery_mode_certification_executes_the_full_live_matrix(self) -> None:
+        """A battery-mode repair cannot certify without executing every
+        pinned live package-v2 row and the generated-family-patch gate."""
         wrapper = REPAIR.read_text(encoding="utf-8")
         run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
-        # Battery-mode certification runs parity validate, reads the
-        # ORIGINAL workflow-persisted coverage target, and invokes the live
-        # matrix for exactly that row with prepared producer provenance —
-        # before the family battery can pass.
+        # Source transformation replaces the one-family expansion target.
+        # Battery-mode certification validates the manifests and runs the
+        # complete pinned live matrix before the family battery can pass.
         self.assertIn('if [[ "$MODE" == "battery" ]]; then', run_battery)
         self.assertIn("skippy-llama-parity.py --llama-src .deps/llama.cpp", run_battery)
-        self.assertIn(".deps/llama-canary-coverage-target.json", run_battery)
         self.assertIn('skippy-canary-live-matrix.sh --prepare', run_battery)
-        self.assertIn('--model "$coverage_model"', run_battery)
-        # A failing live row (or a failing validate) blocks certification.
+        self.assertNotIn('--model', run_battery)
         self.assertIn("repair cannot certify", run_battery)
-        # When no target file exists, the full pinned set still runs live so
-        # a newly added pin cannot certify unexecuted.
-        self.assertIn(
-            "certify unexecuted",
-            run_battery,
-        )
-        # Validate runs before the live matrix, which runs before the family
-        # battery.
+        self.assertIn("check-skippy-generated-family-patch.sh", run_battery)
+        # Validate runs before the live matrix; the generated-patch check and
+        # family battery run only after the native build succeeds.
         self.assertLess(
             run_battery.index("skippy-llama-parity.py --llama-src"),
             run_battery.index("skippy-canary-live-matrix.sh"),
@@ -317,50 +310,28 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
             run_battery.index("skippy-canary-live-matrix.sh"),
             run_battery.index("skippy-family-battery.sh"),
         )
-        # The live matrix script itself supports the row filter and fails
-        # when the filter matches no runnable row.
-        matrix = (ROOT / "scripts" / "skippy-canary-live-matrix.sh").read_text(encoding="utf-8")
-        self.assertIn("--model)", matrix)
-        self.assertIn("model filter matched no runnable model_pin row", matrix)
+        self.assertLess(
+            run_battery.index("check-skippy-generated-family-patch.sh"),
+            run_battery.index("skippy-family-battery.sh"),
+        )
 
-    def test_graduated_coverage_target_does_not_advance_verification(self) -> None:
+    def test_one_family_coverage_target_is_retired(self) -> None:
         wrapper = REPAIR.read_text(encoding="utf-8")
         run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
         self.assertNotIn("next-boundary-target --json", run_battery)
-        self.assertIn(".deps/llama-canary-coverage-target.json", run_battery)
-        # Blocker path: a non-runnable resolution needs a non-empty
-        # unsupported_reason; a runnable status never carries one (validate
-        # rejects the ambiguous combination).
-        self.assertIn("resolved to '$coverage_status' without an unsupported_reason", run_battery)
-        self.assertIn("certified|candidate|candidate_stateful)", run_battery)
-        # Patch-queue runs clear any stale persisted target.
-        self.assertIn(
-            'rm -f "$ROOT/.deps/llama-canary-coverage-target.json"', wrapper
-        )
+        self.assertNotIn("llama-canary-coverage-target.json", wrapper)
+        self.assertNotIn("coverage_model", run_battery)
+        self.assertIn("single generated family patch", run_battery)
 
-    def test_malformed_persisted_coverage_target_fails_closed(self) -> None:
-        """A malformed/unreadable target file must be a hard failure, not a
-        silent downgrade to 'no target' (which would certify via the
-        ordinary full matrix)."""
+    def test_generated_patch_failure_blocks_certification(self) -> None:
         wrapper = REPAIR.read_text(encoding="utf-8")
         run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
-        # The three target-file states are distinguished; malformed is
-        # distinct from missing and from JSON null.
-        self.assertIn('|| echo "malformed"', run_battery)
-        self.assertIn('if [[ "$coverage_state" == "malformed" ]]; then', run_battery)
-        self.assertIn("is malformed/unreadable; repair cannot certify", run_battery)
-        # The malformed branch returns before any matrix can certify.
-        malformed_branch = run_battery.split('$coverage_state" == "malformed"')[1]
-        self.assertIn("return 1", malformed_branch.split("coverage_model=")[0])
-        # The missing-file state runs the full live matrix exactly like
-        # JSON null — "missing" must never be treated as a literal model
-        # name.
-        self.assertIn(
-            'if [[ "$coverage_state" == "missing" ]]; then', run_battery
-        )
-        self.assertIn('coverage_model=""', run_battery)
-        missing_branch = run_battery.split('$coverage_state" == "missing"')[1]
-        self.assertIn('coverage_model=""', missing_branch.split("if [[ -n")[0])
+        self.assertIn("if ! scripts/check-skippy-generated-family-patch.sh", run_battery)
+        self.assertIn("generated model-family patch is stale or invalid", run_battery)
+        patch_failure = run_battery.split(
+            "if ! scripts/check-skippy-generated-family-patch.sh", 1
+        )[1].split("fi", 1)[0]
+        self.assertIn("return 1", patch_failure)
 
     def test_runnable_row_carrying_unsupported_reason_is_rejected(self) -> None:
         """validate must reject candidate/candidate_stateful rows carrying

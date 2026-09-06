@@ -33,6 +33,7 @@ jobs:
       changed: ${{ steps.sha.outputs.changed }}
       certify: ${{ steps.sha.outputs.certify }}
       cadence: ${{ steps.sha.outputs.cadence }}
+      family_patch_outcome: ${{ steps.family_patch.outcome }}
       battery_outcome: ${{ steps.battery.outcome }}
       trusted_queue_sha: ${{ steps.sha.outputs.trusted_queue_sha }}
     env:
@@ -65,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for cmd in cargo just sccache jq python3 cmake ninja hf lipo; do
+          for cmd in cargo just sccache jq python3 cmake ninja hf lipo brew xcrun; do
             if ! command -v "$cmd" >/dev/null 2>&1; then
               echo "missing on family-certify image: $cmd" >&2
               missing=1
@@ -74,6 +75,13 @@ jobs:
           if [[ -z "${HF_CACHE:-}" ]]; then
             echo "HF_CACHE is not exported on this runner" >&2
             missing=1
+          fi
+          llvm_prefix="$(brew --prefix llvm@22 2>/dev/null || true)"
+          if [[ ! -x "$llvm_prefix/bin/clang" || ! -f "$llvm_prefix/lib/cmake/clang/ClangConfig.cmake" ]]; then
+            echo "pinned llvm@22 with Clang LibTooling is not installed on the family-certify image" >&2
+            missing=1
+          else
+            echo "SKIPPY_REWRITER_LLVM_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
           fi
           if (( missing == 1 )); then
             echo "bake the missing tools into the family-certify runner image; this job installs nothing" >&2
@@ -144,53 +152,6 @@ jobs:
           python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp validate 2>&1 \
             | tee -a .deps/llama-canary-repair-battery.log
 
-      - name: Append coverage-expansion target (one family per run)
-        id: coverage_target
-        # Work down the needs_boundary_registration queue deterministically:
-        # select exactly ONE family, append it (and its source file) to the
-        # battery repair evidence so the battery-mode repair agent attempts
-        # real hooks plus an immutable smallest GGUF and updates both joined
-        # manifests; a non-runnable classification is acceptable only with
-        # recorded blocker evidence. Never fans out; a no-gap run appends
-        # nothing. Only full certification cadences (llama-bump, manual-full)
-        # expand coverage and exit nonzero (with continue-on-error) so the
-        # pending target routes the run into the battery-mode agent repair
-        # loop, exactly like a battery or live-matrix failure; nightly runs
-        # still RECORD the target but defer expansion. The original
-        # workflow-selected JSON is persisted to
-        # .deps/llama-canary-coverage-target.json BEFORE any agent turn: the
-        # repair wrapper must verify exactly this original row — re-selecting
-        # after a repair would advance to the next queue entry and test the
-        # wrong model. The file is rewritten on every certify run (and
-        # cleared in patch-queue mode) so no previous run's target can leak.
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
-        continue-on-error: true
-        run: |
-          mkdir -p .deps
-          TARGET="$(python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp next-boundary-target --json)"
-          printf '%s' "$TARGET" > .deps/llama-canary-coverage-target.json
-          if [[ "$TARGET" != "null" && -n "$TARGET" ]]; then
-            {
-              echo
-              echo "=== coverage-expansion target (one family per run) ==="
-              echo "This run's repair agent must attempt real boundary hooks plus an"
-              echo "immutable smallest GGUF for exactly this family, updating both"
-              echo "docs/skippy/llama-parity-candidates.json and"
-              echo "ci/llama-canary/family-certified.json in the repair PR; a"
-              echo "non-runnable classification is acceptable only with recorded"
-              echo "blocker evidence."
-              echo "$TARGET"
-            } | tee -a .deps/llama-canary-repair-battery.log
-            if [[ "${{ steps.sha.outputs.cadence }}" != "nightly" ]]; then
-              echo "coverage target pending: $TARGET" >&2
-              exit 1
-            fi
-            echo "nightly cadence: coverage target deferred (recorded only): $TARGET"
-          else
-            echo "no needs_boundary_registration gaps remain; no coverage target appended" \
-              | tee -a .deps/llama-canary-repair-battery.log
-          fi
-
       - name: Plan and verify family certification cache
         id: family_plan
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
@@ -213,6 +174,8 @@ jobs:
         # The family-certify service can itself be launched under Rosetta.
         # Select the native slice for the build shell as well as the CMake
         # target so host detection and produced archives are both arm64.
+        env:
+          LLAMA_STAGE_BUILD_TESTS: "ON"
         run: arch -arm64 bash scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64
 
       - name: Verify native archive architecture
@@ -226,14 +189,22 @@ jobs:
             exit 1
           fi
 
-      - name: Build stage runtime crates
+      - name: Verify generated model-family patch
+        id: family_patch
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        continue-on-error: true
+        env:
+          SKIPPY_REWRITER_ARTIFACT_ROOT: ${{ github.workspace }}/target/skippy-stage-rewriter-check
+        run: scripts/check-skippy-generated-family-patch.sh
+
+      - name: Build stage runtime crates
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success'
         # Do not select skippy-ffi directly here: its default dynamic-runtime
         # feature would be unified into the statically linked certification binaries.
         run: cargo build -p skippy-runtime -p skippy-server -p skippy-model-package -p skippy-correctness -p llama-spec-bench
 
       - name: Skippy smoke tests
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'
         timeout-minutes: 45
         env:
           WORK_DIR: ${{ runner.temp }}/skippy-ci-smoke
@@ -250,7 +221,7 @@ jobs:
         # supply false provenance. Failure routes to the same battery-mode
         # agent repair loop; per-row evidence lands under the family
         # battery evidence root and is uploaded with it.
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'
         continue-on-error: true
         env:
           FAMILY_BATTERY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
@@ -261,7 +232,7 @@ jobs:
 
       - name: Supported-families certification battery (parity gate)
         id: battery
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success'
         # continue-on-error so the battery-failure agent repair loop below can
         # run; the "Fail when the canary needs human attention" step keeps the
         # job red for any battery failure the repair does not resolve.
@@ -288,12 +259,14 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: llama-family-battery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/family-battery/${{ github.run_id }}-${{ github.run_attempt }}/
+          path: |
+            target/family-battery/${{ github.run_id }}-${{ github.run_attempt }}/
+            target/skippy-stage-rewriter-check/
           if-no-files-found: warn
           retention-days: 14
 
       - name: Generate summary
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success'
         env:
           SKIPPY_CI_SMOKE: ${{ env.LLAMA_UPSTREAM_CANARY_SMOKE }}
         run: |
@@ -305,7 +278,7 @@ jobs:
 
       - name: Report upstream pin update
         # Truthful success reporting: parity validation, the live matrix,
-        # and the coverage gate are independent fail-closed lanes now — a
+        # and the generated-family-patch gate are independent fail-closed lanes — a
         # green battery alone must not print "pin eligible" while another
         # lane failed.
         if: >-
@@ -314,7 +287,7 @@ jobs:
           && steps.battery.outcome == 'success'
           && steps.parity_validate.outcome == 'success'
           && steps.live_matrix.outcome == 'success'
-          && steps.coverage_target.outcome == 'success'
+          && steps.family_patch.outcome == 'success'
         run: |
           {
             echo "## llama.cpp upstream pin update"
@@ -332,7 +305,7 @@ jobs:
           && steps.battery.outcome == 'success'
           && steps.parity_validate.outcome == 'success'
           && steps.live_matrix.outcome == 'success'
-          && steps.coverage_target.outcome == 'success'
+          && steps.family_patch.outcome == 'success'
         run: |
           {
             echo "## llama.cpp upstream canary (forced certification)"
@@ -343,15 +316,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report nightly family result
-        # Nightly: parity + live + battery must be green; the coverage
-        # target is recorded-only on nightly (its deferral is not a
-        # failure), so it is deliberately not required here.
+        # Nightly: generated patch, parity, live, and battery gates must all
+        # be green.
         if: >-
           steps.prepare.outcome == 'success'
           && steps.sha.outputs.cadence == 'nightly'
           && steps.battery.outcome == 'success'
           && steps.parity_validate.outcome == 'success'
           && steps.live_matrix.outcome == 'success'
+          && steps.family_patch.outcome == 'success'
         run: |
           {
             echo "## llama.cpp nightly family sentinels"
@@ -401,7 +374,7 @@ jobs:
           && (steps.battery.outcome == 'failure'
               || steps.parity_validate.outcome == 'failure'
               || steps.live_matrix.outcome == 'failure'
-              || steps.coverage_target.outcome == 'failure')
+              || steps.family_patch.outcome == 'failure')
         timeout-minutes: 720
         continue-on-error: true
         env:
@@ -426,7 +399,7 @@ jobs:
           || steps.battery.outcome == 'failure'
           || steps.parity_validate.outcome == 'failure'
           || steps.live_matrix.outcome == 'failure'
-          || steps.coverage_target.outcome == 'failure'
+          || steps.family_patch.outcome == 'failure'
         env:
           CANARY_CADENCE: ${{ steps.sha.outputs.cadence }}
         run: |
@@ -451,7 +424,7 @@ jobs:
 
   update-pin:
     needs: latest-upstream
-    if: needs.latest-upstream.outputs.changed == 'true' && needs.latest-upstream.outputs.battery_outcome == 'success'
+    if: needs.latest-upstream.outputs.changed == 'true' && needs.latest-upstream.outputs.family_patch_outcome == 'success' && needs.latest-upstream.outputs.battery_outcome == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

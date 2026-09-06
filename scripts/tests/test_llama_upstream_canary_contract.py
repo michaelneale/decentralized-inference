@@ -87,10 +87,7 @@ class ParityCliInvocationTests(unittest.TestCase):
         self.assertIn(
             "skippy-llama-parity.py --llama-src .deps/llama.cpp validate", workflow
         )
-        self.assertIn(
-            "skippy-llama-parity.py --llama-src .deps/llama.cpp next-boundary-target",
-            workflow,
-        )
+        self.assertNotIn("next-boundary-target", workflow)
         self.assertIn(
             "skippy-llama-parity.py --llama-src .deps/llama.cpp \\", wrapper
         )
@@ -340,51 +337,47 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("SKIPPY_CANARY_LIVE_MATRIX_BACKEND", live_matrix)
         self.assertIn("metal", live_matrix)
 
-        # A pending coverage-expansion target must actually trigger the
-        # battery-mode repair loop: the step exits nonzero under
-        # continue-on-error and its failure outcome feeds both the repair
-        # condition and the final fail condition. The no-gap path must
-        # remain successful (no exit 1 on that branch).
-        coverage = _step_block(workflow, "Append coverage-expansion target (one family per run)")
-        self.assertIn("id: coverage_target", coverage)
-        self.assertIn("continue-on-error: true", coverage)
-        self.assertIn("next-boundary-target --json", coverage)
-        self.assertIn("tee -a .deps/llama-canary-repair-battery.log", coverage)
-        self.assertIn("exit 1", coverage)
-        # The ORIGINAL workflow-selected target is persisted before any
-        # agent turn so the repair wrapper verifies exactly this row —
-        # re-selecting after a graduated repair would advance to the next
-        # queue entry and test the wrong model.
-        self.assertIn(".deps/llama-canary-coverage-target.json", coverage)
-        target_branch = coverage.split("if [[ \"$TARGET\"")[1].split("else")[0]
-        no_gap_branch = coverage.split("else", 1)[1]
-        self.assertIn("exit 1", target_branch)
-        self.assertNotIn("exit 1", no_gap_branch)
-        self.assertIn("no needs_boundary_registration gaps remain", no_gap_branch)
-        # Only full certification cadences fail on a pending target;
-        # nightly runs record + defer it.
-        self.assertIn('!= "nightly" ]]', target_branch)
-        self.assertIn("steps.coverage_target.outcome == 'failure'", battery_repair)
-        self.assertIn("steps.coverage_target.outcome == 'failure'", fail_step)
-        # Truthful success reporting: the pin-eligible and forced-cert
-        # reports require parity + live + coverage all green alongside the
-        # battery; nightly requires parity + live + battery (coverage is
-        # recorded-only there).
+        # The source rewriter replaces the one-family boundary-expansion loop.
+        # Its deterministic generated-patch check must route drift to the
+        # repair loop and keep every success report fail-closed.
+        family_patch = _step_block(workflow, "Verify generated model-family patch")
+        self.assertIn("id: family_patch", family_patch)
+        self.assertIn("continue-on-error: true", family_patch)
+        self.assertIn("scripts/check-skippy-generated-family-patch.sh", family_patch)
+        self.assertNotIn("next-boundary-target", workflow)
+        self.assertNotIn("llama-canary-coverage-target.json", workflow)
+        self.assertIn("steps.family_patch.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.family_patch.outcome == 'failure'", fail_step)
+        self.assertIn("family_patch_outcome: ${{ steps.family_patch.outcome }}", workflow)
+        update_job = workflow[workflow.index("  update-pin:") :]
+        self.assertIn("needs.latest-upstream.outputs.family_patch_outcome == 'success'", update_job)
+
+        generated_patch_check = ROOT / "scripts" / "check-skippy-generated-family-patch.sh"
+        generated_patch_check_text = generated_patch_check.read_text(encoding="utf-8")
+        self.assertIn("llvm@22", generated_patch_check_text)
+        self.assertIn("0076-skippy-generate-model-family-stage-controls.patch", generated_patch_check_text)
+        self.assertIn("generate-skippy-family-patch.py", generated_patch_check_text)
+        self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
+        self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
+        self.assertIn("-R '^skippy_'", generated_patch_check_text)
+
+        native_build = _step_block(workflow, "Build patched llama.cpp ABI")
+        self.assertIn('LLAMA_STAGE_BUILD_TESTS: "ON"', native_build)
+
+        # Truthful success reporting requires generated patch + parity + live
+        # + battery gates to be green on every cadence.
         pin_report = _step_block(workflow, "Report upstream pin update")
         forced_report = _step_block(workflow, "Report forced certification result")
         nightly_report = _step_block(workflow, "Report nightly family result")
-        for report in (pin_report, forced_report):
+        for report in (pin_report, forced_report, nightly_report):
             self.assertIn("steps.battery.outcome == 'success'", report)
             self.assertIn("steps.parity_validate.outcome == 'success'", report)
             self.assertIn("steps.live_matrix.outcome == 'success'", report)
-            self.assertIn("steps.coverage_target.outcome == 'success'", report)
-        self.assertIn("steps.battery.outcome == 'success'", nightly_report)
-        self.assertIn("steps.parity_validate.outcome == 'success'", nightly_report)
-        self.assertIn("steps.live_matrix.outcome == 'success'", nightly_report)
-        self.assertNotIn("steps.coverage_target.outcome == 'success'", nightly_report)
-        # Live-matrix evidence lands under the uploaded battery evidence root.
+            self.assertIn("steps.family_patch.outcome == 'success'", report)
+        # Live-matrix and generated-patch evidence are uploaded together.
         upload = _step_block(workflow, "Upload supported-families battery evidence")
         self.assertIn("target/family-battery/", upload)
+        self.assertIn("target/skippy-stage-rewriter-check/", upload)
 
     def test_post_green_agent_review_is_wired_and_opt_out(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

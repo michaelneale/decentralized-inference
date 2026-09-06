@@ -53,4 +53,14 @@ python3 scripts/generate-skippy-family-patch.py \
 
 The wrapper refuses a dirty input tree, applies the Clang-proven edits, checks
 a second pass for zero edits, and writes a fixed-header mail patch suitable for
-the existing `git am` preparation flow.
+the existing `git am` preparation flow. A tree in which every supported builder
+is already transformed is also valid: this lets CI canonicalize the complete
+prepared model-tree diff and compare it byte-for-byte with the checked-in patch.
+
+After `scripts/build-llama.sh` has produced the compilation database and run the
+native Skippy verifier, CI can run the complete deterministic check with:
+
+```sh
+SKIPPY_REWRITER_LLVM_PREFIX=/path/to/pinned/llvm \
+  scripts/check-skippy-generated-family-patch.sh
+```
