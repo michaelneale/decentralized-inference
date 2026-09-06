@@ -55,6 +55,7 @@ CTX_SIZE="${MESH_TWO_NODE_SPLIT_CTX_SIZE:-${MESH_LLM_SMOKE_CONTEXT_SIZE:-}}"
 MAX_VRAM="${MESH_TWO_NODE_SPLIT_MAX_VRAM:-1}"
 DEVICE="${MESH_TWO_NODE_SPLIT_DEVICE:-CPU}"
 WORK_DIR="${MESH_TWO_NODE_SPLIT_WORK_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/mesh-two-node-split.XXXXXX")}"
+mkdir -p "$WORK_DIR"
 # Keep this under /tmp with a short prefix because plugin Unix socket paths
 # must fit platform SUN_LEN limits, especially on macOS where TMPDIR is long.
 PROCESS_ROOT="${MESH_TWO_NODE_SPLIT_PROCESS_ROOT:-$(mktemp -d "/tmp/m2split.XXXXXX")}"

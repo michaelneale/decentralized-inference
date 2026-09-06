@@ -1,6 +1,7 @@
 import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -14,6 +15,44 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE_SCRIPT = ROOT / "scripts/ci-two-node-split-smoke.sh"
 PROMPT_COUNTS = [644, 644, 788, 788, 916, 916]
+
+
+class WorkDirCreationTests(unittest.TestCase):
+    def test_external_work_dir_is_created_before_logs_are_opened(self) -> None:
+        """An externally supplied MESH_TWO_NODE_SPLIT_WORK_DIR may be a fresh
+        nested evidence path; the smoke must mkdir -p it before opening any
+        log file (the mktemp default self-creates, the override does not)."""
+        script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        work_dir_line = script.index('WORK_DIR="${MESH_TWO_NODE_SPLIT_WORK_DIR:-')
+        mkdir_line = script.index('mkdir -p "$WORK_DIR"')
+        seed_log_line = script.index('SEED_LOG="${WORK_DIR}/')
+        worker_log_line = script.index('WORKER_LOG="${WORK_DIR}/')
+        self.assertLess(work_dir_line, mkdir_line)
+        self.assertLess(mkdir_line, seed_log_line)
+        self.assertLess(mkdir_line, worker_log_line)
+        # And behaviorally: run the script far enough to observe the directory
+        # exists even when nothing else is mocked (script exits early on a
+        # missing binary, but only after creating WORK_DIR).
+        with tempfile.TemporaryDirectory() as directory:
+            work_dir = Path(directory) / "nested" / "evidence" / "split-work"
+            self.assertFalse(work_dir.exists())
+            env = {
+                **os.environ,
+                "MESH_TWO_NODE_SPLIT_WORK_DIR": str(work_dir),
+                "MESH_LLM_BIN": str(Path(directory) / "nonexistent-mesh-llm"),
+            }
+            subprocess.run(
+                ["bash", str(SMOKE_SCRIPT), str(Path(directory) / "nonexistent-mesh-llm"),
+                 "/bin", str(Path(directory) / "nonexistent-model.gguf")],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=60,
+            )
+            self.assertTrue(
+                work_dir.is_dir(),
+                "smoke must create an externally supplied WORK_DIR before use",
+            )
 
 
 def prefix_validator_source() -> str:
