@@ -133,6 +133,10 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("select-skippy-family-shards.py", family_selection)
         self.assertIn("--include-sentinels", family_selection)
         self.assertIn("core-or-policy-change", family_selection)
+        self.assertIn(
+            "':(top,glob)third_party/llama.cpp/patches/*.patch'",
+            family_selection,
+        )
 
         family_plan = _step_block(workflow, "Plan and verify family certification cache")
         self.assertIn("python3 scripts/plan-family-battery.py", family_plan)
@@ -195,11 +199,71 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, family-certify]", latest_job)
         self.assertIn("permissions:\n      contents: read", latest_job)
         self.assertIn("ref: main", latest_job)
+        self.assertIn("fetch-depth: 2", latest_job)
         self.assertNotIn("queue_ref", workflow)
         self.assertNotIn("github.token", latest_job)
         self.assertIn("runs-on: ubuntu-latest", update_job)
         self.assertIn("permissions:\n      contents: write", update_job)
         self.assertIn("trusted_queue_sha", update_job)
+
+    def test_core_patch_pathspec_excludes_generated_shards(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="family-selection-git-") as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "test")
+            git("config", "user.email", "test@example.com")
+            patch_dir = repo / "third_party/llama.cpp/patches"
+            generated_dir = patch_dir / "generated"
+            generated_dir.mkdir(parents=True)
+            (patch_dir / "0001-core.patch").write_text("core\n", encoding="utf-8")
+            shard = generated_dir / "0001-family-gemma2.patch"
+            shard.write_text("generated-v1\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "base")
+
+            shard.write_text("generated-v2\n", encoding="utf-8")
+            git("add", str(shard.relative_to(repo)))
+            git("commit", "-qm", "generated")
+            top_level_patches = ":(top,glob)third_party/llama.cpp/patches/*.patch"
+            self.assertEqual(
+                git(
+                    "diff",
+                    "--quiet",
+                    "HEAD^",
+                    "HEAD",
+                    "--",
+                    top_level_patches,
+                    check=False,
+                ).returncode,
+                0,
+            )
+
+            core = patch_dir / "0001-core.patch"
+            core.write_text("core-v2\n", encoding="utf-8")
+            git("add", str(core.relative_to(repo)))
+            git("commit", "-qm", "core")
+            self.assertEqual(
+                git(
+                    "diff",
+                    "--quiet",
+                    "HEAD^",
+                    "HEAD",
+                    "--",
+                    top_level_patches,
+                    check=False,
+                ).returncode,
+                1,
+            )
 
     def test_update_job_writes_the_single_upstream_pin(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

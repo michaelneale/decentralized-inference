@@ -1178,11 +1178,40 @@ public:
     for (const clang::ContinueStmt *statement : exits.continues) {
       const std::string continue_indent =
           indentationAt(statement->getBeginLoc(), sm);
-      valid &= addInsert(report.edits, "insert_end_block_before_continue",
-                         report.file, statement->getBeginLoc(),
-                         "end_block(" + *carried + ", " +
-                             report.proof.loop_var + ");\n" + continue_indent,
-                         sm);
+      const auto parents = context.getParents(*statement);
+      if (parents.size() == 1 && parents[0].get<CompoundStmt>() != nullptr) {
+        valid &= addInsert(report.edits, "insert_end_block_before_continue",
+                           report.file, statement->getBeginLoc(),
+                           "end_block(" + *carried + ", " +
+                               report.proof.loop_var + ");\n" +
+                               continue_indent,
+                           sm);
+        continue;
+      }
+
+      // Inserting a statement before an unbraced conditional continue would
+      // make the continue unconditional. Replace the complete continue
+      // statement with a compound statement so it remains owned by the same
+      // if/else arm.
+      const auto next_token = clang::Lexer::findNextToken(
+          statement->getEndLoc(), sm, lang);
+      if (!next_token || !next_token->is(clang::tok::semi)) {
+        valid = false;
+        continue;
+      }
+      std::string block_indent = continue_indent;
+      if (block_indent.empty() && parents.size() == 1) {
+        if (const auto *parent = parents[0].get<Stmt>()) {
+          block_indent = indentationAt(parent->getBeginLoc(), sm);
+        }
+      }
+      valid &= addReplace(
+          report.edits, "wrap_end_block_before_continue", report.file,
+          clang::SourceRange(statement->getBeginLoc(), next_token->getLocation()),
+          "{\n" + block_indent + "    end_block(" + *carried + ", " +
+              report.proof.loop_var + ");\n" + block_indent +
+              "    continue;\n" + block_indent + "}",
+          sm, lang);
     }
 
     if (!completing_filter && output_call != nullptr) {

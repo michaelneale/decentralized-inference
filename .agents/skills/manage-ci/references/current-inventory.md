@@ -67,7 +67,13 @@ shard, and requires every shard that carries `*.block_count` and
 before compilation; Qwen4 experimental artifacts derive their wider boundary
 from `hyper_connection.count * embedding_length`. It emits
 deterministic bounded GitHub matrix shards; the current one-runner topology consumes one
-selected-family shard while retaining the plan as evidence. The runner's `.env` exports
+selected-family shard while retaining the plan as evidence. On a changed llama.cpp pin,
+the trusted checkout compares each generated family shard with the previous `main`
+commit and runs only the affected manifest families plus fixed architecture sentinels.
+Core patch, generator, policy, or selector changes fail closed to the full family
+battery. The checkout retains two commits so this comparison is available, and the
+core-patch pathspec is restricted to top-level patch files so generated shards do not
+force a full run. The runner's `.env` exports
 `HF_CACHE` pointing at a pre-warmed HF cache that lives on the lab NFS models
 volume and `HF_HUB_OFFLINE=1` (NFS offers no `flock`, so `hf` on the runner is
 read-only; the cache is populated by a two-stage prewarm that downloads on

@@ -60,6 +60,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: main
+          # Family-shard selection compares the trusted main commit with its
+          # first parent. Keep exactly that history available on this runner.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Verify runner toolchain
@@ -166,7 +169,7 @@ jobs:
               && git rev-parse HEAD^ >/dev/null 2>&1 \
               && git show HEAD^:third_party/llama.cpp/patches/generated/series.json > /tmp/base-family-series.json 2>/dev/null \
               && git diff --quiet HEAD^ HEAD -- \
-                   'third_party/llama.cpp/patches/*.patch' \
+                   ':(top,glob)third_party/llama.cpp/patches/*.patch' \
                    ci/llama-canary/family-certified.json \
                    ci/llama-canary/generated-family-map.json \
                    scripts/check-skippy-generated-family-patch.sh \

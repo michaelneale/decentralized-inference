@@ -250,6 +250,71 @@ def main() -> int:
         )["builders"][0]
         assert continue_second["verdict"] == "already_transformed"
 
+        unbraced_source = (
+            fixture_root / "src/models/continue-path.cpp"
+        ).read_text(encoding="utf-8").replace(
+            "if (il == 2) {\n      continue;\n    }",
+            "if (il == 2) continue;",
+        )
+        (source_root / "src/models/unbraced-continue.cpp").write_text(
+            unbraced_source, encoding="utf-8"
+        )
+        unbraced_continue = run(
+            tool,
+            source_root,
+            Path(temporary) / "unbraced-continue.json",
+            source_name="unbraced-continue.cpp",
+            apply=False,
+        )["builders"][0]
+        assert unbraced_continue["verdict"] == "transformable"
+        assert sum(
+            edit["kind"] == "wrap_end_block_before_continue"
+            for edit in unbraced_continue["edits"]
+        ) == 1
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "unbraced-continue-applied.json",
+            source_name="unbraced-continue.cpp",
+            apply=True,
+        )
+        unbraced_transformed = (
+            source_root / "src/models/unbraced-continue.cpp"
+        ).read_text(encoding="utf-8")
+        assert "if (il == 2) {\n" in unbraced_transformed
+        assert "end_block(inpL, il);\n        continue;\n    }" in unbraced_transformed
+        unbraced_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "unbraced-continue-second.json",
+            source_name="unbraced-continue.cpp",
+            apply=False,
+        )["builders"][0]
+        assert unbraced_second["verdict"] == "already_transformed"
+
+        unbraced_else_source = unbraced_source.replace(
+            "if (il == 2) continue;\n    inpL = block(inpL, il);",
+            "if (il == 2) continue;\n    else inpL = block(inpL, il);",
+        )
+        (source_root / "src/models/unbraced-continue-else.cpp").write_text(
+            unbraced_else_source, encoding="utf-8"
+        )
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "unbraced-continue-else-applied.json",
+            source_name="unbraced-continue-else.cpp",
+            apply=True,
+        )
+        unbraced_else_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "unbraced-continue-else-second.json",
+            source_name="unbraced-continue-else.cpp",
+            apply=False,
+        )["builders"][0]
+        assert unbraced_else_second["verdict"] == "already_transformed"
+
         switch_break = run(
             tool,
             source_root,
