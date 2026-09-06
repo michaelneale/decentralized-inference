@@ -426,7 +426,10 @@ class BoundaryRegistrationTests(unittest.TestCase):
         self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
         self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
 
-    def test_unregistered_candidate_row_with_reason_passes(self):
+    def test_unregistered_candidate_row_with_reason_fails(self):
+        # A runnable candidate with an unsupported_reason is an ambiguous
+        # state (runnable-but-unsupported) — reject it exactly like the
+        # certified case, even when hooks are registered.
         rows = [
             {
                 "llama_model": "somearch",
@@ -434,7 +437,18 @@ class BoundaryRegistrationTests(unittest.TestCase):
                 "unsupported_reason": "non-causal encoder",
             }
         ]
-        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 0)
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+
+    def test_candidate_stateful_row_with_reason_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "candidate_stateful",
+                "unsupported_reason": "ambiguous leftover",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
 
     def test_registered_row_with_reason_fails(self):
         rows = [
@@ -453,6 +467,65 @@ class BoundaryRegistrationTests(unittest.TestCase):
     def test_non_runnable_statuses_skipped(self):
         rows = [{"llama_model": "otherarch", "status": "implementation_base"}]
         self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 0)
+
+
+class CoverageExpansionTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    @staticmethod
+    def _row(model: str, family: str | None = None) -> dict:
+        row = {
+            "llama_model": model,
+            "status": "needs_boundary_registration",
+        }
+        if family is not None:
+            row["family"] = family
+        return row
+
+    def test_selects_deterministic_lexicographic_first(self):
+        # 2+ rows: the pick is stable and lexicographic on
+        # (llama_model, family), independent of input order.
+        rows = [
+            self._row("zeta", "zeta_family"),
+            self._row("alpha", "alpha_family"),
+            self._row("mid", "mid_family"),
+        ]
+        for order in (rows, list(reversed(rows)), [rows[1], rows[0], rows[2]]):
+            target = self.parity.coverage_expansion_target(order, set())
+            self.assertEqual(target["llama_model"], "alpha")
+            self.assertEqual(target["family"], "alpha_family")
+
+    def test_skips_rows_already_registered(self):
+        # A row whose hooks already landed but whose manifest status is
+        # stale must not be chosen — that is reclassification work, not
+        # coverage expansion.
+        rows = [
+            self._row("alpha", "alpha_family"),
+            self._row("zeta", "zeta_family"),
+        ]
+        target = self.parity.coverage_expansion_target(rows, {"alpha"})
+        self.assertEqual(target["llama_model"], "zeta")
+
+    def test_no_gaps_returns_none(self):
+        self.assertIsNone(self.parity.coverage_expansion_target([], set()))
+        self.assertIsNone(
+            self.parity.coverage_expansion_target(
+                [self._row("alpha"), self._row("zeta")], {"alpha", "zeta"}
+            )
+        )
+
+    def test_skips_rows_with_unsupported_reason(self):
+        rows = [
+            {
+                "llama_model": "alpha",
+                "status": "needs_boundary_registration",
+                "unsupported_reason": "blocked upstream",
+            },
+            self._row("zeta", "zeta_family"),
+        ]
+        target = self.parity.coverage_expansion_target(rows, set())
+        self.assertEqual(target["llama_model"], "zeta")
 
     def test_needs_boundary_registration_rows_lists_pending(self):
         rows = [
@@ -583,6 +656,7 @@ class PinManifestJoinTests(unittest.TestCase):
                 "file": "model.gguf",
                 "size_bytes": size,
                 "blob_sha256": blob,
+                "selector": "Q4_K_M",
             },
         }
 
@@ -591,6 +665,7 @@ class PinManifestJoinTests(unittest.TestCase):
             "artifact": {
                 "repo": repo,
                 "revision": revision,
+                "selector": "Q4_K_M",
                 "file_integrity": {
                     "model.gguf": {"size_bytes": size, "blob_id": blob}
                 },

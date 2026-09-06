@@ -452,14 +452,15 @@ def validate_pin_manifest_join(rows: list[dict[str, Any]]) -> int:
     except (OSError, ValueError) as error:
         print(f"cannot read {certified_path}: {error}", file=sys.stderr)
         return 1
-    # (repo, revision, file) -> (size_bytes, blob_sha256)
-    certified_index: dict[tuple[str, str, str], tuple[int, str]] = {}
+    # (repo, revision, file) -> (selector, size_bytes, blob_sha256)
+    certified_index: dict[tuple[str, str, str], tuple[str, int, str]] = {}
     for model in certified.get("models", []):
         artifact = model.get("artifact") or {}
         integrity = artifact.get("file_integrity") or {}
         for file_name, record in integrity.items():
             key = (artifact.get("repo", ""), artifact.get("revision", ""), file_name)
             certified_index[key] = (
+                artifact.get("selector", ""),
                 record.get("size_bytes", -1),
                 record.get("blob_id", ""),
             )
@@ -479,12 +480,16 @@ def validate_pin_manifest_join(rows: list[dict[str, Any]]) -> int:
                 file=sys.stderr,
             )
             continue
-        size, blob = record
-        if pin.get("size_bytes") != size or pin.get("blob_sha256") != blob:
+        selector, size, blob = record
+        if (
+            pin.get("selector") != selector
+            or pin.get("size_bytes") != size
+            or pin.get("blob_sha256") != blob
+        ):
             failures += 1
             print(
                 f"model_pin for {row['llama_model']} disagrees with "
-                f"family-certified.json integrity for {key[2]}",
+                f"family-certified.json selector/integrity for {key[2]}",
                 file=sys.stderr,
             )
     return failures
@@ -562,18 +567,22 @@ def validate_boundary_registration(
     Rows whose llama model does not register `begin_block`/`end_block` must
     carry an explicit `unsupported_reason` so the gap is classified rather
     than silently certified. Only a non-runnable classification may carry a
-    reason: a `certified` row with `unsupported_reason` is a manifest error
-    regardless of hook state.
+    reason: a runnable row (`certified`, `candidate`, `candidate_stateful`)
+    with `unsupported_reason` is an ambiguous manifest error regardless of
+    hook state.
     """
     failures = 0
     for row in rows:
         status = row.get("status")
         if status not in {"certified", "candidate", "candidate_stateful"}:
             continue
-        if status == "certified" and row.get("unsupported_reason"):
+        if status in {"certified", "candidate", "candidate_stateful"} and row.get(
+            "unsupported_reason"
+        ):
             failures += 1
             print(
-                f"certified row carries unsupported_reason: {row['llama_model']}",
+                f"runnable row carries unsupported_reason ({status}): "
+                f"{row['llama_model']}",
                 file=sys.stderr,
             )
             continue
@@ -601,6 +610,44 @@ def needs_boundary_registration_rows(
         and row["llama_model"] not in registered
         and not row.get("unsupported_reason")
     )
+
+
+def coverage_expansion_target(
+    rows: list[dict[str, Any]], registered: set[str], llama_src: Path | None = None
+) -> dict[str, str] | None:
+    """Deterministically select ONE needs_boundary_registration family.
+
+    Each llama-bump/manual-full canary run hands the battery repair agent a
+    single coverage-expansion target (family + source file) so the queue is
+    worked down one family per run — never fanned out. Selection is
+    lexicographic over the classified rows, so it is stable across runs and
+    advances as families graduate. Returns None when no gaps remain.
+    """
+    source = llama_src or ROOT / ".deps/llama.cpp"
+    pending = sorted(
+        (
+            row
+            for row in rows
+            if row.get("status") == "needs_boundary_registration"
+            and not row.get("unsupported_reason")
+            # Skip rows whose hooks have already landed but whose manifest
+            # status is stale — those are reclassification bugs, not
+            # coverage work, and validate flags them separately.
+            and row["llama_model"] not in registered
+        ),
+        key=lambda row: (row["llama_model"], row.get("family", "")),
+    )
+    if not pending:
+        return None
+    row = pending[0]
+    model = row["llama_model"]
+    source_file = str(source / "src/models" / f"{model}.cpp")
+    return {
+        "llama_model": model,
+        "family": row.get("family", model.replace("-", "_")),
+        "source_file": source_file,
+        "status": row["status"],
+    }
 
 
 def executable_cpp(
@@ -1061,6 +1108,12 @@ def main() -> int:
 
     sub.add_parser("validate", help="fail if the pinned llama.cpp inventory is not fully classified")
 
+    coverage = sub.add_parser(
+        "next-boundary-target",
+        help="print ONE deterministic needs_boundary_registration family for this run's repair agent",
+    )
+    coverage.add_argument("--json", action="store_true")
+
     classify = sub.add_parser(
         "classify-boundaries",
         help="list runnable families lacking boundary registration (repair queue)",
@@ -1122,6 +1175,15 @@ def main() -> int:
         return 0
     if args.command == "validate":
         return 1 if validate_inventory(rows, args.llama_src) else 0
+    if args.command == "next-boundary-target":
+        target = coverage_expansion_target(
+            rows, boundary_registered_models(args.llama_src), args.llama_src
+        )
+        if args.json:
+            print(json.dumps(target, indent=2))
+        elif target:
+            print(f"{target['llama_model']}\t{target['family']}\t{target['source_file']}")
+        return 0
     if args.command == "classify-boundaries":
         pending = needs_boundary_registration_rows(
             rows, boundary_registered_models(args.llama_src)

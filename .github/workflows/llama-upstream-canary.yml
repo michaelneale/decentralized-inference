@@ -141,8 +141,55 @@ jobs:
           # log. The wrapper clears this file at the start of its own runs.
           echo "=== parity manifest validation (boundary registration gate) ===" \
             | tee .deps/llama-canary-repair-battery.log
-          python3 scripts/skippy-llama-parity.py validate --llama-src .deps/llama.cpp 2>&1 \
+          python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp validate 2>&1 \
             | tee -a .deps/llama-canary-repair-battery.log
+
+      - name: Append coverage-expansion target (one family per run)
+        id: coverage_target
+        # Work down the needs_boundary_registration queue deterministically:
+        # select exactly ONE family, append it (and its source file) to the
+        # battery repair evidence so the battery-mode repair agent attempts
+        # real hooks plus an immutable smallest GGUF and updates both joined
+        # manifests; a non-runnable classification is acceptable only with
+        # recorded blocker evidence. Never fans out; a no-gap run appends
+        # nothing. Only full certification cadences (llama-bump, manual-full)
+        # expand coverage and exit nonzero (with continue-on-error) so the
+        # pending target routes the run into the battery-mode agent repair
+        # loop, exactly like a battery or live-matrix failure; nightly runs
+        # still RECORD the target but defer expansion. The original
+        # workflow-selected JSON is persisted to
+        # .deps/llama-canary-coverage-target.json BEFORE any agent turn: the
+        # repair wrapper must verify exactly this original row — re-selecting
+        # after a repair would advance to the next queue entry and test the
+        # wrong model. The file is rewritten on every certify run (and
+        # cleared in patch-queue mode) so no previous run's target can leak.
+        if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p .deps
+          TARGET="$(python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp next-boundary-target --json)"
+          printf '%s' "$TARGET" > .deps/llama-canary-coverage-target.json
+          if [[ "$TARGET" != "null" && -n "$TARGET" ]]; then
+            {
+              echo
+              echo "=== coverage-expansion target (one family per run) ==="
+              echo "This run's repair agent must attempt real boundary hooks plus an"
+              echo "immutable smallest GGUF for exactly this family, updating both"
+              echo "docs/skippy/llama-parity-candidates.json and"
+              echo "ci/llama-canary/family-certified.json in the repair PR; a"
+              echo "non-runnable classification is acceptable only with recorded"
+              echo "blocker evidence."
+              echo "$TARGET"
+            } | tee -a .deps/llama-canary-repair-battery.log
+            if [[ "${{ steps.sha.outputs.cadence }}" != "nightly" ]]; then
+              echo "coverage target pending: $TARGET" >&2
+              exit 1
+            fi
+            echo "nightly cadence: coverage target deferred (recorded only): $TARGET"
+          else
+            echo "no needs_boundary_registration gaps remain; no coverage target appended" \
+              | tee -a .deps/llama-canary-repair-battery.log
+          fi
 
       - name: Plan and verify family certification cache
         id: family_plan
@@ -257,7 +304,17 @@ jobs:
             > /tmp/llama-upstream-pr.md
 
       - name: Report upstream pin update
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.changed == 'true' && steps.battery.outcome == 'success'
+        # Truthful success reporting: parity validation, the live matrix,
+        # and the coverage gate are independent fail-closed lanes now — a
+        # green battery alone must not print "pin eligible" while another
+        # lane failed.
+        if: >-
+          steps.prepare.outcome == 'success'
+          && steps.sha.outputs.changed == 'true'
+          && steps.battery.outcome == 'success'
+          && steps.parity_validate.outcome == 'success'
+          && steps.live_matrix.outcome == 'success'
+          && steps.coverage_target.outcome == 'success'
         run: |
           {
             echo "## llama.cpp upstream pin update"
@@ -268,7 +325,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report forced certification result
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.cadence == 'manual-full' && steps.battery.outcome == 'success'
+        # Same truthfulness: all certification lanes green, not battery only.
+        if: >-
+          steps.prepare.outcome == 'success'
+          && steps.sha.outputs.cadence == 'manual-full'
+          && steps.battery.outcome == 'success'
+          && steps.parity_validate.outcome == 'success'
+          && steps.live_matrix.outcome == 'success'
+          && steps.coverage_target.outcome == 'success'
         run: |
           {
             echo "## llama.cpp upstream canary (forced certification)"
@@ -279,7 +343,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report nightly family result
-        if: steps.prepare.outcome == 'success' && steps.sha.outputs.cadence == 'nightly' && steps.battery.outcome == 'success'
+        # Nightly: parity + live + battery must be green; the coverage
+        # target is recorded-only on nightly (its deferral is not a
+        # failure), so it is deliberately not required here.
+        if: >-
+          steps.prepare.outcome == 'success'
+          && steps.sha.outputs.cadence == 'nightly'
+          && steps.battery.outcome == 'success'
+          && steps.parity_validate.outcome == 'success'
+          && steps.live_matrix.outcome == 'success'
         run: |
           {
             echo "## llama.cpp nightly family sentinels"
@@ -328,7 +400,8 @@ jobs:
           && steps.sha.outputs.cadence != 'nightly'
           && (steps.battery.outcome == 'failure'
               || steps.parity_validate.outcome == 'failure'
-              || steps.live_matrix.outcome == 'failure')
+              || steps.live_matrix.outcome == 'failure'
+              || steps.coverage_target.outcome == 'failure')
         timeout-minutes: 720
         continue-on-error: true
         env:
@@ -353,6 +426,7 @@ jobs:
           || steps.battery.outcome == 'failure'
           || steps.parity_validate.outcome == 'failure'
           || steps.live_matrix.outcome == 'failure'
+          || steps.coverage_target.outcome == 'failure'
         env:
           CANARY_CADENCE: ${{ steps.sha.outputs.cadence }}
         run: |

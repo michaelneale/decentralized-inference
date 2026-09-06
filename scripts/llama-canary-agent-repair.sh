@@ -163,6 +163,10 @@ check_repair_token_permissions
 # before invoking this script) and must survive to seed the first repair turn.
 if [[ "$MODE" == "patch-queue" ]]; then
   rm -f "$BATTERY_LOG"
+  # A patch-queue repair run has no coverage-expansion target; drop any
+  # previous run's persisted target so it can never leak into a later
+  # battery-mode certification on this persistent runner.
+  rm -f "$ROOT/.deps/llama-canary-coverage-target.json"
 fi
 rm -f "$ROOT/.deps/llama-canary-pr-body.md"
 rm -f "$ROOT/.deps/llama-canary-review-report.md"
@@ -447,6 +451,121 @@ run_battery() {
   # live in run 33140672269). An arm64 sanity check follows the build so a
   # misconfigured toolchain fails loudly instead of as symbol errors.
   prepare_repair_target || return 1
+  # Coverage-expansion certification (battery mode): before the family
+  # battery can certify the tree, the parity manifest must validate (the
+  # strict model_pin <-> family-certified.json join — including that no
+  # runnable row carries an unsupported_reason) and the ORIGINAL
+  # workflow-selected coverage target must be resolved. The target is read
+  # from the run-scoped .deps/llama-canary-coverage-target.json persisted
+  # by the workflow BEFORE any agent turn — never re-selected here, because
+  # next-boundary-target would advance to the next queue entry once the
+  # agent graduates the original row and the wrapper would test the wrong
+  # model. Resolution rules for the original row:
+  #   - runnable with a joined model_pin -> run its live package-v2
+  #     two-node row via live-matrix --model <original> with prepared
+  #     producer provenance; a failure blocks certification;
+  #   - non-runnable status with a non-empty unsupported_reason -> the
+  #     documented blocker path (validate enforces the reason's presence
+  #     and that runnable rows never carry one);
+  #   - anything else -> fail before the family battery.
+  # With no target file (ordinary parity/live/battery failure), the full
+  # live matrix still runs so a newly added pin cannot certify unexecuted.
+  if [[ "$MODE" == "battery" ]]; then
+    if ! python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp \
+        validate >>"$BATTERY_LOG" 2>&1; then
+      tail -n 2 "$BATTERY_LOG"
+      echo "parity manifest validation failed; repair cannot certify" >&2
+      return 1
+    fi
+    export SKIPPY_CANARY_LIVE_MATRIX_BACKEND="${SKIPPY_CANARY_LIVE_MATRIX_BACKEND:-metal}"
+    local coverage_model coverage_state coverage_status coverage_reason
+    # Three distinct target-file states — never collapse them:
+    #   missing    -> ordinary repair run, full live matrix
+    #   null       -> no gap, full live matrix
+    #   malformed / unreadable / non-dict JSON -> HARD FAILURE: converting
+    #                 it to "no target" would let a corrupted evidence file
+    #                 silently downgrade coverage verification.
+    coverage_state="$(python3 - "$ROOT/.deps/llama-canary-coverage-target.json" <<'PY' 2>>"$BATTERY_LOG" || echo "malformed"
+import json, os, sys
+path = sys.argv[1]
+if not os.path.exists(path):
+    print("missing")
+    raise SystemExit
+try:
+    target = json.load(open(path))
+except Exception as exc:
+    print(f"coverage-target file unreadable: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+if target is None:
+    print("")
+elif isinstance(target, dict):
+    print(target.get("llama_model", "malformed") or "malformed")
+else:
+    print("malformed")
+PY
+)"
+    if [[ "$coverage_state" == "malformed" ]]; then
+      tail -n 5 "$BATTERY_LOG"
+      echo "coverage-target file .deps/llama-canary-coverage-target.json is malformed/unreadable; repair cannot certify" >&2
+      return 1
+    fi
+    # missing file (no workflow-persisted target) and JSON null both mean
+    # "no coverage target for this run" -> full live matrix below. Never
+    # treat "missing" as a literal model name.
+    if [[ "$coverage_state" == "missing" ]]; then
+      coverage_model=""
+    else
+      coverage_model="$coverage_state"
+    fi
+    if [[ -n "$coverage_model" ]]; then
+      read -r coverage_status coverage_reason <<<"$(python3 - "$coverage_model" "$ROOT/docs/skippy/llama-parity-candidates.json" <<'PY'
+import json, sys
+model, path = sys.argv[1], sys.argv[2]
+for row in json.load(open(path)).get("candidates", []):
+    if row.get("llama_model") == model:
+        print(row.get("status", ""), row.get("unsupported_reason", "") or "")
+        break
+else:
+    print("missing", "")
+PY
+)"
+      echo "coverage target $coverage_model: status=$coverage_status" >>"$BATTERY_LOG"
+      case "$coverage_status" in
+        certified|candidate|candidate_stateful)
+          # Runnable: prove the original row live. A missing pin fails the
+          # matrix itself (fail-closed :selector/:pin row in the evidence).
+          if ! arch -arm64 scripts/skippy-canary-live-matrix.sh --prepare \
+              --model "$coverage_model" \
+              >>"$BATTERY_LOG" 2>&1; then
+            tail -n 2 "$BATTERY_LOG"
+            echo "coverage live row failed for $coverage_model; repair cannot certify" >&2
+            return 1
+          fi
+          ;;
+        *)
+          # Blocker path: non-runnable status must carry a concrete,
+          # non-empty unsupported_reason (validate already rejected the
+          # ambiguous runnable+reason combination).
+          if [[ -z "$coverage_reason" ]]; then
+            tail -n 2 "$BATTERY_LOG"
+            echo "coverage target $coverage_model resolved to '$coverage_status' without an unsupported_reason; repair cannot certify" >&2
+            return 1
+          fi
+          echo "coverage target $coverage_model recorded as blocked: $coverage_reason" >>"$BATTERY_LOG"
+          ;;
+      esac
+    else
+      # No persisted coverage target: ordinary battery/parity/live failure.
+      # Prove the whole pinned set live so a newly added pin cannot
+      # certify unexecuted.
+      if ! arch -arm64 scripts/skippy-canary-live-matrix.sh --prepare \
+          >>"$BATTERY_LOG" 2>&1; then
+        tail -n 2 "$BATTERY_LOG"
+        echo "live package-v2 matrix failed; repair cannot certify" >&2
+        return 1
+      fi
+    fi
+  fi
   arch -arm64 scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64 || return 1
   local archive
   archive="${LLAMA_STAGE_BUILD_DIR:-}/src/libllama.a"

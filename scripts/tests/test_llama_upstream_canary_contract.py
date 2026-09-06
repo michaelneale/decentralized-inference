@@ -13,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "llama-upstream-canary.yml"
+PARITY = ROOT / "scripts" / "skippy-llama-parity.py"
 UPDATE_PIN = ROOT / "scripts" / "update-llama-pin.sh"
 BATTERY = ROOT / "scripts" / "skippy-family-battery.sh"
 BATTERY_PLANNER = ROOT / "scripts" / "plan-family-battery.py"
@@ -26,6 +27,56 @@ def _step_block(workflow: str, name: str) -> str:
     start = workflow.index(marker)
     end = workflow.find("\n      - name: ", start + len(marker))
     return workflow[start:] if end == -1 else workflow[start:end]
+
+
+class ParityCliInvocationTests(unittest.TestCase):
+    """Executable contract: the exact parity invocations the workflow and
+    repair wrapper use must parse (argparse rejects a global option placed
+    after the subcommand — seen live as exit 2)."""
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(PARITY), *args],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            check=False,
+        )
+
+    def test_validate_global_llama_src_before_subcommand(self) -> None:
+        result = self._run("--llama-src", ".deps/llama.cpp", "validate")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_next_boundary_target_global_llama_src_before_subcommand(self) -> None:
+        result = self._run(
+            "--llama-src", ".deps/llama.cpp", "next-boundary-target", "--json"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Valid single-target JSON (or null), not an argparse usage error.
+        payload = json.loads(result.stdout.strip() or "null")
+        self.assertTrue(payload is None or "llama_model" in payload)
+
+    def test_workflow_and_wrapper_use_valid_invocations(self) -> None:
+        # The exact command strings embedded in the workflow and wrapper
+        # must be the valid global-first form, never the rejected
+        # subcommand-first form.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        wrapper = (ROOT / "scripts" / "llama-canary-agent-repair.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "skippy-llama-parity.py --llama-src .deps/llama.cpp validate", workflow
+        )
+        self.assertIn(
+            "skippy-llama-parity.py --llama-src .deps/llama.cpp next-boundary-target",
+            workflow,
+        )
+        self.assertIn(
+            "skippy-llama-parity.py --llama-src .deps/llama.cpp \\", wrapper
+        )
+        for text in (workflow, wrapper):
+            self.assertNotIn("validate --llama-src", text)
+            self.assertNotIn("--json --llama-src", text)
 
 
 class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
@@ -246,7 +297,7 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         parity_gate = _step_block(
             workflow, "Parity manifest validation (boundary registration gate)"
         )
-        self.assertIn("skippy-llama-parity.py validate --llama-src .deps/llama.cpp", parity_gate)
+        self.assertIn("skippy-llama-parity.py --llama-src .deps/llama.cpp validate", parity_gate)
         self.assertIn("continue-on-error: true", parity_gate)
         gate_idx = workflow.index("Parity manifest validation (boundary registration gate)")
         plan_idx = workflow.index("Plan and verify family certification cache")
@@ -268,6 +319,49 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         # binary/bundle may supply the matrix.
         self.assertIn("SKIPPY_CANARY_LIVE_MATRIX_BACKEND", live_matrix)
         self.assertIn("metal", live_matrix)
+
+        # A pending coverage-expansion target must actually trigger the
+        # battery-mode repair loop: the step exits nonzero under
+        # continue-on-error and its failure outcome feeds both the repair
+        # condition and the final fail condition. The no-gap path must
+        # remain successful (no exit 1 on that branch).
+        coverage = _step_block(workflow, "Append coverage-expansion target (one family per run)")
+        self.assertIn("id: coverage_target", coverage)
+        self.assertIn("continue-on-error: true", coverage)
+        self.assertIn("next-boundary-target --json", coverage)
+        self.assertIn("tee -a .deps/llama-canary-repair-battery.log", coverage)
+        self.assertIn("exit 1", coverage)
+        # The ORIGINAL workflow-selected target is persisted before any
+        # agent turn so the repair wrapper verifies exactly this row —
+        # re-selecting after a graduated repair would advance to the next
+        # queue entry and test the wrong model.
+        self.assertIn(".deps/llama-canary-coverage-target.json", coverage)
+        target_branch = coverage.split("if [[ \"$TARGET\"")[1].split("else")[0]
+        no_gap_branch = coverage.split("else", 1)[1]
+        self.assertIn("exit 1", target_branch)
+        self.assertNotIn("exit 1", no_gap_branch)
+        self.assertIn("no needs_boundary_registration gaps remain", no_gap_branch)
+        # Only full certification cadences fail on a pending target;
+        # nightly runs record + defer it.
+        self.assertIn('!= "nightly" ]]', target_branch)
+        self.assertIn("steps.coverage_target.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.coverage_target.outcome == 'failure'", fail_step)
+        # Truthful success reporting: the pin-eligible and forced-cert
+        # reports require parity + live + coverage all green alongside the
+        # battery; nightly requires parity + live + battery (coverage is
+        # recorded-only there).
+        pin_report = _step_block(workflow, "Report upstream pin update")
+        forced_report = _step_block(workflow, "Report forced certification result")
+        nightly_report = _step_block(workflow, "Report nightly family result")
+        for report in (pin_report, forced_report):
+            self.assertIn("steps.battery.outcome == 'success'", report)
+            self.assertIn("steps.parity_validate.outcome == 'success'", report)
+            self.assertIn("steps.live_matrix.outcome == 'success'", report)
+            self.assertIn("steps.coverage_target.outcome == 'success'", report)
+        self.assertIn("steps.battery.outcome == 'success'", nightly_report)
+        self.assertIn("steps.parity_validate.outcome == 'success'", nightly_report)
+        self.assertIn("steps.live_matrix.outcome == 'success'", nightly_report)
+        self.assertNotIn("steps.coverage_target.outcome == 'success'", nightly_report)
         # Live-matrix evidence lands under the uploaded battery evidence root.
         upload = _step_block(workflow, "Upload supported-families battery evidence")
         self.assertIn("target/family-battery/", upload)

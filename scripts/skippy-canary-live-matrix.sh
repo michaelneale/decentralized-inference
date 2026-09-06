@@ -34,9 +34,12 @@ LIMIT="${SKIPPY_CANARY_LIVE_MATRIX_LIMIT:-}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/skippy-canary-live-matrix.sh [--dry-run] [--prepare]
+usage: scripts/skippy-canary-live-matrix.sh [--dry-run] [--prepare] [--model NAME]
 
 Runs the minimum live package-v2 two-node matrix for parity model_pin rows.
+--model executes exactly the named row (llama_model); the battery-mode
+repair loop uses it to prove the coverage-expansion target's new pin before
+the repair can report success. A filter matching no runnable row fails.
 
 --prepare builds this run's exact producers before any live row: the mesh-llm
 host binary (cargo build -p mesh-llm) and the patched native runtime bundle
@@ -62,10 +65,14 @@ EOF
 
 DRY_RUN=0
 PREPARE=0
+MODEL_FILTER=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --prepare) PREPARE=1; shift ;;
+    --model) [[ $# -ge 2 ]] || { echo "--model requires a value" >&2; exit 2; }
+             MODEL_FILTER="$2"; shift 2 ;;
+    --model=*) MODEL_FILTER="${1#--model=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -76,13 +83,22 @@ mkdir -p "$EVIDENCE_ROOT/live-matrix" "$WORK_ROOT"
 write_producer_provenance() {
   # Record exactly which producers this matrix ran against: Rust HEAD,
   # upstream + patched llama SHAs, host binary sha256, and the native
-  # runtime manifest identity (runtime id, skippy_abi, backend). A cached
-  # binary/bundle cannot masquerade as this run's producers.
+  # runtime manifest identity (runtime id, skippy_abi, backend). The
+  # manifest is read from THIS run's unique bundle directory by the
+  # explicit backend's runtime id — never discovered by find, so a stale
+  # decoy manifest cannot be attested.
   local provenance="$EVIDENCE_ROOT/live-matrix/producer-provenance.json"
-  local runtime_manifest
-  runtime_manifest="$(find "$(dirname "$MESH_LLM_BIN")/native-runtimes" -maxdepth 2 -name manifest.json 2>/dev/null | head -n 1)"
-  if [[ -z "$runtime_manifest" ]]; then
-    echo "cannot record producer provenance: no native-runtime manifest beside $MESH_LLM_BIN" >&2
+  local bundle_root="${MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR:?MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR must be set (--prepare)}"
+  # Runtime id follows package-native-runtime.sh's target_platform naming:
+  # darwin-aarch64-metal, linux-x86_64-cuda, ...
+  local os_id arch_id
+  os_id="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch_id="$(uname -m)"
+  [[ "$arch_id" == "arm64" ]] && arch_id="aarch64"
+  local runtime_id="meshllm-native-runtime-${os_id}-${arch_id}-${SKIPPY_CANARY_LIVE_MATRIX_BACKEND:-metal}"
+  local runtime_manifest="$bundle_root/$runtime_id/manifest.json"
+  if [[ ! -f "$runtime_manifest" ]]; then
+    echo "cannot record producer provenance: no manifest for $runtime_id under $bundle_root" >&2
     return 1
   fi
   RUST_HEAD="$(git -C "$ROOT" rev-parse HEAD)" \
@@ -124,12 +140,19 @@ if [[ "$PREPARE" -eq 1 ]]; then
     (cd "$ROOT" && cargo build -p mesh-llm -p skippy-model-package -p skippy-server) >&2
   fi
   MESH_LLM_BIN="$(cd "$(dirname "$MESH_LLM_BIN")" && pwd)/$(basename "$MESH_LLM_BIN")"
-  # Package the runtime straight beside the host binary: ci-two-node-split-smoke.sh
-  # resolves MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR as <bin-dir>/native-runtimes.
+  # Package into a unique clean directory under this matrix work root (a
+  # shared native-runtimes dir can hold stale runtime directories, and the
+  # smoke's auto-resolution would attest the wrong manifest). The exact
+  # bundle dir is exported so ci-two-node-split-smoke.sh loads only this
+  # run's runtime.
+  RUNTIME_BUNDLE_ROOT="$WORK_ROOT/native-runtimes"
+  rm -rf "$RUNTIME_BUNDLE_ROOT"
+  mkdir -p "$RUNTIME_BUNDLE_ROOT"
   if [[ "${SKIPPY_CANARY_LIVE_MATRIX_PREPARE_SKIP_BUILD:-}" != "1" ]]; then
     "$ROOT/scripts/package-native-runtime.sh" --build --backend "$BACKEND" \
-      --out "$(dirname "$MESH_LLM_BIN")/native-runtimes" >&2
+      --out "$RUNTIME_BUNDLE_ROOT" >&2
   fi
+  export MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$RUNTIME_BUNDLE_ROOT"
   export MESH_LLM_BIN
   if ! write_producer_provenance; then
     exit 1
@@ -154,7 +177,7 @@ build_tool() {
   printf '%s\n' "$ROOT/target/debug/$bin"
 }
 
-ROWS_JSON="$(python3 - "$MANIFEST" <<'PY'
+ROWS_JSON="$(python3 - "$MANIFEST" "$MODEL_FILTER" <<'PY'
 import json, sys
 rows = []
 for row in json.loads(open(sys.argv[1]).read()).get("candidates", []):
@@ -162,6 +185,8 @@ for row in json.loads(open(sys.argv[1]).read()).get("candidates", []):
     if not pin:
         continue
     if row.get("status") not in ("certified", "candidate", "candidate_stateful"):
+        continue
+    if sys.argv[2] and row["llama_model"] != sys.argv[2]:
         continue
     rows.append({
         "llama_model": row["llama_model"],
@@ -175,12 +200,19 @@ PY
 
 ROW_COUNT="$(python3 -c 'import json,sys; print(len(json.loads(sys.stdin.read())))' <<<"$ROWS_JSON")"
 echo "  rows:      $ROW_COUNT"
+if [[ -n "$MODEL_FILTER" ]]; then
+  echo "  model:     $MODEL_FILTER"
+fi
 if [[ "$DRY_RUN" -eq 1 ]]; then
   python3 -c 'import json,sys
 for r in json.loads(sys.stdin.read()):
     print("  - {}: {}@{} {}".format(r["llama_model"], r["repo"], r["revision"][:12], r["file"]))' <<<"$ROWS_JSON"
   echo "dry run: no rows executed"
   exit 0
+fi
+if [[ "$ROW_COUNT" -eq 0 ]]; then
+  echo "model filter matched no runnable model_pin row: ${MODEL_FILTER:-<none>}" >&2
+  exit 1
 fi
 
 if [[ -n "$LIMIT" ]]; then
@@ -207,43 +239,22 @@ while IFS= read -r ROW; do
   read -r MODEL_NAME REPO REVISION FILE SIZE SHA PAYLOAD_KIND <<<"$(python3 -c 'import json,sys
 r = json.loads(sys.stdin.read())
 print(r["llama_model"], r["repo"], r["revision"], r["file"], r["size_bytes"], r["blob_sha256"], r["expected_payload_kind"])' <<<"$ROW")"
-  # Selector follows the repository convention
-  # (crates/model-ref/src/lib.rs::quant_selector_from_gguf_file):
-  # shard-stem prefix split, then the last -ud-/.ud-/-iq/.iq/-q/.q/-bf16/
-  # .bf16/-f16/.f16/-f32/.f32 marker, case-preserving. Fail closed when no
-  # marker is found rather than inventing a whole-stem selector.
-  SELECTOR="$(python3 - "$FILE" <<'PY'
-import sys
-from pathlib import Path
-
-file = sys.argv[1]
-stem = Path(file).name.removesuffix(".gguf")
-# Shard stems ("name-00001-of-00003") collapse to their prefix.
-marker = "-of-"
-if marker in stem:
-    head = stem.split(marker)[0]
-    for sep in ("-", "."):
-        if sep in head:
-            stem = head.rsplit(sep, 1)[0] + sep
-            break
-lower = stem.lower()
-for m in ("-ud-", ".ud-", "-iq", ".iq", "-q", ".q", "-bf16", ".bf16", "-f16", ".f16", "-f32", ".f32"):
-    pos = lower.rfind(m)
-    if pos != -1:
-        print(stem[pos + 1:])
-        sys.exit(0)
-sys.exit(1)
-PY
-)"
+  # Evidence/work dirs exist before ANY per-row validation can fail: a
+  # classified failure must always be recorded (set -u would otherwise
+  # abort on the unbound ROW_DIR).
+  ROW_DIR="$EVIDENCE_ROOT/live-matrix/$MODEL_NAME"
+  PKG_DIR="$WORK_ROOT/$MODEL_NAME"
+  mkdir -p "$ROW_DIR"
+  # The selector is carried by the model_pin and joined against
+  # family-certified.json by validate_pin_manifest_join — never re-derived
+  # from the filename here.
+  SELECTOR="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["selector"])' <<<"$ROW")"
   if [[ -z "$SELECTOR" ]]; then
-    echo "row $MODEL_NAME: cannot derive a quant selector from $FILE (no quant marker in the filename)" | tee -a "$ROW_DIR/row.log"
+    echo "row $MODEL_NAME: model_pin carries no selector (join failure — run validate)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:selector")
     continue
   fi
   MODEL_ID="$REPO:$SELECTOR"
-  ROW_DIR="$EVIDENCE_ROOT/live-matrix/$MODEL_NAME"
-  PKG_DIR="$WORK_ROOT/$MODEL_NAME"
-  mkdir -p "$ROW_DIR"
   echo
   echo "--- [$ROW_INDEX/$ROW_COUNT] $MODEL_NAME ($PAYLOAD_KIND) ---"
 

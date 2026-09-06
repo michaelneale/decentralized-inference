@@ -119,6 +119,7 @@
         "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
         "revision": "067b946cf014b7c697f3654f621d577a3e3afd1c",
         "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
         "size_bytes": 807694464,
         "blob_sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
         "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
@@ -143,6 +144,7 @@
         "repo": "Qwen/Qwen3-0.6B-GGUF",
         "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
         "file": "Qwen3-0.6B-Q8_0.gguf",
+        "selector": "Q8_0",
         "size_bytes": 639446688,
         "blob_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
         "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
@@ -387,6 +389,7 @@
         "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
         "revision": "a864f823cce6e6048b5752e2816fe7a23987d790",
         "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
         "size_bytes": 222662560,
         "blob_sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb",
         "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
@@ -461,6 +464,7 @@
         "repo": "Felladrin/gguf-mamba-130m-hf",
         "revision": "83ef2222e1a0437d26bda213537afc195a53b3ad",
         "file": "mamba-130m-hf.Q4_K_M.gguf",
+        "selector": "Q4_K_M",
         "size_bytes": 103576544,
         "blob_sha256": "2784131bc0546f802bcb720cbc77d26c174c85514400cc645507146ad95f07da",
         "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
@@ -516,6 +520,7 @@
         "repo": "tiiuae/Falcon-H1-1.5B-Instruct-GGUF",
         "revision": "0d3a6cfe25fb4eeab0153fb8623aac5b69d6bd0a",
         "file": "Falcon-H1-1.5B-Instruct-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
         "size_bytes": 944786656,
         "blob_sha256": "8b51aa2aa34a0373fd0cd64c02eb91d1bc1da681c09e955ad769d4a9b2d8385f",
         "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"

@@ -136,6 +136,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
                                     "file": "model-Q4_K_M.gguf",
                                     "size_bytes": len(payload),
                                     "blob_sha256": blob,
+                                    "selector": "Q4_K_M",
                                 },
                             }
                         ]
@@ -197,6 +198,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
                                     "file": "model-Q4_K_M.gguf",
                                     "size_bytes": len(payload),
                                     "blob_sha256": "0" * 64,
+                                    "selector": "Q4_K_M",
                                 },
                             }
                         ]
@@ -211,6 +213,10 @@ class LiveMatrixScriptTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "SKIPPY_PARITY_MANIFEST": str(manifest),
+                    # Hermetic: never invoke a real cargo build in the test
+                    # tree — the sha mismatch must be reached and recorded
+                    # without any producer build.
+                    "SKIPPY_CANARY_LIVE_MATRIX_PKG_TOOL": str(hf_mock),
                     "SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD": str(hf_mock),
                     "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(tmp / "evidence"),
                     "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
@@ -252,7 +258,52 @@ class LiveMatrixScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn("no native-runtime manifest", result.stdout + result.stderr)
+            self.assertIn(
+                "no manifest for meshllm-native-runtime-darwin-aarch64-metal",
+                result.stdout + result.stderr,
+            )
+
+            # Decoy: a WRONG/stale runtime manifest under the bundle root
+            # must not be attested — provenance reads only the exact path
+            # meshllm-native-runtime-<os>-<arch>-<backend>/manifest.json.
+            decoy_root = tmp / "work" / "native-runtimes"
+            decoy_root.mkdir(parents=True, exist_ok=True)
+            decoy_dir = decoy_root / "meshllm-native-runtime-darwin-aarch64-vulkan"
+            decoy_dir.mkdir()
+            (decoy_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "runtime": {"id": "decoy", "skippy_abi": "0"},
+                        "build": {
+                            "backend": "vulkan",
+                            "platform": "darwin-aarch64",
+                            "llama_patch_digest": "decoy",
+                            "llama_upstream_sha": "0" * 40,
+                            "llama_patched_sha": "0" * 40,
+                        },
+                    }
+                )
+            )
+            result = subprocess.run(
+                [str(SCRIPT), "--prepare"],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(tmp / "evidence"),
+                    "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                    "MESH_LLM_BIN": "/usr/bin/true",
+                    "SKIPPY_CANARY_LIVE_MATRIX_PREPARE_SKIP_BUILD": "1",
+                    "MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR": str(decoy_root),
+                },
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "no manifest for meshllm-native-runtime-darwin-aarch64-metal",
+                result.stdout + result.stderr,
+            )
+            self.assertNotIn("decoy", (tmp / "evidence" / "live-matrix" / "producer-provenance.json").read_text() if (tmp / "evidence" / "live-matrix" / "producer-provenance.json").exists() else "")
 
         text = SCRIPT.read_text()
         self.assertIn("cargo build -p mesh-llm", text)
