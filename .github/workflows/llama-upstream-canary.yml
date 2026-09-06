@@ -196,17 +196,21 @@ jobs:
         id: live_matrix
         # Executable evidence for parity model_pin rows: pinned GGUF
         # verified, package-v2 written + independently verified, two-node
-        # split smoke run per row. Failure routes to the same battery-mode
+        # split smoke run per row. --prepare first builds this run's exact
+        # producers (mesh-llm host binary + patched native runtime bundle
+        # from this run's llama tree; backend explicit per runner) and
+        # records producer-provenance.json — a cached binary/bundle cannot
+        # supply false provenance. Failure routes to the same battery-mode
         # agent repair loop; per-row evidence lands under the family
         # battery evidence root and is uploaded with it.
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'
         continue-on-error: true
         env:
           FAMILY_BATTERY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          MESH_LLM_BIN: ${{ github.workspace }}/target/debug/mesh-llm
+          SKIPPY_CANARY_LIVE_MATRIX_BACKEND: metal
           SKIPPY_CANARY_LIVE_MATRIX_ROOT: ${{ github.workspace }}/target/family-battery/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          scripts/skippy-canary-live-matrix.sh 2>&1 | tee -a .deps/llama-canary-repair-battery.log
+          scripts/skippy-canary-live-matrix.sh --prepare 2>&1 | tee -a .deps/llama-canary-repair-battery.log
 
       - name: Supported-families certification battery (parity gate)
         id: battery

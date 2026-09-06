@@ -70,7 +70,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
         blob = hashlib.sha256(payload).hexdigest()
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            gguf = tmp / "model.gguf"
+            gguf = tmp / "model-Q4_K_M.gguf"
             gguf.write_bytes(payload)
             pkg_dir = tmp / "pkg"
             pkg_dir.mkdir()
@@ -90,17 +90,26 @@ class LiveMatrixScriptTests(unittest.TestCase):
             pkg_tool = tmp / "pkg-tool-mock"
             pkg_tool.write_text(
                 "#!/usr/bin/env bash\n"
-                'if [[ "$1" == "write-package" ]]; then\n'
-                '  out=""; prev=""\n'
+                'args=("$@")\n'
+                'if [[ "${args[0]}" == "write-package" ]]; then\n'
+                "  # Positional input must be the local GGUF path and the\n"
+                "  # coordinate must arrive via --model-id (resolve_package_input\n"
+                "  # rejects identity flags on a non-local positional input).\n"
+                '  [[ "${args[1]}" == "' + str(gguf) + '" ]] || { echo "expected local path positional, got ${args[1]}" >&2; exit 3; }\n'
+                "  out=\"\"; model_id=\"\"; prev=\"\"\n"
                 '  for a in "$@"; do\n'
-                '    if [[ "$prev" == "--out-dir" ]]; then out="$a"; fi\n'
+                '    case "$prev" in\n'
+                '      --out-dir) out="$a" ;;\n'
+                '      --model-id) model_id="$a" ;;\n'
+                "    esac\n"
                 "    prev=\"$a\"\n"
                 "  done\n"
+                '  [[ "$model_id" == "org/mock-gguf:Q4_K_M" ]] || { echo "bad --model-id: $model_id" >&2; exit 3; }\n'
                 '  mkdir -p "$out/artifacts"\n'
                 '  printf "{}" >"$out/model-package.json"\n'
                 "  exit 0\n"
                 "fi\n"
-                'if [[ "$1" == "verify-package-v2" ]]; then exit 0; fi\n'
+                'if [[ "${args[0]}" == "verify-package-v2" ]]; then exit 0; fi\n'
                 "exit 2\n"
             )
             pkg_tool.chmod(0o755)
@@ -124,7 +133,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
                                 "model_pin": {
                                     "repo": "org/mock-gguf",
                                     "revision": "1" * 40,
-                                    "file": "model.gguf",
+                                    "file": "model-Q4_K_M.gguf",
                                     "size_bytes": len(payload),
                                     "blob_sha256": blob,
                                 },
@@ -167,7 +176,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
         payload = b"tampered-bytes"
         with tempfile.TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            gguf = tmp / "model.gguf"
+            gguf = tmp / "model-Q4_K_M.gguf"
             gguf.write_bytes(payload)
             hf_mock = tmp / "hf-mock"
             hf_mock.write_text(
@@ -185,7 +194,7 @@ class LiveMatrixScriptTests(unittest.TestCase):
                                 "model_pin": {
                                     "repo": "org/mock-gguf",
                                     "revision": "1" * 40,
-                                    "file": "model.gguf",
+                                    "file": "model-Q4_K_M.gguf",
                                     "size_bytes": len(payload),
                                     "blob_sha256": "0" * 64,
                                 },
@@ -212,6 +221,47 @@ class LiveMatrixScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("sha256 mismatch", result.stdout)
             self.assertIn("mockfamily:sha256", result.stdout)
+
+    def test_prepare_builds_exact_producers_and_records_provenance(self):
+        """--prepare must build this run's host binary and patched native
+        runtime and write producer-provenance.json; the provenance writer
+        must fail closed without an adjacent runtime manifest."""
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            result = subprocess.run(
+                [str(SCRIPT), "--prepare"],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(tmp / "evidence"),
+                    "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                    # Point at a binary with NO adjacent native-runtimes
+                    # bundle: provenance must fail closed before the build
+                    # and packaging producers run (their failure would be a
+                    # different defect).
+                    "MESH_LLM_BIN": "/usr/bin/true",
+                    # Skip the real producers; this test pins the
+                    # provenance fail-closed path, not a full build.
+                    "SKIPPY_CANARY_LIVE_MATRIX_PREPARE_SKIP_BUILD": "1",
+                },
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("no native-runtime manifest", result.stdout + result.stderr)
+
+        text = SCRIPT.read_text()
+        self.assertIn("cargo build -p mesh-llm", text)
+        self.assertIn("package-native-runtime.sh", text)
+        self.assertIn("--build --backend", text)
+        self.assertIn("producer-provenance.json", text)
+        self.assertIn("llama_upstream_sha", text)
+        self.assertIn("llama_patched_sha", text)
+        self.assertIn("skippy_abi", text)
 
 
 if __name__ == "__main__":

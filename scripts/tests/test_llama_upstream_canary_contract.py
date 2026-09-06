@@ -259,10 +259,15 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         live_matrix = _step_block(
             workflow, "Live package-v2 two-node matrix (model_pin proof)"
         )
-        self.assertIn("scripts/skippy-canary-live-matrix.sh", live_matrix)
+        self.assertIn("scripts/skippy-canary-live-matrix.sh --prepare", live_matrix)
         self.assertIn("continue-on-error: true", live_matrix)
         self.assertIn("steps.live_matrix.outcome == 'failure'", battery_repair)
         self.assertIn("steps.live_matrix.outcome == 'failure'", fail_step)
+        # The live step must build this run's exact producers (host binary +
+        # patched native runtime) with an explicit backend — no cached
+        # binary/bundle may supply the matrix.
+        self.assertIn("SKIPPY_CANARY_LIVE_MATRIX_BACKEND", live_matrix)
+        self.assertIn("metal", live_matrix)
         # Live-matrix evidence lands under the uploaded battery evidence root.
         upload = _step_block(workflow, "Upload supported-families battery evidence")
         self.assertIn("target/family-battery/", upload)
