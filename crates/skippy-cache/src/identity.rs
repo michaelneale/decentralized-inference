@@ -347,7 +347,10 @@ mod identity_completeness_tests {
 
     #[test]
     fn activation_codec_changes_page_identity() {
-        let f16 = test_config();
+        let f16 = StageConfig {
+            activation_codec: skippy_protocol::StageActivationCodec::F16RneV1,
+            ..test_config()
+        };
         let exact = StageConfig {
             activation_codec: skippy_protocol::StageActivationCodec::RawF32V1,
             ..test_config()

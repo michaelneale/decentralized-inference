@@ -85,6 +85,10 @@ class TwoNodeSplitSmokeTests(unittest.TestCase):
         cases = {
             "second request misses": ([0, 0, 512, 640, 640, 768], 1),
             "recurrent checkpoint reuse grows": ([0, 512, 512, 640, 640, 768], 0),
+            "recurrent longer first sights may be cold": (
+                [0, 512, 0, 640, 0, 768],
+                0,
+            ),
             "later repeated request misses": ([0, 512, 512, 640, 640, 0], 1),
             "all follow-up requests miss": ([0, 0, 0, 0, 0, 0], 75),
         }

@@ -672,6 +672,7 @@ prompt_counts = [prompt for prompt, _ in metrics]
 cached_counts = [cached for _, cached in metrics]
 growth_prompts = [prompt_counts[index - 1] for index in growth_indexes]
 growth_cached = [cached_counts[index - 1] for index in growth_indexes]
+repeat_cached = [cached_counts[repeat - 1] for _, repeat in repeat_pairs]
 if prompt_counts[0] != prompt_counts[1] or any(
     prompt_counts[pair[0] - 1] != prompt_counts[pair[1] - 1] for pair in repeat_pairs
 ):
@@ -689,7 +690,13 @@ if all(cached == 0 for cached in cached_counts[1:]):
         file=sys.stderr,
     )
     raise SystemExit(TRANSIENT_STATUS)
-if not growth_cached[0] < growth_cached[1] < growth_cached[2]:
+# Dense KV cache can reuse an established prefix while processing a longer
+# first-sight prompt, so its growth arms must increase. Exact recurrent state
+# is checkpoint-aligned and cannot resume at an arbitrary nonzero token offset;
+# a longer first-sight prompt may therefore be cold. Its identical repeat still
+# has to restore a progressively later checkpoint for each longer prompt.
+reuse_growth = repeat_cached if checkpointed_restore else growth_cached
+if not reuse_growth[0] < reuse_growth[1] < reuse_growth[2]:
     raise SystemExit(f"split prefix reuse did not increase: {cached_counts}")
 # Only growth arms need an uncached suffix; a repeat arm may legitimately
 # restore everything except the final re-fed token.
