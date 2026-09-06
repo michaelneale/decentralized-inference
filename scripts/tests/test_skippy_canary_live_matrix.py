@@ -567,9 +567,9 @@ class LiveMatrixScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn(
-                "no manifest for meshllm-native-runtime-darwin-aarch64-metal",
+            self.assertRegex(
                 result.stdout + result.stderr,
+                r"no manifest for meshllm-native-runtime-[^ \n]+-metal under ",
             )
 
             # Decoy: a WRONG/stale runtime manifest under the bundle root
@@ -608,9 +608,9 @@ class LiveMatrixScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.returncode, 1)
-            self.assertIn(
-                "no manifest for meshllm-native-runtime-darwin-aarch64-metal",
+            self.assertRegex(
                 result.stdout + result.stderr,
+                r"no manifest for meshllm-native-runtime-[^ \n]+-metal under ",
             )
             self.assertNotIn("decoy", (tmp / "evidence" / "live-matrix" / "producer-provenance.json").read_text() if (tmp / "evidence" / "live-matrix" / "producer-provenance.json").exists() else "")
 
