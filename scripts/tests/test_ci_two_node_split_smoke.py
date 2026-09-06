@@ -1,3 +1,4 @@
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import re
@@ -29,6 +30,35 @@ def shell_function_block(first: str, following: str) -> str:
     return script[
         script.index(f"{first}() {{") : script.index(f"{following}() {{")
     ]
+
+
+def write_runtime_manifest(
+    runtime_bundle: Path,
+    runtime_id: str = "runtime-id",
+    *,
+    tool_rel: str = "tools/skippy-model-package",
+    tool_contents: bytes = b"#!/usr/bin/env bash\nexit 0\n",
+    executable: bool = True,
+    manifest_tool_rel: str | None = None,
+) -> tuple[Path, Path]:
+    runtime_dir = runtime_bundle / runtime_id
+    tool = runtime_dir / tool_rel
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_bytes(tool_contents)
+    if executable:
+        tool.chmod(0o755)
+    declared_rel = manifest_tool_rel or tool_rel
+    manifest = {
+        "runtime": {
+            "tools": {
+                declared_rel: hashlib.sha256(tool_contents).hexdigest(),
+            }
+        }
+    }
+    (runtime_dir / "manifest.json").write_text(
+        json.dumps(manifest) + "\n", encoding="utf-8"
+    )
+    return runtime_dir, tool
 
 
 class SnapshotHandler(BaseHTTPRequestHandler):
@@ -124,6 +154,183 @@ class TwoNodeSplitSmokeTests(unittest.TestCase):
             ROOT / ".github/workflows/product-integration-smoke.yml"
         ).read_text()
         self.assertIn("if: success() || failure()", workflow)
+
+    def test_raw_gguf_is_prepared_as_verified_package_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "Fixture-Q4_K_M.gguf"
+            source.write_bytes(b"immutable-gguf-fixture")
+            calls = root / "calls.log"
+            package_tool = root / "skippy-model-package"
+            package_tool.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$CALLS_LOG"
+if [[ "$1" == write-package ]]; then
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --out-dir ]]; then
+      mkdir -p "$2"
+      printf '{"schema_version":2}\\n' > "$2/model-package.json"
+      exit 0
+    fi
+    shift
+  done
+fi
+[[ "$1" == verify-package-v2 ]]
+""",
+                encoding="utf-8",
+            )
+            package_tool.chmod(0o755)
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("sha256_file", "quant_selector_from_gguf_file")
+                + shell_function_block("quant_selector_from_gguf_file", "resolve_package_tool")
+                + shell_function_block("prepare_split_package", "descendant_pids")
+                + f'WORK_DIR="{root / "work"}"\n'
+                + f'export CALLS_LOG="{calls}"\n'
+                + f'prepare_split_package dense "{source}" "{package_tool}"\n'
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            package_dir = root / "work/prepared-packages/dense"
+            self.assertEqual(result.stdout.strip(), str(package_dir))
+            invocation = calls.read_text(encoding="utf-8")
+            self.assertIn(f"write-package {source}", invocation)
+            self.assertIn("--model-id ci/dense-", invocation)
+            self.assertIn(":Q4_K_M", invocation)
+            self.assertIn("--source-revision", invocation)
+            self.assertIn(f"verify-package-v2 {package_dir}", invocation)
+
+    def test_existing_package_v2_is_passed_through(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package_dir = Path(directory) / "package"
+            package_dir.mkdir()
+            (package_dir / "model-package.json").write_text(
+                '{"schema_version":2}\n', encoding="utf-8"
+            )
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("prepare_split_package", "descendant_pids")
+                + f'WORK_DIR="{Path(directory) / "work"}"\n'
+                + f'prepare_split_package dense "{package_dir}" /missing/tool\n'
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(package_dir))
+
+    def test_package_tool_is_resolved_from_verified_runtime_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime_bundle = root / "runtime"
+            _, tool = write_runtime_manifest(runtime_bundle)
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("resolve_package_tool", "prepare_split_package")
+                + f'RUNTIME_BUNDLE="{runtime_bundle}"\n'
+                + "resolve_package_tool\n"
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(tool.resolve()))
+
+    def test_package_tool_must_be_declared_at_exact_manifest_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_bundle = Path(directory) / "runtime"
+            write_runtime_manifest(
+                runtime_bundle,
+                tool_rel="other/skippy-model-package",
+                manifest_tool_rel="other/skippy-model-package",
+            )
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("resolve_package_tool", "prepare_split_package")
+                + f'RUNTIME_BUNDLE="{runtime_bundle}"\n'
+                + "resolve_package_tool\n"
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not declare tools/skippy-model-package", result.stderr)
+
+    def test_package_tool_checksum_is_verified_before_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_bundle = Path(directory) / "runtime"
+            _, tool = write_runtime_manifest(runtime_bundle)
+            tool.write_bytes(b"tampered\n")
+            tool.chmod(0o755)
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("resolve_package_tool", "prepare_split_package")
+                + f'RUNTIME_BUNDLE="{runtime_bundle}"\n'
+                + "resolve_package_tool\n"
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("checksum mismatch", result.stderr)
+
+    def test_package_tool_rejects_ambiguous_runtime_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_bundle = Path(directory) / "runtime"
+            write_runtime_manifest(runtime_bundle, "runtime-a")
+            write_runtime_manifest(runtime_bundle, "runtime-b")
+            harness = (
+                "set -euo pipefail\n"
+                + shell_function_block("resolve_package_tool", "prepare_split_package")
+                + f'RUNTIME_BUNDLE="{runtime_bundle}"\n'
+                + "resolve_package_tool\n"
+            )
+            result = subprocess.run(
+                ["bash", "-s"],
+                input=harness,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("expected exactly one native runtime manifest", result.stderr)
+
+    def test_package_tool_has_no_consumer_build_fallback(self) -> None:
+        script = SMOKE_SCRIPT.read_text(encoding="utf-8")
+        start = script.index("resolve_package_tool()")
+        end = script.index("prepare_split_package()", start)
+        resolver = script[start:end]
+        self.assertNotIn("cargo build", resolver)
+        self.assertIn("$RUNTIME_BUNDLE", resolver)
 
     def test_status_snapshot_is_strict_identity_whitelist(self) -> None:
         SnapshotHandler.delay_seconds = 0

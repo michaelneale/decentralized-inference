@@ -427,6 +427,14 @@ Smoke and SDK consumers download those artifacts and never rebuild a missing
 producer. PR and smoke artifacts retain for one day; caches are acceleration,
 not correctness contracts.
 
+Non-Windows native runtime artifacts include the checksum-bound
+`skippy-model-package` tool under `tools/`. Split-serving smoke consumers use
+that producer-owned tool to convert registry-pinned GGUF fixtures into verified
+package-v2 directories before starting either node; the smoke job never
+compiles a missing converter. Windows runtime producers omit this tool because
+it cannot currently link reliably against the staged DLLs; Windows native
+runtime packaging therefore keeps its established DLL-only producer path.
+
 Runtime and product artifact IDs preserve every compatibility discriminator:
 `ci-runtime-<platform>-<architecture>-<backend>` and
 `ci-product-<platform>-<architecture>-<backend>`. Consumers download the exact

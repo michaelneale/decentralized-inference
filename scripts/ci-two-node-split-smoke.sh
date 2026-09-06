@@ -109,6 +109,176 @@ if [[ ! -d "$RUNTIME_BUNDLE" ]]; then
 fi
 export MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$RUNTIME_BUNDLE"
 
+sha256_file() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    else
+        shasum -a 256 "$path" | awk '{print $1}'
+    fi
+}
+
+quant_selector_from_gguf_file() {
+    local filename="$1"
+    python3 - "$filename" <<'PY'
+import re
+import sys
+
+stem = re.sub(r"-\d{5}-of-\d{5}$", "", sys.argv[1].removesuffix(".gguf"), flags=re.IGNORECASE)
+matches = list(re.finditer(
+    r"(?:^|[-_.])((?:IQ|Q)[1-8](?:_[0-9A-Z]+)+|F(?:16|32)|BF16)(?=$|[-_.])",
+    stem,
+    flags=re.IGNORECASE,
+))
+if not matches:
+    raise SystemExit(f"cannot derive quant selector from GGUF filename: {sys.argv[1]}")
+print(matches[-1].group(1))
+PY
+}
+
+resolve_package_tool() {
+    python3 - "$RUNTIME_BUNDLE" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import sys
+
+runtime_bundle = Path(sys.argv[1])
+if not runtime_bundle.is_dir():
+    raise SystemExit(f"native runtime bundle is not a directory: {runtime_bundle}")
+bundle_root = runtime_bundle.resolve()
+
+manifests = sorted(runtime_bundle.glob("*/manifest.json"))
+if len(manifests) != 1:
+    raise SystemExit(
+        "expected exactly one native runtime manifest under "
+        f"{runtime_bundle}; found {len(manifests)}"
+    )
+
+manifest_path = manifests[0]
+runtime_dir = manifest_path.parent.resolve()
+if runtime_dir.parent != bundle_root:
+    raise SystemExit(f"native runtime manifest is outside its bundle: {manifest_path}")
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"cannot read native runtime manifest {manifest_path}: {error}")
+
+runtime = manifest.get("runtime")
+if not isinstance(runtime, dict):
+    raise SystemExit(f"native runtime manifest has no runtime object: {manifest_path}")
+tools = runtime.get("tools")
+if not isinstance(tools, dict):
+    raise SystemExit(f"native runtime manifest runtime.tools must be a checksum map: {manifest_path}")
+
+def validate_safe_relative_path(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or PurePosixPath(value).is_absolute()
+        or any(part in {"", ".", ".."} for part in PurePosixPath(value).parts)
+    ):
+        raise SystemExit(f"declared runtime tool path is not safe: {value!r}")
+
+for declared_path in tools:
+    validate_safe_relative_path(declared_path)
+
+# This is deliberately an exact manifest key. Looking up by basename could
+# select an unrelated executable from a different declared path.
+tool_rel = "tools/skippy-model-package"
+if tool_rel not in tools:
+    raise SystemExit(
+        f"native runtime manifest does not declare {tool_rel} in runtime.tools: {manifest_path}"
+    )
+if not isinstance(tools[tool_rel], str) or not re.fullmatch(r"[0-9a-fA-F]{64}", tools[tool_rel]):
+    raise SystemExit(f"invalid SHA-256 for declared runtime tool {tool_rel}")
+
+validate_safe_relative_path(tool_rel)
+
+tool_path = (runtime_dir / tool_rel).resolve()
+try:
+    tool_path.relative_to(runtime_dir)
+except ValueError:
+    raise SystemExit(f"declared runtime tool escapes its bundle: {tool_rel}")
+if not tool_path.is_file():
+    raise SystemExit(f"declared runtime tool is not a file: {tool_rel}")
+if not os.access(tool_path, os.X_OK):
+    raise SystemExit(f"declared runtime tool is not executable: {tool_rel}")
+
+digest = hashlib.sha256()
+with tool_path.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+if digest.hexdigest() != tools[tool_rel].lower():
+    raise SystemExit(f"declared runtime tool checksum mismatch: {tool_rel}")
+
+print(tool_path)
+PY
+}
+
+prepare_split_package() {
+    local label="$1"
+    local source="$2"
+    local package_tool="$3"
+
+    if [[ -d "$source" && -s "$source/model-package.json" ]]; then
+        printf '%s\n' "$source"
+        return 0
+    fi
+    [[ -f "$source" ]] || {
+        echo "Generation-8 split smoke input must be a package-v2 directory or local GGUF: $source" >&2
+        return 1
+    }
+
+    local source_file selector digest package_dir model_id
+    source_file="$(basename "$source")"
+    selector="$(quant_selector_from_gguf_file "$source_file")"
+    digest="$(sha256_file "$source")"
+    package_dir="$WORK_DIR/prepared-packages/$label"
+    model_id="ci/${label}-$(printf '%s' "$digest" | cut -c1-16):${selector}"
+    rm -rf "$package_dir"
+    mkdir -p "$(dirname "$package_dir")"
+
+    local write_log="$WORK_DIR/${label}-write-package.log"
+    local verify_log="$WORK_DIR/${label}-verify-package-v2.log"
+    if ! "$package_tool" write-package "$source" \
+        --model-id "$model_id" \
+        --out-dir "$package_dir" \
+        --source-repo "ci/two-node-split-smoke" \
+        --source-revision "$digest" \
+        --source-file "$source_file" >"$write_log" 2>&1; then
+        echo "Package-v2 preparation failed for $source; see $write_log" >&2
+        return 1
+    fi
+    if ! "$package_tool" verify-package-v2 "$package_dir" \
+        --source "$source" \
+        --source-file "$source_file" >"$verify_log" 2>&1; then
+        echo "Package-v2 verification failed for $source; see $verify_log" >&2
+        return 1
+    fi
+    [[ -s "$package_dir/model-package.json" ]] || {
+        echo "Package-v2 preparation did not emit $package_dir/model-package.json" >&2
+        return 1
+    }
+    printf '%s\n' "$package_dir"
+}
+
+prepare_split_inputs() {
+    local package_tool
+    if [[ -d "$MODEL" && -s "$MODEL/model-package.json" ]] &&
+        { [[ -z "$RECURRENT_MODEL" ]] || [[ -d "$RECURRENT_MODEL" && -s "$RECURRENT_MODEL/model-package.json" ]]; }; then
+        return 0
+    fi
+    package_tool="$(resolve_package_tool)"
+    MODEL="$(prepare_split_package "$PRIMARY_MODEL_LABEL" "$MODEL" "$package_tool")"
+    if [[ -n "$RECURRENT_MODEL" ]]; then
+        RECURRENT_MODEL="$(prepare_split_package recurrent "$RECURRENT_MODEL" "$package_tool")"
+    fi
+}
+
 descendant_pids() {
     local pid="$1"
     local children
@@ -158,6 +328,8 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+prepare_split_inputs
 
 status_json() {
     local console_port="$1"

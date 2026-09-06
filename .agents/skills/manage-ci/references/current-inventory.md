@@ -463,7 +463,10 @@ fail-open policy.
 - `prepare-host-input` / `prepare-windows-host-input`: neutral host bytes,
   import report and checksum.
 - `prepare-native-runtime-input`: one verified native runtime archive and
-  manifest.
+  manifest. Non-Windows artifacts include the checksum-bound
+  `skippy-model-package` tool used by split-serving consumers to prepare
+  package-v2 fixtures; Windows artifacts remain DLL-only until the producer has
+  a reliable import-library path for the tool.
 - `prepare-static-abi-input`: portable static ABI archive.
 - `compose-product-input`: exact host/runtime verification and composition.
 - `ci/model-artifacts/registry.json`: canonical immutable model identities,

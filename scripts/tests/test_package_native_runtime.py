@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -18,7 +19,28 @@ def write_failing_nvcc(path: Path) -> None:
 
 
 class PackageNativeRuntimeTests(unittest.TestCase):
-    def test_cpu_package_with_no_tools_is_safe_under_macos_bash(self) -> None:
+    def test_windows_package_skips_dynamic_model_package_tool(self) -> None:
+        script = SCRIPT.read_text(encoding="utf-8")
+        start = script.index("build_model_package_tool() {")
+        end = script.index("collect_runtime_libraries() {", start)
+        harness = (
+            "set -euo pipefail\n"
+            + script[start:end]
+            + 'runtime_os="windows"\n'
+            + 'stage_dir="${TMPDIR:-/tmp}/mesh-test-no-windows-tool"\n'
+            + "build_model_package_tool\n"
+            + '[[ ! -e "$stage_dir/tools/skippy-model-package" ]]\n'
+        )
+        result = subprocess.run(
+            ["/bin/bash", "-s"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cpu_package_includes_model_package_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             build_dir = root / "build"
@@ -33,6 +55,7 @@ class PackageNativeRuntimeTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["LLAMA_STAGE_BUILD_DIR"] = str(build_dir)
+            env["MESH_NATIVE_RUNTIME_MODEL_PACKAGE_TOOL"] = "/usr/bin/true"
             env["PATH"] = f"{tool_dir}{os.pathsep}{env['PATH']}"
             result = subprocess.run(
                 [
@@ -59,7 +82,20 @@ class PackageNativeRuntimeTests(unittest.TestCase):
                     / "manifest.json"
                 ).read_text(encoding="utf-8")
             )
-            self.assertEqual(manifest["runtime"]["tools"], {})
+            self.assertEqual(
+                set(manifest["runtime"]["tools"]),
+                {"tools/skippy-model-package"},
+            )
+            archive = (
+                root
+                / "output"
+                / "meshllm-native-runtime-linux-x86_64-cpu.tar.gz"
+            )
+            with tarfile.open(archive, "r:gz") as handle:
+                self.assertFalse(
+                    any(Path(member.name).name.startswith("._") for member in handle),
+                    "native runtime archive must not contain macOS AppleDouble entries",
+                )
 
     def test_rocm_benchmark_tool_uses_configured_offload_arches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -95,6 +131,7 @@ class PackageNativeRuntimeTests(unittest.TestCase):
                     "HIPCC_ARGS_LOG": str(root / "hipcc-args.log"),
                     "LLAMA_STAGE_AMDGPU_TARGETS": "gfx90a;gfx942, gfx1151",
                     "LLAMA_STAGE_BUILD_DIR": str(build_dir),
+                    "MESH_NATIVE_RUNTIME_MODEL_PACKAGE_TOOL": "/usr/bin/true",
                     "PATH": f"{tool_dir}{os.pathsep}{env['PATH']}",
                 }
             )
@@ -271,6 +308,7 @@ class PackageNativeRuntimeTests(unittest.TestCase):
             patchelf.chmod(0o755)
             env = self.clean_package_env(tool_dir)
             env["LLAMA_STAGE_BUILD_DIR"] = str(build_dir)
+            env["MESH_NATIVE_RUNTIME_MODEL_PACKAGE_TOOL"] = "/usr/bin/true"
             result = subprocess.run(
                 [
                     "/bin/bash",
@@ -408,6 +446,7 @@ class PackageNativeRuntimeTests(unittest.TestCase):
         inherited_env["CMAKE_CUDA_COMPILER"] = str(root / "inherited-cmake-nvcc")
         env = self.clean_package_env(tool_dir, inherited_env)
         env["LLAMA_STAGE_BUILD_DIR"] = str(build_dir)
+        env["MESH_NATIVE_RUNTIME_MODEL_PACKAGE_TOOL"] = "/usr/bin/true"
         if mesh_cuda_version is not None:
             env["MESH_CUDA_VERSION"] = mesh_cuda_version
         if toolkit_major is not None:
