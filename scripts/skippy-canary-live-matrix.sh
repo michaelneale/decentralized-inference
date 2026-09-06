@@ -27,6 +27,9 @@ CTX_SIZE="${SKIPPY_CANARY_LIVE_MATRIX_CTX_SIZE:-2048}"
 READINESS_TIMEOUT_SECONDS="${SKIPPY_CANARY_LIVE_MATRIX_READINESS_TIMEOUT_SECONDS:-300}"
 STAGE_SERVER_BIN="${STAGE_SERVER_BIN:-}"
 MESH_LLM_BIN="${MESH_LLM_BIN:-}"
+PKG_TOOL_BIN="${SKIPPY_CANARY_LIVE_MATRIX_PKG_TOOL:-}"
+SPLIT_SMOKE_SCRIPT="${SKIPPY_CANARY_LIVE_MATRIX_SPLIT_SMOKE:-$ROOT/scripts/ci-two-node-split-smoke.sh}"
+HF_DOWNLOAD_BIN="${SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD:-hf}"
 LIMIT="${SKIPPY_CANARY_LIVE_MATRIX_LIMIT:-}"
 
 usage() {
@@ -42,6 +45,9 @@ Environment:
   MESH_LLM_BIN               mesh-llm binary; required (two-node split smoke)
   HF_HOME                    Hugging Face cache root for pinned GGUFs
   SKIPPY_CANARY_LIVE_MATRIX_LIMIT   run at most N rows (bounded canary use)
+  SKIPPY_CANARY_LIVE_MATRIX_PKG_TOOL    package tool override (tests)
+  SKIPPY_CANARY_LIVE_MATRIX_SPLIT_SMOKE split smoke script override (tests)
+  SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD hf download command override (tests)
 EOF
 }
 
@@ -62,7 +68,7 @@ echo "  evidence:  $EVIDENCE_ROOT/live-matrix"
 echo "  work root: $WORK_ROOT"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  command -v hf >/dev/null 2>&1 || { echo "hf CLI is required" >&2; exit 1; }
+  command -v "$HF_DOWNLOAD_BIN" >/dev/null 2>&1 || { echo "hf CLI is required ($HF_DOWNLOAD_BIN)" >&2; exit 1; }
   [[ -n "$MESH_LLM_BIN" && -x "$MESH_LLM_BIN" ]] || {
     echo "MESH_LLM_BIN must point at an executable mesh-llm binary" >&2; exit 1; }
 fi
@@ -112,30 +118,29 @@ fi
 if [[ -z "$STAGE_SERVER_BIN" ]]; then
   STAGE_SERVER_BIN="$(cargo build -p skippy-model-package -p skippy-server >&2 && printf '%s\n' "$ROOT/target/debug/skippy-server")"
 fi
-PKG_TOOL="$ROOT/target/debug/skippy-model-package"
-[[ -x "$PKG_TOOL" ]] || PKG_TOOL="$(build_tool skippy-model-package skippy-model-package)"
-[[ -x "$STAGE_SERVER_BIN" ]] || STAGE_SERVER_BIN="$(build_tool skippy-server skippy-server)"
+if [[ -z "$PKG_TOOL_BIN" ]]; then
+  PKG_TOOL_BIN="$ROOT/target/debug/skippy-model-package"
+  if [[ ! -x "$PKG_TOOL_BIN" ]]; then
+    cargo build -p skippy-model-package >&2
+  fi
+fi
 export SKIPPY_SERVER_BIN="$STAGE_SERVER_BIN"
 
 declare -a FAILED_ROWS=()
 ROW_INDEX=0
 while IFS= read -r ROW; do
   ROW_INDEX=$((ROW_INDEX + 1))
-  MODEL_NAME="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["llama_model"])' <<<"$ROW")"
-  REPO="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["repo"])' <<<"$ROW")"
-  REVISION="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["revision"])' <<<"$ROW")"
-  FILE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["file"])' <<<"$ROW")"
-  SIZE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["size_bytes"])' <<<"$ROW")"
-  SHA="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["blob_sha256"])' <<<"$ROW")"
-  PAYLOAD_KIND="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["expected_payload_kind"])' <<<"$ROW")"
-  MODEL_ID="$REPO:$(python3 -c 'import sys; f=sys.argv[1]; print(f.rsplit(".",2)[0])' "$FILE")"
+  read -r MODEL_NAME REPO REVISION FILE SIZE SHA PAYLOAD_KIND <<<"$(python3 -c 'import json,sys
+r = json.loads(sys.stdin.read())
+print(r["llama_model"], r["repo"], r["revision"], r["file"], r["size_bytes"], r["blob_sha256"], r["expected_payload_kind"])' <<<"$ROW")"
+  MODEL_ID="$REPO:$(python3 -c 'import sys; print(sys.argv[1].rsplit(".",2)[0])' "$FILE")"
   ROW_DIR="$EVIDENCE_ROOT/live-matrix/$MODEL_NAME"
   PKG_DIR="$WORK_ROOT/$MODEL_NAME"
   mkdir -p "$ROW_DIR"
   echo
   echo "--- [$ROW_INDEX/$ROW_COUNT] $MODEL_NAME ($PAYLOAD_KIND) ---"
 
-  if ! GGUF_PATH="$(hf download "$REPO" "$FILE" --revision "$REVISION" 2>>"$ROW_DIR/download.log" | tail -n 1)" \
+  if ! GGUF_PATH="$("$HF_DOWNLOAD_BIN" download "$REPO" "$FILE" --revision "$REVISION" 2>>"$ROW_DIR/download.log" | tail -n 1)" \
       || [[ -z "$GGUF_PATH" || ! -f "$GGUF_PATH" ]]; then
     echo "row $MODEL_NAME: download failed (see $ROW_DIR/download.log)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:download")
@@ -156,7 +161,7 @@ while IFS= read -r ROW; do
   echo "verified pinned source: $FILE ($SIZE bytes, sha256 ${SHA:0:16}…)"
 
   rm -rf "$PKG_DIR"
-  if ! "$PKG_TOOL" write-package "$MODEL_ID" \
+  if ! "$PKG_TOOL_BIN" write-package "$MODEL_ID" \
       --out-dir "$PKG_DIR" \
       --source-repo "$REPO" --source-revision "$REVISION" --source-file "$FILE" \
       >"$ROW_DIR/write-package.log" 2>&1; then
@@ -164,7 +169,7 @@ while IFS= read -r ROW; do
     FAILED_ROWS+=("$MODEL_NAME:write-package")
     continue
   fi
-  if ! "$PKG_TOOL" verify-package-v2 "$PKG_DIR" --source "$GGUF_PATH" --source-file "$FILE" \
+  if ! "$PKG_TOOL_BIN" verify-package-v2 "$PKG_DIR" --source "$GGUF_PATH" --source-file "$FILE" \
       >"$ROW_DIR/verify-package-v2.log" 2>&1; then
     echo "row $MODEL_NAME: verify-package-v2 failed (see $ROW_DIR/verify-package-v2.log)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:verify-package-v2")
@@ -178,7 +183,7 @@ while IFS= read -r ROW; do
       MESH_TWO_NODE_SPLIT_EXPECTED_EXACT_PAYLOAD_KIND="$PAYLOAD_KIND" \
       MESH_TWO_NODE_SPLIT_READINESS_TIMEOUT_SECONDS="$READINESS_TIMEOUT_SECONDS" \
       MESH_TWO_NODE_SPLIT_WORK_DIR="$ROW_DIR/split" \
-      scripts/ci-two-node-split-smoke.sh "$MESH_LLM_BIN" "$(dirname "$MESH_LLM_BIN")" "$PKG_DIR" \
+      "$SPLIT_SMOKE_SCRIPT" "$MESH_LLM_BIN" "$(dirname "$MESH_LLM_BIN")" "$PKG_DIR" \
       >"$ROW_DIR/two-node-split.log" 2>&1; then
     echo "row $MODEL_NAME: two-node split smoke failed (see $ROW_DIR/two-node-split.log)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:two-node")

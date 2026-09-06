@@ -487,6 +487,19 @@ class BoundaryRegisteredModelsTests(unittest.TestCase):
             registered = self.parity.boundary_registered_models(tmp)
         self.assertEqual(registered, {"full"})
 
+    def test_comment_only_mentions_do_not_register(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            models = self._models_dir(tmp)
+            # Both names appear only in comments/docs — no real calls.
+            (models / "commented.cpp").write_text(
+                "// registers begin_block(inpL, il) and end_block(cur, il)\n"
+                "/* block boundaries: begin_block / end_block hooks */\n"
+                "void f() {}\n"
+            )
+            registered = self.parity.boundary_registered_models(tmp)
+        self.assertEqual(registered, set())
+
     def test_missing_models_dir_is_empty(self):
         with tempfile.TemporaryDirectory() as tmp_name:
             self.assertEqual(self.parity.boundary_registered_models(Path(tmp_name)), set())

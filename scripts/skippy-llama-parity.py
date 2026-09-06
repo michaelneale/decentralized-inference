@@ -493,10 +493,12 @@ def validate_pin_manifest_join(rows: list[dict[str, Any]]) -> int:
 def boundary_registered_models(llama_src: Path | None) -> set[str]:
     """Model implementations that register stage block boundaries.
 
-    A model file counts as registered only when it calls both `begin_block`
-    and `end_block` (the per-layer boundary pair is always added in the same
-    edit per the llama-patch-changes skill). A file with only one half of
-    the pair cannot certify.
+    A model file counts as registered only when its comment-stripped
+    executable source contains real `begin_block(...)` and `end_block(...)`
+    call patterns (the per-layer boundary pair is always added in the same
+    edit per the llama-patch-changes skill). Bare name mentions — comments,
+    docs, or strings — cannot certify a family, and a file with only one
+    half of the pair cannot certify either.
     """
     source = llama_src or ROOT / ".deps/llama.cpp"
     models_dir = source / "src/models"
@@ -508,7 +510,10 @@ def boundary_registered_models(llama_src: Path | None) -> set[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if "begin_block" in text and "end_block" in text:
+        executable_text = executable_cpp(text)
+        if re.search(r"\bbegin_block\s*\(", executable_text) and re.search(
+            r"\bend_block\s*\(", executable_text
+        ):
             registered.add(path.stem)
     return registered
 
