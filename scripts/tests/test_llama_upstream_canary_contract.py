@@ -34,6 +34,24 @@ class ParityCliInvocationTests(unittest.TestCase):
     repair wrapper use must parse (argparse rejects a global option placed
     after the subcommand — seen live as exit 2)."""
 
+    def _temp_llama_src(self) -> tempfile.TemporaryDirectory:
+        # Hermetic: CI's quality job has no .deps/llama.cpp checkout. A minimal
+        # source tree with real boundary hooks is enough — argparse errors
+        # precede any source validation, so the global-first property under
+        # test is unchanged.
+        tmp = tempfile.TemporaryDirectory(prefix="parity-cli-src-")
+        models = Path(tmp.name) / "src" / "models"
+        models.mkdir(parents=True)
+        (models / "llama.cpp").write_text(
+            "void f() {\n"
+            "    begin_block(x, 0);\n"
+            "    end_block(y, 0);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(tmp.cleanup)
+        return tmp
+
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(PARITY), *args],
@@ -44,12 +62,14 @@ class ParityCliInvocationTests(unittest.TestCase):
         )
 
     def test_validate_global_llama_src_before_subcommand(self) -> None:
-        result = self._run("--llama-src", ".deps/llama.cpp", "validate")
+        tmp = self._temp_llama_src()
+        result = self._run("--llama-src", tmp.name, "validate")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_next_boundary_target_global_llama_src_before_subcommand(self) -> None:
+        tmp = self._temp_llama_src()
         result = self._run(
-            "--llama-src", ".deps/llama.cpp", "next-boundary-target", "--json"
+            "--llama-src", tmp.name, "next-boundary-target", "--json"
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # Valid single-target JSON (or null), not an argparse usage error.
