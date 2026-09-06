@@ -19,7 +19,7 @@ def write_failing_nvcc(path: Path) -> None:
 
 
 class PackageNativeRuntimeTests(unittest.TestCase):
-    def test_macos_model_package_tool_uses_portable_lld_driver_name(self) -> None:
+    def test_macos_model_package_tool_uses_portable_linker_flags(self) -> None:
         script = SCRIPT.read_text(encoding="utf-8")
         start = script.index("build_model_package_tool() {")
         end = script.index("collect_runtime_libraries() {", start)
@@ -27,6 +27,11 @@ class PackageNativeRuntimeTests(unittest.TestCase):
         self.assertIn('command -v ld64.lld', function)
         self.assertIn(
             'CARGO_ENCODED_RUSTFLAGS=-Clink-arg=-fuse-ld=lld',
+            function,
+        )
+        self.assertIn('cargo_env+=("CARGO_ENCODED_RUSTFLAGS=")', function)
+        self.assertNotIn(
+            "LLVM ld64.lld is required to build the macOS model package tool",
             function,
         )
 

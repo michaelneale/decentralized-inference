@@ -349,15 +349,19 @@ build_model_package_tool() {
         source_path="$configured"
     else
         if [[ "$runtime_os" == "macos" ]]; then
-            if ! command -v ld64.lld >/dev/null 2>&1; then
-                echo "LLVM ld64.lld is required to build the macOS model package tool" >&2
-                exit 1
+            if command -v ld64.lld >/dev/null 2>&1; then
+                # Cargo's encoded flags override the checked-in target
+                # rustflags, whose absolute `-fuse-ld=/path/to/ld64.lld`
+                # form is rejected by Apple clang. Prefer the portable LLD
+                # driver name when the producer installed it.
+                cargo_env+=("CARGO_ENCODED_RUSTFLAGS=-Clink-arg=-fuse-ld=lld")
+            else
+                # Protected reusable workflows may not include the repository
+                # setup action. An explicitly empty encoded flag set still
+                # overrides the non-portable checked-in target rustflags and
+                # lets Apple clang use the system linker.
+                cargo_env+=("CARGO_ENCODED_RUSTFLAGS=")
             fi
-            # Cargo's encoded flags override the checked-in target rustflags,
-            # whose absolute `-fuse-ld=/path/to/ld64.lld` form is rejected by
-            # Apple clang. The portable driver name is also used by the
-            # repository's setup-macos-lld action.
-            cargo_env+=("CARGO_ENCODED_RUSTFLAGS=-Clink-arg=-fuse-ld=lld")
         fi
         env "${cargo_env[@]}" \
             cargo build --release --locked --target "$TARGET_TRIPLE" \
