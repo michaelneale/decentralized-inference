@@ -110,6 +110,28 @@ def main() -> int:
         assert filter_only_second["verdict"] == "already_transformed"
         assert filter_only_second["edits"] == []
 
+        multiple_assignments = run(
+            tool,
+            source_root,
+            Path(temporary) / "multiple-assignments.json",
+            source_name="multiple-assignments.cpp",
+            apply=False,
+        )["builders"][0]
+        assert multiple_assignments["verdict"] == "transformable"
+        assert multiple_assignments["proof"]["loop"]["var"] == "layer_index"
+        assert multiple_assignments["proof"]["activation_out"] == "cur"
+
+        self_carried = run(
+            tool,
+            source_root,
+            Path(temporary) / "self-carried.json",
+            source_name="self-carried.cpp",
+            apply=False,
+        )["builders"][0]
+        assert self_carried["verdict"] == "transformable"
+        assert self_carried["proof"]["activation_in"] == "cur"
+        assert self_carried["proof"]["activation_out"] == "cur"
+
         two_loops = run(
             tool,
             source_root,
@@ -141,7 +163,7 @@ def main() -> int:
         )["builders"][0]
         assert trailing_work["verdict"] == "unsupported_shape"
         assert trailing_work["unsupported_reason"] == (
-            "carried activation assignment is not the final block statement"
+            "non-callback work follows the final carried activation assignment"
         )
 
     return 0

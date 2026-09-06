@@ -328,6 +328,42 @@ public:
   bool has_stage_filter = false;
 };
 
+bool isCallbackOnly(const Stmt *statement) {
+  class Visitor final : public RecursiveASTVisitor<Visitor> {
+  public:
+    bool TraverseLambdaExpr(clang::LambdaExpr *) {
+      valid_ = false;
+      return false;
+    }
+
+    bool VisitCallExpr(CallExpr *call) {
+      const auto *callee = directCallee(call);
+      if (callee == nullptr || callee->getNameAsString() != "cb") {
+        valid_ = false;
+        return false;
+      }
+      saw_callback_ = true;
+      return true;
+    }
+
+    bool VisitBinaryOperator(BinaryOperator *binary) {
+      if (binary->isAssignmentOp()) {
+        valid_ = false;
+        return false;
+      }
+      return true;
+    }
+
+    bool valid() const { return valid_ && saw_callback_; }
+
+  private:
+    bool valid_ = true;
+    bool saw_callback_ = false;
+  } visitor;
+  visitor.TraverseStmt(const_cast<Stmt *>(statement));
+  return visitor.valid();
+}
+
 std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
                                                   llvm::StringRef variable) {
   class AssignmentVisitor final
@@ -525,30 +561,57 @@ public:
     report.proof.embedding_owner = true;
 
     const auto carries = assignmentsTo(loop_body, *activation);
-    if (carries.size() != 1) {
-      refuse(report, carries.empty()
-                         ? "no unique carried activation assignment"
-                         : "multiple carried activation assignments");
+    if (carries.empty()) {
+      refuse(report, "no carried activation assignment");
       reports_.push_back(std::move(report));
       return;
     }
-    const BinaryOperator *carry = carries.front();
-    const Stmt *carry_statement =
-        directChildContaining(loop_body, carry, sm, lang);
-    if (carry_statement == nullptr || loop_body->body_empty() ||
-        carry_statement != loop_body->body_back()) {
-      refuse(report,
-             "carried activation assignment is not the final block statement");
+
+    // Builders commonly reuse the carried activation inside a block. Select
+    // the last unconditional top-level assignment. Statements after it may
+    // only be graph-label callbacks; state/effect work still causes refusal.
+    size_t carry_index = 0;
+    bool found_carry_statement = false;
+    std::vector<const BinaryOperator *> final_statement_carries;
+    for (size_t index = 0; index < loop_body->size(); ++index) {
+      const Stmt *statement = *(loop_body->body_begin() + index);
+      std::vector<const BinaryOperator *> statement_carries;
+      for (const BinaryOperator *candidate : carries) {
+        if (directChildContaining(loop_body, candidate, sm, lang) == statement) {
+          statement_carries.push_back(candidate);
+        }
+      }
+      if (!statement_carries.empty()) {
+        carry_index = index;
+        found_carry_statement = true;
+        final_statement_carries = std::move(statement_carries);
+      }
+    }
+    if (!found_carry_statement || final_statement_carries.size() != 1) {
+      refuse(report, !found_carry_statement
+                         ? "no top-level carried activation assignment"
+                         : "multiple carried activation assignments in final carry statement");
       reports_.push_back(std::move(report));
       return;
     }
-    const auto output = referencedName(carry->getRHS());
-    if (!output) {
-      refuse(report, "carried activation output is not a named tensor");
+
+    const BinaryOperator *carry = final_statement_carries.front();
+    if (*(loop_body->body_begin() + carry_index) != carry) {
+      refuse(report, "final carried activation assignment is conditional or nested");
       reports_.push_back(std::move(report));
       return;
     }
-    report.proof.activation_out = *output;
+    for (size_t index = carry_index + 1; index < loop_body->size(); ++index) {
+      if (!isCallbackOnly(*(loop_body->body_begin() + index))) {
+        refuse(report, "non-callback work follows the final carried activation assignment");
+        reports_.push_back(std::move(report));
+        return;
+      }
+    }
+
+    const auto named_output = referencedName(carry->getRHS());
+    const std::string output = named_output.value_or(*activation);
+    report.proof.activation_out = output;
 
     const auto &output_calls = facts.calls["build_inp_out_ids"];
     if (output_calls.size() > 1) {
@@ -627,11 +690,19 @@ public:
                   "\n" + inner_indent + "begin_block(" + *activation + ", " +
                       report.proof.loop_var + ");\n",
                   sm);
-    valid &= addInsert(report.edits, "insert_end_block", report.file,
-                       carry->getBeginLoc(),
-                       "end_block(" + *output + ", " + report.proof.loop_var +
-                           ");\n\n" + inner_indent,
-                       sm);
+    if (named_output) {
+      valid &= addInsert(report.edits, "insert_end_block", report.file,
+                         carry->getBeginLoc(),
+                         "end_block(" + output + ", " + report.proof.loop_var +
+                             ");\n\n" + inner_indent,
+                         sm);
+    } else {
+      valid &= addInsert(report.edits, "insert_end_block", report.file,
+                         loop_body->getRBracLoc(),
+                         inner_indent + "end_block(" + output + ", " +
+                             report.proof.loop_var + ");\n",
+                         sm);
+    }
 
     if (!completing_filter && output_call != nullptr) {
       const Stmt *output_statement =

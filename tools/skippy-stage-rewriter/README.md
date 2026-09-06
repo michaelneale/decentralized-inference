@@ -35,3 +35,19 @@ Classify without editing:
 Add `--apply` to apply only the `transformable` edit sets. Run the tool again
 over the result to prove idempotence: every edited builder must report
 `already_transformed` with no edits.
+
+The checked-in family patch is produced from a clean llama.cpp tree containing
+the central Skippy patches, but not the generated family patch itself:
+
+```sh
+python3 scripts/generate-skippy-family-patch.py \
+  --source-root .scratch/llama-central \
+  --build-dir .scratch/llama-central-build \
+  --rewriter .scratch/skippy-stage-rewriter-build/skippy-stage-rewriter \
+  --report .scratch/skippy-stage-rewriter-report.json \
+  --output third_party/llama.cpp/patches/0076-skippy-generate-model-family-stage-controls.patch
+```
+
+The wrapper refuses a dirty input tree, applies the Clang-proven edits, checks
+a second pass for zero edits, and writes a fixed-header mail patch suitable for
+the existing `git am` preparation flow.
