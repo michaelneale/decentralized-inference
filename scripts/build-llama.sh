@@ -12,10 +12,17 @@ LLAMA_BACKEND="${LLAMA_STAGE_BACKEND:-${SKIPPY_LLAMA_BACKEND:-${LLAMA_BACKEND:-c
 LLAMA_LINK_MODE="${LLAMA_STAGE_LINK_MODE:-${SKIPPY_LLAMA_LINK_MODE:-static}}"
 LLAMA_STAGE_BUILD_TESTS="${LLAMA_STAGE_BUILD_TESTS:-OFF}"
 LLAMA_STAGE_FULL_REPLAY="${LLAMA_STAGE_FULL_REPLAY:-OFF}"
+LLAMA_STAGE_UPSTREAM_TESTS="${LLAMA_STAGE_UPSTREAM_TESTS:-OFF}"
 LLAMA_BUILD_TESTS=OFF
-if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
+LLAMA_BUILD_SERVER=OFF
+if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" || "$LLAMA_STAGE_UPSTREAM_TESTS" == "ON" ]]; then
   LLAMA_BUILD_TESTS=ON
   LLAMA_STAGE_BUILD_TESTS=ON
+fi
+if [[ "$LLAMA_STAGE_UPSTREAM_TESTS" == "ON" ]]; then
+  # Upstream test-chat compiles server headers and requires their complete
+  # multimodal include/link closure.
+  LLAMA_BUILD_SERVER=ON
 fi
 PRINT_BUILD_DIR=0
 REQUIRE_EXISTING=0
@@ -202,7 +209,7 @@ CMAKE_ARGS=(
   -DGGML_NATIVE="${LLAMA_STAGE_GGML_NATIVE:-${SKIPPY_GGML_NATIVE:-OFF}}"
   -DLLAMA_OPENSSL=OFF
   -DLLAMA_BUILD_EXAMPLES=OFF
-  -DLLAMA_BUILD_SERVER=OFF
+  -DLLAMA_BUILD_SERVER="$LLAMA_BUILD_SERVER"
   -DLLAMA_BUILD_TESTS="$LLAMA_BUILD_TESTS"
   -DLLAMA_STAGE_BUILD_TESTS="$LLAMA_STAGE_BUILD_TESTS"
   -DLLAMA_CURL=OFF
@@ -347,6 +354,7 @@ CURRENT_BUILD_STAMP="$(
 )"
 
 if [[ "$LLAMA_STAGE_FULL_REPLAY" != "ON" &&
+      "$LLAMA_STAGE_UPSTREAM_TESTS" != "ON" &&
       "${LLAMA_STAGE_FORCE_BUILD:-${SKIPPY_FORCE_LLAMA_BUILD:-0}}" != "1" &&
       -f "$BUILD_STAMP" &&
       "$(cat "$BUILD_STAMP")" == "$CURRENT_BUILD_STAMP" ]] &&
@@ -393,9 +401,18 @@ if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
   )
 fi
 
-cmake --build "$LLAMA_BUILD_DIR" --config "${CMAKE_BUILD_TYPE:-Release}" --parallel "$(detect_jobs)" --target "${BUILD_TARGETS[@]}"
+if [[ "$LLAMA_STAGE_UPSTREAM_TESTS" == "ON" ]]; then
+  # Build CMake's complete default target set so every upstream llama.cpp
+  # CTest executable is present. The ordinary ABI path intentionally builds
+  # only the native link closure and Skippy probes listed above.
+  cmake --build "$LLAMA_BUILD_DIR" --config "${CMAKE_BUILD_TYPE:-Release}" --parallel "$(detect_jobs)"
+else
+  cmake --build "$LLAMA_BUILD_DIR" --config "${CMAKE_BUILD_TYPE:-Release}" --parallel "$(detect_jobs)" --target "${BUILD_TARGETS[@]}"
+fi
 
-if [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
+if [[ "$LLAMA_STAGE_UPSTREAM_TESTS" == "ON" ]]; then
+  ctest --test-dir "$LLAMA_BUILD_DIR" --build-config "${CMAKE_BUILD_TYPE:-Release}" --output-on-failure --timeout 900
+elif [[ "$LLAMA_STAGE_FULL_REPLAY" == "ON" ]]; then
   REPLAY_FIXTURE_DIR="$LLAMA_BUILD_DIR/tests/test-models"
   mkdir -p "$REPLAY_FIXTURE_DIR"
   "$LLAMA_BUILD_DIR/bin/skippy-model-fixture-generator" --arch gemma --seed 1 --out "$REPLAY_FIXTURE_DIR"

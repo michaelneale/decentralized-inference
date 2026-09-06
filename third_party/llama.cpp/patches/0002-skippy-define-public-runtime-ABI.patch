@@ -1,0 +1,1939 @@
+From 404bfb7172b1a0be6e5a4e03252d3cf6b2ac1c40 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:22:42 +1000
+Subject: [PATCH 02/11] skippy: define public runtime ABI
+
+---
+ include/skippy.h                      |  28 +++
+ include/skippy/activation.h           |  69 +++++++
+ include/skippy/common.h               | 128 +++++++++++++
+ include/skippy/devices.h              |  56 ++++++
+ include/skippy/events.h               | 106 +++++++++++
+ include/skippy/execution.h            | 264 ++++++++++++++++++++++++++
+ include/skippy/model_package.h        | 103 ++++++++++
+ include/skippy/model_source.h         |  84 ++++++++
+ include/skippy/runtime.h              | 257 +++++++++++++++++++++++++
+ include/skippy/sampling.h             |  74 ++++++++
+ include/skippy/signals.h              |  53 ++++++
+ include/skippy/speculative_decoding.h |  71 +++++++
+ include/skippy/stage_plan.h           | 243 ++++++++++++++++++++++++
+ include/skippy/state.h                | 187 ++++++++++++++++++
+ include/skippy/tokenization.h         |  85 +++++++++
+ 15 files changed, 1808 insertions(+)
+ create mode 100644 include/skippy.h
+ create mode 100644 include/skippy/activation.h
+ create mode 100644 include/skippy/common.h
+ create mode 100644 include/skippy/devices.h
+ create mode 100644 include/skippy/events.h
+ create mode 100644 include/skippy/execution.h
+ create mode 100644 include/skippy/model_package.h
+ create mode 100644 include/skippy/model_source.h
+ create mode 100644 include/skippy/runtime.h
+ create mode 100644 include/skippy/sampling.h
+ create mode 100644 include/skippy/signals.h
+ create mode 100644 include/skippy/speculative_decoding.h
+ create mode 100644 include/skippy/stage_plan.h
+ create mode 100644 include/skippy/state.h
+ create mode 100644 include/skippy/tokenization.h
+
+diff --git a/include/skippy.h b/include/skippy.h
+new file mode 100644
+index 000000000..33a47b244
+--- /dev/null
++++ b/include/skippy.h
+@@ -0,0 +1,28 @@
++#ifndef SKIPPY_H
++#define SKIPPY_H
++
++/**
++ * @file skippy.h
++ * @brief Umbrella include for the capability-oriented Skippy C API.
++ *
++ * Include a narrower header when a consumer only needs one capability. This
++ * file exists for consumers that want the complete staged-runtime surface.
++ */
++
++// Public umbrella for the capability-oriented Skippy C API.
++#include "skippy/common.h"
++#include "skippy/events.h"
++#include "skippy/devices.h"
++#include "skippy/runtime.h"
++#include "skippy/model_source.h"
++#include "skippy/stage_plan.h"
++#include "skippy/activation.h"
++#include "skippy/sampling.h"
++#include "skippy/speculative_decoding.h"
++#include "skippy/execution.h"
++#include "skippy/state.h"
++#include "skippy/tokenization.h"
++#include "skippy/model_package.h"
++#include "skippy/signals.h"
++
++#endif // SKIPPY_H
+diff --git a/include/skippy/activation.h b/include/skippy/activation.h
+new file mode 100644
+index 000000000..347576e05
+--- /dev/null
++++ b/include/skippy/activation.h
+@@ -0,0 +1,69 @@
++#ifndef SKIPPY_ACTIVATION_H
++#define SKIPPY_ACTIVATION_H
++
++/**
++ * @file skippy/activation.h
++ * @brief Describes activation-frame payloads exchanged between stages.
++ *
++ * The descriptor carries the payload representation, layer range, token and
++ * sequence shape, and model-family sideband flags needed by downstream stages.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum skippy_activation_dtype {
++    SKIPPY_ACTIVATION_DTYPE_UNKNOWN       = 0,
++    SKIPPY_ACTIVATION_DTYPE_F32           = 1,
++    SKIPPY_ACTIVATION_DTYPE_F16           = 2,
++    SKIPPY_ACTIVATION_DTYPE_BF16          = 3,
++};
++
++enum skippy_activation_layout {
++    SKIPPY_ACTIVATION_LAYOUT_OPAQUE       = 0,
++    SKIPPY_ACTIVATION_LAYOUT_TOKEN_MAJOR  = 1,
++};
++
++#define SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION 1
++
++/** @brief Stable, graph-observed representation for one token at a stage edge. */
++struct skippy_activation_boundary_desc {
++    uint32_t version;
++    uint32_t ggml_type;
++    uint32_t layout;
++    uint32_t reserved;
++    uint64_t elements_per_token;
++    uint64_t bytes_per_token;
++    uint64_t required_frame_flags;
++    uint64_t required_sidebands;
++};
++
++#define SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS (UINT64_C(1) << 0)
++
++#define SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST   (UINT64_C(1) << 0)
++#define SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP   (UINT64_C(1) << 1)
++#define SKIPPY_ACTIVATION_FLAG_INKLING_MTP_EMBD (UINT64_C(1) << 2)
++#define SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K     (UINT64_C(1) << 3)
++
++/** @brief Metadata for an activation payload passed between staged runtimes. */
++struct skippy_activation_desc {
++    uint32_t version;
++    enum skippy_activation_dtype dtype;
++    enum skippy_activation_layout layout;
++    int32_t producer_stage_index;
++    int32_t layer_start;
++    int32_t layer_end;
++    uint32_t token_count;
++    uint32_t sequence_count;
++    uint64_t payload_bytes;
++    uint64_t flags;
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_ACTIVATION_H
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+new file mode 100644
+index 000000000..fbbb636ef
+--- /dev/null
++++ b/include/skippy/common.h
+@@ -0,0 +1,128 @@
++#ifndef SKIPPY_COMMON_H
++#define SKIPPY_COMMON_H
++
++/**
++ * @file skippy/common.h
++ * @brief ABI versioning, feature discovery, status codes, and errors.
++ *
++ * Every other public Skippy header depends on this capability boundary. The
++ * ABI is intentionally C-compatible so Rust and other native callers do not
++ * depend on private llama.cpp C++ layouts.
++ */
++
++#include "../llama.h"
++#include "stdbool.h"
++#include "stddef.h"
++#include "stdint.h"
++
++#if defined(LLAMA_SHARED) && defined(_WIN32) && !defined(__MINGW32__)
++#    ifdef SKIPPY_COMMON_BUILD
++#        define SKIPPY_COMMON_API __declspec(dllexport)
++#    else
++#        define SKIPPY_COMMON_API __declspec(dllimport)
++#    endif
++#elif defined(LLAMA_SHARED)
++#    define SKIPPY_COMMON_API __attribute__((visibility("default")))
++#else
++#    define SKIPPY_COMMON_API
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Experimental ABI for layer-range staged inference.
++//
++// This header is intentionally a capability boundary. It exposes opaque handles
++// and plain C structs so Rust orchestration code can use llama.cpp model
++// execution, tokenization, GGUF metadata, and GGUF writing without depending on
++// private C++ layouts.
++//
++// Stability note:
++// - ABI version 0 is experimental.
++// - Callers must feature-probe before use.
++// - Names, structs, and ownership rules may change until cross-family staged
++//   runtime validation has completed.
++
++#define SKIPPY_ABI_VERSION_MAJOR 0
++#define SKIPPY_ABI_VERSION_MINOR 1
++#define SKIPPY_ABI_VERSION_PATCH 51
++
++#if defined(_MSC_VER)
++#define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
++#elif defined(__GNUC__) || defined(__clang__)
++#define SKIPPY_DEPRECATED(message) __attribute__((deprecated(message)))
++#else
++#define SKIPPY_DEPRECATED(message)
++#endif
++
++enum skippy_feature {
++    SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
++    SKIPPY_FEATURE_LAYER_PACKAGE          = 1 << 1,
++    SKIPPY_FEATURE_ARTIFACT_SLICE         = 1 << 2,
++    SKIPPY_FEATURE_MODEL_INTROSPECTION    = 1 << 3,
++    SKIPPY_FEATURE_GGUF_SLICE_WRITE       = 1 << 4,
++    SKIPPY_FEATURE_STATE_IMPORT_EXPORT    = 1 << 5,
++    SKIPPY_FEATURE_TOKENIZE_DETOKENIZE    = 1 << 6,
++    SKIPPY_FEATURE_ACTIVATION_FRAME       = 1 << 7,
++    SKIPPY_FEATURE_NATIVE_KV_PAGE         = 1 << 8,
++    SKIPPY_FEATURE_SESSION_RESET          = 1 << 9,
++    SKIPPY_FEATURE_BATCH_VERIFY           = 1 << 10,
++    SKIPPY_FEATURE_CHAT_TEMPLATE          = 1 << 11,
++    SKIPPY_FEATURE_SAMPLING_CONFIG        = 1 << 12,
++    SKIPPY_FEATURE_BATCH_VERIFY_FRAME     = 1 << 13,
++    SKIPPY_FEATURE_RECURRENT_STATE        = 1 << 14,
++    SKIPPY_FEATURE_LOGIT_BIAS             = 1 << 15,
++    SKIPPY_FEATURE_SESSION_TRIM           = 1 << 16,
++    SKIPPY_FEATURE_STAGE_PLAN             = 1 << 17,
++    SKIPPY_FEATURE_PACKAGE_PART_LOAD      = 1 << 18,
++    SKIPPY_FEATURE_GENERATION_SIGNALS     = 1 << 19,
++    SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL = 1 << 20,
++    SKIPPY_FEATURE_CHAT_TEMPLATE_TOOLS    = 1 << 21,
++    SKIPPY_FEATURE_CHAT_SAMPLING_GRAMMAR  = 1 << 22,
++    SKIPPY_FEATURE_BACKEND_DEVICES        = 1 << 23,
++    SKIPPY_FEATURE_RUNTIME_EVENTS         = 1 << 24,
++    SKIPPY_FEATURE_NATIVE_MTP_N1          = 1 << 25,
++    SKIPPY_FEATURE_NGRAM_CACHE_DRAFT      = 1 << 26,
++    SKIPPY_FEATURE_INKLING_MTP_MM         = 1 << 27,
++    SKIPPY_FEATURE_ITERATION_BATCH        = 1 << 28,
++    SKIPPY_FEATURE_ACTIVATION_BOUNDARY     = 1 << 29,
++    SKIPPY_FEATURE_MODEL_SOURCE            = 1 << 30,
++};
++
++enum skippy_status {
++    SKIPPY_STATUS_OK                      = 0,
++    SKIPPY_STATUS_ERROR                   = 1,
++    SKIPPY_STATUS_INVALID_ARGUMENT        = 2,
++    SKIPPY_STATUS_UNSUPPORTED             = 3,
++    SKIPPY_STATUS_BUFFER_TOO_SMALL        = 4,
++    SKIPPY_STATUS_IO_ERROR                = 5,
++    SKIPPY_STATUS_MODEL_ERROR             = 6,
++    SKIPPY_STATUS_RUNTIME_ERROR           = 7,
++};
++
++struct skippy_error {
++    enum skippy_status status;
++    const char * message;
++};
++
++struct skippy_abi_version {
++    uint32_t major;
++    uint32_t minor;
++    uint32_t patch;
++};
++
++/** @brief Returns the native Skippy ABI version exported by this runtime. */
++LLAMA_API struct skippy_abi_version skippy_abi_version(void);
++
++/** @brief Returns the bitmask of optional capabilities compiled into the runtime. */
++LLAMA_API uint64_t skippy_abi_features(void);
++
++/** @brief Releases an error returned through an `out_error` parameter. */
++LLAMA_API void skippy_error_free(struct skippy_error * error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_COMMON_H
+diff --git a/include/skippy/devices.h b/include/skippy/devices.h
+new file mode 100644
+index 000000000..36c6eb641
+--- /dev/null
++++ b/include/skippy/devices.h
+@@ -0,0 +1,56 @@
++#ifndef SKIPPY_DEVICES_H
++#define SKIPPY_DEVICES_H
++
++/**
++ * @file skippy/devices.h
++ * @brief Enumerates backend devices available to the staged runtime.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum skippy_backend_device_type {
++    SKIPPY_BACKEND_DEVICE_TYPE_CPU         = 0,
++    SKIPPY_BACKEND_DEVICE_TYPE_GPU         = 1,
++    SKIPPY_BACKEND_DEVICE_TYPE_IGPU        = 2,
++    SKIPPY_BACKEND_DEVICE_TYPE_ACCEL       = 3,
++    SKIPPY_BACKEND_DEVICE_TYPE_META        = 4,
++};
++
++enum skippy_backend_device_cap {
++    SKIPPY_BACKEND_DEVICE_CAP_ASYNC                 = UINT64_C(1) << 0,
++    SKIPPY_BACKEND_DEVICE_CAP_HOST_BUFFER           = UINT64_C(1) << 1,
++    SKIPPY_BACKEND_DEVICE_CAP_BUFFER_FROM_HOST_PTR  = UINT64_C(1) << 2,
++    SKIPPY_BACKEND_DEVICE_CAP_EVENTS                = UINT64_C(1) << 3,
++};
++
++struct skippy_backend_device {
++    uint32_t version;
++    const char * name;
++    const char * description;
++    const char * device_id;
++    uint64_t memory_free;
++    uint64_t memory_total;
++    enum skippy_backend_device_type type;
++    uint64_t caps;
++};
++
++/** @brief Returns the number of enumerated backend devices. */
++LLAMA_API enum skippy_status skippy_backend_device_count(
++        size_t * out_count,
++        struct skippy_error ** out_error);
++
++/** @brief Copies the description of one backend device into `out_device`. */
++LLAMA_API enum skippy_status skippy_backend_device_at(
++        size_t index,
++        struct skippy_backend_device * out_device,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+new file mode 100644
+index 000000000..9fee2715f
+--- /dev/null
++++ b/include/skippy/events.h
+@@ -0,0 +1,106 @@
++#ifndef SKIPPY_EVENTS_H
++#define SKIPPY_EVENTS_H
++
++/**
++ * @file skippy/events.h
++ * @brief Versioned callbacks for model-open and runtime lifecycle progress.
++ *
++ * Event reporters are optional and operation-scoped. A reporter must remain
++ * valid until the corresponding model-open call returns.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION 1
++
++typedef uint32_t skippy_runtime_event_category;
++enum {
++    SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN = 1,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_BACKEND    = 2,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_SESSION    = 3,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_KV         = 4,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_WARNING    = 5,
++};
++
++typedef uint32_t skippy_runtime_event_kind;
++enum {
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_STARTED       = 1,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_PROGRESS      = 2,
++    SKIPPY_RUNTIME_EVENT_KIND_BACKEND_DEVICE_SELECTED  = 3,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_FINISHED      = 4,
++    SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_FAILED_HANDLED = 5,
++};
++
++typedef uint32_t skippy_runtime_event_emitter_kind;
++enum {
++    SKIPPY_RUNTIME_EVENT_EMITTER_UNKNOWN       = 0,
++    SKIPPY_RUNTIME_EVENT_EMITTER_OPEN_THREAD   = 1,
++    SKIPPY_RUNTIME_EVENT_EMITTER_WORKER_THREAD = 2,
++};
++
++typedef uint32_t skippy_runtime_event_progress_unit;
++enum {
++    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_NONE    = 0,
++    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_BYTES   = 1,
++    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_ITEMS   = 2,
++    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_TENSORS = 3,
++    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_STEPS   = 4,
++};
++
++typedef uint32_t skippy_runtime_event_failure_code;
++enum {
++    SKIPPY_RUNTIME_EVENT_FAILURE_NONE             = 0,
++    SKIPPY_RUNTIME_EVENT_FAILURE_INVALID_ARGUMENT = 1,
++    SKIPPY_RUNTIME_EVENT_FAILURE_IO_ERROR         = 2,
++    SKIPPY_RUNTIME_EVENT_FAILURE_MODEL_ERROR      = 3,
++    SKIPPY_RUNTIME_EVENT_FAILURE_RUNTIME_ERROR    = 4,
++    SKIPPY_RUNTIME_EVENT_FAILURE_BACKEND_ERROR    = 5,
++    SKIPPY_RUNTIME_EVENT_FAILURE_CANCELLED        = 6,
++    SKIPPY_RUNTIME_EVENT_FAILURE_INTERNAL_ERROR   = 7,
++};
++
++/** @brief Versioned event payload delivered to a runtime event callback. */
++struct skippy_runtime_event_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    skippy_runtime_event_category category;
++    skippy_runtime_event_kind kind;
++    skippy_runtime_event_emitter_kind emitter;
++    uint32_t reserved0;
++    uint64_t sequence;
++    uint64_t timestamp_mono_ns;
++    uint64_t model_id;
++    uint64_t stage_id;
++    uint64_t session_id;
++    uint64_t progress_current;
++    uint64_t progress_total;
++    skippy_runtime_event_progress_unit progress_unit;
++    skippy_runtime_event_failure_code failure_code;
++    int32_t status;
++    uint32_t reserved1;
++    const char * detail_ptr;
++    uint64_t detail_len;
++};
++
++/** @brief Callback type used by a runtime event reporter. */
++typedef void (*skippy_runtime_event_callback)(
++        const struct skippy_runtime_event_v1 * event,
++        void * user_data);
++
++/** @brief Callback registration passed to model-open-with-events entrypoints. */
++struct skippy_runtime_event_reporter_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    skippy_runtime_event_callback callback;
++    void * user_data;
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_EVENTS_H
+diff --git a/include/skippy/execution.h b/include/skippy/execution.h
+new file mode 100644
+index 000000000..7098677d8
+--- /dev/null
++++ b/include/skippy/execution.h
+@@ -0,0 +1,264 @@
++#ifndef SKIPPY_EXECUTION_H
++#define SKIPPY_EXECUTION_H
++
++/**
++ * @file skippy/execution.h
++ * @brief Prefill, decode, verification, activation-frame, and batched execution.
++ */
++
++#include "activation.h"
++#include "runtime.h"
++#include "sampling.h"
++#include "speculative_decoding.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/** @brief Prefills tokens and emits a raw activation payload for the next stage. */
++LLAMA_API enum skippy_status skippy_prefill_chunk(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const void * input_activations,
++        size_t input_activation_bytes,
++        void * output_activations,
++        size_t output_activation_capacity,
++        size_t * out_output_activation_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Verifies a proposed token sequence and returns accepted output tokens. */
++LLAMA_API enum skippy_status skippy_verify_tokens(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        llama_token * output_tokens,
++        size_t output_token_capacity,
++        size_t * out_token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Decodes and samples one token using raw activation buffers. */
++LLAMA_API enum skippy_status skippy_decode_step_sampled(
++        struct skippy_session * session,
++        llama_token token_id,
++        const struct skippy_sampling_config * sampling,
++        const void * input_activation,
++        size_t input_activation_bytes,
++        void * output_activation,
++        size_t output_activation_capacity,
++        size_t * out_output_activation_bytes,
++        llama_token * out_predicted_token,
++        struct skippy_error ** out_error);
++
++/** @brief Decodes one token and returns a native MTP draft proposal. */
++LLAMA_API enum skippy_status skippy_decode_step_sampled_mtp(
++        struct skippy_session * session,
++        llama_token token_id,
++        const struct skippy_sampling_config * sampling,
++        llama_token * out_predicted_token,
++        size_t max_draft_tokens,
++        struct skippy_native_mtp_draft * out_mtp_draft,
++        struct skippy_error ** out_error);
++
++/**
++ * @brief Describes one variable-length request in a mixed scheduler iteration.
++ *
++ * `positions` contains `token_count * n_pos_per_embd` entries when supplied.
++ * A null positions pointer derives contiguous positions from the session. The
++ * activation frame, when required by a downstream stage, must describe exactly
++ * `token_count` tokens. `sample_last` requests logits and sampling only for the
++ * final token in this request.
++ */
++struct skippy_iteration_request {
++        struct skippy_session * session;
++        const llama_token * token_ids;
++        size_t token_count;
++        const llama_pos * positions;
++        size_t position_count;
++        const struct skippy_sampling_config * sampling;
++        const struct skippy_activation_desc * input_desc;
++        const void * input_payload;
++        bool sample_last;
++};
++
++/**
++ * @brief Executes mixed prefill chunks and decode tokens in one model iteration.
++ *
++ * Requests may have different token counts. Activation outputs are request-major.
++ * Sampled outputs are compact and explicitly map back to the request indexes
++ * whose final rows requested logits. GLM-DSA inputs in one iteration must use
++ * the same sideband width and stream count.
++ */
++LLAMA_API enum skippy_status skippy_iteration_batch_sampled(
++        const struct skippy_iteration_request * requests,
++        size_t request_count,
++        struct skippy_activation_desc * output_descs,
++        void * const * output_payloads,
++        const size_t * output_payload_capacities,
++        size_t * out_output_payload_bytes,
++        size_t * out_sampled_request_indexes,
++        llama_token * out_predicted_tokens,
++        size_t sampled_output_capacity,
++        size_t * out_sampled_output_count,
++        struct skippy_error ** out_error);
++
++/**
++ * @brief Samples one predicted token for each session in a request batch.
++ * @deprecated Use `skippy_iteration_batch_sampled`; this legacy serving entrypoint
++ * cannot express mixed prefill and decode work.
++ */
++LLAMA_API SKIPPY_DEPRECATED("use skippy_iteration_batch_sampled")
++enum skippy_status skippy_decode_batch_sampled(
++        struct skippy_session * const * sessions,
++        const llama_token * token_ids,
++        const struct skippy_sampling_config * const * sampling,
++        size_t request_count,
++        llama_token * out_predicted_tokens,
++        size_t predicted_token_capacity,
++        struct skippy_error ** out_error);
++
++/** @brief Prefills tokens using a described activation frame. */
++LLAMA_API enum skippy_status skippy_prefill_chunk_frame(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Prefills an activation frame and samples the final-stage token. */
++LLAMA_API enum skippy_status skippy_prefill_chunk_frame_sampled(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const struct skippy_sampling_config * sampling,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        llama_token * out_predicted_token,
++        struct skippy_error ** out_error);
++
++/** @brief Prefills a positioned token chunk using activation-frame I/O. */
++LLAMA_API enum skippy_status skippy_prefill_chunk_frame_with_positions(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const llama_pos * positions,
++        size_t position_count,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Prefills positioned tokens, then samples with activation-frame I/O. */
++LLAMA_API enum skippy_status skippy_prefill_chunk_frame_sampled_with_positions(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const llama_pos * positions,
++        size_t position_count,
++        const struct skippy_sampling_config * sampling,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        llama_token * out_predicted_token,
++        struct skippy_error ** out_error);
++
++/** @brief Decodes and samples one token using activation-frame I/O. */
++LLAMA_API enum skippy_status skippy_decode_step_frame_sampled(
++        struct skippy_session * session,
++        llama_token token_id,
++        const struct skippy_sampling_config * sampling,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        llama_token * out_predicted_token,
++        struct skippy_error ** out_error);
++
++/** @brief Decodes one framed token and returns a native MTP draft proposal. */
++LLAMA_API enum skippy_status skippy_decode_step_frame_sampled_mtp(
++        struct skippy_session * session,
++        llama_token token_id,
++        const struct skippy_sampling_config * sampling,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        llama_token * out_predicted_token,
++        size_t max_draft_tokens,
++        struct skippy_native_mtp_draft * out_mtp_draft,
++        struct skippy_error ** out_error);
++
++/**
++ * @brief Runs framed sampled decode for multiple sessions in one batch.
++ * @deprecated Use `skippy_iteration_batch_sampled`; this legacy serving entrypoint
++ * is restricted to one token per request.
++ */
++LLAMA_API SKIPPY_DEPRECATED("use skippy_iteration_batch_sampled")
++enum skippy_status skippy_decode_step_frame_batch_sampled(
++        struct skippy_session * const * sessions,
++        const llama_token * token_ids,
++        const struct skippy_sampling_config * const * sampling,
++        const struct skippy_activation_desc * const * input_descs,
++        const void * const * input_payloads,
++        struct skippy_activation_desc * output_descs,
++        void * const * output_payloads,
++        const size_t * output_payload_capacities,
++        size_t * out_output_payload_bytes,
++        llama_token * out_predicted_tokens,
++        size_t predicted_token_capacity,
++        size_t request_count,
++        struct skippy_error ** out_error);
++
++/** @brief Verifies proposed tokens with framed activations and optional MTP drafting. */
++LLAMA_API enum skippy_status skippy_verify_tokens_frame_sampled(
++        struct skippy_session * session,
++        const llama_token * token_ids,
++        size_t token_count,
++        const struct skippy_sampling_config * sampling,
++        const struct skippy_activation_desc * input_desc,
++        const void * input_payload,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        llama_token * output_tokens,
++        size_t output_token_capacity,
++        size_t * out_token_count,
++        size_t max_draft_tokens,
++        struct skippy_native_mtp_draft * out_mtp_draft,
++        struct skippy_error ** out_error);
++
++/** @brief Copies the session's pending output activation into a caller buffer. */
++LLAMA_API enum skippy_status skippy_session_copy_output_activation_frame(
++        struct skippy_session * session,
++        size_t token_count,
++        struct skippy_activation_desc * output_desc,
++        void * output_payload,
++        size_t output_payload_capacity,
++        size_t * out_output_payload_bytes,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_EXECUTION_H
+diff --git a/include/skippy/model_package.h b/include/skippy/model_package.h
+new file mode 100644
+index 000000000..22639b8f5
+--- /dev/null
++++ b/include/skippy/model_package.h
+@@ -0,0 +1,103 @@
++#ifndef SKIPPY_MODEL_PACKAGE_H
++#define SKIPPY_MODEL_PACKAGE_H
++
++/**
++ * @file skippy/model_package.h
++ * @brief Inspects GGUF tensors and writes layer-range or multi-part packages.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum skippy_tensor_role {
++    SKIPPY_TENSOR_ROLE_UNKNOWN            = 0,
++    SKIPPY_TENSOR_ROLE_METADATA           = 1,
++    SKIPPY_TENSOR_ROLE_TOKENIZER          = 2,
++    SKIPPY_TENSOR_ROLE_EMBEDDING          = 3,
++    SKIPPY_TENSOR_ROLE_LAYER              = 4,
++    SKIPPY_TENSOR_ROLE_FINAL_NORM         = 5,
++    SKIPPY_TENSOR_ROLE_OUTPUT             = 6,
++};
++
++struct skippy_model_info;
++struct skippy_slice_plan;
++
++/** @brief Metadata for one tensor discovered in a GGUF model. */
++struct skippy_tensor_info {
++    const char * name;
++    int32_t layer_index;
++    enum skippy_tensor_role role;
++    uint32_t ggml_type;
++    uint64_t byte_size;
++    uint64_t element_count;
++};
++
++/** @brief Opens a model for tensor-level inspection without creating a runtime. */
++LLAMA_API enum skippy_status skippy_model_info_open(
++        const char * path,
++        struct skippy_model_info ** out_info,
++        struct skippy_error ** out_error);
++
++/** @brief Releases model-introspection state. */
++LLAMA_API enum skippy_status skippy_model_info_free(
++        struct skippy_model_info * info,
++        struct skippy_error ** out_error);
++
++/** @brief Returns the number of tensors visible to model introspection. */
++LLAMA_API enum skippy_status skippy_model_info_tensor_count(
++        struct skippy_model_info * info,
++        size_t * out_count,
++        struct skippy_error ** out_error);
++
++/** @brief Copies one tensor's metadata into `out_tensor`. */
++LLAMA_API enum skippy_status skippy_model_info_tensor_at(
++        struct skippy_model_info * info,
++        size_t index,
++        struct skippy_tensor_info * out_tensor,
++        struct skippy_error ** out_error);
++
++/** @brief Creates an empty layer-range package-writing plan. */
++LLAMA_API enum skippy_status skippy_slice_plan_create(
++        struct skippy_model_info * info,
++        struct skippy_slice_plan ** out_plan,
++        struct skippy_error ** out_error);
++
++/** @brief Releases a package-writing plan. */
++LLAMA_API enum skippy_status skippy_slice_plan_free(
++        struct skippy_slice_plan * plan,
++        struct skippy_error ** out_error);
++
++/** @brief Adds a stage layer range and its shared-tensor ownership to a plan. */
++LLAMA_API enum skippy_status skippy_slice_plan_add_layer_range(
++        struct skippy_slice_plan * plan,
++        int32_t stage_index,
++        int32_t layer_start,
++        int32_t layer_end,
++        bool include_embeddings,
++        bool include_output,
++        bool include_per_layer_token_embd,
++        struct skippy_error ** out_error);
++
++/** @brief Writes one planned stage slice as a GGUF file. */
++LLAMA_API enum skippy_status skippy_write_slice_gguf(
++        struct skippy_model_info * info,
++        const struct skippy_slice_plan * plan,
++        int32_t stage_index,
++        const char * output_path,
++        struct skippy_error ** out_error);
++
++/** @brief Composes ordered GGUF parts into one output GGUF file. */
++LLAMA_API enum skippy_status skippy_write_gguf_from_parts(
++        const char * const * input_paths,
++        size_t input_count,
++        const char * output_path,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_MODEL_PACKAGE_H
+diff --git a/include/skippy/model_source.h b/include/skippy/model_source.h
+new file mode 100644
+index 000000000..5d77f4804
+--- /dev/null
++++ b/include/skippy/model_source.h
+@@ -0,0 +1,84 @@
++#ifndef SKIPPY_MODEL_SOURCE_H
++#define SKIPPY_MODEL_SOURCE_H
++
++/**
++ * @file skippy/model_source.h
++ * @brief Callback-backed model construction and load-time quantization.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct skippy_model;
++struct skippy_runtime_config;
++
++#define SKIPPY_MODEL_TENSOR_SOURCE_V1_ABI_VERSION 1
++
++/** @brief Supplies one canonical model tensor as F32 values during model construction.
++ *
++ * The callback is invoked synchronously and serially while
++ * `skippy_model_open_from_source` is active. `tensor_name` and `destination`
++ * are borrowed only for the callback duration; implementations must write
++ * exactly `element_count` values and must not retain either pointer. On
++ * failure, `out_message` may receive a borrowed NUL-terminated message that
++ * remains valid until `skippy_model_open_from_source` returns.
++ */
++typedef enum skippy_status (*skippy_model_read_tensor_f32_callback)(
++        const char * tensor_name,
++        float * destination,
++        size_t element_count,
++        const char ** out_message,
++        void * user_data);
++
++/** @brief One tensor's importance weights for low-bit quantization.
++ *
++ * `tensor_name` identifies the canonical llama.cpp tensor. `values` contains
++ * exactly the weights expected by llama.cpp for that tensor. Both buffers are
++ * borrowed for the synchronous model-open call and are never retained.
++ */
++struct skippy_model_imatrix_entry_v1 {
++    const char * tensor_name;
++    const float * values;
++    size_t value_count;
++};
++
++/** @brief Versioned callback source for direct checkpoint loading.
++ *
++ * The source and `user_data` are borrowed for the synchronous duration of
++ * `skippy_model_open_from_source` and are never retained by the model.
++ */
++struct skippy_model_tensor_source_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    skippy_model_read_tensor_f32_callback read_tensor_f32;
++    void * user_data;
++    const struct skippy_model_imatrix_entry_v1 * imatrix;
++    size_t imatrix_count;
++};
++
++/** @brief Opens a model from metadata-only GGUF and callback-supplied tensor values.
++ *
++ * `metadata_gguf`, `source`, and `source->user_data` must remain valid for
++ * this synchronous call and are not retained; tensor callbacks execute
++ * synchronously before the function returns. `quantization_ftype` is a
++ * llama_ftype value, or -1 to preserve the tensor types declared by
++ * `metadata_gguf`. On success, `out_model` owns the resulting model and must
++ * be released with `skippy_model_free`.
++ */
++LLAMA_API enum skippy_status skippy_model_open_from_source(
++        const void * metadata_gguf,
++        size_t metadata_gguf_size,
++        const struct skippy_model_tensor_source_v1 * source,
++        int32_t quantization_ftype,
++        const struct skippy_runtime_config * config,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_MODEL_SOURCE_H
+diff --git a/include/skippy/runtime.h b/include/skippy/runtime.h
+new file mode 100644
+index 000000000..4c66e6772
+--- /dev/null
++++ b/include/skippy/runtime.h
+@@ -0,0 +1,257 @@
++#ifndef SKIPPY_RUNTIME_H
++#define SKIPPY_RUNTIME_H
++
++/**
++ * @file skippy/runtime.h
++ * @brief Model loading, session lifecycle, and llama.cpp context access.
++ */
++
++#include "common.h"
++#include "events.h"
++#include "sampling.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum skippy_load_mode {
++    SKIPPY_LOAD_MODE_RUNTIME_SLICE        = 0,
++    SKIPPY_LOAD_MODE_LAYER_PACKAGE        = 1,
++    SKIPPY_LOAD_MODE_ARTIFACT_SLICE       = 2,
++};
++
++/** @brief Selects whether a target loads no MTP tensors, integrated MTP tensors, or an external MTP sidecar. */
++enum skippy_mtp_source {
++    SKIPPY_MTP_SOURCE_DISABLED   = 0,
++    SKIPPY_MTP_SOURCE_INTEGRATED = 1,
++    SKIPPY_MTP_SOURCE_EXTERNAL   = 2,
++};
++
++#define SKIPPY_GLM_DSA_POLICY_PROFILE_NONE     0
++#define SKIPPY_GLM_DSA_POLICY_PROFILE_V1       1
++
++#define SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_ATTN                  (UINT32_C(1) << 0)
++#define SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_PREFILL               (UINT32_C(1) << 1)
++#define SKIPPY_GLM_DSA_POLICY_DISABLE_COMPACT_FLASH_ATTN          (UINT32_C(1) << 2)
++#define SKIPPY_GLM_DSA_POLICY_UNPROVEN_LARGE_DIRECT_SPARSE_PREFILL (UINT32_C(1) << 3)
++
++struct skippy_model;
++struct skippy_session;
++struct skippy_activation_boundary_desc;
++
++/** @brief Model, stage, memory, cache, device, and family-policy load options. */
++struct skippy_runtime_config {
++    int32_t stage_index;
++    int32_t layer_start;
++    int32_t layer_end;
++    int32_t ctx_size;
++    int32_t lane_count;
++    int32_t n_batch;
++    int32_t n_ubatch;
++    int32_t n_threads;
++    int32_t n_threads_batch;
++    int32_t n_gpu_layers;
++    bool has_mmap_override;
++    bool use_mmap;
++    bool use_mlock;
++    int32_t cache_type_k;
++    int32_t cache_type_v;
++    int32_t flash_attn_type;
++
++    enum skippy_load_mode load_mode;
++
++    bool disable_repack;
++    bool use_mmap_prefetch;
++    bool use_mmap_buffer;
++    bool filter_tensors_on_load;
++    bool include_embeddings;
++    bool include_output;
++    enum skippy_mtp_source mtp_source;
++
++    // Optional ggml backend device name, for example "CUDA0", "MTL0",
++    // "Vulkan1", or "CPU". When set, skippy loads the model only on that
++    // backend device instead of relying on llama.cpp default device ordering.
++    const char * selected_backend_device;
++
++    // Optional GLM-DSA execution policy resolved from package generation
++    // metadata. Zero values preserve llama.cpp built-in/env behavior.
++    int32_t  glm_dsa_policy_profile;
++    uint32_t glm_dsa_policy_flags;
++    int32_t  glm_dsa_short_prefill_max_tokens;
++    int32_t  glm_dsa_direct_sparse_decode_max_top_k;
++    uint64_t glm_dsa_dense_sparse_mask_max_bytes;
++    int32_t  glm_dsa_compact_flash_min_kv;
++
++    // Tri-state KV/session controls resolved from `model_fit` config.
++    // SKIPPY_TRISTATE_AUTO preserves today's derived default; FALSE/TRUE
++    // force the value.
++    /** @brief Whether K/V tensors are offloaded to the compute backend (mirrors upstream `offload_kqv`). */
++    int32_t kv_offload;
++    /** @brief Whether the KV cache is unified across sequences/lanes instead of per-sequence (mirrors upstream `kv_unified`). Recurrent/hybrid architectures still force this true regardless of the requested value. */
++    int32_t kv_unified;
++    /** @brief Whether sliding-window-attention layers use a full, unshifted cache window (mirrors upstream `swa_full`). */
++    int32_t swa_full;
++
++    // Model-load and context-creation controls resolved from `hardware`
++    // config.
++    /** @brief Whether the backend offloads host tensor operations to device (mirrors upstream `op_offload`). SKIPPY_TRISTATE_AUTO preserves llama.cpp's derived default (enabled); FALSE/TRUE force the value. */
++    int32_t op_offload;
++    /** @brief Whether model loading bypasses the host buffer, allowing extra buffers to be used (mirrors upstream `no_host`). */
++    bool no_host_buffer;
++    /** @brief Whether to validate model tensor data while loading (mirrors upstream `check_tensors`). */
++    bool check_tensors;
++    /** @brief Forces direct I/O for model loading (mirrors upstream `LLAMA_LOAD_MODE_DIRECT_IO`), taking precedence over `use_mmap`/`use_mlock` when set. */
++    bool use_direct_io;
++    /** @brief Whether `main_gpu` below should override llama.cpp's derived GPU index. */
++    bool has_main_gpu_override;
++    /** @brief Explicit GPU index used for the entire model when `split_mode` resolves to `none`. Ignored unless `has_main_gpu_override` is set, and overridden by `selected_backend_device` when that is also set. */
++    int32_t main_gpu;
++    /** @brief How to split the model across multiple GPUs (mirrors upstream `llama_split_mode`). SKIPPY_TRISTATE_AUTO (-1) preserves llama.cpp's derived default; 0=none, 1=layer, 2=row, 3=tensor. */
++    int32_t split_mode;
++};
++
++/** @brief Returns a C-safe runtime configuration with all derived-default controls set to auto. */
++LLAMA_API struct skippy_runtime_config skippy_runtime_config_default(void);
++
++/** @brief Sentinel for `skippy_runtime_config` tri-state fields: keep the derived default. */
++#define SKIPPY_TRISTATE_AUTO  (-1)
++/** @brief Sentinel for `skippy_runtime_config` tri-state fields: force false. */
++#define SKIPPY_TRISTATE_FALSE (0)
++/** @brief Sentinel for `skippy_runtime_config` tri-state fields: force true. */
++#define SKIPPY_TRISTATE_TRUE  (1)
++
++/** @brief Opens a direct GGUF, runtime slice, layer package, or artifact slice. */
++LLAMA_API enum skippy_status skippy_model_open(
++        const char * path,
++        const struct skippy_runtime_config * config,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error);
++
++/** @brief Opens a model and reports operation-scoped lifecycle events. */
++LLAMA_API enum skippy_status skippy_model_open_with_events(
++        const char * path,
++        const struct skippy_runtime_config * config,
++        const struct skippy_runtime_event_reporter_v1 * reporter,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error);
++
++/** @brief Attaches a native MTP draft model to an opened target model. */
++LLAMA_API enum skippy_status skippy_model_attach_mtp_draft_model(
++        struct skippy_model * target_model,
++        const char * path,
++        const struct skippy_runtime_config * config,
++        struct skippy_error ** out_error);
++
++/** @brief Opens an ordered set of GGUF package parts as one model. */
++LLAMA_API enum skippy_status skippy_model_open_from_parts(
++        const char * const * paths,
++        size_t path_count,
++        const struct skippy_runtime_config * config,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error);
++
++/** @brief Opens ordered GGUF parts and reports lifecycle events. */
++LLAMA_API enum skippy_status skippy_model_open_from_parts_with_events(
++        const char * const * paths,
++        size_t path_count,
++        const struct skippy_runtime_config * config,
++        const struct skippy_runtime_event_reporter_v1 * reporter,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error);
++
++/** @brief Releases an opened model handle. */
++LLAMA_API enum skippy_status skippy_model_free(
++        struct skippy_model * model,
++        struct skippy_error ** out_error);
++
++/** @brief Returns the underlying llama.cpp model for native read-only integrations. */
++LLAMA_API const struct llama_model * skippy_model_llama_model(
++        const struct skippy_model * model);
++
++/** @brief Reads the configured stage graph's observed output boundary descriptor. */
++LLAMA_API bool skippy_model_output_activation_boundary(
++        const struct skippy_model * model,
++        struct skippy_activation_boundary_desc * out_desc);
++
++/** @brief Reads the configured stage graph's observed input boundary descriptor. */
++LLAMA_API bool skippy_model_input_activation_boundary(
++        const struct skippy_model * model,
++        struct skippy_activation_boundary_desc * out_desc);
++
++/** @brief Creates a fresh inference session for an opened model. */
++LLAMA_API enum skippy_status skippy_session_create(
++        struct skippy_model * model,
++        struct skippy_session ** out_session,
++        struct skippy_error ** out_error);
++
++/** @brief Creates a session restored from a resident prefix-cache sequence. */
++LLAMA_API enum skippy_status skippy_session_create_from_resident_prefix(
++        struct skippy_model * model,
++        int32_t cache_seq_id,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_session ** out_session,
++        struct skippy_error ** out_error);
++
++/** @brief Returns the underlying llama.cpp context for native integrations. */
++LLAMA_API struct llama_context * skippy_session_llama_context(
++        struct skippy_session * session);
++
++/** @brief Returns the session's current token position. */
++LLAMA_API int32_t skippy_session_position(
++        const struct skippy_session * session);
++
++/** @brief Returns the native batch width currently configured for the session. */
++LLAMA_API int32_t skippy_session_batch_size(
++        const struct skippy_session * session);
++
++/** @brief Returns the llama.cpp sequence ID claimed by the session. */
++LLAMA_API int32_t skippy_session_sequence_id(
++        const struct skippy_session * session);
++
++/** @brief Begins a caller-managed external decode section. */
++LLAMA_API enum skippy_status skippy_session_begin_external_decode(
++        struct skippy_session * session,
++        struct skippy_error ** out_error);
++
++/** @brief Ends a caller-managed external decode section. */
++LLAMA_API enum skippy_status skippy_session_end_external_decode(
++        struct skippy_session * session,
++        struct skippy_error ** out_error);
++
++/** @brief Sets the session token position used by the next execution call. */
++LLAMA_API enum skippy_status skippy_session_set_position(
++        struct skippy_session * session,
++        int32_t n_past,
++        struct skippy_error ** out_error);
++
++/** @brief Samples the current logits using the supplied sampling configuration. */
++LLAMA_API enum skippy_status skippy_session_sample_current(
++        struct skippy_session * session,
++        const struct skippy_sampling_config * sampling,
++        llama_token * out_predicted_token,
++        struct skippy_error ** out_error);
++
++/** @brief Configures template-derived grammar and sampling metadata for a session. */
++LLAMA_API enum skippy_status skippy_session_configure_chat_sampling(
++        struct skippy_session * session,
++        const struct skippy_sampling_config * sampling,
++        const char * metadata_json,
++        uint64_t prompt_token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Clears session state so the session can be reused. */
++LLAMA_API enum skippy_status skippy_session_reset(
++        struct skippy_session * session,
++        struct skippy_error ** out_error);
++
++/** @brief Releases an inference session handle. */
++LLAMA_API enum skippy_status skippy_session_free(
++        struct skippy_session * session,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_RUNTIME_H
+diff --git a/include/skippy/sampling.h b/include/skippy/sampling.h
+new file mode 100644
+index 000000000..8b114e3e4
+--- /dev/null
++++ b/include/skippy/sampling.h
+@@ -0,0 +1,74 @@
++#ifndef SKIPPY_SAMPLING_H
++#define SKIPPY_SAMPLING_H
++
++/**
++ * @file skippy/sampling.h
++ * @brief Sampling parameters shared by single-token and batched decode calls.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SKIPPY_MAX_LOGIT_BIAS 256
++#define SKIPPY_MAX_SAMPLERS 16
++#define SKIPPY_MAX_DRY_SEQUENCE_BREAKERS 8
++#define SKIPPY_MAX_DRY_SEQUENCE_BREAKER_BYTES 16
++#define SKIPPY_SAMPLING_FLAG_ENABLED (1u << 0)
++#define SKIPPY_SAMPLING_FLAG_IGNORE_EOS (1u << 1)
++
++enum skippy_sampler_type {
++    SKIPPY_SAMPLER_PENALTIES = 1,
++    SKIPPY_SAMPLER_DRY = 2,
++    SKIPPY_SAMPLER_TOP_N_SIGMA = 3,
++    SKIPPY_SAMPLER_TOP_K = 4,
++    SKIPPY_SAMPLER_TYPICAL_P = 5,
++    SKIPPY_SAMPLER_TOP_P = 6,
++    SKIPPY_SAMPLER_MIN_P = 7,
++    SKIPPY_SAMPLER_XTC = 8,
++    SKIPPY_SAMPLER_TEMPERATURE = 9,
++};
++
++
++/** @brief Versioned sampling configuration consumed by Skippy decode entrypoints. */
++struct skippy_sampling_config {
++    uint32_t version;
++    uint32_t flags;
++    uint32_t seed;
++    int32_t top_k;
++    int32_t penalty_last_n;
++    float temperature;
++    float top_p;
++    float presence_penalty;
++    float frequency_penalty;
++    float repeat_penalty;
++    uint32_t logit_bias_count;
++    float min_p;
++    float typical_p;
++    float top_nsigma;
++    float dynatemp_range;
++    float dynatemp_exponent;
++    float dry_multiplier;
++    float dry_base;
++    int32_t dry_allowed_length;
++    int32_t dry_penalty_last_n;
++    float xtc_probability;
++    float xtc_threshold;
++    int32_t mirostat_mode;
++    float mirostat_entropy;
++    float mirostat_learning_rate;
++    uint32_t sampler_count;
++    uint32_t samplers[SKIPPY_MAX_SAMPLERS];
++    uint32_t ignore_eos;
++    uint32_t dry_sequence_breaker_count;
++    char dry_sequence_breakers[SKIPPY_MAX_DRY_SEQUENCE_BREAKERS][SKIPPY_MAX_DRY_SEQUENCE_BREAKER_BYTES];
++    llama_logit_bias logit_bias[SKIPPY_MAX_LOGIT_BIAS];
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_SAMPLING_H
+diff --git a/include/skippy/signals.h b/include/skippy/signals.h
+new file mode 100644
+index 000000000..c4d3d24d9
+--- /dev/null
++++ b/include/skippy/signals.h
+@@ -0,0 +1,53 @@
++#ifndef SKIPPY_SIGNALS_H
++#define SKIPPY_SIGNALS_H
++
++/**
++ * @file skippy/signals.h
++ * @brief Generation uncertainty and repetition signals for routing or policy.
++ */
++
++#include "runtime.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/** @brief Statistics for the most recently sampled token. */
++struct skippy_token_signal {
++    float entropy;
++    float top_logprob;
++    float second_logprob;
++    float margin;
++    int32_t top_token;
++    int32_t second_token;
++};
++
++/** @brief Aggregated uncertainty and repetition statistics over a token window. */
++struct skippy_generation_signal_window {
++    uint32_t token_count;
++    float mean_entropy;
++    float max_entropy;
++    float mean_margin;
++    float min_margin;
++    uint32_t high_entropy_count;
++    uint32_t repetition_count;
++};
++
++/** @brief Returns signal statistics for the most recently sampled token. */
++LLAMA_API enum skippy_status skippy_session_last_token_signal(
++        struct skippy_session * session,
++        struct skippy_token_signal * out_signal,
++        struct skippy_error ** out_error);
++
++/** @brief Computes signal statistics over the requested recent token window. */
++LLAMA_API enum skippy_status skippy_session_signal_window(
++        struct skippy_session * session,
++        uint32_t window_tokens,
++        struct skippy_generation_signal_window * out_window,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_SIGNALS_H
+diff --git a/include/skippy/speculative_decoding.h b/include/skippy/speculative_decoding.h
+new file mode 100644
+index 000000000..0b5994482
+--- /dev/null
++++ b/include/skippy/speculative_decoding.h
+@@ -0,0 +1,71 @@
++#ifndef SKIPPY_SPECULATIVE_DECODING_H
++#define SKIPPY_SPECULATIVE_DECODING_H
++
++/**
++ * @file skippy/speculative_decoding.h
++ * @brief Native MTP draft results and request-local n-gram drafting.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct skippy_ngram_cache;
++
++#define SKIPPY_NATIVE_MTP_MAX_DRAFT_TOKENS 8
++
++/** @brief A bounded native MTP proposal returned alongside target decoding. */
++struct skippy_native_mtp_draft {
++    uint32_t version;
++    bool available;
++    int32_t token_count;
++    llama_token token_ids[SKIPPY_NATIVE_MTP_MAX_DRAFT_TOKENS];
++    int64_t proposal_compute_us;
++};
++
++// Stateful, request-local adapter for llama.cpp's ngram-cache proposer.
++// The cache is updated only with committed history. `continuation_prefix`
++// supplies optional provisional tokens (such as native MTP output) used only
++// while drafting; it never mutates the cache.
++/** @brief Creates a request-local n-gram proposal cache. */
++SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_create(
++        uint16_t ngram_min,
++        uint16_t ngram_max,
++        struct skippy_ngram_cache ** out_cache,
++        struct skippy_error ** out_error);
++
++/** @brief Releases an n-gram proposal cache. */
++SKIPPY_COMMON_API void skippy_ngram_cache_free(struct skippy_ngram_cache * cache);
++
++/** @brief Replaces committed history in an n-gram proposal cache. */
++SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_reset(
++        struct skippy_ngram_cache * cache,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Appends newly committed tokens to an n-gram proposal cache. */
++SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_append(
++        struct skippy_ngram_cache * cache,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Drafts tokens from committed history plus an optional provisional prefix. */
++SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_draft(
++        struct skippy_ngram_cache * cache,
++        const llama_token * continuation_prefix,
++        size_t continuation_prefix_count,
++        uint16_t max_draft_tokens,
++        llama_token * output_tokens,
++        size_t output_token_capacity,
++        size_t * out_token_count,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_SPECULATIVE_DECODING_H
+diff --git a/include/skippy/stage_plan.h b/include/skippy/stage_plan.h
+new file mode 100644
+index 000000000..852145ebf
+--- /dev/null
++++ b/include/skippy/stage_plan.h
+@@ -0,0 +1,243 @@
++#ifndef SKIPPY_STAGE_PLAN_H
++#define SKIPPY_STAGE_PLAN_H
++
++/**
++ * @file skippy/stage_plan.h
++ * @brief Metadata-only construction and inspection of guarded stage plans.
++ */
++
++#include "common.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SKIPPY_STAGE_PLANNER_CONFIG_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLANNER_TENSOR_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLANNER_PROFILE_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLAN_VALUE_DESC_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLAN_STATE_DESC_V1_ABI_VERSION 1
++#define SKIPPY_STAGE_PLAN_MAX_DIMS 4
++
++struct skippy_stage_planner;
++struct skippy_stage_plan;
++
++/** @brief Offset and length of a UTF-8 string owned by a stage plan. */
++struct skippy_stage_plan_string_ref_v1 {
++    uint64_t offset;
++    uint64_t length;
++};
++
++/** @brief Exact package tensor binding used by metadata planning. */
++struct skippy_stage_planner_tensor_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    const char * tensor_id;
++    const char * native_name;
++    int32_t ggml_type;
++    uint32_t dimension_count;
++    int64_t dimensions[SKIPPY_STAGE_PLAN_MAX_DIMS];
++    uint32_t split_no;
++    uint32_t reserved;
++    uint64_t data_offset;
++    uint64_t stored_length;
++};
++
++/** @brief One requested whole-model execution profile. */
++struct skippy_stage_planner_profile_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    const char * profile_id;
++    uint32_t n_tokens;
++    uint32_t n_sequences;
++    uint32_t n_outputs;
++    uint32_t n_recurrent_rollback_sequences;
++};
++
++/** @brief Versioned inputs for a metadata-only stage planner.
++ *
++ * Graph configuration and backend identities are copied by the planner and
++ * become part of every guarded profile and plan identity.
++ */
++struct skippy_stage_planner_config_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    const char * package_id;
++    const char * const * shard_paths;
++    size_t shard_count;
++    const struct skippy_stage_planner_tensor_v1 * tensors;
++    size_t tensor_count;
++    const struct skippy_stage_planner_profile_v1 * profiles;
++    size_t profile_count;
++    const char * graph_configuration_id;
++    const char * backend_id;
++};
++
++/** @brief Kind of semantic value enumerated for an execution profile. */
++enum skippy_stage_plan_value_kind {
++    SKIPPY_STAGE_PLAN_VALUE_ACTIVATION_IMPORT = 0,
++    SKIPPY_STAGE_PLAN_VALUE_ACTIVATION_EXPORT = 1,
++    SKIPPY_STAGE_PLAN_VALUE_REQUEST_INPUT = 2,
++};
++
++/** @brief Kind of persistent state accessed by a stage. */
++enum skippy_stage_plan_state_kind {
++    SKIPPY_STAGE_PLAN_STATE_KV_KEY = 0,
++    SKIPPY_STAGE_PLAN_STATE_KV_VALUE = 1,
++    SKIPPY_STAGE_PLAN_STATE_RECURRENT_CONV = 2,
++    SKIPPY_STAGE_PLAN_STATE_RECURRENT_SSM = 3,
++};
++
++/** @brief Access performed against persistent state. */
++enum skippy_stage_plan_state_access {
++    SKIPPY_STAGE_PLAN_STATE_READ = 0,
++    SKIPPY_STAGE_PLAN_STATE_WRITE = 1,
++};
++
++/** @brief Pointer-free summary of one realized guarded stage plan. */
++struct skippy_stage_plan_desc_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    struct skippy_stage_plan_string_ref_v1 package_id;
++    struct skippy_stage_plan_string_ref_v1 plan_id;
++    int32_t layer_count;
++    int32_t layer_start;
++    int32_t layer_end;
++    uint32_t reserved;
++    uint64_t profile_count;
++    uint64_t resident_tensor_count;
++};
++
++/** @brief Pointer-free guard and identity summary for one graph profile. */
++struct skippy_stage_plan_profile_desc_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    struct skippy_stage_plan_string_ref_v1 profile_id;
++    struct skippy_stage_plan_string_ref_v1 graph_identity;
++    struct skippy_stage_plan_string_ref_v1 profile_identity;
++    struct skippy_stage_plan_string_ref_v1 slice_identity;
++    struct skippy_stage_plan_string_ref_v1 source_snapshot_identity;
++    struct skippy_stage_plan_string_ref_v1 graph_configuration_id;
++    struct skippy_stage_plan_string_ref_v1 backend_id;
++    uint32_t n_tokens;
++    uint32_t n_sequences;
++    uint32_t n_outputs;
++    uint32_t n_recurrent_rollback_sequences;
++    uint64_t activation_import_count;
++    uint64_t activation_export_count;
++    uint64_t request_input_count;
++    uint64_t state_effect_count;
++};
++
++/** @brief Pointer-free semantic identity for a resident or frontier value. */
++struct skippy_stage_plan_value_desc_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    struct skippy_stage_plan_string_ref_v1 identity;
++};
++
++/** @brief Pointer-free persistent-state effect descriptor. */
++struct skippy_stage_plan_state_desc_v1 {
++    uint32_t abi_version;
++    uint32_t struct_size;
++    struct skippy_stage_plan_string_ref_v1 identity;
++    int32_t kind;
++    int32_t access;
++    int32_t layer;
++    int32_t reserved;
++    int64_t write_ordinal;
++};
++
++/** @brief Creates a planner from explicit ordered shards and exact package bindings.
++ *
++ * All pointed-to inputs are borrowed only for this synchronous call. On
++ * success `out_planner` owns an independent metadata-only model. On failure it
++ * is set to null and no partial planner is returned.
++ */
++LLAMA_API enum skippy_status skippy_stage_planner_create_v1(
++        const struct skippy_stage_planner_config_v1 * config,
++        struct skippy_stage_planner ** out_planner,
++        struct skippy_error ** out_error);
++
++/** @brief Releases a metadata-only stage planner. */
++LLAMA_API void skippy_stage_planner_free(struct skippy_stage_planner * planner);
++
++/** @brief Realizes one guarded layer range across every configured profile.
++ *
++ * The returned immutable plan remains valid independently of the planner and
++ * must be released with `skippy_stage_plan_free`. On failure `out_plan` is set
++ * to null.
++ */
++LLAMA_API enum skippy_status skippy_stage_planner_realize_v1(
++        const struct skippy_stage_planner * planner,
++        int32_t layer_start,
++        int32_t layer_end,
++        struct skippy_stage_plan ** out_plan,
++        struct skippy_error ** out_error);
++
++/** @brief Releases an immutable realized stage plan. */
++LLAMA_API void skippy_stage_plan_free(struct skippy_stage_plan * plan);
++
++/** @brief Copies the root descriptor for a realized plan. */
++LLAMA_API enum skippy_status skippy_stage_plan_describe_v1(
++        const struct skippy_stage_plan * plan,
++        struct skippy_stage_plan_desc_v1 * out_desc,
++        struct skippy_error ** out_error);
++
++/** @brief Copies one profile descriptor by deterministic profile index. */
++LLAMA_API enum skippy_status skippy_stage_plan_profile_at_v1(
++        const struct skippy_stage_plan * plan,
++        size_t index,
++        struct skippy_stage_plan_profile_desc_v1 * out_desc,
++        struct skippy_error ** out_error);
++
++/** @brief Copies one resident package tensor identity by sorted index. */
++LLAMA_API enum skippy_status skippy_stage_plan_resident_tensor_at_v1(
++        const struct skippy_stage_plan * plan,
++        size_t index,
++        struct skippy_stage_plan_value_desc_v1 * out_desc,
++        struct skippy_error ** out_error);
++
++/** @brief Copies one activation-frontier or request-input identity. */
++LLAMA_API enum skippy_status skippy_stage_plan_value_at_v1(
++        const struct skippy_stage_plan * plan,
++        size_t profile_index,
++        enum skippy_stage_plan_value_kind kind,
++        size_t index,
++        struct skippy_stage_plan_value_desc_v1 * out_desc,
++        struct skippy_error ** out_error);
++
++/** @brief Copies one persistent-state effect by profile and deterministic index. */
++LLAMA_API enum skippy_status skippy_stage_plan_state_at_v1(
++        const struct skippy_stage_plan * plan,
++        size_t profile_index,
++        size_t index,
++        struct skippy_stage_plan_state_desc_v1 * out_desc,
++        struct skippy_error ** out_error);
++
++/** @brief Resolves a plan-owned string reference.
++ *
++ * On success `out_data` points into immutable plan storage and remains valid
++ * until the plan is freed. The bytes are not NUL-terminated; `out_length`
++ * receives their exact length.
++ */
++LLAMA_API enum skippy_status skippy_stage_plan_string_v1(
++        const struct skippy_stage_plan * plan,
++        struct skippy_stage_plan_string_ref_v1 reference,
++        const char ** out_data,
++        size_t * out_length,
++        struct skippy_error ** out_error);
++
++/** @brief Validates that realized plans form one complete compatible chain. */
++LLAMA_API enum skippy_status skippy_stage_plan_validate_chain_v1(
++        const struct skippy_stage_plan * const * plans,
++        size_t plan_count,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_STAGE_PLAN_H
+diff --git a/include/skippy/state.h b/include/skippy/state.h
+new file mode 100644
+index 000000000..aa698c124
+--- /dev/null
++++ b/include/skippy/state.h
+@@ -0,0 +1,187 @@
++#ifndef SKIPPY_STATE_H
++#define SKIPPY_STATE_H
++
++/**
++ * @file skippy/state.h
++ * @brief Moves KV, recurrent, checkpoint, and resident-prefix state.
++ */
++
++#include "runtime.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum skippy_kv_page_flag {
++    SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED      = 1 << 0,
++    SKIPPY_KV_PAGE_FLAG_HAS_K_IDX         = 1 << 1,
++};
++
++enum skippy_kv_page_codec {
++    SKIPPY_KV_PAGE_CODEC_SINGLE_V1         = 1,
++    SKIPPY_KV_PAGE_CODEC_ISWA_COMPOSITE_V1 = 2,
++};
++
++enum skippy_kv_page_component_role {
++    SKIPPY_KV_PAGE_COMPONENT_BASE = 1,
++    SKIPPY_KV_PAGE_COMPONENT_SWA  = 2,
++};
++
++/** @brief Describes one independently ranged cache in a composite KV page. */
++struct skippy_kv_page_component_desc {
++    uint32_t version;
++    uint32_t role;
++    uint64_t token_start;
++    uint64_t token_count;
++    uint32_t layer_count;
++    uint32_t k_type;
++    uint32_t v_type;
++    uint32_t k_row_bytes;
++    uint32_t v_row_bytes;
++    uint32_t v_element_bytes;
++    uint32_t k_idx_row_bytes;
++    uint64_t payload_offset;
++    uint64_t payload_bytes;
++    uint64_t flags;
++};
++
++/** @brief Describes the layout and ownership of an exported KV page payload. */
++struct skippy_kv_page_desc {
++    uint32_t version;
++    int32_t layer_start;
++    int32_t layer_end;
++    uint64_t token_start;
++    uint64_t token_count;
++    uint32_t layer_count;
++    uint32_t k_type;
++    uint32_t v_type;
++    uint32_t k_row_bytes;
++    uint32_t v_row_bytes;
++    uint32_t v_element_bytes;
++    uint32_t k_idx_row_bytes;
++    uint64_t payload_bytes;
++    uint64_t flags;
++    uint32_t codec;
++    uint32_t component_count;
++    struct skippy_kv_page_component_desc components[2];
++};
++
++/** @brief Exports the selected layer-range state for staged transfer. */
++LLAMA_API enum skippy_status skippy_export_state(
++        struct skippy_session * session,
++        int32_t layer_start,
++        int32_t layer_end,
++        void * output,
++        size_t output_capacity,
++        size_t * out_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Imports a layer-range state payload into a session. */
++LLAMA_API enum skippy_status skippy_import_state(
++        struct skippy_session * session,
++        int32_t layer_start,
++        int32_t layer_end,
++        const void * input,
++        size_t input_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Exports full KV state for the selected layer range. */
++LLAMA_API enum skippy_status skippy_export_full_state(
++        struct skippy_session * session,
++        int32_t layer_start,
++        int32_t layer_end,
++        void * output,
++        size_t output_capacity,
++        size_t * out_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Exports recurrent state for models that maintain recurrent memory. */
++LLAMA_API enum skippy_status skippy_export_recurrent_state(
++        struct skippy_session * session,
++        void * output,
++        size_t output_capacity,
++        size_t * out_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Imports full KV state for the selected layer range. */
++LLAMA_API enum skippy_status skippy_import_full_state(
++        struct skippy_session * session,
++        int32_t layer_start,
++        int32_t layer_end,
++        const void * input,
++        size_t input_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Imports recurrent state into a session. */
++LLAMA_API enum skippy_status skippy_import_recurrent_state(
++        struct skippy_session * session,
++        const void * input,
++        size_t input_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Trims the session's token history and associated state. */
++LLAMA_API enum skippy_status skippy_trim_session(
++        struct skippy_session * session,
++        uint64_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Retires a verified checkpoint after its tokens are accepted. */
++LLAMA_API enum skippy_status skippy_retire_verify_checkpoint(
++        struct skippy_session * session,
++        uint64_t token_start,
++        uint64_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Exports a token/layer KV page with an explicit layout descriptor. */
++LLAMA_API enum skippy_status skippy_export_kv_page(
++        struct skippy_session * session,
++        int32_t layer_start,
++        int32_t layer_end,
++        uint64_t token_start,
++        uint64_t token_count,
++        struct skippy_kv_page_desc * out_desc,
++        void * output,
++        size_t output_capacity,
++        size_t * out_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Imports a described KV page. Composite pages require a fresh session and are cleared on failure. */
++LLAMA_API enum skippy_status skippy_import_kv_page(
++        struct skippy_session * session,
++        const struct skippy_kv_page_desc * desc,
++        const void * input,
++        size_t input_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Saves a session prefix into a resident cache sequence. */
++LLAMA_API enum skippy_status skippy_session_save_prefix(
++        struct skippy_session * session,
++        int32_t cache_seq_id,
++        uint64_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Restores a session prefix from a resident cache sequence. */
++LLAMA_API enum skippy_status skippy_session_restore_prefix(
++        struct skippy_session * session,
++        int32_t cache_seq_id,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Reports physically occupied cells in the session's unified KV cache. */
++LLAMA_API enum skippy_status skippy_session_memory_used_cells(
++        struct skippy_session * session,
++        uint64_t * out_used_cells,
++        struct skippy_error ** out_error);
++
++/** @brief Drops a llama.cpp sequence from the session's cache. */
++LLAMA_API enum skippy_status skippy_session_drop_sequence(
++        struct skippy_session * session,
++        int32_t seq_id,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_STATE_H
+diff --git a/include/skippy/tokenization.h b/include/skippy/tokenization.h
+new file mode 100644
+index 000000000..c9697cf6c
+--- /dev/null
++++ b/include/skippy/tokenization.h
+@@ -0,0 +1,85 @@
++#ifndef SKIPPY_TOKENIZATION_H
++#define SKIPPY_TOKENIZATION_H
++
++/**
++ * @file skippy/tokenization.h
++ * @brief Token, detokenization, chat-template, and chat-response helpers.
++ */
++
++#include "runtime.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/** @brief Converts UTF-8 text into model tokens. */
++LLAMA_API enum skippy_status skippy_tokenize(
++        struct skippy_model * model,
++        const char * text,
++        bool add_special,
++        llama_token * output_tokens,
++        size_t output_token_capacity,
++        size_t * out_token_count,
++        struct skippy_error ** out_error);
++
++/** @brief Converts model tokens into UTF-8 text. */
++LLAMA_API enum skippy_status skippy_detokenize(
++        struct skippy_model * model,
++        const llama_token * tokens,
++        size_t token_count,
++        char * output_text,
++        size_t output_text_capacity,
++        size_t * out_text_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Reports whether a token is an end-of-generation token for the model. */
++LLAMA_API enum skippy_status skippy_token_is_eog(
++        struct skippy_model * model,
++        llama_token token,
++        bool * out_is_eog,
++        struct skippy_error ** out_error);
++
++/** @brief Exposes the underlying llama model for native integrations. */
++LLAMA_API const struct llama_model * skippy_model_native_model(
++        const struct skippy_model * model);
++
++/** @brief Renders OpenAI-style JSON messages through the model chat template. */
++SKIPPY_COMMON_API enum skippy_status skippy_apply_chat_template_json(
++        struct skippy_model * model,
++        const char * messages_json,
++        const char * tools_json,
++        const char * tool_choice_json,
++        bool add_assistant,
++        bool override_enable_thinking,
++        bool enable_thinking,
++        bool parallel_tool_calls,
++        const char * reasoning_format,
++        const char * chat_template_kwargs,
++        const char * chat_template,
++        bool use_jinja,
++        const char * grammar,
++        const char * json_schema,
++        bool skip_chat_parsing,
++        char * output_text,
++        size_t output_text_capacity,
++        size_t * out_text_bytes,
++        char * output_metadata_json,
++        size_t output_metadata_json_capacity,
++        size_t * out_metadata_json_bytes,
++        struct skippy_error ** out_error);
++
++/** @brief Parses generated chat text and template metadata into an OpenAI message. */
++SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
++        const char * generated_text,
++        const char * metadata_json,
++        bool is_partial,
++        char * output_message_json,
++        size_t output_message_json_capacity,
++        size_t * out_message_json_bytes,
++        struct skippy_error ** out_error);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SKIPPY_TOKENIZATION_H
+-- 
+2.54.0 (Apple Git-157)
+

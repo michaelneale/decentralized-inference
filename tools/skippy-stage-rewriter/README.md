@@ -48,7 +48,7 @@ python3 scripts/generate-skippy-family-patch.py \
   --rewriter .scratch/skippy-stage-rewriter-build/skippy-stage-rewriter \
   --report .scratch/skippy-stage-rewriter-report.json \
   --diff-base "$(cat .scratch/llama-full/.mesh-llm-upstream-sha)" \
-  --output third_party/llama.cpp/patches/0076-skippy-generate-model-family-stage-controls.patch
+  --output third_party/llama.cpp/patches/0012-skippy-generate-model-family-stage-controls.patch
 ```
 
 The wrapper refuses a dirty input tree, applies the Clang-proven edits, checks

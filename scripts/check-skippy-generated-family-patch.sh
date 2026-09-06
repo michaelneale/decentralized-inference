@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ROOT="${SKIPPY_REWRITER_SOURCE_ROOT:-$ROOT/.deps/llama.cpp}"
 LLAMA_BUILD_DIR="${LLAMA_STAGE_BUILD_DIR:-${LLAMA_BUILD_DIR:-$ROOT/.deps/llama-build/build-stage-abi-static-metal}}"
-CHECKED_PATCH="${SKIPPY_REWRITER_PATCH:-$ROOT/third_party/llama.cpp/patches/0076-skippy-generate-model-family-stage-controls.patch}"
+CHECKED_PATCH="${SKIPPY_REWRITER_PATCH:-$ROOT/third_party/llama.cpp/patches/0012-skippy-generate-model-family-stage-controls.patch}"
 ARTIFACT_ROOT="${SKIPPY_REWRITER_ARTIFACT_ROOT:-$ROOT/target/skippy-stage-rewriter-check}"
 TOOL_BUILD="$ARTIFACT_ROOT/tool-build"
 GENERATED_PATCH="$ARTIFACT_ROOT/generated-family.patch"

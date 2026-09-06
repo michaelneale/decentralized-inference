@@ -466,7 +466,8 @@ run_battery() {
       return 1
     fi
   fi
-  LLAMA_STAGE_BUILD_TESTS=ON arch -arm64 scripts/build-llama.sh \
+  LLAMA_STAGE_UPSTREAM_TESTS=ON uv run --no-project --with jinja2==3.1.6 -- \
+    arch -arm64 scripts/build-llama.sh \
     -DCMAKE_OSX_ARCHITECTURES=arm64 || return 1
   local archive
   archive="${LLAMA_STAGE_BUILD_DIR:-}/src/libllama.a"

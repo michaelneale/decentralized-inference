@@ -1,22 +1,15 @@
-From 68c74bd51c52ddee295bb3ea10fa6f9f5b351692 Mon Sep 17 00:00:00 2001
+From 44e50d81cfa48ad04fdbd8613299b7c0300c4c32 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
-Date: Wed, 26 Aug 2026 07:15:54 +1000
-Subject: [PATCH 19/32] ggml: cache compiled Metal pipelines on disk via
- MTLBinaryArchive
+Date: Mon, 7 Sep 2026 06:23:35 +1000
+Subject: [PATCH 09/11] ggml: optimize Apple Metal staging paths
 
-Set GGML_METAL_PIPELINE_CACHE_DIR to a directory to persist compiled
-compute pipeline states in an MTLBinaryArchive named after a fingerprint
-of the device, ggml version, preprocessor macros, and kernel sources.
-Pipeline compilation consults the archive before specializing and
-appends newly compiled pipelines, flushing after each addition. The
-cache is disabled when the variable is unset or the archive is invalid;
-behavior is then unchanged.
 ---
- ggml/src/ggml-metal/ggml-metal-device.m | 173 +++++++++++++++++++++++-
- 1 file changed, 169 insertions(+), 4 deletions(-)
+ ggml/src/ggml-metal/ggml-metal-device.m | 177 +++++++++++++++++++++++-
+ ggml/src/ggml-metal/ggml-metal-impl.h   |  34 ++---
+ 2 files changed, 189 insertions(+), 22 deletions(-)
 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 41ce90dc8..c2dbfc6ad 100644
+index 41ce90dc8..2f9acd002 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
 @@ -9,6 +9,7 @@
@@ -27,7 +20,7 @@ index 41ce90dc8..c2dbfc6ad 100644
  
  #ifndef TARGET_OS_VISION
  #define TARGET_OS_VISION 0
-@@ -156,6 +157,11 @@ struct ggml_metal_library {
+@@ -156,6 +157,11 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
      ggml_metal_device_t dev;
      ggml_metal_pipelines_t pipelines; // cache of compiled pipelines
  
@@ -303,6 +296,82 @@ index 41ce90dc8..c2dbfc6ad 100644
      }
  
      [lib->lock unlock];
+@@ -1181,7 +1346,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+ #endif
+ 
+                 dev->props.use_shared_buffers = dev->props.has_unified_memory;
+-#if TARGET_OS_OSX
++#if TARGET_OS_OSX && !defined(__aarch64__)
+                 // In case of eGPU, shared memory may be preferable.
+                 dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
+ #endif
+@@ -1241,12 +1406,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                         }
+                     }
+ 
++#if !defined(__aarch64__)
+                     for (int i = MTLGPUFamilyCommon1 + 5; i >= MTLGPUFamilyCommon1; --i) {
+                         if ([dev->mtl_device supportsFamily:i]) {
+                             GGML_LOG_INFO("%s: GPU family: MTLGPUFamilyCommon%d (%d)\n", __func__, i - (int) MTLGPUFamilyCommon1 + 1, i);
+                             break;
+                         }
+                     }
++#endif
+ 
+                     for (int i = MTLGPUFamilyMetal3_GGML + 5; i >= MTLGPUFamilyMetal3_GGML; --i) {
+                         if ([dev->mtl_device supportsFamily:i]) {
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index 49102afe9..a018165de 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -994,6 +994,23 @@ typedef struct {
+     uint64_t nb3;
+ } ggml_metal_kargs_solve_tri;
+ 
++typedef struct {
++    int32_t  n_kv;
++    int32_t  n_batch;
++    int32_t  mask_ne3;
++    uint64_t nb1;
++    uint64_t nb3;
++    uint64_t nbq1;
++    uint64_t nbq2;
++    uint64_t nbq3;
++    uint64_t nbk2;
++    uint64_t nbk3;
++    uint64_t nbw1;
++    uint64_t nbw3;
++    uint64_t nbm1;
++    uint64_t nbm3;
++} ggml_metal_kargs_lightning_indexer;
++
+ typedef struct {
+     int32_t  ne00t;
+     int32_t  ne00;
+@@ -1203,23 +1220,6 @@ typedef struct {
+     int64_t val;
+ } ggml_metal_kargs_memset;
+ 
+-typedef struct {
+-    int32_t  n_kv;
+-    int32_t  n_batch;
+-    int32_t  mask_ne3;
+-    uint64_t nb1;
+-    uint64_t nb3;
+-    uint64_t nbq1;
+-    uint64_t nbq2;
+-    uint64_t nbq3;
+-    uint64_t nbk2;
+-    uint64_t nbk3;
+-    uint64_t nbw1;
+-    uint64_t nbw3;
+-    uint64_t nbm1;
+-    uint64_t nbm3;
+-} ggml_metal_kargs_lightning_indexer;
+-
+ typedef struct {
+     int32_t  n_tokens;
+     int32_t  n_iter;
 -- 
-2.55.0
+2.54.0 (Apple Git-157)
 

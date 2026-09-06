@@ -1,0 +1,391 @@
+From 90fec0d31f81690784c9f56557cc7690ea722a73 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:51 +1000
+Subject: [PATCH 11/11] build(skippy): wire runtime and native tests
+
+---
+ CMakeLists.txt            |  10 ++
+ common/CMakeLists.txt     |   2 +
+ src/CMakeLists.txt        | 289 ++++++++++++++++++++++++++++++++++++++
+ tools/mtmd/CMakeLists.txt |   1 +
+ 4 files changed, 302 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1d4bcf45f..9de023d3d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit
+ project("llama.cpp" C CXX)
+ include(CheckIncludeFileCXX)
+ 
++option(LLAMA_STAGE_BUILD_TESTS "Build private Skippy native application probes" OFF)
++if (LLAMA_STAGE_BUILD_TESTS)
++    enable_testing()
++endif()
++
+ ### llama.cpp version
+ set(LLAMA_VERSION_MAJOR 0)
+ set(LLAMA_VERSION_MINOR 3)
+@@ -271,6 +276,7 @@ set(LLAMA_BIN_INSTALL_DIR     ${CMAKE_INSTALL_BINDIR}     CACHE PATH "Location o
+ 
+ set(LLAMA_PUBLIC_HEADERS
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-cpp.h)
+ 
+ set_target_properties(llama
+@@ -278,6 +284,10 @@ set_target_properties(llama
+         PUBLIC_HEADER "${LLAMA_PUBLIC_HEADERS}")
+ 
+ install(TARGETS llama LIBRARY PUBLIC_HEADER)
++install(
++    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy
++    DESTINATION ${LLAMA_INCLUDE_INSTALL_DIR}
++    FILES_MATCHING PATTERN "*.h")
+ 
+ if (LLAMA_BUILD_COMMON)
+     install(TARGETS llama-common LIBRARY)
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index 36f1e0cd5..6d139e7bb 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -100,6 +100,7 @@ add_library(${TARGET}
+     reasoning-budget.h
+     sampling.cpp
+     sampling.h
++    stage-chat.cpp
+     speculative.cpp
+     speculative.h
+     subproc.cpp
+@@ -138,6 +139,7 @@ endif()
+ 
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
++    target_compile_definitions(${TARGET} PRIVATE SKIPPY_COMMON_BUILD)
+ 
+     # TODO: make fine-grained exports in the future
+     set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 8922dc12a..9922906c8 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -39,6 +39,32 @@ add_library(llama
+             llama-model.cpp
+             llama-quant.cpp
+             llama-sampler.cpp
++            skippy/activation.cpp
++            skippy/activation_layout.cpp
++            skippy/execution-batch.cpp
++            skippy/execution-single.cpp
++            skippy/model_load_config.cpp
++            skippy/model_lifecycle.cpp
++            skippy/model_loading.cpp
++            skippy/model_source.cpp
++            skippy/session.cpp
++            skippy/verification.cpp
++            skippy/abi.cpp
++            skippy/block_boundaries.cpp
++            skippy/devices.cpp
++            skippy/glm_dsa.cpp
++            skippy/graph_dependencies.cpp
++            skippy/graph_identity.cpp
++            skippy/executable_graph.cpp
++            skippy/model_package.cpp
++            skippy/package_tensor_binding.cpp
++            skippy/sampling.cpp
++            skippy/stage_slice_plan.cpp
++            skippy/stage_plan.cpp
++            skippy/state.cpp
++            skippy/state_effects.cpp
++            skippy/speculative_decoding.cpp
++            skippy/tokenization.cpp
+             llama-vocab.cpp
+             unicode-data.cpp
+             unicode.cpp
+@@ -63,8 +89,271 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+ 
+ target_link_libraries(llama PUBLIC ggml)
+ 
++if (LLAMA_STAGE_BUILD_TESTS)
++    target_compile_definitions(llama PRIVATE LLAMA_STAGE_BUILD_TESTS)
++
++    add_executable(skippy-hardware-application-probe
++        skippy/tests/hardware_application_probe.cpp)
++    target_include_directories(skippy-hardware-application-probe PRIVATE .)
++    target_compile_features(skippy-hardware-application-probe PRIVATE cxx_std_17)
++    target_link_libraries(skippy-hardware-application-probe PRIVATE llama)
++    add_test(
++        NAME skippy_hardware_application_probe
++        COMMAND skippy-hardware-application-probe)
++
++    set(SKIPPY_MODEL_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/skippy/test-models")
++    file(MAKE_DIRECTORY "${SKIPPY_MODEL_FIXTURE_DIR}")
++
++    add_executable(skippy-model-fixture-generator
++        ../tests/test-llama-archs.cpp)
++    target_compile_features(skippy-model-fixture-generator PRIVATE cxx_std_17)
++    target_link_libraries(skippy-model-fixture-generator PRIVATE llama-common)
++
++    add_executable(skippy-model-loader-accounting
++        ../tests/test-skippy-model-loader-accounting.cpp)
++    target_include_directories(skippy-model-loader-accounting PRIVATE .)
++    target_compile_features(skippy-model-loader-accounting PRIVATE cxx_std_17)
++    target_link_libraries(skippy-model-loader-accounting PRIVATE llama-common)
++
++    add_executable(skippy-noalloc-graph-planning
++        skippy/tests/noalloc_graph_planning.cpp)
++    target_include_directories(skippy-noalloc-graph-planning PRIVATE .)
++    target_compile_features(skippy-noalloc-graph-planning PRIVATE cxx_std_17)
++    target_link_libraries(skippy-noalloc-graph-planning PRIVATE llama)
++
++    add_executable(skippy-renamed-multishard-planning
++        skippy/tests/renamed_multishard_planning.cpp)
++    target_include_directories(skippy-renamed-multishard-planning PRIVATE .)
++    target_compile_definitions(skippy-renamed-multishard-planning PRIVATE LLAMA_STAGE_BUILD_TESTS)
++    target_compile_features(skippy-renamed-multishard-planning PRIVATE cxx_std_17)
++    target_link_libraries(skippy-renamed-multishard-planning PRIVATE llama)
++    add_dependencies(skippy-noalloc-graph-planning skippy-renamed-multishard-planning)
++
++    add_executable(skippy-stage-plan-header-c
++        skippy/tests/stage_plan_header.c)
++    target_compile_features(skippy-stage-plan-header-c PRIVATE c_std_11)
++    target_include_directories(skippy-stage-plan-header-c PRIVATE ../include ../ggml/include)
++
++    add_executable(skippy-stage-plan-header-cpp
++        skippy/tests/stage_plan_header.cpp)
++    target_compile_features(skippy-stage-plan-header-cpp PRIVATE cxx_std_17)
++    target_include_directories(skippy-stage-plan-header-cpp PRIVATE ../include ../ggml/include)
++
++    add_test(NAME skippy_stage_plan_header_c COMMAND skippy-stage-plan-header-c)
++    add_test(NAME skippy_stage_plan_header_cpp COMMAND skippy-stage-plan-header-cpp)
++
++    add_executable(skippy-stage-slice-plan
++        skippy/tests/stage_slice_plan.cpp)
++    target_include_directories(skippy-stage-slice-plan PRIVATE .)
++    target_compile_features(skippy-stage-slice-plan PRIVATE cxx_std_17)
++    target_link_libraries(skippy-stage-slice-plan PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-stage-plan-header-c skippy-stage-plan-header-cpp)
++
++    add_test(
++        NAME skippy_stage_slice_plan
++        COMMAND skippy-stage-slice-plan)
++
++    add_executable(skippy-graph-build-inputs
++        skippy/tests/graph_build_inputs.cpp)
++    target_include_directories(skippy-graph-build-inputs PRIVATE .)
++    target_compile_features(skippy-graph-build-inputs PRIVATE cxx_std_17)
++    target_link_libraries(skippy-graph-build-inputs PRIVATE llama)
++    add_dependencies(skippy-stage-slice-plan skippy-graph-build-inputs)
++
++    add_test(
++        NAME skippy_graph_build_inputs
++        COMMAND skippy-graph-build-inputs
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/dream-dense.gguf")
++    set_tests_properties(skippy_graph_build_inputs PROPERTIES
++        FIXTURES_REQUIRED "skippy-model-loader-fixtures;skippy-graph-build-input-fixtures")
++
++    add_test(
++        NAME skippy_generate_graph_build_input_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch dream
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_graph_build_input_fixture PROPERTIES
++        FIXTURES_SETUP skippy-graph-build-input-fixtures)
++
++    add_test(
++        NAME skippy_generate_gemma_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch gemma
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_gemma_fixture PROPERTIES
++        FIXTURES_SETUP skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_generate_qwen3_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen3
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen3_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen3-fixture)
++
++    add_test(
++        NAME skippy_generate_qwen2moe_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen2moe
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen2moe_fixture PROPERTIES
++        FIXTURES_SETUP skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_generate_granite_hybrid_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch granitehybrid
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_granite_hybrid_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_generate_qwen35_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen35
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen35_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen35-fixture)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_qwen35
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen35-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-qwen35"
++            1)
++    set_tests_properties(skippy_renamed_multishard_planning_qwen35 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen35-fixture)
++
++    add_test(
++        NAME skippy_model_loader_accounting_dense
++        COMMAND skippy-model-loader-accounting
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf")
++    set_tests_properties(skippy_model_loader_accounting_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_model_loader_accounting_moe
++        COMMAND skippy-model-loader-accounting
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen2moe-moe.gguf")
++    set_tests_properties(skippy_model_loader_accounting_moe PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_dense
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            0
++            "kv,kv")
++    set_tests_properties(skippy_noalloc_graph_planning_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_qwen3
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen3-dense.gguf"
++            0
++            "kv,kv"
++            0
++            "token-kv")
++    set_tests_properties(skippy_noalloc_graph_planning_qwen3 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen3-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_granite_hybrid
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/granitehybrid-dense.gguf"
++            1
++            "kv,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_granite_hybrid PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_dense
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-gemma"
++            0)
++    set_tests_properties(skippy_renamed_multishard_planning_dense PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_granite_hybrid
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/granitehybrid-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-granite-hybrid"
++            1)
++    set_tests_properties(skippy_renamed_multishard_planning_granite_hybrid PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-granite-hybrid-fixture)
++
++    add_test(
++        NAME skippy_generate_nemotron_h_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch nemotron_h
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_nemotron_h_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-nemotron-h-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_recurrent_rollback
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/nemotron_h-dense.gguf"
++            1
++            "kv,recurrent,none"
++            2)
++    set_tests_properties(skippy_noalloc_graph_planning_recurrent_rollback PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-nemotron-h-fixture)
++
++    add_test(
++        NAME skippy_generate_mamba2_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch mamba2
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_mamba2_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-mamba2-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_recurrent_source
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/mamba2-dense.gguf"
++            1
++            "recurrent,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_recurrent_source PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-mamba2-fixture)
++
++    add_test(
++        NAME skippy_generate_mamba_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch mamba
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_mamba_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-mamba-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_mamba_state_ownership
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/mamba-dense.gguf"
++            1
++            "recurrent,recurrent")
++    set_tests_properties(skippy_noalloc_graph_planning_mamba_state_ownership PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-mamba-fixture)
++endif()
++
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
+     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+     target_compile_definitions(llama PUBLIC  LLAMA_SHARED)
+ endif()
++if (APPLE)
++    find_library(SKIPPY_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
++    target_link_libraries(llama PRIVATE ${SKIPPY_ACCELERATE_FRAMEWORK})
++endif()
+diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
+index e60c9c878..7b886d4e4 100644
+--- a/tools/mtmd/CMakeLists.txt
++++ b/tools/mtmd/CMakeLists.txt
+@@ -42,6 +42,7 @@ add_library(mtmd
+             models/granite4-vision.cpp
+             models/hunyuanvl.cpp
+             models/internvl.cpp
++            models/inkling.cpp
+             models/kimivl.cpp
+             models/kimik25.cpp
+             models/nemotron-v2-vl.cpp
+-- 
+2.54.0 (Apple Git-157)
+

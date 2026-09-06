@@ -1,31 +1,95 @@
-From b99a5f3b87203b32cf612ea75a3a2817ba4e45b6 Mon Sep 17 00:00:00 2001
+From 49b0b39dafaba5ff1d572a445f7ce0e9e84098b8 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
-Date: Sat, 8 Aug 2026 17:06:42 +1000
-Subject: [PATCH 04/32] Add Skippy model lifecycle and package support
+Date: Mon, 7 Sep 2026 06:22:57 +1000
+Subject: [PATCH 03/11] skippy: implement model lifecycle and package loading
 
 ---
+ src/skippy/abi.cpp                      |  52 ++
  src/skippy/devices.cpp                  | 106 +++
- src/skippy/environment.h                |  49 ++
- src/skippy/model_lifecycle.cpp          | 124 ++++
- src/skippy/model_load_config.cpp        | 138 ++++
- src/skippy/model_load_config_internal.h |  22 +
- src/skippy/model_loading.cpp            | 930 ++++++++++++++++++++++++
- src/skippy/model_loading_internal.h     |  29 +
- src/skippy/model_package.cpp            | 727 ++++++++++++++++++
- src/skippy/runtime_support.h            |  28 +
- src/skippy/runtime_types.h              | 133 ++++
- 10 files changed, 2286 insertions(+)
+ src/skippy/model_lifecycle.cpp          | 146 ++++
+ src/skippy/model_load_config.cpp        | 159 +++++
+ src/skippy/model_load_config_internal.h |  25 +
+ src/skippy/model_loading.cpp            | 911 ++++++++++++++++++++++++
+ src/skippy/model_loading_internal.h     |  38 +
+ src/skippy/model_package.cpp            | 738 +++++++++++++++++++
+ src/skippy/model_source.cpp             | 458 ++++++++++++
+ src/skippy/package_tensor_binding.cpp   | 104 +++
+ src/skippy/package_tensor_binding.h     |  27 +
+ src/skippy/runtime_support.h            |  37 +
+ src/skippy/runtime_types.h              | 159 +++++
+ 13 files changed, 2960 insertions(+)
+ create mode 100644 src/skippy/abi.cpp
  create mode 100644 src/skippy/devices.cpp
- create mode 100644 src/skippy/environment.h
  create mode 100644 src/skippy/model_lifecycle.cpp
  create mode 100644 src/skippy/model_load_config.cpp
  create mode 100644 src/skippy/model_load_config_internal.h
  create mode 100644 src/skippy/model_loading.cpp
  create mode 100644 src/skippy/model_loading_internal.h
  create mode 100644 src/skippy/model_package.cpp
+ create mode 100644 src/skippy/model_source.cpp
+ create mode 100644 src/skippy/package_tensor_binding.cpp
+ create mode 100644 src/skippy/package_tensor_binding.h
  create mode 100644 src/skippy/runtime_support.h
  create mode 100644 src/skippy/runtime_types.h
 
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+new file mode 100644
+index 000000000..ec2b47444
+--- /dev/null
++++ b/src/skippy/abi.cpp
+@@ -0,0 +1,52 @@
++#include "skippy/common.h"
++
++#include <cstdlib>
++
++struct skippy_abi_version skippy_abi_version(void) {
++    return {
++        SKIPPY_ABI_VERSION_MAJOR,
++        SKIPPY_ABI_VERSION_MINOR,
++        SKIPPY_ABI_VERSION_PATCH,
++    };
++}
++
++uint64_t skippy_abi_features(void) {
++    return SKIPPY_FEATURE_RUNTIME_SLICE |
++           SKIPPY_FEATURE_MODEL_INTROSPECTION |
++           SKIPPY_FEATURE_GGUF_SLICE_WRITE |
++           SKIPPY_FEATURE_STATE_IMPORT_EXPORT |
++           SKIPPY_FEATURE_TOKENIZE_DETOKENIZE |
++           SKIPPY_FEATURE_ACTIVATION_FRAME |
++           SKIPPY_FEATURE_NATIVE_KV_PAGE |
++           SKIPPY_FEATURE_SESSION_RESET |
++           SKIPPY_FEATURE_BATCH_VERIFY |
++           SKIPPY_FEATURE_CHAT_TEMPLATE |
++           SKIPPY_FEATURE_SAMPLING_CONFIG |
++           SKIPPY_FEATURE_BATCH_VERIFY_FRAME |
++           SKIPPY_FEATURE_RECURRENT_STATE |
++           SKIPPY_FEATURE_LOGIT_BIAS |
++           SKIPPY_FEATURE_SESSION_TRIM |
++           SKIPPY_FEATURE_STAGE_PLAN |
++           SKIPPY_FEATURE_PACKAGE_PART_LOAD |
++           SKIPPY_FEATURE_GENERATION_SIGNALS |
++           SKIPPY_FEATURE_EXTERNAL_MEDIA_PREFILL |
++           SKIPPY_FEATURE_CHAT_TEMPLATE_TOOLS |
++           SKIPPY_FEATURE_CHAT_SAMPLING_GRAMMAR |
++           SKIPPY_FEATURE_RUNTIME_EVENTS |
++           SKIPPY_FEATURE_BACKEND_DEVICES |
++           SKIPPY_FEATURE_NATIVE_MTP_N1 |
++           SKIPPY_FEATURE_NGRAM_CACHE_DRAFT |
++           SKIPPY_FEATURE_INKLING_MTP_MM |
++           SKIPPY_FEATURE_ITERATION_BATCH |
++           SKIPPY_FEATURE_ACTIVATION_BOUNDARY |
++           SKIPPY_FEATURE_MODEL_SOURCE;
++}
++
++void skippy_error_free(struct skippy_error * error) {
++    if (error == nullptr) {
++        return;
++    }
++
++    std::free(const_cast<char *>(error->message));
++    delete error;
++}
 diff --git a/src/skippy/devices.cpp b/src/skippy/devices.cpp
 new file mode 100644
 index 000000000..2068a9b1c
@@ -138,72 +202,16 @@ index 000000000..2068a9b1c
 +    return skippy_success(out_error);
 +}
 +
-diff --git a/src/skippy/environment.h b/src/skippy/environment.h
-new file mode 100644
-index 000000000..f22af9c5a
---- /dev/null
-+++ b/src/skippy/environment.h
-@@ -0,0 +1,49 @@
-+#pragma once
-+
-+#include <algorithm>
-+#include <cerrno>
-+#include <cstdint>
-+#include <cstdlib>
-+#include <cstring>
-+
-+inline bool skippy_env_enabled(const char * name) {
-+    const char * value = std::getenv(name);
-+    if (value == nullptr || value[0] == '\0') {
-+        return false;
-+    }
-+    return std::strcmp(value, "0") != 0 &&
-+           std::strcmp(value, "false") != 0 &&
-+           std::strcmp(value, "off") != 0 &&
-+           std::strcmp(value, "no") != 0;
-+}
-+
-+inline bool skippy_env_disabled(const char * name) {
-+    const char * value = std::getenv(name);
-+    if (value == nullptr || value[0] == '\0') {
-+        return false;
-+    }
-+    return std::strcmp(value, "0") == 0 ||
-+           std::strcmp(value, "false") == 0 ||
-+           std::strcmp(value, "FALSE") == 0 ||
-+           std::strcmp(value, "off") == 0 ||
-+           std::strcmp(value, "OFF") == 0 ||
-+           std::strcmp(value, "no") == 0 ||
-+           std::strcmp(value, "NO") == 0;
-+}
-+
-+inline uint32_t skippy_env_u32(const char * name, uint32_t fallback, uint32_t min_value, uint32_t max_value) {
-+    const char * value = std::getenv(name);
-+    if (value == nullptr || value[0] == '\0') {
-+        return fallback;
-+    }
-+
-+    char * end = nullptr;
-+    errno = 0;
-+    const unsigned long parsed = std::strtoul(value, &end, 10);
-+    if (errno != 0 || end == value || *end != '\0') {
-+        return fallback;
-+    }
-+
-+    return std::min<uint32_t>(max_value, std::max<uint32_t>(min_value, static_cast<uint32_t>(parsed)));
-+}
-+
 diff --git a/src/skippy/model_lifecycle.cpp b/src/skippy/model_lifecycle.cpp
 new file mode 100644
-index 000000000..f46335ba7
+index 000000000..fa28e31d4
 --- /dev/null
 +++ b/src/skippy/model_lifecycle.cpp
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,146 @@
 +#include "skippy.h"
 +#include "skippy/errors.h"
 +#include "skippy/environment.h"
 +#include "skippy/glm_dsa.h"
-+#include "skippy/graph_filter_scope.h"
 +#include "skippy-verify-checkpoint.h"
 +#include "skippy/devices.h"
 +
@@ -310,6 +318,9 @@ index 000000000..f46335ba7
 +        if (model->ctx != nullptr) {
 +            llama_free(model->ctx);
 +        }
++        if (model->chat_templates != nullptr && model->chat_templates_free != nullptr) {
++            model->chat_templates_free(model->chat_templates);
++        }
 +        llama_model_free(model->model);
 +        delete model;
 +    }
@@ -321,19 +332,38 @@ index 000000000..f46335ba7
 +    return model != nullptr ? model->model : nullptr;
 +}
 +
++bool skippy_model_output_activation_boundary(
++        const struct skippy_model * model,
++        struct skippy_activation_boundary_desc * out_desc) {
++    if (model == nullptr || out_desc == nullptr || !model->has_output_activation_boundary) {
++        return false;
++    }
++    *out_desc = model->output_activation_boundary;
++    return true;
++}
++
++bool skippy_model_input_activation_boundary(
++        const struct skippy_model * model,
++        struct skippy_activation_boundary_desc * out_desc) {
++    if (model == nullptr || out_desc == nullptr || !model->has_input_activation_boundary) {
++        return false;
++    }
++    *out_desc = model->input_activation_boundary;
++    return true;
++}
++
 +
 +} // extern "C"
 diff --git a/src/skippy/model_load_config.cpp b/src/skippy/model_load_config.cpp
 new file mode 100644
-index 000000000..43c95ee4d
+index 000000000..a6ec5b2eb
 --- /dev/null
 +++ b/src/skippy/model_load_config.cpp
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,159 @@
 +#include "skippy.h"
 +#include "skippy/errors.h"
 +#include "skippy/environment.h"
 +#include "skippy/glm_dsa.h"
-+#include "skippy/graph_filter_scope.h"
 +#include "skippy-verify-checkpoint.h"
 +#include "skippy/devices.h"
 +
@@ -461,18 +491,40 @@ index 000000000..43c95ee4d
 +    if (config == nullptr) {
 +        return;
 +    }
-+    if (config->use_mlock) {
++    if (config->use_direct_io) {
++        params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;
++    } else if (config->use_mlock) {
 +        params.load_mode = LLAMA_LOAD_MODE_MLOCK;
 +    } else if (config->has_mmap_override) {
 +        params.load_mode = config->use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
 +    }
++    params.check_tensors = config->check_tensors;
++    params.no_host = config->no_host_buffer;
++    if (config->has_main_gpu_override) {
++        params.main_gpu = config->main_gpu;
++    }
++    if (config->split_mode != SKIPPY_TRISTATE_AUTO) {
++        params.split_mode = static_cast<llama_split_mode>(config->split_mode);
++    }
++    if (config->disable_repack || config->filter_tensors_on_load) {
++        params.use_extra_bufts = false;
++    }
++}
++
++void skippy_apply_context_hardware_config(
++        const struct skippy_runtime_config * config,
++        llama_context_params & params) {
++    if (config == nullptr || config->op_offload == SKIPPY_TRISTATE_AUTO) {
++        return;
++    }
++    params.op_offload = config->op_offload == SKIPPY_TRISTATE_TRUE;
 +}
 diff --git a/src/skippy/model_load_config_internal.h b/src/skippy/model_load_config_internal.h
 new file mode 100644
-index 000000000..8bd88058a
+index 000000000..0f7c83139
 --- /dev/null
 +++ b/src/skippy/model_load_config_internal.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,25 @@
 +#pragma once
 +
 +#include "skippy/common.h"
@@ -495,17 +547,20 @@ index 000000000..8bd88058a
 +void skippy_apply_model_load_memory_config(
 +        const skippy_runtime_config * config,
 +        llama_model_params & params);
++void skippy_apply_context_hardware_config(
++        const skippy_runtime_config * config,
++        llama_context_params & params);
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
 new file mode 100644
-index 000000000..70065bdcf
+index 000000000..8cfc8e9bd
 --- /dev/null
 +++ b/src/skippy/model_loading.cpp
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,911 @@
 +#include "skippy.h"
 +#include "skippy/errors.h"
 +#include "skippy/environment.h"
 +#include "skippy/glm_dsa.h"
-+#include "skippy/graph_filter_scope.h"
++#include "skippy/graph_build_inputs.h"
 +#include "skippy-verify-checkpoint.h"
 +#include "skippy/devices.h"
 +
@@ -554,6 +609,7 @@ index 000000000..70065bdcf
 +using json = nlohmann::ordered_json;
 +
 +#include "skippy/execution_internal.h"
++#include "skippy/activation_internal.h"
 +#include "skippy/sampling_internal.h"
 +#include "skippy/speculative_internal.h"
 +#include "skippy/model_loading_internal.h"
@@ -914,6 +970,7 @@ index 000000000..70065bdcf
 +    if (model == nullptr ||
 +        config == nullptr ||
 +        !config->include_output ||
++        config->mtp_source != SKIPPY_MTP_SOURCE_INTEGRATED ||
 +        model->hparams.n_layer_nextn == 0) {
 +        return false;
 +    }
@@ -944,9 +1001,41 @@ index 000000000..70065bdcf
 +           has_head;
 +}
 +
++static void skippy_enable_integrated_mtp_tensors(
++        const skippy_runtime_config * config,
++        llama_model_params & params) {
++    // A terminal stage does not imply MTP ownership. Only the resolved
++    // integrated source keeps optional NextN tensors in the target load.
++    params.load_mtp = config != nullptr &&
++                      config->include_output &&
++                      config->mtp_source == SKIPPY_MTP_SOURCE_INTEGRATED;
++}
++
++// Applies a tri-state config override on top of a derived default. Auto
++// (SKIPPY_TRISTATE_AUTO) keeps the derived value; false/true replace it.
++static bool skippy_resolve_tristate(int32_t tristate, bool derived_default) {
++    if (tristate == SKIPPY_TRISTATE_FALSE) {
++        return false;
++    }
++    if (tristate == SKIPPY_TRISTATE_TRUE) {
++        return true;
++    }
++    return derived_default;
++}
++
 +extern "C" {
 +
-+static enum skippy_status skippy_finish_model_open(
++struct skippy_runtime_config skippy_runtime_config_default(void) {
++    struct skippy_runtime_config config = {};
++    config.kv_offload = SKIPPY_TRISTATE_AUTO;
++    config.kv_unified = SKIPPY_TRISTATE_AUTO;
++    config.swa_full = SKIPPY_TRISTATE_AUTO;
++    config.op_offload = SKIPPY_TRISTATE_AUTO;
++    config.split_mode = SKIPPY_TRISTATE_AUTO;
++    return config;
++}
++
++enum skippy_status skippy_finish_model_open(
 +        llama_model * model,
 +        const struct skippy_runtime_config * config,
 +        skippy_runtime_event_scope * event_scope,
@@ -954,122 +1043,6 @@ index 000000000..70065bdcf
 +        struct skippy_error ** out_error) {
 +    if (config != nullptr && config->filter_tensors_on_load) {
 +        const int32_t n_layer = skippy_stage_layer_count(model);
-+        if (model->arch != LLM_ARCH_LLAMA &&
-+            model->arch != LLM_ARCH_AFMOE &&
-+            model->arch != LLM_ARCH_APERTUS &&
-+            model->arch != LLM_ARCH_ARCEE &&
-+            model->arch != LLM_ARCH_ARCTIC &&
-+            model->arch != LLM_ARCH_BAICHUAN &&
-+            model->arch != LLM_ARCH_BAILINGMOE &&
-+            model->arch != LLM_ARCH_BAILINGMOE2 &&
-+            model->arch != LLM_ARCH_BITNET &&
-+            model->arch != LLM_ARCH_BLOOM &&
-+            model->arch != LLM_ARCH_CHATGLM &&
-+            model->arch != LLM_ARCH_COHERE2 &&
-+            model->arch != LLM_ARCH_COMMAND_R &&
-+            model->arch != LLM_ARCH_CODESHELL &&
-+            model->arch != LLM_ARCH_DBRX &&
-+            model->arch != LLM_ARCH_DECI &&
-+            model->arch != LLM_ARCH_DOTS1 &&
-+            model->arch != LLM_ARCH_DREAM &&
-+            model->arch != LLM_ARCH_ERNIE4_5 &&
-+            model->arch != LLM_ARCH_ERNIE4_5_MOE &&
-+            model->arch != LLM_ARCH_EXAONE &&
-+            model->arch != LLM_ARCH_EXAONE4 &&
-+            model->arch != LLM_ARCH_EXAONE_MOE &&
-+            model->arch != LLM_ARCH_FALCON &&
-+            model->arch != LLM_ARCH_GPT2 &&
-+            model->arch != LLM_ARCH_GPTNEOX &&
-+            model->arch != LLM_ARCH_GRANITE &&
-+            model->arch != LLM_ARCH_GRANITE_HYBRID &&
-+            model->arch != LLM_ARCH_GRANITE_MOE &&
-+            model->arch != LLM_ARCH_GROK &&
-+            model->arch != LLM_ARCH_GROVEMOE &&
-+            model->arch != LLM_ARCH_HUNYUAN_DENSE &&
-+            model->arch != LLM_ARCH_HUNYUAN_MOE &&
-+            model->arch != LLM_ARCH_HUNYUAN_VL &&
-+            model->arch != LLM_ARCH_INKLING &&
-+            model->arch != LLM_ARCH_INTERNLM2 &&
-+            model->arch != LLM_ARCH_JAIS &&
-+            model->arch != LLM_ARCH_JAIS2 &&
-+            model->arch != LLM_ARCH_JAMBA &&
-+            model->arch != LLM_ARCH_LAGUNA &&
-+            model->arch != LLM_ARCH_LFM2 &&
-+            model->arch != LLM_ARCH_LLADA &&
-+            model->arch != LLM_ARCH_LLADA_MOE &&
-+            model->arch != LLM_ARCH_LLAMA4 &&
-+            model->arch != LLM_ARCH_MAINCODER &&
-+            model->arch != LLM_ARCH_MAMBA &&
-+            model->arch != LLM_ARCH_MAMBA2 &&
-+            model->arch != LLM_ARCH_MIMO2 &&
-+            model->arch != LLM_ARCH_MINICPM3 &&
-+            model->arch != LLM_ARCH_MISTRAL3 &&
-+            model->arch != LLM_ARCH_MISTRAL4 &&
-+            model->arch != LLM_ARCH_MPT &&
-+            model->arch != LLM_ARCH_NEMOTRON &&
-+            model->arch != LLM_ARCH_OLMO2 &&
-+            model->arch != LLM_ARCH_OLMOE &&
-+            model->arch != LLM_ARCH_OPENAI_MOE &&
-+            model->arch != LLM_ARCH_OPENELM &&
-+            model->arch != LLM_ARCH_ORION &&
-+            model->arch != LLM_ARCH_PLAMO &&
-+            model->arch != LLM_ARCH_PLAMO3 &&
-+            model->arch != LLM_ARCH_PLM &&
-+            model->arch != LLM_ARCH_QWEN &&
-+            model->arch != LLM_ARCH_QWEN2 &&
-+            model->arch != LLM_ARCH_QWEN3 &&
-+            model->arch != LLM_ARCH_QWEN3NEXT &&
-+            model->arch != LLM_ARCH_QWEN2VL &&
-+            model->arch != LLM_ARCH_QWEN3VL &&
-+            model->arch != LLM_ARCH_QWEN3VLMOE &&
-+            model->arch != LLM_ARCH_QWEN2MOE &&
-+            model->arch != LLM_ARCH_QWEN35 &&
-+            model->arch != LLM_ARCH_QWEN35MOE &&
-+            model->arch != LLM_ARCH_QWEN3MOE &&
-+            model->arch != LLM_ARCH_REFACT &&
-+            model->arch != LLM_ARCH_RND1 &&
-+            model->arch != LLM_ARCH_RWKV6 &&
-+            model->arch != LLM_ARCH_RWKV7 &&
-+            model->arch != LLM_ARCH_ARWKV7 &&
-+            model->arch != LLM_ARCH_SEED_OSS &&
-+            model->arch != LLM_ARCH_SMALLTHINKER &&
-+            model->arch != LLM_ARCH_SMOLLM3 &&
-+            model->arch != LLM_ARCH_GEMMA &&
-+            model->arch != LLM_ARCH_GEMMA2 &&
-+            model->arch != LLM_ARCH_GEMMA3 &&
-+            model->arch != LLM_ARCH_GEMMA3N &&
-+            model->arch != LLM_ARCH_GEMMA4 &&
-+            model->arch != LLM_ARCH_GLM_DSA &&
-+            model->arch != LLM_ARCH_GLM4 &&
-+            model->arch != LLM_ARCH_GLM4_MOE &&
-+            model->arch != LLM_ARCH_DEEPSEEK2 &&
-+            model->arch != LLM_ARCH_DEEPSEEK2OCR &&
-+            model->arch != LLM_ARCH_FALCON_H1 &&
-+            model->arch != LLM_ARCH_KIMI_LINEAR &&
-+            model->arch != LLM_ARCH_LFM2MOE &&
-+            model->arch != LLM_ARCH_MINICPM &&
-+            model->arch != LLM_ARCH_MINIMAX_M2 &&
-+            model->arch != LLM_ARCH_OLMO &&
-+            model->arch != LLM_ARCH_NEMOTRON_H &&
-+            model->arch != LLM_ARCH_NEMOTRON_H_MOE &&
-+            model->arch != LLM_ARCH_PHI2 &&
-+            model->arch != LLM_ARCH_PHI3 &&
-+            model->arch != LLM_ARCH_PHIMOE &&
-+            model->arch != LLM_ARCH_PLAMO2 &&
-+            model->arch != LLM_ARCH_RWKV6QWEN2 &&
-+            model->arch != LLM_ARCH_STARCODER &&
-+            model->arch != LLM_ARCH_STEP35 &&
-+            model->arch != LLM_ARCH_STARCODER2 &&
-+            model->arch != LLM_ARCH_STABLELM &&
-+            model->arch != LLM_ARCH_XVERSE) {
-+            llama_model_free(model);
-+            const char * message = "runtime-slice execution is not supported for this model architecture yet";
-+            if (event_scope != nullptr) {
-+                event_scope->emit_failure(SKIPPY_STATUS_UNSUPPORTED, message);
-+            }
-+            skippy_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, message);
-+            return SKIPPY_STATUS_UNSUPPORTED;
-+        }
 +        if (config->layer_end > n_layer) {
 +            llama_model_free(model);
 +            const char * message = "layer_end exceeds model layer count";
@@ -1126,6 +1099,12 @@ index 000000000..70065bdcf
 +    params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : params.n_threads;
 +    params.n_seq_max = stage_model->lane_count;
 +    params.kv_unified = stage_model->lane_count > 1;
++    if (config != nullptr) {
++        params.kv_unified = skippy_resolve_tristate(config->kv_unified, params.kv_unified);
++        params.offload_kqv = skippy_resolve_tristate(config->kv_offload, params.offload_kqv);
++        params.swa_full = skippy_resolve_tristate(config->swa_full, params.swa_full);
++        skippy_apply_context_hardware_config(config, params);
++    }
 +    params.type_k = config != nullptr && config->cache_type_k > 0 ? static_cast<ggml_type>(config->cache_type_k) : GGML_TYPE_F16;
 +    params.type_v = config != nullptr && config->cache_type_v > 0 ? static_cast<ggml_type>(config->cache_type_v) : GGML_TYPE_F16;
 +    params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
@@ -1156,8 +1135,8 @@ index 000000000..70065bdcf
 +        params.kv_unified = true;
 +    }
 +
-+    skippy_graph_filter_scope graph_filter_scope(config);
-+    stage_model->ctx = llama_init_from_model(model, params);
++    const skippy_graph_build_inputs graph_build_inputs = skippy_graph_build_inputs_from_config(config);
++    stage_model->ctx = llama_init_from_model_with_graph_inputs(model, params, graph_build_inputs);
 +    if (stage_model->ctx == nullptr) {
 +        const char * message = "failed to create llama context";
 +        if (event_scope != nullptr) {
@@ -1169,14 +1148,63 @@ index 000000000..70065bdcf
 +        return SKIPPY_STATUS_RUNTIME_ERROR;
 +    }
 +
++    const auto fail_boundary_load = [&](const char * message) {
++        if (event_scope != nullptr) {
++            event_scope->emit_failure(SKIPPY_STATUS_RUNTIME_ERROR, message);
++        }
++        llama_free(stage_model->ctx);
++        stage_model->ctx = nullptr;
++        llama_model_free(model);
++        delete stage_model;
++        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, message);
++        return SKIPPY_STATUS_RUNTIME_ERROR;
++    };
++
++    if (config != nullptr && config->filter_tensors_on_load && !config->include_output) {
++        enum ggml_type type = GGML_TYPE_COUNT;
++        uint64_t elements_per_token = 0;
++        uint64_t bytes_per_token = 0;
++        if (!stage_model->ctx->get_activation_boundary(type, elements_per_token, bytes_per_token)) {
++            return fail_boundary_load("stage graph did not expose a stable output activation boundary");
++        }
++        stage_model->has_output_activation_boundary = true;
++        stage_model->output_activation_boundary = {
++            SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION,
++            static_cast<uint32_t>(type),
++            static_cast<uint32_t>(SKIPPY_ACTIVATION_LAYOUT_TOKEN_MAJOR),
++            0,
++            elements_per_token,
++            bytes_per_token,
++            skippy_activation_required_frame_flags(stage_model),
++            skippy_activation_required_sidebands(stage_model),
++        };
++    }
++
++    if (config != nullptr && config->filter_tensors_on_load && config->layer_start > 0) {
++        enum ggml_type type = GGML_TYPE_COUNT;
++        uint64_t elements_per_token = 0;
++        uint64_t bytes_per_token = 0;
++        if (!stage_model->ctx->get_input_activation_boundary(type, elements_per_token, bytes_per_token)) {
++            return fail_boundary_load("stage graph did not expose a stable input activation boundary");
++        }
++        stage_model->has_input_activation_boundary = true;
++        stage_model->input_activation_boundary = {
++            SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION,
++            static_cast<uint32_t>(type),
++            static_cast<uint32_t>(SKIPPY_ACTIVATION_LAYOUT_TOKEN_MAJOR),
++            0,
++            elements_per_token,
++            bytes_per_token,
++            skippy_activation_required_frame_flags(stage_model),
++            skippy_activation_required_sidebands(stage_model),
++        };
++    }
++
 +    if (skippy_should_create_native_mtp_sidecar(model, config)) {
 +        llama_context_params mtp_params = params;
 +        mtp_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
 +        mtp_params.embeddings = false;
-+        {
-+            skippy_graph_filter_scope graph_filter_scope(config);
-+            stage_model->mtp_ctx = llama_init_from_model(model, mtp_params);
-+        }
++        stage_model->mtp_ctx = llama_init_from_model_with_graph_inputs(model, mtp_params, graph_build_inputs);
 +        if (stage_model->mtp_ctx != nullptr) {
 +            llama_set_embeddings_nextn(stage_model->ctx, true, false);
 +            llama_set_embeddings_nextn(stage_model->mtp_ctx, true, false);
@@ -1184,9 +1212,10 @@ index 000000000..70065bdcf
 +            fprintf(stderr, "skippy: native MTP sidecar unavailable for this final stage; continuing without drafts\n");
 +        }
 +    } else if (config != nullptr &&
++               config->mtp_source == SKIPPY_MTP_SOURCE_INTEGRATED &&
 +               config->include_output &&
 +               model->hparams.n_layer_nextn > 0) {
-+        fprintf(stderr, "skippy: native MTP sidecar skipped because this split stage is missing required MTP graph tensors; continuing without drafts\n");
++        fprintf(stderr, "skippy: integrated MTP requested, but this split stage is missing required MTP graph tensors; continuing without drafts\n");
 +    }
 +
 +    stage_model->lane_in_use.assign(stage_model->lane_count, false);
@@ -1240,12 +1269,10 @@ index 000000000..70065bdcf
 +    }
 +
 +    llama_model_params params = llama_model_default_params();
++    skippy_enable_integrated_mtp_tensors(config, params);
 +    if (config != nullptr) {
 +        params.n_gpu_layers = config->n_gpu_layers;
 +        skippy_apply_model_load_memory_config(config, params);
-+        if (config->disable_repack || config->filter_tensors_on_load) {
-+            params.use_extra_bufts = false;
-+        }
 +    }
 +    if (event_scope.is_enabled()) {
 +        params.progress_callback = skippy_model_open_progress_callback;
@@ -1326,12 +1353,10 @@ index 000000000..70065bdcf
 +    }
 +
 +    llama_model_params params = llama_model_default_params();
++    skippy_enable_integrated_mtp_tensors(config, params);
 +    if (config != nullptr) {
 +        params.n_gpu_layers = config->n_gpu_layers;
 +        skippy_apply_model_load_memory_config(config, params);
-+        if (config->disable_repack || config->filter_tensors_on_load) {
-+            params.use_extra_bufts = false;
-+        }
 +    }
 +    if (event_scope.is_enabled()) {
 +        params.progress_callback = skippy_model_open_progress_callback;
@@ -1363,6 +1388,7 @@ index 000000000..70065bdcf
 +
 +    return skippy_finish_model_open(model, config, &event_scope, out_model, out_error);
 +}
++
 +enum skippy_status skippy_model_attach_mtp_draft_model(
 +        struct skippy_model * target_model,
 +        const char * path,
@@ -1372,18 +1398,22 @@ index 000000000..70065bdcf
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "target_model, target context, and path are required");
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
++    if (config == nullptr || config->mtp_source != SKIPPY_MTP_SOURCE_EXTERNAL) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "MTP draft attachment requires an external MTP source");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
 +    if (target_model->mtp_ctx != nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "target model already has an MTP draft context");
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
 +
 +    llama_model_params model_params = llama_model_default_params();
++    // The guard above already established an external MTP source, so this model
++    // backs an LLAMA_CONTEXT_TYPE_MTP draft context and must retain MTP tensors.
++    model_params.load_mtp = true;
 +    if (config != nullptr) {
 +        model_params.n_gpu_layers = config->n_gpu_layers;
 +        skippy_apply_model_load_memory_config(config, model_params);
-+        if (config->disable_repack || config->filter_tensors_on_load) {
-+            model_params.use_extra_bufts = false;
-+        }
 +    }
 +
 +    llama_backend_init();
@@ -1413,6 +1443,12 @@ index 000000000..70065bdcf
 +    ctx_params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : ctx_params.n_threads;
 +    ctx_params.n_seq_max = target_model->lane_count;
 +    ctx_params.kv_unified = target_model->lane_count > 1;
++    if (config != nullptr) {
++        ctx_params.kv_unified = skippy_resolve_tristate(config->kv_unified, ctx_params.kv_unified);
++        ctx_params.offload_kqv = skippy_resolve_tristate(config->kv_offload, ctx_params.offload_kqv);
++        ctx_params.swa_full = skippy_resolve_tristate(config->swa_full, ctx_params.swa_full);
++        skippy_apply_context_hardware_config(config, ctx_params);
++    }
 +    ctx_params.type_k = config != nullptr && config->cache_type_k > 0 ? static_cast<ggml_type>(config->cache_type_k) : GGML_TYPE_F16;
 +    ctx_params.type_v = config != nullptr && config->cache_type_v > 0 ? static_cast<ggml_type>(config->cache_type_v) : GGML_TYPE_F16;
 +    ctx_params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
@@ -1433,10 +1469,10 @@ index 000000000..70065bdcf
 +} // extern "C"
 diff --git a/src/skippy/model_loading_internal.h b/src/skippy/model_loading_internal.h
 new file mode 100644
-index 000000000..ee1e43035
+index 000000000..97e966e4e
 --- /dev/null
 +++ b/src/skippy/model_loading_internal.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,38 @@
 +#pragma once
 +
 +#include "skippy/common.h"
@@ -1447,6 +1483,8 @@ index 000000000..ee1e43035
 +struct skippy_model;
 +struct skippy_runtime_config;
 +struct skippy_runtime_event_reporter_v1;
++struct skippy_runtime_event_scope;
++struct llama_model;
 +
 +extern "C" {
 +
@@ -1465,13 +1503,20 @@ index 000000000..ee1e43035
 +        skippy_model ** out_model,
 +        skippy_error ** out_error);
 +
++enum skippy_status skippy_finish_model_open(
++        llama_model * model,
++        const skippy_runtime_config * config,
++        skippy_runtime_event_scope * event_scope,
++        skippy_model ** out_model,
++        skippy_error ** out_error);
++
 +} // extern "C"
 diff --git a/src/skippy/model_package.cpp b/src/skippy/model_package.cpp
 new file mode 100644
-index 000000000..65d15b717
+index 000000000..ffd84c132
 --- /dev/null
 +++ b/src/skippy/model_package.cpp
-@@ -0,0 +1,727 @@
+@@ -0,0 +1,738 @@
 +#include "skippy/model_package.h"
 +#include "skippy/errors.h"
 +
@@ -1515,6 +1560,7 @@ index 000000000..65d15b717
 +    int32_t layer_end = 0;
 +    bool include_embeddings = false;
 +    bool include_output = false;
++    bool include_per_layer_token_embd = false;
 +};
 +
 +struct skippy_slice_plan {
@@ -1724,7 +1770,15 @@ index 000000000..65d15b717
 +    return ok && info->tensors.size() == static_cast<size_t>(n_tensors);
 +}
 +
-+static bool skippy_tensor_selected(const skippy_tensor_meta & tensor, const skippy_slice_range & range) {
++static bool skippy_tensor_selected(
++        const skippy_tensor_meta & tensor,
++        const skippy_slice_range & range) {
++    if (tensor.name == "per_layer_token_embd.weight") {
++        // The caller plans from the complete tensor inventory. A single shard
++        // cannot infer ownership when this table and its PLE consumers live in
++        // different GGUF parts.
++        return range.include_per_layer_token_embd;
++    }
 +    if (tensor.layer_index >= 0) {
 +        return tensor.layer_index >= range.layer_start && tensor.layer_index < range.layer_end;
 +    }
@@ -2007,6 +2061,7 @@ index 000000000..65d15b717
 +        int32_t layer_end,
 +        bool include_embeddings,
 +        bool include_output,
++        bool include_per_layer_token_embd,
 +        struct skippy_error ** out_error) {
 +    if (plan == nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "plan is required");
@@ -2023,6 +2078,7 @@ index 000000000..65d15b717
 +    range.layer_end = layer_end;
 +    range.include_embeddings = include_embeddings;
 +    range.include_output = include_output;
++    range.include_per_layer_token_embd = include_per_layer_token_embd;
 +    plan->ranges.push_back(range);
 +    return skippy_success(out_error);
 +}
@@ -2199,12 +2255,619 @@ index 000000000..65d15b717
 +
 +    return skippy_success(out_error);
 +}
+diff --git a/src/skippy/model_source.cpp b/src/skippy/model_source.cpp
+new file mode 100644
+index 000000000..b0e475ee6
+--- /dev/null
++++ b/src/skippy/model_source.cpp
+@@ -0,0 +1,458 @@
++#include "skippy/model_source.h"
++
++#include "skippy/errors.h"
++#include "skippy/model_load_config_internal.h"
++#include "skippy/model_loading_internal.h"
++#include "skippy/runtime.h"
++
++#include "ggml-backend.h"
++#include "gguf.h"
++#include "llama-ext.h"
++#include "llama-hparams.h"
++#include "llama-model-loader.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <limits>
++#include <stdexcept>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++using skippy_imatrix_map = std::unordered_map<std::string, const skippy_model_imatrix_entry_v1 *>;
++
++static bool skippy_build_imatrix(
++        const skippy_model_tensor_source_v1 * source,
++        skippy_imatrix_map & entries,
++        std::vector<llama_model_imatrix_data> & native_entries,
++        std::string & error) {
++    if (source->imatrix_count > 0 && source->imatrix == nullptr) {
++        error = "importance matrix count requires a non-null entry array";
++        return false;
++    }
++    native_entries.reserve(source->imatrix_count + 1);
++    for (size_t i = 0; i < source->imatrix_count; ++i) {
++        const skippy_model_imatrix_entry_v1 & entry = source->imatrix[i];
++        if (entry.tensor_name == nullptr || entry.values == nullptr || entry.value_count == 0) {
++            error = "importance matrix entries require a name and non-empty values";
++            return false;
++        }
++        for (size_t value_index = 0; value_index < entry.value_count; ++value_index) {
++            if (!std::isfinite(entry.values[value_index])) {
++                error = "importance matrix contains a non-finite value";
++                return false;
++            }
++        }
++        if (!entries.emplace(entry.tensor_name, &entry).second) {
++            error = std::string("duplicate importance matrix entry for ") + entry.tensor_name;
++            return false;
++        }
++        native_entries.push_back({ entry.tensor_name, entry.values, entry.value_count });
++    }
++    native_entries.push_back({ nullptr, nullptr, 0 });
++    return true;
++}
++
++static uint32_t skippy_gguf_u32_or(
++        const gguf_context * metadata,
++        const std::string & key,
++        uint32_t fallback) {
++    const int64_t key_id = gguf_find_key(metadata, key.c_str());
++    if (key_id < 0) {
++        return fallback;
++    }
++    switch (gguf_get_kv_type(metadata, key_id)) {
++        case GGUF_TYPE_UINT32:
++            return gguf_get_val_u32(metadata, key_id);
++        case GGUF_TYPE_INT32: {
++            const int32_t value = gguf_get_val_i32(metadata, key_id);
++            return value > 0 ? static_cast<uint32_t>(value) : fallback;
++        }
++        case GGUF_TYPE_ARRAY:
++            break;
++        default:
++            return fallback;
++    }
++
++    uint32_t result = fallback;
++    const size_t count = gguf_get_arr_n(metadata, key_id);
++    switch (gguf_get_arr_type(metadata, key_id)) {
++        case GGUF_TYPE_UINT32: {
++            const auto * values = static_cast<const uint32_t *>(gguf_get_arr_data(metadata, key_id));
++            for (size_t i = 0; i < count; ++i) {
++                result = std::max(result, values[i]);
++            }
++            break;
++        }
++        case GGUF_TYPE_INT32: {
++            const auto * values = static_cast<const int32_t *>(gguf_get_arr_data(metadata, key_id));
++            for (size_t i = 0; i < count; ++i) {
++                if (values[i] > 0) {
++                    result = std::max(result, static_cast<uint32_t>(values[i]));
++                }
++            }
++            break;
++        }
++        default:
++            break;
++    }
++    return result;
++}
++
++static bool skippy_imatrix_size(
++        const ggml_tensor * tensor,
++        size_t & result,
++        std::string & error) {
++    if (tensor->ne[0] <= 0 || tensor->ne[2] <= 0 ||
++        static_cast<uint64_t>(tensor->ne[0]) > std::numeric_limits<size_t>::max() /
++                static_cast<uint64_t>(tensor->ne[2])) {
++        error = std::string("invalid importance matrix shape for tensor ") + ggml_get_name(tensor);
++        return false;
++    }
++    result = static_cast<size_t>(tensor->ne[0]) * static_cast<size_t>(tensor->ne[2]);
++    return true;
++}
++
++static bool skippy_apply_source_quantization(
++        gguf_context * metadata,
++        ggml_context * tensor_context,
++        int32_t quantization_ftype,
++        const skippy_imatrix_map & imatrix,
++        const llama_model_imatrix_data * native_imatrix,
++        std::string & error) {
++    if (quantization_ftype < 0) {
++        return true;
++    }
++
++    const int64_t architecture_id = gguf_find_key(metadata, "general.architecture");
++    if (architecture_id < 0) {
++        error = "metadata GGUF is missing general.architecture";
++        return false;
++    }
++    if (gguf_get_kv_type(metadata, architecture_id) != GGUF_TYPE_STRING) {
++        error = "metadata GGUF general.architecture must be a string";
++        return false;
++    }
++    const char * architecture = gguf_get_val_str(metadata, architecture_id);
++    const std::string prefix = architecture;
++    const uint32_t n_embd = skippy_gguf_u32_or(metadata, prefix + ".embedding_length", 0);
++    const uint32_t n_head = skippy_gguf_u32_or(metadata, prefix + ".attention.head_count", 0);
++    llama_quant_model_desc desc = {
++        /*.architecture =*/ architecture,
++        /*.n_embd =*/ n_embd,
++        /*.n_ff =*/ skippy_gguf_u32_or(metadata, prefix + ".feed_forward_length", 0),
++        /*.n_layer =*/ skippy_gguf_u32_or(metadata, prefix + ".block_count", 0),
++        /*.n_head =*/ n_head,
++        /*.n_head_kv =*/ skippy_gguf_u32_or(metadata, prefix + ".attention.head_count_kv", n_head),
++        /*.n_expert =*/ skippy_gguf_u32_or(metadata, prefix + ".expert_count", 0),
++        /*.n_embd_head_k =*/ skippy_gguf_u32_or(
++                metadata,
++                prefix + ".attention.key_length",
++                n_head > 0 ? n_embd / n_head : 0),
++        /*.n_embd_head_v =*/ skippy_gguf_u32_or(
++                metadata,
++                prefix + ".attention.value_length",
++                n_head > 0 ? n_embd / n_head : 0),
++    };
++    if (desc.n_layer == 0 || desc.n_layer > LLAMA_MAX_LAYERS) {
++        error = "metadata GGUF has an invalid block count for quantization";
++        return false;
++    }
++    llama_model * quant_model = llama_quant_model_from_metadata(&desc);
++    if (quant_model == nullptr) {
++        error = "failed to construct quantization policy from checkpoint metadata";
++        return false;
++    }
++    llama_model_quantize_params quant_params = llama_model_quantize_default_params();
++    quant_params.ftype = static_cast<llama_ftype>(quantization_ftype);
++    quant_params.imatrix = native_imatrix;
++    quantize_state_impl * quant_state = llama_quant_init(quant_model, &quant_params);
++    if (quant_state == nullptr) {
++        llama_model_free(quant_model);
++        error = "failed to initialize tensor quantization policy";
++        return false;
++    }
++
++    std::vector<ggml_tensor *> tensors;
++    for (ggml_tensor * tensor = ggml_get_first_tensor(tensor_context);
++         tensor != nullptr;
++         tensor = ggml_get_next_tensor(tensor_context, tensor)) {
++        if (llama_quant_tensor_allows_quantization(quant_state, tensor)) {
++            tensors.push_back(tensor);
++        }
++    }
++    std::vector<ggml_type> result_types(tensors.size());
++    if (!tensors.empty()) {
++        llama_quant_compute_types(
++                quant_state,
++                static_cast<llama_ftype>(quantization_ftype),
++                tensors.data(),
++                result_types.data(),
++                tensors.size());
++    }
++    for (size_t i = 0; i < tensors.size(); ++i) {
++        if (llama_quant_tensor_requires_imatrix(
++                    tensors[i], result_types[i], static_cast<llama_ftype>(quantization_ftype))) {
++            const auto entry = imatrix.find(ggml_get_name(tensors[i]));
++            size_t expected = 0;
++            if (!skippy_imatrix_size(tensors[i], expected, error)) {
++                llama_quant_free(quant_state);
++                llama_model_free(quant_model);
++                return false;
++            }
++            if (entry == imatrix.end()) {
++                error = std::string("missing importance matrix for tensor ") + ggml_get_name(tensors[i]);
++                llama_quant_free(quant_state);
++                llama_model_free(quant_model);
++                return false;
++            }
++            if (entry->second->value_count != expected) {
++                error = std::string("importance matrix size mismatch for tensor ") + ggml_get_name(tensors[i]);
++                llama_quant_free(quant_state);
++                llama_model_free(quant_model);
++                return false;
++            }
++        }
++        gguf_set_tensor_type(metadata, ggml_get_name(tensors[i]), result_types[i]);
++    }
++    llama_quant_free(quant_state);
++    llama_model_free(quant_model);
++    return true;
++}
++
++struct skippy_model_source_state {
++    const skippy_model_tensor_source_v1 * source = nullptr;
++    const skippy_imatrix_map * imatrix = nullptr;
++    std::string error;
++};
++
++static void skippy_set_model_tensor_from_source(ggml_tensor * tensor, void * user_data) {
++    auto * state = static_cast<skippy_model_source_state *>(user_data);
++    const int64_t element_count_i64 = ggml_nelements(tensor);
++    if (element_count_i64 < 0) {
++        throw std::runtime_error("source tensor has a negative element count");
++    }
++    const size_t element_count = static_cast<size_t>(element_count_i64);
++    std::vector<float> source_values(element_count);
++    const char * callback_message = nullptr;
++    const skippy_status status = state->source->read_tensor_f32(
++            ggml_get_name(tensor),
++            source_values.data(),
++            element_count,
++            &callback_message,
++            state->source->user_data);
++    if (status != SKIPPY_STATUS_OK) {
++        state->error = callback_message != nullptr
++                ? callback_message
++                : "model tensor source callback failed";
++        throw std::runtime_error(state->error);
++    }
++
++    const int64_t elements_per_row = tensor->ne[0];
++    if (elements_per_row <= 0 || element_count_i64 % elements_per_row != 0) {
++        state->error = "source tensor has an invalid row shape";
++        throw std::runtime_error(state->error);
++    }
++    std::vector<uint8_t> encoded(ggml_nbytes(tensor));
++    const float * imatrix = nullptr;
++    const auto imatrix_entry = state->imatrix->find(ggml_get_name(tensor));
++    if (imatrix_entry != state->imatrix->end()) {
++        size_t expected = 0;
++        if (!skippy_imatrix_size(tensor, expected, state->error)) {
++            throw std::runtime_error(state->error);
++        }
++        if (imatrix_entry->second->value_count != expected) {
++            state->error = std::string("importance matrix size mismatch for tensor ") + ggml_get_name(tensor);
++            throw std::runtime_error(state->error);
++        }
++        imatrix = imatrix_entry->second->values;
++    }
++    size_t written = 0;
++    if (imatrix != nullptr && tensor->ne[2] > 1) {
++        // llama.cpp records one importance vector per expert. Quantize 3-D
++        // expert tensors one slice at a time so each expert sees its own
++        // ne[0]-wide vector instead of reusing expert zero's weights.
++        const int64_t rows_per_expert = tensor->ne[1];
++        for (int64_t expert = 0; expert < tensor->ne[2]; ++expert) {
++            written += ggml_quantize_chunk(
++                    tensor->type,
++                    source_values.data(),
++                    encoded.data(),
++                    expert * rows_per_expert * elements_per_row,
++                    rows_per_expert,
++                    elements_per_row,
++                    imatrix + expert * elements_per_row);
++        }
++    } else {
++        written = ggml_quantize_chunk(
++                tensor->type,
++                source_values.data(),
++                encoded.data(),
++                0,
++                element_count_i64 / elements_per_row,
++                elements_per_row,
++                imatrix);
++    }
++    if (written != encoded.size()) {
++        state->error = "source tensor encoding produced an unexpected byte count";
++        throw std::runtime_error(state->error);
++    }
++    ggml_backend_tensor_set(tensor, encoded.data(), 0, encoded.size());
++}
++
++struct skippy_source_filter_scope {
++    explicit skippy_source_filter_scope(const skippy_runtime_config * config) {
++        if (config != nullptr && config->filter_tensors_on_load) {
++            llama_model_loader_stage_filter filter;
++            filter.enabled = true;
++            filter.layer_start = config->layer_start;
++            filter.layer_end = config->layer_end;
++            if (config->include_output && filter.layer_end < std::numeric_limits<int32_t>::max()) {
++                filter.layer_end += 1;
++            }
++            filter.include_embeddings = config->include_embeddings;
++            filter.include_output = config->include_output;
++            llama_model_loader_set_stage_filter(filter);
++            enabled = true;
++        }
++    }
++
++    ~skippy_source_filter_scope() {
++        if (enabled) {
++            llama_model_loader_clear_stage_filter();
++        }
++    }
++
++    bool enabled = false;
++};
++
++static enum skippy_status skippy_model_open_from_source_impl(
++        const void * metadata_gguf,
++        size_t metadata_gguf_size,
++        const struct skippy_model_tensor_source_v1 * source,
++        int32_t quantization_ftype,
++        const struct skippy_runtime_config * config,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error) {
++    if (metadata_gguf == nullptr || metadata_gguf_size == 0 || source == nullptr ||
++        source->abi_version != SKIPPY_MODEL_TENSOR_SOURCE_V1_ABI_VERSION ||
++        source->struct_size < sizeof(skippy_model_tensor_source_v1) ||
++        source->read_tensor_f32 == nullptr || out_model == nullptr) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "valid metadata, tensor source, and out_model are required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    *out_model = nullptr;
++    if (config != nullptr && config->filter_tensors_on_load &&
++        (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "layer_start must be non-negative and less than layer_end");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    skippy_imatrix_map imatrix;
++    std::vector<llama_model_imatrix_data> native_imatrix;
++    std::string imatrix_error;
++    if (!skippy_build_imatrix(source, imatrix, native_imatrix, imatrix_error)) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, imatrix_error.c_str());
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
++    ggml_context * tensor_context = nullptr;
++    gguf_init_params init_params = { true, &tensor_context };
++    gguf_context * metadata = gguf_init_from_buffer(metadata_gguf, metadata_gguf_size, init_params);
++    if (metadata == nullptr || tensor_context == nullptr) {
++        if (tensor_context != nullptr) {
++            ggml_free(tensor_context);
++        }
++        if (metadata != nullptr) {
++            gguf_free(metadata);
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to parse metadata-only GGUF");
++        return SKIPPY_STATUS_MODEL_ERROR;
++    }
++
++    std::string quant_error;
++    const llama_model_imatrix_data * native_imatrix_ptr =
++            source->imatrix_count > 0 ? native_imatrix.data() : nullptr;
++    if (!skippy_apply_source_quantization(
++                metadata,
++                tensor_context,
++                quantization_ftype,
++                imatrix,
++                native_imatrix_ptr,
++                quant_error)) {
++        ggml_free(tensor_context);
++        gguf_free(metadata);
++        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, quant_error.c_str());
++        return SKIPPY_STATUS_MODEL_ERROR;
++    }
++
++    llama_model_params params = llama_model_default_params();
++    params.load_mtp = config != nullptr && config->include_output &&
++                      config->mtp_source == SKIPPY_MTP_SOURCE_INTEGRATED;
++    if (config != nullptr) {
++        params.n_gpu_layers = config->n_gpu_layers;
++        skippy_apply_model_load_memory_config(config, params);
++    }
++    llama_backend_init();
++    if (!ggml_backend_reg_count()) {
++        ggml_backend_load_all();
++    }
++    std::vector<ggml_backend_dev_t> selected_devices;
++    const skippy_status device_status = skippy_apply_selected_backend_device(
++            config, params, selected_devices, out_error);
++    if (device_status != SKIPPY_STATUS_OK) {
++        ggml_free(tensor_context);
++        gguf_free(metadata);
++        return device_status;
++    }
++
++    skippy_model_source_state state = { source, &imatrix, {} };
++    skippy_source_filter_scope filter_scope(config);
++    llama_model * model = llama_model_init_from_user(
++            metadata,
++            skippy_set_model_tensor_from_source,
++            &state,
++            params);
++    ggml_free(tensor_context);
++    gguf_free(metadata);
++    if (model == nullptr) {
++        const char * message = state.error.empty()
++                ? "failed to load model from tensor source"
++                : state.error.c_str();
++        skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, message);
++        return SKIPPY_STATUS_MODEL_ERROR;
++    }
++    return skippy_finish_model_open(model, config, nullptr, out_model, out_error);
++}
++
++enum skippy_status skippy_model_open_from_source(
++        const void * metadata_gguf,
++        size_t metadata_gguf_size,
++        const struct skippy_model_tensor_source_v1 * source,
++        int32_t quantization_ftype,
++        const struct skippy_runtime_config * config,
++        struct skippy_model ** out_model,
++        struct skippy_error ** out_error) {
++    try {
++        return skippy_model_open_from_source_impl(
++                metadata_gguf,
++                metadata_gguf_size,
++                source,
++                quantization_ftype,
++                config,
++                out_model,
++                out_error);
++    } catch (const std::exception & exception) {
++        if (out_model != nullptr) {
++            *out_model = nullptr;
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, exception.what());
++        return SKIPPY_STATUS_RUNTIME_ERROR;
++    } catch (...) {
++        if (out_model != nullptr) {
++            *out_model = nullptr;
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_RUNTIME_ERROR, "unexpected failure while loading callback tensor source");
++        return SKIPPY_STATUS_RUNTIME_ERROR;
++    }
++}
+diff --git a/src/skippy/package_tensor_binding.cpp b/src/skippy/package_tensor_binding.cpp
+new file mode 100644
+index 000000000..3c816dfcc
+--- /dev/null
++++ b/src/skippy/package_tensor_binding.cpp
+@@ -0,0 +1,104 @@
++#include "package_tensor_binding.h"
++
++#include "llama-model.h"
++
++#include <algorithm>
++#include <limits>
++#include <map>
++#include <set>
++
++namespace {
++
++bool valid_dimensions(const std::vector<int64_t> & dimensions) {
++    return !dimensions.empty() &&
++           dimensions.size() <= GGML_MAX_DIMS &&
++           std::all_of(dimensions.begin(), dimensions.end(), [](int64_t dimension) {
++               return dimension > 0;
++           });
++}
++
++bool tensor_dimensions_match(
++        const ggml_tensor * tensor,
++        const std::vector<int64_t> & dimensions) {
++    if (tensor == nullptr || ggml_n_dims(tensor) != static_cast<int>(dimensions.size())) {
++        return false;
++    }
++    for (size_t index = 0; index < dimensions.size(); ++index) {
++        if (tensor->ne[index] != dimensions[index]) {
++            return false;
++        }
++    }
++    return true;
++}
++
++}
++
++bool skippy_bind_package_tensors(
++        const llama_model * model,
++        const std::vector<skippy_package_tensor_binding_input> & inputs,
++        std::vector<skippy_parameter_binding> & bindings,
++        std::string & error) {
++    bindings.clear();
++    error.clear();
++    if (model == nullptr || inputs.empty()) {
++        error = "package tensor binding requires a model and a non-empty catalog";
++        return false;
++    }
++
++    std::map<std::string, const ggml_tensor *> native_tensors;
++    for (const auto & [name, tensor] : llama_internal_get_tensor_map(model)) {
++        if (name.empty() || tensor == nullptr || !native_tensors.emplace(name, tensor).second) {
++            error = "native model tensor inventory is incomplete or duplicated";
++            return false;
++        }
++    }
++    if (native_tensors.size() != inputs.size()) {
++        error = "package and native tensor inventory sizes differ";
++        return false;
++    }
++
++    std::set<std::string> native_names;
++    std::string previous_tensor_id;
++    bindings.reserve(inputs.size());
++    for (const auto & input : inputs) {
++        if (input.tensor_id.empty() ||
++                (!previous_tensor_id.empty() && input.tensor_id <= previous_tensor_id)) {
++            error = "package tensor IDs are empty or not strictly increasing";
++            return false;
++        }
++        previous_tensor_id = input.tensor_id;
++        if (input.native_name.empty() || !native_names.insert(input.native_name).second) {
++            error = "package native tensor locators are empty or duplicated";
++            return false;
++        }
++        if (input.type < 0 || input.type >= GGML_TYPE_COUNT ||
++                !valid_dimensions(input.dimensions) || input.stored_length == 0) {
++            error = "package tensor metadata is incomplete";
++            return false;
++        }
++        const auto found = native_tensors.find(input.native_name);
++        if (found == native_tensors.end()) {
++            error = "package tensor locator is absent from the native model: " + input.native_name;
++            return false;
++        }
++        const ggml_tensor * tensor = found->second;
++        if (tensor->type != input.type || !tensor_dimensions_match(tensor, input.dimensions) ||
++                ggml_nbytes(tensor) != input.stored_length) {
++            error = "package tensor metadata differs from the native model: " + input.native_name;
++            return false;
++        }
++        uint16_t split_no = 0;
++        size_t data_offset = 0;
++        size_t stored_length = 0;
++        if (!model->tensor_source_location(
++                    input.native_name.c_str(), split_no, data_offset, stored_length) ||
++                split_no != input.split_no ||
++                data_offset != input.data_offset ||
++                stored_length != input.stored_length) {
++            error = "package tensor storage locator differs from the native model: " + input.native_name;
++            return false;
++        }
++        bindings.push_back({tensor, input.tensor_id});
++    }
++    return true;
++}
+diff --git a/src/skippy/package_tensor_binding.h b/src/skippy/package_tensor_binding.h
+new file mode 100644
+index 000000000..751048af8
+--- /dev/null
++++ b/src/skippy/package_tensor_binding.h
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include "graph_identity.h"
++
++#include "ggml.h"
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++struct llama_model;
++
++struct skippy_package_tensor_binding_input {
++    std::string tensor_id;
++    std::string native_name;
++    ggml_type type = GGML_TYPE_COUNT;
++    std::vector<int64_t> dimensions;
++    uint16_t split_no = 0;
++    uint64_t data_offset = 0;
++    uint64_t stored_length = 0;
++};
++
++bool skippy_bind_package_tensors(
++        const llama_model * model,
++        const std::vector<skippy_package_tensor_binding_input> & inputs,
++        std::vector<skippy_parameter_binding> & bindings,
++        std::string & error);
 diff --git a/src/skippy/runtime_support.h b/src/skippy/runtime_support.h
 new file mode 100644
-index 000000000..da305e80c
+index 000000000..2d35f7d5f
 --- /dev/null
 +++ b/src/skippy/runtime_support.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,37 @@
 +#pragma once
 +
 +#include "skippy/common.h"
@@ -2214,6 +2877,7 @@ index 000000000..da305e80c
 +#include <cstdint>
 +
 +struct llama_model;
++struct skippy_model;
 +struct skippy_session;
 +
 +void skippy_disable_chat_grammar_after_exception(
@@ -2225,9 +2889,17 @@ index 000000000..da305e80c
 +        const skippy_session * session,
 +        skippy_error ** out_error);
 +int32_t skippy_stage_layer_count(const llama_model * model);
++int32_t skippy_claim_execution_lane(skippy_model * model);
++void skippy_release_execution_lane(skippy_model * model, int32_t seq_id);
++void skippy_mark_context_work_pending(skippy_model * model);
++void skippy_mark_context_synchronized(skippy_model * model);
++void skippy_synchronize_context_if_pending(skippy_model * model);
 +bool skippy_memory_needs_verify_checkpoint(llama_memory_t memory);
 +void skippy_mtp_clear_session_state(skippy_session * session);
 +void skippy_clear_chat_sampling(skippy_session * session);
++bool skippy_verify_window_can_roll_back_in_place(
++        const skippy_session * session,
++        size_t token_count);
 +enum skippy_status skippy_restore_verify_prefix(
 +        skippy_session * session,
 +        uint64_t token_count,
@@ -2235,10 +2907,10 @@ index 000000000..da305e80c
 +        skippy_error ** out_error);
 diff --git a/src/skippy/runtime_types.h b/src/skippy/runtime_types.h
 new file mode 100644
-index 000000000..c20c52e71
+index 000000000..a82b64408
 --- /dev/null
 +++ b/src/skippy/runtime_types.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,159 @@
 +#pragma once
 +
 +#include "skippy.h"
@@ -2246,8 +2918,10 @@ index 000000000..c20c52e71
 +#include "llama-context.h"
 +#include "llama-model.h"
 +
++#include <atomic>
 +#include <cstddef>
 +#include <cstdint>
++#include <mutex>
 +#include <string>
 +#include <vector>
 +
@@ -2322,12 +2996,21 @@ index 000000000..c20c52e71
 +    llama_context * ctx = nullptr;
 +    llama_model * mtp_model = nullptr;
 +    llama_context * mtp_ctx = nullptr;
++    std::atomic<bool> context_work_pending{false};
 +    skippy_runtime_config config = {};
 +    skippy_glm_dsa_op_timing glm_dsa_timing = {};
 +    bool executable = true;
++    bool has_input_activation_boundary = false;
++    skippy_activation_boundary_desc input_activation_boundary = {};
++    bool has_output_activation_boundary = false;
++    skippy_activation_boundary_desc output_activation_boundary = {};
 +    uint32_t lane_count = 1;
++    std::mutex lane_mutex;
 +    std::vector<bool> lane_in_use;
 +    std::vector<std::vector<llama_token>> lane_resident_prefix_tokens;
++    std::mutex chat_templates_mutex;
++    void * chat_templates = nullptr;
++    void (*chat_templates_free)(void *) = nullptr;
 +};
 +
 +struct skippy_verify_checkpoint {
@@ -2352,8 +3035,19 @@ index 000000000..c20c52e71
 +    int32_t preserve_prefix_tokens = 0;
 +    std::vector<llama_token> token_history;
 +    std::vector<skippy_token_signal> signal_history;
++    std::vector<llama_pos> prefill_positions;
++    std::vector<int32_t> prefill_n_seq_ids;
++    std::vector<llama_seq_id> prefill_seq_ids;
++    std::vector<llama_seq_id *> prefill_seq_id_ptrs;
++    std::vector<int8_t> prefill_logits;
 +    llama_sampler * sampling_chain = nullptr;
 +    llama_sampler * grammar_sampler = nullptr;
++    bool sampling_backend_enabled = false;
++    // A sampler chain may be backend-initialized at most once
++    // (llama_sampler_chain_backend_init asserts on reuse). Once a chain is
++    // detached -- e.g. so a sampled verify window can output every row --
++    // it must never be re-attached; only building a fresh chain clears this.
++    bool sampling_backend_retired = false;
 +    skippy_sampling_config sampling_config = {};
 +    bool sampling_config_valid = false;
 +    std::string chat_sampling_metadata;
@@ -2366,12 +3060,16 @@ index 000000000..c20c52e71
 +    bool mtp_has_pending_draft = false;
 +    llama_pos mtp_pending_draft_pos = 0;
 +    llama_token mtp_pending_draft_token = -1;
++    // One past the highest position the last proposal wrote into a sidecar
++    // cache of its own. Only the first drafted token is recorded above, so this
++    // is the boundary the next sync prunes back to once the accepted prefix is
++    // known.
++    llama_pos mtp_pending_draft_end = 0;
 +    bool external_mtp_embeddings_available = false;
 +    std::vector<float> external_mtp_embeddings;
 +    bool reset_required = false;
 +    std::vector<skippy_verify_checkpoint> verify_checkpoints;
 +};
-+
 -- 
-2.55.0
+2.54.0 (Apple Git-157)
 

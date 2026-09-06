@@ -34,7 +34,11 @@ LEGACY_TARGETS = {
 
 class LlamaNativeFullReplayTests(unittest.TestCase):
     def run_build(
-        self, *, full_replay: bool, repeat_cached: bool = False
+        self,
+        *,
+        full_replay: bool,
+        upstream_tests: bool = False,
+        repeat_cached: bool = False,
     ) -> list[dict[str, object]]:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -129,6 +133,8 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
             )
             if full_replay:
                 environment["LLAMA_STAGE_FULL_REPLAY"] = "ON"
+            if upstream_tests:
+                environment["LLAMA_STAGE_UPSTREAM_TESTS"] = "ON"
 
             for run_number in range(2 if repeat_cached else 1):
                 if run_number:
@@ -163,6 +169,7 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
 
         self.assertIn("-DLLAMA_BUILD_TESTS=ON", configure["args"])
         self.assertIn("-DLLAMA_STAGE_BUILD_TESTS=ON", configure["args"])
+        self.assertIn("-DLLAMA_BUILD_SERVER=OFF", configure["args"])
         self.assertTrue(PRIVATE_TARGETS.issubset(build["args"]))
         self.assertTrue(LEGACY_TARGETS.issubset(build["args"]))
         self.assertNotIn("test-llama-archs", build["args"])
@@ -198,6 +205,20 @@ class LlamaNativeFullReplayTests(unittest.TestCase):
 
         self.assertEqual(len(build_calls), 1)
         self.assertFalse(any(call["tool"] == "ctest" for call in trace))
+
+    def test_upstream_suite_builds_default_targets_and_runs_all_ctests(self) -> None:
+        trace = self.run_build(full_replay=False, upstream_tests=True)
+        configure = next(call for call in trace if call["args"][0] != "--build")
+        build = next(call for call in trace if call["args"][0] == "--build")
+        ctest = next(call for call in trace if call["tool"] == "ctest")
+
+        self.assertIn("-DLLAMA_BUILD_TESTS=ON", configure["args"])
+        self.assertIn("-DLLAMA_STAGE_BUILD_TESTS=ON", configure["args"])
+        self.assertIn("-DLLAMA_BUILD_SERVER=ON", configure["args"])
+        self.assertNotIn("--target", build["args"])
+        self.assertNotIn("-R", ctest["args"])
+        self.assertIn("--output-on-failure", ctest["args"])
+        self.assertEqual(ctest["args"][ctest["args"].index("--timeout") + 1], "900")
 
     def test_just_recipe_uses_a_dedicated_forced_replay_build(self) -> None:
         recipe = (ROOT / "just" / "skippy.just").read_text(encoding="utf-8")

@@ -1,0 +1,3415 @@
+From 5c68a3ca9b429a76b02c71163e561b0154646a0b Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:13 +1000
+Subject: [PATCH 06/11] test(skippy): cover graph planning and stage contracts
+
+---
+ src/skippy/tests/graph_build_inputs.cpp       |  320 +++++
+ .../tests/hardware_application_probe.cpp      |   64 +
+ src/skippy/tests/noalloc_graph_planning.cpp   | 1023 ++++++++++++++++
+ .../tests/renamed_multishard_planning.cpp     |  882 ++++++++++++++
+ src/skippy/tests/stage_plan_header.c          |   10 +
+ src/skippy/tests/stage_plan_header.cpp        |   13 +
+ src/skippy/tests/stage_slice_plan.cpp         | 1036 +++++++++++++++++
+ 7 files changed, 3348 insertions(+)
+ create mode 100644 src/skippy/tests/graph_build_inputs.cpp
+ create mode 100644 src/skippy/tests/hardware_application_probe.cpp
+ create mode 100644 src/skippy/tests/noalloc_graph_planning.cpp
+ create mode 100644 src/skippy/tests/renamed_multishard_planning.cpp
+ create mode 100644 src/skippy/tests/stage_plan_header.c
+ create mode 100644 src/skippy/tests/stage_plan_header.cpp
+ create mode 100644 src/skippy/tests/stage_slice_plan.cpp
+
+diff --git a/src/skippy/tests/graph_build_inputs.cpp b/src/skippy/tests/graph_build_inputs.cpp
+new file mode 100644
+index 000000000..bfea3d5ca
+--- /dev/null
++++ b/src/skippy/tests/graph_build_inputs.cpp
+@@ -0,0 +1,320 @@
++#include "llama-context.h"
++#include "llama-graph.h"
++#include "llama-memory.h"
++#include "llama-model.h"
++#include "llama.h"
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <thread>
++#include <vector>
++
++class recording_input final : public llm_graph_input_i {
++public:
++    void set_build_inputs(const skippy_graph_build_inputs & inputs) override {
++        observed = inputs;
++        set_count++;
++    }
++
++    void set_input(const llama_ubatch *) override {
++        input_count++;
++    }
++
++    skippy_graph_build_inputs observed;
++    uint32_t set_count = 0;
++    uint32_t input_count = 0;
++};
++
++static skippy_graph_build_inputs make_inputs(uint32_t id) {
++    skippy_graph_build_inputs inputs;
++    inputs.filter.enabled = true;
++    inputs.filter.layer_start = static_cast<int32_t>(id);
++    inputs.filter.layer_end = static_cast<int32_t>(id + 3);
++    inputs.filter.include_embeddings = id % 2 == 0;
++    inputs.filter.include_output = id % 3 == 0;
++    inputs.filter.glm_dsa_policy_profile = static_cast<int32_t>(id + 10);
++    inputs.filter.glm_dsa_policy_flags = id + 20;
++    inputs.filter.glm_dsa_short_prefill_max_tokens = static_cast<int32_t>(id + 30);
++    inputs.filter.glm_dsa_direct_sparse_decode_max_top_k = static_cast<int32_t>(id + 40);
++    inputs.filter.glm_dsa_dense_sparse_mask_max_bytes = id + 50;
++    inputs.filter.glm_dsa_compact_flash_min_kv = static_cast<int32_t>(id + 60);
++    inputs.filter.glm_dsa_phase_hint = static_cast<int32_t>(id % 4);
++    inputs.activation_tokens.tokens = reinterpret_cast<const llama_token *>(static_cast<uintptr_t>(id + 1));
++    inputs.activation_tokens.token_count = id + 2;
++    inputs.rwkv7_v_first.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 3));
++    inputs.rwkv7_v_first.token_count = id + 4;
++    inputs.rwkv7_v_first.n_embd = id + 5;
++    inputs.gemma3n_altup.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 6));
++    inputs.gemma3n_altup.token_count = id + 7;
++    inputs.gemma3n_altup.n_embd = id + 8;
++    inputs.gemma3n_altup.n_altup = id + 9;
++    inputs.qwen4exp_hc.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 10));
++    inputs.qwen4exp_hc.token_count = id + 11;
++    inputs.qwen4exp_hc.n_embd = id + 12;
++    inputs.qwen4exp_hc.n_hc = id + 13;
++    inputs.glm_dsa_top_k.values = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(id + 14));
++    inputs.glm_dsa_top_k.token_count = id + 15;
++    inputs.glm_dsa_top_k.n_top_k = id + 16;
++    inputs.glm_dsa_top_k.n_stream = id + 17;
++    inputs.glm_dsa_top_k.pos_start = static_cast<llama_pos>(id + 18);
++    inputs.mtp_embeddings.values = reinterpret_cast<const float *>(static_cast<uintptr_t>(id + 19));
++    inputs.mtp_embeddings.token_count = id + 20;
++    inputs.mtp_embeddings.n_embd = id + 21;
++    inputs.mtp_embeddings.pos_start = static_cast<llama_pos>(id + 22);
++    return inputs;
++}
++
++static bool matches(const skippy_graph_build_inputs & inputs, uint32_t id) {
++    const auto expected = make_inputs(id);
++    return inputs.filter.enabled == expected.filter.enabled &&
++           inputs.filter.layer_start == expected.filter.layer_start &&
++           inputs.filter.layer_end == expected.filter.layer_end &&
++           inputs.activation_tokens.tokens == expected.activation_tokens.tokens &&
++           inputs.activation_tokens.token_count == expected.activation_tokens.token_count &&
++           inputs.rwkv7_v_first.values == expected.rwkv7_v_first.values &&
++           inputs.gemma3n_altup.values == expected.gemma3n_altup.values &&
++           inputs.qwen4exp_hc.values == expected.qwen4exp_hc.values &&
++           inputs.glm_dsa_top_k.values == expected.glm_dsa_top_k.values &&
++           inputs.mtp_embeddings.values == expected.mtp_embeddings.values;
++}
++
++static int check_sequential_and_nested_lifetimes() {
++    llm_graph_result outer(64);
++    auto outer_input = std::make_unique<recording_input>();
++    auto * outer_observer = outer_input.get();
++    outer.add_input(std::move(outer_input));
++    outer.set_inputs(nullptr, make_inputs(7));
++    if (!matches(outer.get_build_inputs(), 7) || !matches(outer_observer->observed, 7)) {
++        return 1;
++    }
++
++    {
++        llm_graph_result inner(64);
++        inner.set_inputs(nullptr, make_inputs(23));
++        if (!matches(inner.get_build_inputs(), 23) || !matches(outer.get_build_inputs(), 7)) {
++            return 2;
++        }
++    }
++
++    outer.set_inputs(nullptr, make_inputs(11));
++    if (!matches(outer.get_build_inputs(), 11) || !matches(outer_observer->observed, 11) ||
++            outer_observer->set_count != 2 || outer_observer->input_count != 2) {
++        return 3;
++    }
++
++    outer.reset();
++    if (outer.get_build_inputs().filter.enabled || outer.get_build_inputs().activation_tokens.tokens != nullptr) {
++        return 4;
++    }
++    return 0;
++}
++
++static int check_topology_reuse_guards() {
++    auto base = make_inputs(31);
++    auto changed_pointer = base;
++    changed_pointer.activation_tokens.tokens = reinterpret_cast<const llama_token *>(static_cast<uintptr_t>(999));
++    if (!base.topology_equal(changed_pointer)) {
++        return 5;
++    }
++
++    auto changed_filter = base;
++    changed_filter.filter.layer_end++;
++    if (base.topology_equal(changed_filter)) {
++        return 6;
++    }
++
++    auto removed_sideband = base;
++    removed_sideband.glm_dsa_top_k.values = nullptr;
++    if (base.topology_equal(removed_sideband)) {
++        return 7;
++    }
++
++    auto changed_shape = base;
++    changed_shape.mtp_embeddings.n_embd++;
++    if (base.topology_equal(changed_shape)) {
++        return 8;
++    }
++    return 0;
++}
++
++static int check_concurrent_builds() {
++    constexpr uint32_t thread_count = 12;
++    constexpr uint32_t iterations = 200;
++    std::atomic<uint32_t> ready { 0 };
++    std::atomic<bool> start { false };
++    std::atomic<bool> failed { false };
++    std::vector<std::thread> threads;
++    threads.reserve(thread_count);
++
++    for (uint32_t thread_id = 0; thread_id < thread_count; ++thread_id) {
++        threads.emplace_back([&, thread_id] {
++            llm_graph_result result(64);
++            auto input = std::make_unique<recording_input>();
++            auto * observer = input.get();
++            result.add_input(std::move(input));
++            ready.fetch_add(1, std::memory_order_release);
++            while (!start.load(std::memory_order_acquire)) {
++                std::this_thread::yield();
++            }
++            for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
++                const uint32_t id = thread_id*iterations + iteration + 1;
++                result.set_inputs(nullptr, make_inputs(id));
++                if (!matches(result.get_build_inputs(), id) || !matches(observer->observed, id)) {
++                    failed.store(true, std::memory_order_release);
++                    return;
++                }
++            }
++        });
++    }
++
++    while (ready.load(std::memory_order_acquire) != thread_count) {
++        std::this_thread::yield();
++    }
++    start.store(true, std::memory_order_release);
++    for (auto & thread : threads) {
++        thread.join();
++    }
++    return failed.load(std::memory_order_acquire) ? 9 : 0;
++}
++
++static skippy_graph_build_inputs make_stage_inputs(
++        int32_t layer_start,
++        int32_t layer_end,
++        bool include_embeddings,
++        bool include_output) {
++    skippy_graph_build_inputs inputs;
++    inputs.filter.enabled = true;
++    inputs.filter.layer_start = layer_start;
++    inputs.filter.layer_end = layer_end;
++    inputs.filter.include_embeddings = include_embeddings;
++    inputs.filter.include_output = include_output;
++    return inputs;
++}
++
++static llama_context_params make_context_params(uint32_t n_seq_max) {
++    llama_context_params params = llama_context_default_params();
++    params.n_ctx = 32;
++    params.n_batch = 8;
++    params.n_ubatch = 8;
++    params.n_seq_max = n_seq_max;
++    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    return params;
++}
++
++static llama_model * load_model(const char * path) {
++    llama_model_params params = llama_model_default_params();
++    params.n_gpu_layers = 0;
++    return llama_model_load_from_file(path, params);
++}
++
++static int check_sched_reserve_and_memory_update(const char * model_path) {
++    llama_model * model = load_model(model_path);
++    if (model == nullptr || llama_model_n_layer(model) < 2) {
++        llama_model_free(model);
++        return 10;
++    }
++
++    const auto startup = make_stage_inputs(0, llama_model_n_layer(model), true, true);
++    const auto reserve_inputs = make_stage_inputs(0, 1, true, false);
++    const auto update_inputs = make_stage_inputs(1, 2, false, true);
++    if (startup.topology_equal(reserve_inputs) || startup.topology_equal(update_inputs)) {
++        llama_model_free(model);
++        return 11;
++    }
++
++    llama_context * context = llama_init_from_model_with_graph_inputs(
++            model, make_context_params(2), startup);
++    if (context == nullptr) {
++        llama_model_free(model);
++        return 12;
++    }
++
++    context->set_causal_attn(false);
++    context->sched_reserve(reserve_inputs);
++    const auto * reserve_result = context->get_gf_res_reserve();
++    if (!reserve_result->get_build_inputs().topology_equal(reserve_inputs) ||
++            reserve_result->get_block_boundaries().size() != 2) {
++        llama_free(context);
++        llama_model_free(model);
++        return 13;
++    }
++
++    llama_memory_t memory = llama_get_memory(context);
++    if (memory == nullptr) {
++        llama_free(context);
++        llama_model_free(model);
++        return 14;
++    }
++    memory->seq_cp(0, 1, -1, -1);
++    if (!context->memory_update(false, update_inputs)) {
++        llama_free(context);
++        llama_model_free(model);
++        return 15;
++    }
++    const auto * update_result = context->get_gf_res_reserve();
++    if (!update_result->get_build_inputs().topology_equal(update_inputs) ||
++            update_result->get_block_boundaries().size() != 2) {
++        llama_free(context);
++        llama_model_free(model);
++        return 16;
++    }
++
++    llama_free(context);
++    llama_model_free(model);
++    return 0;
++}
++
++static int check_decode_encode_fallback(const char * model_path) {
++    llama_model * model = load_model(model_path);
++    if (model == nullptr) {
++        return 17;
++    }
++    const skippy_graph_build_inputs startup;
++    const auto per_call = make_stage_inputs(0, llama_model_n_layer(model), true, true);
++    llama_context * context = llama_init_from_model_with_graph_inputs(
++            model, make_context_params(1), startup);
++    if (context == nullptr || llama_get_memory(context) != nullptr) {
++        llama_free(context);
++        llama_model_free(model);
++        return 18;
++    }
++
++    llama_token token = 1;
++    llama_batch batch = llama_batch_get_one(&token, 1);
++    context->set_causal_attn(!context->get_cparams().causal_attn);
++    const int rc = context->decode(batch, per_call);
++    if (rc != 0 ||
++            !context->get_gf_res_reserve()->get_build_inputs().topology_equal(per_call) ||
++            !context->get_gf_res_prev()->get_build_inputs().topology_equal(per_call)) {
++        llama_free(context);
++        llama_model_free(model);
++        return 19;
++    }
++
++    llama_free(context);
++    llama_model_free(model);
++    return 0;
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 3) {
++        return 64;
++    }
++    if (const int rc = check_sequential_and_nested_lifetimes()) {
++        return rc;
++    }
++    if (const int rc = check_topology_reuse_guards()) {
++        return rc;
++    }
++    if (const int rc = check_concurrent_builds()) {
++        return rc;
++    }
++    llama_backend_init();
++    int rc = check_sched_reserve_and_memory_update(argv[1]);
++    if (rc == 0) {
++        rc = check_decode_encode_fallback(argv[2]);
++    }
++    llama_backend_free();
++    return rc;
++}
+diff --git a/src/skippy/tests/hardware_application_probe.cpp b/src/skippy/tests/hardware_application_probe.cpp
+new file mode 100644
+index 000000000..1a1bb0ca5
+--- /dev/null
++++ b/src/skippy/tests/hardware_application_probe.cpp
+@@ -0,0 +1,64 @@
++#include "skippy/model_load_config_internal.h"
++#include "skippy/runtime.h"
++
++#include <cstdio>
++
++static bool require(bool condition, const char * message) {
++    if (!condition) {
++        std::fprintf(stderr, "%s\n", message);
++    }
++    return condition;
++}
++
++int main() {
++    skippy_runtime_config config = skippy_runtime_config_default();
++    bool passed = true;
++    passed &= require(config.kv_offload == SKIPPY_TRISTATE_AUTO,
++            "default kv_offload must preserve the derived default");
++    passed &= require(config.kv_unified == SKIPPY_TRISTATE_AUTO,
++            "default kv_unified must preserve the derived default");
++    passed &= require(config.swa_full == SKIPPY_TRISTATE_AUTO,
++            "default swa_full must preserve the derived default");
++    passed &= require(config.op_offload == SKIPPY_TRISTATE_AUTO,
++            "default op_offload must preserve the derived default");
++    passed &= require(config.split_mode == SKIPPY_TRISTATE_AUTO,
++            "default split_mode must preserve the derived default");
++
++    config.use_direct_io = true;
++    config.use_mlock = true;
++    config.has_mmap_override = true;
++    config.use_mmap = true;
++    config.no_host_buffer = true;
++    config.check_tensors = true;
++    config.has_main_gpu_override = true;
++    config.main_gpu = 2;
++    config.split_mode = LLAMA_SPLIT_MODE_ROW;
++    config.disable_repack = true;
++
++    llama_model_params model_params = llama_model_default_params();
++    skippy_apply_model_load_memory_config(&config, model_params);
++
++    passed &= require(model_params.load_mode == LLAMA_LOAD_MODE_DIRECT_IO,
++            "direct I/O must take precedence over mmap and mlock");
++    passed &= require(model_params.main_gpu == 2, "main_gpu override was not applied");
++    passed &= require(model_params.split_mode == LLAMA_SPLIT_MODE_ROW, "split mode was not applied");
++    passed &= require(model_params.no_host, "host-buffer policy was not applied");
++    passed &= require(model_params.check_tensors, "tensor checking was not applied");
++    passed &= require(!model_params.use_extra_bufts, "disabled repack must disable extra buffer types");
++
++    llama_context_params context_params = llama_context_default_params();
++    context_params.op_offload = true;
++    config.op_offload = SKIPPY_TRISTATE_AUTO;
++    skippy_apply_context_hardware_config(&config, context_params);
++    passed &= require(context_params.op_offload, "auto op_offload must preserve the derived default");
++
++    config.op_offload = SKIPPY_TRISTATE_FALSE;
++    skippy_apply_context_hardware_config(&config, context_params);
++    passed &= require(!context_params.op_offload, "false op_offload override was not applied");
++
++    config.op_offload = SKIPPY_TRISTATE_TRUE;
++    skippy_apply_context_hardware_config(&config, context_params);
++    passed &= require(context_params.op_offload, "true op_offload override was not applied");
++
++    return passed ? 0 : 1;
++}
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+new file mode 100644
+index 000000000..f46288a22
+--- /dev/null
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -0,0 +1,1023 @@
++#include "ggml-backend.h"
++#include "ggml.h"
++#include "gguf.h"
++#include "llama-context.h"
++#include "llama-kv-cache.h"
++#include "llama-memory-hybrid.h"
++#include "llama-memory-recurrent.h"
++#include "llama-model.h"
++#include "llama.h"
++#include "skippy/block_boundaries.h"
++#include "skippy/executable_graph.h"
++#include "skippy/graph_dependencies.h"
++#include "skippy/stage_slice_plan.h"
++#include "skippy/state_effects.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <string>
++#include <unordered_set>
++#include <vector>
++
++static bool is_dummy_buffer(const ggml_tensor * tensor) {
++    return tensor != nullptr &&
++           tensor->buffer != nullptr &&
++           ggml_backend_buffer_get_size(tensor->buffer) == 0 &&
++           ggml_backend_buffer_get_base(tensor->buffer) == nullptr;
++}
++
++static bool check_model_buffers(const llama_model * model) {
++    const auto & tensors = llama_internal_get_tensor_map(model);
++    if (tensors.empty()) {
++        std::fprintf(stderr, "metadata-only model has no tensors\n");
++        return false;
++    }
++    for (const auto & [name, tensor] : tensors) {
++        if (!is_dummy_buffer(tensor)) {
++            std::fprintf(stderr, "model tensor %s has a payload allocation\n", name.c_str());
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool check_kv_buffers(const llama_kv_cache * memory) {
++    const auto layer_ids = memory->get_layer_ids();
++    if (layer_ids.empty()) {
++        std::fprintf(stderr, "metadata-only attention memory has no layers\n");
++        return false;
++    }
++    for (uint32_t layer_id : layer_ids) {
++        if (!is_dummy_buffer(memory->get_k_storage(static_cast<int32_t>(layer_id)))) {
++            std::fprintf(stderr, "attention memory layer %u has a payload allocation\n", layer_id);
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool check_recurrent_buffers(const llama_memory_recurrent * memory) {
++    size_t tensor_count = 0;
++    for (const auto * tensor : memory->r_l) {
++        if (tensor != nullptr) {
++            ++tensor_count;
++            if (!is_dummy_buffer(tensor)) {
++                std::fprintf(stderr, "recurrent R state has a payload allocation\n");
++                return false;
++            }
++        }
++    }
++    for (const auto * tensor : memory->s_l) {
++        if (tensor != nullptr) {
++            ++tensor_count;
++            if (!is_dummy_buffer(tensor)) {
++                std::fprintf(stderr, "recurrent S state has a payload allocation\n");
++                return false;
++            }
++        }
++    }
++    for (const auto * tensor : memory->p_l) {
++        if (tensor != nullptr) {
++            ++tensor_count;
++            if (!is_dummy_buffer(tensor)) {
++                std::fprintf(stderr, "recurrent P state has a payload allocation\n");
++                return false;
++            }
++        }
++    }
++    if (tensor_count == 0) {
++        std::fprintf(stderr, "metadata-only recurrent memory has no state tensors\n");
++        return false;
++    }
++    return true;
++}
++
++static bool check_memory_buffers(llama_context * context, bool expect_recurrent) {
++    llama_memory_t memory = llama_get_memory(context);
++    if (memory == nullptr) {
++        std::fprintf(stderr, "metadata-only context has no memory module\n");
++        return false;
++    }
++    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
++        return check_kv_buffers(hybrid->get_mem_attn()) &&
++               check_recurrent_buffers(hybrid->get_mem_recr());
++    }
++    if (auto * recurrent = dynamic_cast<llama_memory_recurrent *>(memory)) {
++        return check_recurrent_buffers(recurrent);
++    }
++    if (expect_recurrent) {
++        std::fprintf(stderr, "fixture did not construct recurrent memory\n");
++        return false;
++    }
++    auto * kv = dynamic_cast<llama_kv_cache *>(memory);
++    if (kv == nullptr) {
++        std::fprintf(stderr, "fixture did not construct attention memory\n");
++        return false;
++    }
++    return check_kv_buffers(kv);
++}
++
++static bool check_compute_buffers(llama_context * context, const char * profile_name) {
++    ggml_backend_sched_t scheduler = context->get_sched();
++    for (int index = 0; index < ggml_backend_sched_get_n_backends(scheduler); ++index) {
++        ggml_backend_t backend = ggml_backend_sched_get_backend(scheduler, index);
++        const size_t buffer_size = ggml_backend_sched_get_buffer_size(scheduler, backend);
++        if (buffer_size != 0) {
++            std::fprintf(stderr, "metadata-only %s graph allocated %zu compute bytes on %s\n",
++                    profile_name,
++                    buffer_size,
++                    ggml_backend_name(backend));
++            return false;
++        }
++    }
++    return true;
++}
++
++static void count_payload_read(ggml_tensor * tensor, void * user_data) {
++    GGML_UNUSED(tensor);
++    auto * payload_read_count = static_cast<size_t *>(user_data);
++    ++*payload_read_count;
++}
++
++static llama_model * load_metadata_only_model(const char * model_path) {
++    ggml_context * tensor_context = nullptr;
++    gguf_init_params params = {
++        /*.no_alloc =*/ true,
++        /*.ctx      =*/ &tensor_context,
++    };
++    gguf_context * metadata = gguf_init_from_file(model_path, params);
++    if (metadata == nullptr || tensor_context == nullptr) {
++        std::fprintf(stderr, "failed to inspect fixture GGUF\n");
++        if (tensor_context != nullptr) {
++            ggml_free(tensor_context);
++        }
++        if (metadata != nullptr) {
++            gguf_free(metadata);
++        }
++        return nullptr;
++    }
++
++    llama_model_params model_params = llama_model_default_params();
++    model_params.n_gpu_layers = 0;
++    model_params.no_alloc = true;
++    size_t payload_read_count = 0;
++    llama_model * model = llama_model_init_from_user(
++            metadata,
++            count_payload_read,
++            &payload_read_count,
++            model_params);
++    ggml_free(tensor_context);
++    gguf_free(metadata);
++    if (payload_read_count != 0) {
++        std::fprintf(stderr, "metadata-only load requested %zu weight payloads\n", payload_read_count);
++        llama_model_free(model);
++        return nullptr;
++    }
++    return model;
++}
++
++struct graph_profile_result {
++    int node_count = 0;
++    size_t boundary_pairs = 0;
++    size_t state_effects = 0;
++    std::vector<std::string> dependencies;
++};
++
++enum class request_contract {
++    unchecked,
++    token_kv,
++};
++
++static bool check_request_contract(
++        const skippy_stage_slice_selection & selection,
++        const std::vector<skippy_request_input_binding> & bindings,
++        request_contract contract,
++        const char * profile_name,
++        int32_t layer_start,
++        int32_t layer_end,
++        int32_t layer_count) {
++    if (contract == request_contract::unchecked) {
++        return true;
++    }
++
++    std::vector<std::string> expected = {
++        "attention.key_indices.0",
++        "attention.mask.0",
++        "attention.value_indices.0",
++        "positions.0",
++    };
++    if (layer_start == 0) {
++        expected.push_back("tokens.0");
++    }
++    if (layer_end == layer_count) {
++        expected.push_back("output.indices.0");
++    }
++    std::sort(expected.begin(), expected.end());
++    std::vector<std::string> actual;
++    for (const ggml_tensor * input : selection.request_inputs) {
++        const auto found = std::find_if(bindings.begin(), bindings.end(), [input](const auto & binding) {
++            return binding.tensor == input;
++        });
++        if (found == bindings.end()) {
++            std::fprintf(stderr,
++                    "metadata-only %s layers %d..%d contain an unbound request input\n",
++                    profile_name, layer_start, layer_end);
++            return false;
++        }
++        actual.push_back(found->identity);
++    }
++    std::sort(actual.begin(), actual.end());
++    if (actual != expected) {
++        std::fprintf(stderr,
++                "metadata-only %s layers %d..%d request-input identities differ from the token/KV contract\n",
++                profile_name, layer_start, layer_end);
++        return false;
++    }
++
++    const size_t expected_imports = layer_start == 0 ? 0 : 1;
++    const size_t expected_exports = layer_end == layer_count ? 0 : 1;
++    if (selection.activation_imports.size() != expected_imports ||
++            selection.activation_exports.size() != expected_exports) {
++        std::fprintf(stderr,
++                "metadata-only %s layers %d..%d do not expose exactly one hidden-state frontier per cut\n",
++                profile_name, layer_start, layer_end);
++        return false;
++    }
++    return true;
++}
++
++static size_t layer_state_count(
++        const std::vector<skippy_state_effect> & effects,
++        int32_t layer,
++        skippy_state_kind kind,
++        skippy_state_access access) {
++    size_t count = 0;
++    for (const auto & effect : effects) {
++        if (effect.layer == layer && effect.kind == kind && effect.access == access) {
++            ++count;
++        }
++    }
++    return count;
++}
++
++static bool check_stage_slices(
++        const llm_graph_result * graph_result,
++        ggml_cgraph * graph,
++        const llama_model * model,
++        const char * profile_name,
++        uint32_t n_tokens,
++        uint32_t n_seqs,
++        uint32_t n_outputs,
++        uint32_t n_rs_seq,
++        request_contract contract) {
++    std::vector<skippy_parameter_binding> parameters;
++    std::map<std::string, uint32_t> parameter_ordinals;
++    for (const auto & [name, tensor] : llama_internal_get_tensor_map(model)) {
++        const uint32_t ordinal = parameter_ordinals[name]++;
++        parameters.push_back({tensor, name + "." + std::to_string(ordinal)});
++    }
++
++    const int32_t n_layer = llama_model_n_layer(model);
++    const skippy_execution_profile_guard guard = {
++        n_tokens,
++        n_seqs,
++        n_outputs,
++        n_rs_seq,
++        "noalloc-fixture-v1",
++        "cpu",
++    };
++    const std::vector<skippy_stage_profile_input> profiles = {{
++        profile_name,
++        graph,
++        &graph_result->get_block_boundaries(),
++        &graph_result->get_state_effects(),
++        &parameters,
++        &graph_result->get_request_input_bindings(),
++        n_layer,
++        guard,
++        graph_result->get_logits() != nullptr
++                ? graph_result->get_logits()
++                : graph_result->get_embd(),
++    }};
++    skippy_guarded_stage_slice_plan full_plan;
++    std::string full_plan_error;
++    if (!skippy_build_guarded_stage_slice_plan(
++                profiles,
++                0,
++                n_layer,
++                full_plan,
++                full_plan_error)) {
++        std::fprintf(stderr, "metadata-only %s full slice invalid: %s\n",
++                profile_name, full_plan_error.c_str());
++        return false;
++    }
++    if (!check_request_contract(
++                full_plan.profiles[0].slice,
++                graph_result->get_request_input_bindings(),
++                contract,
++                profile_name,
++                0,
++                n_layer,
++                n_layer)) {
++        return false;
++    }
++    const auto & full_parameter_identities = full_plan.profiles[0].slice.parameter_identities;
++    std::vector<std::string> selected_dependencies;
++    std::vector<skippy_guarded_stage_slice_plan> stage_plans;
++    bool has_downstream_recurrent_layer = false;
++    bool proved_noncontiguous_recurrent_slice = false;
++    bool proved_self_contained_recurrent_source = false;
++    const bool recurrent_layer0 = model->hparams.is_recr(0);
++    for (int32_t layer = 0; layer < n_layer; ++layer) {
++        skippy_guarded_stage_slice_plan stage_plan;
++        std::string error;
++        if (!skippy_build_guarded_stage_slice_plan(
++                    profiles,
++                    layer,
++                    layer + 1,
++                    stage_plan,
++                    error)) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice invalid: %s\n",
++                    profile_name, layer, error.c_str());
++            return false;
++        }
++        const auto & selection = stage_plan.profiles[0].slice;
++        if (!check_request_contract(
++                    selection,
++                    graph_result->get_request_input_bindings(),
++                    contract,
++                    profile_name,
++                    layer,
++                    layer + 1,
++                    n_layer)) {
++            return false;
++        }
++        if (selection.node_indices.empty() || selection.parameter_identities.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice is incomplete\n",
++                    profile_name, layer);
++            return false;
++        }
++        skippy_executable_graph executable;
++        if (!skippy_build_executable_graph(graph, selection, executable, error) ||
++                executable.slice_identity != selection.slice_identity ||
++                executable.node_identities != selection.node_identities) {
++            std::fprintf(stderr, "metadata-only %s layer %d executable semantic clone invalid: %s\n",
++                    profile_name, layer, error.c_str());
++            return false;
++        }
++        if (!std::is_sorted(selection.node_indices.begin(), selection.node_indices.end()) ||
++                std::adjacent_find(selection.node_indices.begin(), selection.node_indices.end()) != selection.node_indices.end()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice nodes are not normalized\n",
++                    profile_name, layer);
++            return false;
++        }
++        for (int32_t index : selection.node_indices) {
++            if (index < 0 || index >= ggml_graph_n_nodes(graph)) {
++                std::fprintf(stderr, "metadata-only %s layer %d slice has an invalid node index\n",
++                        profile_name, layer);
++                return false;
++            }
++        }
++        if (layer > 0 && selection.activation_imports.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice has no activation import\n",
++                    profile_name, layer);
++            return false;
++        }
++        if (layer + 1 < n_layer && selection.activation_exports.empty()) {
++            std::fprintf(stderr, "metadata-only %s layer %d slice has no activation export\n",
++                    profile_name, layer);
++            return false;
++        }
++        for (const auto & effect : graph_result->get_state_effects()) {
++            if (effect.layer != layer || effect.access != skippy_state_access::write) {
++                continue;
++            }
++            bool retained = false;
++            for (int32_t index : selection.node_indices) {
++                retained |= ggml_graph_node(graph, index) == effect.effect_node;
++            }
++            if (!retained) {
++                std::fprintf(stderr, "metadata-only %s layer %d omitted owning write ordinal %lld\n",
++                        profile_name, layer, static_cast<long long>(effect.write_ordinal));
++                return false;
++            }
++        }
++        if (model->hparams.is_recr(layer)) {
++            if (layer > 0) {
++                has_downstream_recurrent_layer = true;
++                const ggml_tensor * entry = graph_result->get_block_boundaries()[2 * layer].tensor;
++                int32_t entry_index = -1;
++                for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++                    if (ggml_graph_node(graph, index) == entry) {
++                        entry_index = index;
++                        break;
++                    }
++                }
++                if (entry_index < 0 || selection.node_indices.front() >= entry_index) {
++                    std::fprintf(stderr,
++                            "metadata-only %s recurrent layer %d slice omitted its pre-entry auxiliary cone\n",
++                            profile_name, layer);
++                    return false;
++                }
++                proved_noncontiguous_recurrent_slice = true;
++            } else {
++                if (!selection.activation_imports.empty()) {
++                    std::fprintf(stderr,
++                            "metadata-only %s recurrent layer 0 slice imports an activation\n",
++                            profile_name);
++                    return false;
++                }
++                if (selection.request_inputs.empty()) {
++                    std::fprintf(stderr,
++                            "metadata-only %s recurrent layer 0 slice has no request input\n",
++                            profile_name);
++                    return false;
++                }
++                std::unordered_set<int32_t> selected(
++                        selection.node_indices.begin(), selection.node_indices.end());
++                size_t write_effects = 0;
++                for (const auto & effect : selection.state_effects) {
++                    if (effect.layer != 0 || effect.access != skippy_state_access::write) {
++                        continue;
++                    }
++                    ++write_effects;
++                    int32_t effect_index = -1;
++                    for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++                        if (ggml_graph_node(graph, index) == effect.effect_node) {
++                            effect_index = index;
++                            break;
++                        }
++                    }
++                    if (effect_index < 0 || selected.find(effect_index) == selected.end()) {
++                        std::fprintf(stderr,
++                                "metadata-only %s recurrent layer 0 slice does not own a state write node\n",
++                                profile_name);
++                        return false;
++                    }
++                }
++                if (write_effects == 0) {
++                    std::fprintf(stderr,
++                            "metadata-only %s recurrent layer 0 slice carries no state write effects\n",
++                            profile_name);
++                    return false;
++                }
++                proved_self_contained_recurrent_source = true;
++            }
++        }
++        selected_dependencies.insert(
++                selected_dependencies.end(),
++                selection.parameter_identities.begin(),
++                selection.parameter_identities.end());
++        stage_plans.push_back(std::move(stage_plan));
++    }
++    std::vector<const skippy_guarded_stage_slice_plan *> stage_chain;
++    stage_chain.reserve(stage_plans.size());
++    for (const auto & stage_plan : stage_plans) {
++        stage_chain.push_back(&stage_plan);
++    }
++    std::string chain_error;
++    if (!skippy_validate_guarded_stage_chain(stage_chain, chain_error)) {
++        std::fprintf(stderr, "metadata-only %s stage chain invalid: %s\n",
++                profile_name, chain_error.c_str());
++        for (size_t stage_index = 1; stage_index < stage_plans.size(); ++stage_index) {
++            const auto & exports = stage_plans[stage_index - 1].profiles[0].slice.activation_exports;
++            const auto & imports = stage_plans[stage_index].profiles[0].slice.activation_imports;
++            std::fprintf(stderr, "boundary %zu exports=%zu imports=%zu\n",
++                    stage_index, exports.size(), imports.size());
++            for (const auto * tensor : exports) {
++                std::fprintf(stderr, "  export %p %s\n", static_cast<const void *>(tensor), ggml_get_name(tensor));
++            }
++            for (const auto * tensor : imports) {
++                std::fprintf(stderr, "  import %p %s\n", static_cast<const void *>(tensor), ggml_get_name(tensor));
++            }
++        }
++        return false;
++    }
++    std::sort(selected_dependencies.begin(), selected_dependencies.end());
++    selected_dependencies.erase(
++            std::unique(selected_dependencies.begin(), selected_dependencies.end()),
++            selected_dependencies.end());
++    if (selected_dependencies != full_parameter_identities) {
++        std::fprintf(stderr, "metadata-only %s slices do not cover the exact graph dependency set\n",
++                profile_name);
++        return false;
++    }
++    if (has_downstream_recurrent_layer && !proved_noncontiguous_recurrent_slice) {
++        std::fprintf(stderr, "metadata-only %s did not prove a non-contiguous recurrent slice\n",
++                profile_name);
++        return false;
++    }
++    if (recurrent_layer0 && !proved_self_contained_recurrent_source) {
++        std::fprintf(stderr, "metadata-only %s did not prove a self-contained recurrent source stage\n",
++                profile_name);
++        return false;
++    }
++    return true;
++}
++
++static bool layer_has_state(
++        const std::vector<skippy_state_effect> & effects,
++        int32_t layer,
++        skippy_state_kind kind,
++        skippy_state_access access) {
++    return layer_state_count(effects, layer, kind, access) > 0;
++}
++
++enum class layer_state_class {
++    kv,
++    recurrent,
++    none,
++};
++
++static bool parse_layer_classes(const char * spec, std::vector<layer_state_class> & classes) {
++    std::string token;
++    for (const char * c = spec;; ++c) {
++        if (*c == ',' || *c == '\0') {
++            if (token == "kv") {
++                classes.push_back(layer_state_class::kv);
++            } else if (token == "recurrent") {
++                classes.push_back(layer_state_class::recurrent);
++            } else if (token == "none") {
++                classes.push_back(layer_state_class::none);
++            } else {
++                return false;
++            }
++            token.clear();
++            if (*c == '\0') {
++                return !classes.empty();
++            }
++        } else {
++            token += *c;
++        }
++    }
++}
++
++static bool check_state_effects(
++        const llm_graph_result * graph_result,
++        ggml_cgraph * graph,
++        const llama_model * model,
++        const char * profile_name,
++        const std::vector<layer_state_class> & layer_classes,
++        size_t expected_conv_writes) {
++    const auto & effects = graph_result->get_state_effects();
++    std::string effect_error;
++    if (!skippy_validate_state_effects(effects, graph, effect_error)) {
++        std::fprintf(stderr, "metadata-only %s state effects invalid: %s\n",
++                profile_name, effect_error.c_str());
++        return false;
++    }
++
++    const int32_t n_layer = llama_model_n_layer(model);
++    if (layer_classes.size() != static_cast<size_t>(n_layer)) {
++        std::fprintf(stderr, "fixture declares %d layers but %zu layer classes were specified\n",
++                n_layer, layer_classes.size());
++        return false;
++    }
++
++    // every declared layer carries exactly its expected local state class
++    for (int32_t il = 0; il < n_layer; ++il) {
++        const layer_state_class expected = layer_classes[il];
++
++        const size_t kv_key_reads    = layer_state_count(effects, il, skippy_state_kind::kv_key, skippy_state_access::read);
++        const size_t kv_key_writes   = layer_state_count(effects, il, skippy_state_kind::kv_key, skippy_state_access::write);
++        const size_t kv_value_reads  = layer_state_count(effects, il, skippy_state_kind::kv_value, skippy_state_access::read);
++        const size_t kv_value_writes = layer_state_count(effects, il, skippy_state_kind::kv_value, skippy_state_access::write);
++        const size_t conv_reads      = layer_state_count(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::read);
++        const size_t conv_writes     = layer_state_count(effects, il, skippy_state_kind::recurrent_conv, skippy_state_access::write);
++        const size_t ssm_reads       = layer_state_count(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::read);
++        const size_t ssm_writes      = layer_state_count(effects, il, skippy_state_kind::recurrent_ssm, skippy_state_access::write);
++
++        const size_t kv_total   = kv_key_reads + kv_key_writes + kv_value_reads + kv_value_writes;
++        const size_t recr_total = conv_reads + conv_writes + ssm_reads + ssm_writes;
++
++        bool ok = true;
++        switch (expected) {
++            case layer_state_class::kv:
++                ok = kv_key_reads == 1 && kv_key_writes == 1 &&
++                     kv_value_reads == 1 && kv_value_writes == 1 &&
++                     recr_total == 0;
++                break;
++            case layer_state_class::recurrent:
++                ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 3 &&
++                     conv_writes == expected_conv_writes + 2 &&
++                     kv_total == 0;
++                if (conv_writes != expected_conv_writes + 2) {
++                    std::fprintf(stderr,
++                            "metadata-only %s layer %d registered %zu conv writes, expected %zu\n",
++                            profile_name, il, conv_writes, expected_conv_writes + 2);
++                    return false;
++                }
++                break;
++            case layer_state_class::none:
++                ok = kv_total == 0 && recr_total == 0;
++                break;
++        }
++        if (!ok) {
++            std::fprintf(stderr,
++                    "metadata-only %s layer %d does not declare exactly its expected state class\n",
++                    profile_name, il);
++            return false;
++        }
++    }
++
++    for (const auto & owner : effects) {
++        if (owner.access != skippy_state_access::read ||
++                (owner.kind != skippy_state_kind::recurrent_conv && owner.kind != skippy_state_kind::recurrent_ssm)) {
++            continue;
++        }
++        int zero_position = -1;
++        int copy_position = -1;
++        int output_position = -1;
++        const ggml_tensor * extra_read = nullptr;
++        for (const auto & effect : effects) {
++            if (effect.storage != owner.storage || effect.access != skippy_state_access::write) { continue; }
++            const ggml_tensor * node = effect.effect_node;
++            if (node->op != (effect.write_ordinal == 0 ? GGML_OP_SCALE : GGML_OP_CPY)) { return false; }
++            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++                if (ggml_graph_node(graph, i) != node) { continue; }
++                if (effect.write_ordinal == 0) { zero_position = i; }
++                if (effect.write_ordinal == 1) { copy_position = i; extra_read = node->src[0]; }
++            }
++        }
++        const ggml_op output_op = owner.kind == skippy_state_kind::recurrent_conv ? GGML_OP_GET_ROWS : GGML_OP_SSM_SCAN;
++        for (int i = zero_position + 1; i < copy_position; ++i) {
++            const ggml_tensor * node = ggml_graph_node(graph, i);
++            if (node != extra_read && node->op == output_op &&
++                    skippy_state_canonical_storage(node->src[0]) == owner.storage) {
++                output_position = i;
++                break;
++            }
++        }
++        if (!(zero_position >= 0 && zero_position < output_position && output_position < copy_position)) {
++            std::fprintf(stderr, "metadata-only %s layer %d lost zero/output/extra-copy order\n", profile_name, owner.layer);
++            return false;
++        }
++    }
++
++    // persistent state stays local: no state storage is an activation boundary
++    const ggml_tensor * activation_in  = skippy_state_canonical_storage(graph_result->get_skippy_activation_input());
++    const ggml_tensor * activation_out = skippy_state_canonical_storage(graph_result->get_skippy_activation_output());
++    for (const auto & effect : effects) {
++        if (effect.storage == activation_in || effect.storage == activation_out) {
++            std::fprintf(stderr,
++                    "metadata-only %s state storage leaked into an activation boundary\n",
++                    profile_name);
++            return false;
++        }
++    }
++
++    return true;
++}
++
++static bool build_graph_profile(
++        llama_model * model,
++        bool expect_recurrent,
++        const char * profile_name,
++        uint32_t n_tokens,
++        uint32_t n_seqs,
++        uint32_t n_outputs,
++        const std::vector<layer_state_class> & layer_classes,
++        uint32_t n_rs_seq,
++        request_contract contract,
++        graph_profile_result & result) {
++    llama_context_params context_params = llama_context_default_params();
++    context_params.n_ctx = 32;
++    context_params.n_batch = 8;
++    context_params.n_ubatch = 8;
++    context_params.n_seq_max = n_seqs;
++    context_params.n_rs_seq = n_rs_seq;
++    context_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    llama_context * context = llama_init_from_model(model, context_params);
++    if (context == nullptr) {
++        std::fprintf(stderr, "failed to create metadata-only %s context\n", profile_name);
++        return false;
++    }
++
++    llama_memory_context_ptr memory_context;
++    if (llama_memory_t memory = llama_get_memory(context)) {
++        memory_context = memory->init_full();
++        if (!memory_context) {
++            std::fprintf(stderr, "failed to initialize metadata-only %s memory context\n", profile_name);
++            llama_free(context);
++            return false;
++        }
++    }
++
++    ggml_cgraph * graph = context->graph_reserve(
++            n_tokens,
++            n_seqs,
++            n_outputs,
++            memory_context.get(),
++            true);
++    if (graph == nullptr || ggml_graph_n_nodes(graph) == 0) {
++        std::fprintf(stderr, "metadata-only %s graph is empty\n", profile_name);
++        llama_free(context);
++        return false;
++    }
++    if (!check_memory_buffers(context, expect_recurrent) || !check_compute_buffers(context, profile_name)) {
++        llama_free(context);
++        return false;
++    }
++    result.node_count = ggml_graph_n_nodes(graph);
++
++    const llm_graph_result * graph_result = context->get_gf_res_reserve();
++    const auto & boundaries = graph_result->get_block_boundaries();
++    std::string boundary_error;
++    if (!skippy_validate_block_boundaries(boundaries, 0, llama_model_n_layer(model), boundary_error)) {
++        std::fprintf(stderr, "metadata-only %s block boundaries invalid: %s\n",
++                profile_name, boundary_error.c_str());
++        llama_free(context);
++        return false;
++    }
++    result.boundary_pairs = boundaries.size() / 2;
++
++    // mirror the mamba2 slot loop: writes = min(n_seq_tokens, 1 + effective n_rs_seq)
++    const uint32_t effective_rs_seq = llama_n_rs_seq(context);
++    if (n_rs_seq > 0 && effective_rs_seq != n_rs_seq) {
++        std::fprintf(stderr, "metadata-only %s requested n_rs_seq=%u but context clamped it to %u\n",
++                profile_name, n_rs_seq, effective_rs_seq);
++        llama_free(context);
++        return false;
++    }
++    const size_t expected_conv_writes = std::min<size_t>(n_tokens / n_seqs, 1 + effective_rs_seq);
++
++    if (!check_state_effects(graph_result, graph, model, profile_name, layer_classes, expected_conv_writes)) {
++        llama_free(context);
++        return false;
++    }
++    result.state_effects = graph_result->get_state_effects().size();
++
++    result.dependencies = skippy_graph_parameter_dependencies(graph, model);
++    if (result.dependencies.empty()) {
++        std::fprintf(stderr, "metadata-only %s graph has no parameter dependencies\n", profile_name);
++        llama_free(context);
++        return false;
++    }
++    if (!std::is_sorted(result.dependencies.begin(), result.dependencies.end()) ||
++            std::adjacent_find(result.dependencies.begin(), result.dependencies.end()) != result.dependencies.end()) {
++        std::fprintf(stderr, "metadata-only %s parameter dependencies are not normalized\n", profile_name);
++        llama_free(context);
++        return false;
++    }
++    if (!check_stage_slices(
++                graph_result,
++                graph,
++                model,
++                profile_name,
++                n_tokens,
++                n_seqs,
++                n_outputs,
++                n_rs_seq,
++                contract)) {
++        llama_free(context);
++        return false;
++    }
++    llama_free(context);
++    return true;
++}
++
++static int check_noalloc_graphs(
++        const char * model_path,
++        bool expect_recurrent,
++        const std::vector<layer_state_class> & layer_classes,
++        uint32_t n_rs_seq,
++        request_contract contract) {
++    llama_model * model = load_metadata_only_model(model_path);
++    if (model == nullptr) {
++        std::fprintf(stderr, "failed to load metadata-only model\n");
++        return 1;
++    }
++    if (!check_model_buffers(model)) {
++        llama_model_free(model);
++        return 2;
++    }
++
++    graph_profile_result prefill;
++    graph_profile_result batched;
++    graph_profile_result decode;
++    if (!build_graph_profile(model, expect_recurrent, "prefill", 8, 1, 8, layer_classes, n_rs_seq, contract, prefill) ||
++            !build_graph_profile(model, expect_recurrent, "batched", 8, 2, 8, layer_classes, n_rs_seq, contract, batched) ||
++            !build_graph_profile(model, expect_recurrent, "decode", 1, 1, 1, layer_classes, n_rs_seq, contract, decode)) {
++        llama_model_free(model);
++        return 3;
++    }
++    if (prefill.dependencies != batched.dependencies) {
++        std::fprintf(stderr,
++                "metadata-only parameter closure differs between prefill (%zu) and batch (%zu)\n",
++                prefill.dependencies.size(),
++                batched.dependencies.size());
++        llama_model_free(model);
++        return 4;
++    }
++    if (prefill.dependencies != decode.dependencies) {
++        std::fprintf(stderr,
++                "metadata-only parameter closure differs between prefill (%zu) and decode (%zu)\n",
++                prefill.dependencies.size(),
++                decode.dependencies.size());
++        llama_model_free(model);
++        return 5;
++    }
++    const size_t expected_pairs = static_cast<size_t>(llama_model_n_layer(model));
++    if (prefill.boundary_pairs != expected_pairs ||
++            batched.boundary_pairs != expected_pairs ||
++            decode.boundary_pairs != expected_pairs) {
++        std::fprintf(stderr,
++                "metadata-only block boundary pairs differ from declared layers: prefill=%zu batched=%zu decode=%zu expected=%zu\n",
++                prefill.boundary_pairs,
++                batched.boundary_pairs,
++                decode.boundary_pairs,
++                expected_pairs);
++        llama_model_free(model);
++        return 6;
++    }
++
++    std::printf("metadata-only planning: prefill_nodes=%d batched_nodes=%d decode_nodes=%d parameters=%zu block_pairs=%zu state_effects=%zu recurrent=%d\n",
++            prefill.node_count,
++            batched.node_count,
++            decode.node_count,
++            prefill.dependencies.size(),
++            prefill.boundary_pairs,
++            prefill.state_effects,
++            expect_recurrent ? 1 : 0);
++    llama_model_free(model);
++    return 0;
++}
++
++static bool check_boundary_validation_rejects() {
++    ggml_tensor a = {};
++    ggml_tensor b = {};
++    ggml_tensor c = {};
++    std::string error;
++
++    const std::vector<skippy_block_boundary> valid = {
++        {skippy_block_boundary_kind::entry, 0, &a},
++        {skippy_block_boundary_kind::exit,  0, &b},
++        {skippy_block_boundary_kind::entry, 1, &b},
++        {skippy_block_boundary_kind::exit,  1, &c},
++    };
++    if (!skippy_validate_block_boundaries(valid, 0, 2, error)) {
++        std::fprintf(stderr, "valid boundary chain rejected: %s\n", error.c_str());
++        return false;
++    }
++
++    const std::vector<std::vector<skippy_block_boundary>> rejected = {
++        // missing layer 1 records
++        {{skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::exit,  0, &b}},
++        // duplicated entry instead of exit
++        {{skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::entry, 1, &b},
++         {skippy_block_boundary_kind::exit,  1, &c}},
++        // unordered layers
++        {{skippy_block_boundary_kind::entry, 1, &b},
++         {skippy_block_boundary_kind::exit,  1, &c},
++         {skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::exit,  0, &b}},
++        // entry does not chain from previous exit
++        {{skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::exit,  0, &b},
++         {skippy_block_boundary_kind::entry, 1, &a},
++         {skippy_block_boundary_kind::exit,  1, &c}},
++        // null canonical tensor
++        {{skippy_block_boundary_kind::entry, 0, &a},
++         {skippy_block_boundary_kind::exit,  0, nullptr},
++         {skippy_block_boundary_kind::entry, 1, &b},
++         {skippy_block_boundary_kind::exit,  1, &c}},
++    };
++    for (size_t i = 0; i < rejected.size(); ++i) {
++        if (skippy_validate_block_boundaries(rejected[i], 0, 2, error)) {
++            std::fprintf(stderr, "invalid boundary case %zu was accepted\n", i);
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool check_state_validation_rejects() {
++    std::vector<uint8_t> buf(ggml_tensor_overhead() * 64 + ggml_graph_overhead());
++    ggml_init_params init = { buf.size(), buf.data(), true };
++    ggml_context * ctx = ggml_init(init);
++    ggml_tensor * storage = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * other = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * value = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 2);
++    ggml_tensor * zero = ggml_scale_inplace(ctx, ggml_view_1d(ctx, storage, 0, 0), 0);
++    ggml_tensor * copy = ggml_cpy(ctx, value, storage);
++    ggml_tensor * ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, 2);
++    ggml_tensor * rows = ggml_set_rows(ctx, storage, value, ids);
++    ggml_tensor * stray = ggml_cpy(ctx, value, storage);
++    ggml_tensor * add = ggml_add(ctx, storage, value);
++    ggml_tensor * sub = ggml_sub(ctx, storage, value);
++    ggml_tensor * scale = ggml_scale(ctx, storage, 0);
++    ggml_cgraph * graph = ggml_new_graph(ctx);
++    for (auto * node : {zero, copy, rows, add, sub, scale}) {
++        ggml_build_forward_expand(graph, node);
++    }
++
++    std::string error;
++    const auto kv = skippy_state_kind::kv_key;
++    const auto rd = skippy_state_access::read;
++    const auto wr = skippy_state_access::write;
++    const std::vector<skippy_state_effect> valid = {
++        {kv, wr, 0, storage, zero, 0},
++        {kv, wr, 0, storage, copy, 1},
++        {kv, wr, 0, storage, rows, 2},
++        {kv, rd, 0, storage, nullptr},
++    };
++    bool ok = skippy_validate_state_effects(valid, graph, error);
++    if (!ok) {
++        std::fprintf(stderr, "valid zero-sized/multi-write/late-owner effects rejected: %s\n", error.c_str());
++    }
++    auto reject = [&](const char * name, const std::vector<skippy_state_effect> & effects) {
++        error.clear();
++        if (skippy_validate_state_effects(effects, graph, error) || error.empty()) {
++            std::fprintf(stderr, "invalid state case accepted: %s\n", name);
++            ok = false;
++        }
++    };
++    auto changed = valid;
++    std::reverse(changed.begin(), changed.end());
++    if (!skippy_validate_state_effects(changed, graph, error)) { ok = false; }
++    changed = valid;
++    changed.erase(changed.begin());
++    reject("omitted preparation", changed);
++    changed[0].write_ordinal = 0;
++    changed[1].write_ordinal = 1;
++    reject("omitted preparation after renumbering", changed);
++    changed = valid; changed[0].write_ordinal = -1; reject("missing ordinal", changed);
++    changed = valid; changed[1].write_ordinal = 0; reject("duplicate ordinal", changed);
++    changed = valid; changed[2].write_ordinal = 3; reject("ordinal gap", changed);
++    changed = valid; std::swap(changed[0].write_ordinal, changed[1].write_ordinal); reject("reversed ordinals", changed);
++    const auto flags = zero->flags;
++    zero->flags &= ~GGML_TENSOR_FLAG_COMPUTE; reject("non-executing write", valid); zero->flags = flags;
++    changed = valid; changed[0].effect_node = stray; reject("stray write", changed);
++    changed = valid; changed[0].effect_node = nullptr; reject("missing node", changed);
++    changed = valid; changed[0].effect_node = copy; reject("duplicate node", changed);
++    for (auto * node : {add, sub, scale}) {
++        changed = valid; changed[0].effect_node = node; reject("non-mutation or allocating SCALE", changed);
++    }
++    changed = valid; changed.pop_back(); reject("missing owner", changed);
++    changed = valid; changed.push_back(valid.back()); reject("duplicate owner", changed);
++    changed = valid; changed.push_back({skippy_state_kind::kv_value, rd, 0, storage, nullptr}); reject("conflicting owner", changed);
++    changed = valid; changed[0].kind = static_cast<skippy_state_kind>(99); reject("unknown kind", changed);
++    changed = valid; changed[0].access = static_cast<skippy_state_access>(99); reject("unknown access", changed);
++    changed = valid; changed[0].layer = -1; reject("invalid layer", changed);
++    changed = valid; changed[0].storage = nullptr; reject("null storage", changed);
++    changed = valid; changed[0].storage = zero; reject("noncanonical storage", changed);
++    changed = valid; changed.back().effect_node = zero; reject("read event instead of owner", changed);
++    changed = valid; changed.back().write_ordinal = 0; reject("read has write ordinal", changed);
++    changed = valid; changed.push_back({kv, rd, 0, other, nullptr}); reject("conflicting kind/layer storage", changed);
++    changed = valid;
++    for (auto & effect : changed) { effect.storage = other; }
++    reject("wrong declared storage", changed);
++    auto * destination = copy->src[1];
++    copy->src[1] = other; reject("wrong CPY destination", valid); copy->src[1] = destination;
++    destination = rows->src[2];
++    rows->src[2] = value; reject("wrong SET_ROWS destination", valid); rows->src[2] = destination;
++    const size_t offset = zero->view_offs;
++    zero->view_offs = ggml_nbytes(storage) + 1; reject("invalid empty view", valid); zero->view_offs = offset;
++    const size_t stride = copy->nb[1];
++    copy->nb[1] = SIZE_MAX; reject("overflowing view span", valid); copy->nb[1] = stride;
++    const int64_t extent = copy->ne[1];
++    copy->ne[1] = -1; reject("negative view extent", valid); copy->ne[1] = extent;
++    const size_t nonempty_offset = copy->view_offs;
++    copy->view_offs = ggml_nbytes(storage); reject("nonempty view out of bounds", valid); copy->view_offs = nonempty_offset;
++    auto * base = zero->view_src;
++    zero->view_src = zero; reject("cyclic view", valid); zero->view_src = base;
++    ggml_free(ctx);
++    return ok;
++}
++
++int main(int argc, char ** argv) {
++    if (argc < 4 || argc > 6) {
++        std::fprintf(stderr, "usage: %s MODEL_PATH EXPECT_RECURRENT LAYER_CLASSES [N_RS_SEQ] [REQUEST_CONTRACT]\n", argv[0]);
++        return 64;
++    }
++    if (!check_boundary_validation_rejects()) {
++        return 65;
++    }
++    if (!check_state_validation_rejects()) {
++        return 66;
++    }
++    std::vector<layer_state_class> layer_classes;
++    if (!parse_layer_classes(argv[3], layer_classes)) {
++        std::fprintf(stderr, "invalid layer class list: %s\n", argv[3]);
++        return 64;
++    }
++    const uint32_t n_rs_seq = argc >= 5 ? static_cast<uint32_t>(std::atoi(argv[4])) : 0;
++    request_contract contract = request_contract::unchecked;
++    if (argc == 6) {
++        if (std::string(argv[5]) != "token-kv") {
++            std::fprintf(stderr, "invalid request contract: %s\n", argv[5]);
++            return 64;
++        }
++        contract = request_contract::token_kv;
++    }
++    llama_backend_init();
++    const int result = check_noalloc_graphs(argv[1], std::string(argv[2]) == "1", layer_classes, n_rs_seq, contract);
++    llama_backend_free();
++    return result;
++}
+diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
+new file mode 100644
+index 000000000..8f4e7dd44
+--- /dev/null
++++ b/src/skippy/tests/renamed_multishard_planning.cpp
+@@ -0,0 +1,882 @@
++#include "ggml-backend.h"
++#include "ggml.h"
++#include "gguf.h"
++#include "llama-context.h"
++#include "llama-kv-cache.h"
++#include "llama-memory-hybrid.h"
++#include "llama-memory-recurrent.h"
++#include "llama-mmap.h"
++#include "llama-model.h"
++#include "llama.h"
++#include "skippy/package_tensor_binding.h"
++#include "skippy/stage_plan.h"
++#include "skippy/stage_slice_plan.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace {
++
++constexpr const char * split_no_key = "split.no";
++constexpr const char * split_count_key = "split.count";
++constexpr const char * split_tensor_count_key = "split.tensors.count";
++
++using ggml_context_owner = std::unique_ptr<ggml_context, decltype(&ggml_free)>;
++using gguf_context_owner = std::unique_ptr<gguf_context, decltype(&gguf_free)>;
++
++struct inspected_split {
++    std::string path;
++    uint16_t split_no = 0;
++    uint16_t split_count = 0;
++    int32_t tensor_count = 0;
++    ggml_context_owner tensors { nullptr, ggml_free };
++    gguf_context_owner metadata { nullptr, gguf_free };
++};
++
++struct package_inventory {
++    std::vector<std::string> ordered_paths;
++    std::vector<skippy_package_tensor_binding_input> tensors;
++};
++
++bool read_exact(std::ifstream & input, uint64_t offset, size_t length, std::vector<uint8_t> & bytes) {
++    bytes.resize(length);
++    input.clear();
++    input.seekg(static_cast<std::streamoff>(offset));
++    input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(length));
++    return input.good();
++}
++
++bool write_padding(std::ofstream & output, size_t length) {
++    static const std::vector<uint8_t> zeros(GGUF_DEFAULT_ALIGNMENT, 0);
++    output.write(reinterpret_cast<const char *>(zeros.data()), static_cast<std::streamsize>(length));
++    return output.good();
++}
++
++bool write_two_renamed_splits(
++        const std::string & source_path,
++        const std::string & output_directory,
++        std::vector<std::string> & paths,
++        std::string & error) {
++    std::filesystem::remove_all(output_directory);
++    std::filesystem::create_directories(output_directory);
++    ggml_context * source_tensors_raw = nullptr;
++    gguf_init_params init = { true, &source_tensors_raw };
++    gguf_context_owner source_metadata(
++            gguf_init_from_file(source_path.c_str(), init),
++            gguf_free);
++    ggml_context_owner source_tensors(source_tensors_raw, ggml_free);
++    if (!source_metadata || !source_tensors) {
++        error = "cannot inspect source GGUF";
++        return false;
++    }
++    const int64_t tensor_count = gguf_get_n_tensors(source_metadata.get());
++    if (tensor_count < 2 || tensor_count > INT32_MAX) {
++        error = "source GGUF cannot be split into two non-empty shards";
++        return false;
++    }
++    const int64_t midpoint = tensor_count / 2;
++    paths = {
++        output_directory + "/renamed-metadata.gguf",
++        output_directory + "/renamed-weights.gguf",
++    };
++    std::ifstream source(source_path, std::ios::binary);
++    if (!source) {
++        error = "cannot open source GGUF payload";
++        return false;
++    }
++    for (uint16_t split_no = 0; split_no < 2; ++split_no) {
++        gguf_context_owner output_metadata(gguf_init_empty(), gguf_free);
++        if (!output_metadata) {
++            error = "cannot allocate split metadata";
++            return false;
++        }
++        if (split_no == 0) {
++            gguf_set_kv(output_metadata.get(), source_metadata.get());
++        }
++        gguf_set_val_u16(output_metadata.get(), split_no_key, split_no);
++        gguf_set_val_u16(output_metadata.get(), split_count_key, 2);
++        gguf_set_val_i32(
++                output_metadata.get(),
++                split_tensor_count_key,
++                static_cast<int32_t>(tensor_count));
++        const int64_t begin = split_no == 0 ? 0 : midpoint;
++        const int64_t end = split_no == 0 ? midpoint : tensor_count;
++        for (int64_t index = begin; index < end; ++index) {
++            const char * name = gguf_get_tensor_name(source_metadata.get(), index);
++            ggml_tensor * tensor = ggml_get_tensor(source_tensors.get(), name);
++            if (tensor == nullptr) {
++                error = "source GGUF tensor metadata is incomplete";
++                return false;
++            }
++            gguf_add_tensor(output_metadata.get(), tensor);
++        }
++        std::ofstream output(paths[split_no], std::ios::binary | std::ios::trunc);
++        if (!output) {
++            error = "cannot create renamed split";
++            return false;
++        }
++        std::vector<uint8_t> metadata_bytes(gguf_get_meta_size(output_metadata.get()));
++        gguf_get_meta_data(output_metadata.get(), metadata_bytes.data());
++        output.write(
++                reinterpret_cast<const char *>(metadata_bytes.data()),
++                static_cast<std::streamsize>(metadata_bytes.size()));
++        std::vector<uint8_t> payload;
++        for (int64_t index = begin; index < end; ++index) {
++            const char * name = gguf_get_tensor_name(source_metadata.get(), index);
++            const ggml_tensor * tensor = ggml_get_tensor(source_tensors.get(), name);
++            const size_t stored_length = ggml_nbytes(tensor);
++            const uint64_t source_offset =
++                    gguf_get_data_offset(source_metadata.get()) +
++                    gguf_get_tensor_offset(source_metadata.get(), index);
++            if (!read_exact(source, source_offset, stored_length, payload)) {
++                error = "cannot read source tensor payload";
++                return false;
++            }
++            output.write(
++                    reinterpret_cast<const char *>(payload.data()),
++                    static_cast<std::streamsize>(payload.size()));
++            const size_t padding = GGML_PAD(stored_length, GGUF_DEFAULT_ALIGNMENT) - stored_length;
++            if (!write_padding(output, padding)) {
++                error = "cannot write split tensor padding";
++                return false;
++            }
++        }
++        if (!output.good()) {
++            error = "cannot finish renamed split";
++            return false;
++        }
++    }
++    return true;
++}
++
++bool required_split_metadata(
++        const gguf_context * metadata,
++        uint16_t & split_no,
++        uint16_t & split_count,
++        int32_t & tensor_count,
++        std::string & error) {
++    const int no_key = gguf_find_key(metadata, split_no_key);
++    const int count_key = gguf_find_key(metadata, split_count_key);
++    const int tensors_key = gguf_find_key(metadata, split_tensor_count_key);
++    if (no_key < 0 || count_key < 0 || tensors_key < 0 ||
++            gguf_get_kv_type(metadata, no_key) != GGUF_TYPE_UINT16 ||
++            gguf_get_kv_type(metadata, count_key) != GGUF_TYPE_UINT16 ||
++            gguf_get_kv_type(metadata, tensors_key) != GGUF_TYPE_INT32) {
++        error = "split metadata is missing or has the wrong type";
++        return false;
++    }
++    split_no = gguf_get_val_u16(metadata, no_key);
++    split_count = gguf_get_val_u16(metadata, count_key);
++    tensor_count = gguf_get_val_i32(metadata, tensors_key);
++    return split_count > 0 && tensor_count > 0;
++}
++
++bool inspect_package_splits(
++        const std::vector<std::string> & unordered_paths,
++        package_inventory & inventory,
++        std::string & error) {
++    inventory = {};
++    if (unordered_paths.empty()) {
++        error = "package split list is empty";
++        return false;
++    }
++    std::vector<inspected_split> splits;
++    splits.reserve(unordered_paths.size());
++    for (const auto & path : unordered_paths) {
++        inspected_split split;
++        split.path = path;
++        ggml_context * tensors_raw = nullptr;
++        gguf_init_params init = { true, &tensors_raw };
++        split.metadata.reset(gguf_init_from_file(path.c_str(), init));
++        split.tensors.reset(tensors_raw);
++        if (!split.metadata || !split.tensors ||
++                !required_split_metadata(
++                    split.metadata.get(),
++                    split.split_no,
++                    split.split_count,
++                    split.tensor_count,
++                    error)) {
++            if (error.empty()) {
++                error = "cannot inspect package split";
++            }
++            return false;
++        }
++        splits.push_back(std::move(split));
++    }
++    const uint16_t expected_count = splits.front().split_count;
++    const int32_t expected_tensors = splits.front().tensor_count;
++    if (expected_count != unordered_paths.size()) {
++        error = "package split count differs from the supplied file count";
++        return false;
++    }
++    std::sort(splits.begin(), splits.end(), [](const auto & left, const auto & right) {
++        return left.split_no < right.split_no;
++    });
++    int64_t total_tensors = 0;
++    std::set<std::string> native_names;
++    for (size_t split_index = 0; split_index < splits.size(); ++split_index) {
++        const auto & split = splits[split_index];
++        if (split.split_no != split_index || split.split_count != expected_count ||
++                split.tensor_count != expected_tensors) {
++            error = "package split metadata is duplicated, unordered, or inconsistent";
++            return false;
++        }
++        inventory.ordered_paths.push_back(split.path);
++        const int64_t count = gguf_get_n_tensors(split.metadata.get());
++        total_tensors += count;
++        for (int64_t tensor_index = 0; tensor_index < count; ++tensor_index) {
++            const char * name = gguf_get_tensor_name(split.metadata.get(), tensor_index);
++            ggml_tensor * tensor = ggml_get_tensor(split.tensors.get(), name);
++            if (name == nullptr || tensor == nullptr || !native_names.insert(name).second) {
++                error = "package split tensor inventory is incomplete or duplicated";
++                return false;
++            }
++            skippy_package_tensor_binding_input input;
++            input.native_name = name;
++            input.type = tensor->type;
++            const int dimensions = ggml_n_dims(tensor);
++            input.dimensions.assign(tensor->ne, tensor->ne + dimensions);
++            input.split_no = split.split_no;
++            input.data_offset =
++                    gguf_get_data_offset(split.metadata.get()) +
++                    gguf_get_tensor_offset(split.metadata.get(), tensor_index);
++            input.stored_length = ggml_nbytes(tensor);
++            inventory.tensors.push_back(std::move(input));
++        }
++    }
++    if (total_tensors != expected_tensors) {
++        error = "package split tensor total is incomplete";
++        return false;
++    }
++    std::sort(inventory.tensors.begin(), inventory.tensors.end(), [](const auto & left, const auto & right) {
++        return left.native_name < right.native_name;
++    });
++    for (size_t index = 0; index < inventory.tensors.size(); ++index) {
++        inventory.tensors[index].tensor_id = "package.tensor." + std::to_string(index);
++    }
++    std::sort(inventory.tensors.begin(), inventory.tensors.end(), [](const auto & left, const auto & right) {
++        return left.tensor_id < right.tensor_id;
++    });
++    return true;
++}
++
++bool is_dummy_buffer(const ggml_tensor * tensor) {
++    return tensor != nullptr && tensor->buffer != nullptr &&
++           ggml_backend_buffer_get_size(tensor->buffer) == 0 &&
++           ggml_backend_buffer_get_base(tensor->buffer) == nullptr;
++}
++
++bool check_model_buffers(const llama_model * model) {
++    const auto & tensors = llama_internal_get_tensor_map(model);
++    return !tensors.empty() && std::all_of(tensors.begin(), tensors.end(), [](const auto & item) {
++        return is_dummy_buffer(item.second);
++    });
++}
++
++bool check_recurrent_buffers(const llama_memory_recurrent * memory) {
++    size_t count = 0;
++    for (const auto * tensor : memory->r_l) {
++        if (tensor != nullptr) {
++            ++count;
++            if (!is_dummy_buffer(tensor)) {
++                return false;
++            }
++        }
++    }
++    for (const auto * tensor : memory->s_l) {
++        if (tensor != nullptr) {
++            ++count;
++            if (!is_dummy_buffer(tensor)) {
++                return false;
++            }
++        }
++    }
++    for (const auto * tensor : memory->p_l) {
++        if (tensor != nullptr) {
++            ++count;
++            if (!is_dummy_buffer(tensor)) {
++                return false;
++            }
++        }
++    }
++    return count > 0;
++}
++
++bool check_kv_buffers(const llama_kv_cache * memory) {
++    const auto layers = memory->get_layer_ids();
++    return !layers.empty() && std::all_of(layers.begin(), layers.end(), [&](uint32_t layer) {
++        const int32_t layer_id = static_cast<int32_t>(layer);
++        return is_dummy_buffer(memory->get_k_storage(layer_id)) &&
++               is_dummy_buffer(memory->get_v_storage(layer_id));
++    });
++}
++
++bool check_memory_buffers(llama_context * context, bool expect_recurrent) {
++    llama_memory_t memory = llama_get_memory(context);
++    if (auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory)) {
++        return check_kv_buffers(hybrid->get_mem_attn()) &&
++               check_recurrent_buffers(hybrid->get_mem_recr());
++    }
++    if (auto * recurrent = dynamic_cast<llama_memory_recurrent *>(memory)) {
++        return check_recurrent_buffers(recurrent);
++    }
++    return !expect_recurrent && check_kv_buffers(dynamic_cast<llama_kv_cache *>(memory));
++}
++
++bool check_compute_buffers(llama_context * context) {
++    ggml_backend_sched_t scheduler = context->get_sched();
++    for (int index = 0; index < ggml_backend_sched_get_n_backends(scheduler); ++index) {
++        ggml_backend_t backend = ggml_backend_sched_get_backend(scheduler, index);
++        if (ggml_backend_sched_get_buffer_size(scheduler, backend) != 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool build_profile(
++        llama_model * model,
++        const std::vector<skippy_parameter_binding> & bindings,
++        bool expect_recurrent,
++        const char * profile_id,
++        uint32_t n_tokens,
++        uint32_t n_sequences,
++        uint32_t n_outputs,
++        std::vector<std::string> & dependencies,
++        std::string & error,
++        uint32_t n_rs_seq = 0) {
++    llama_context_params params = llama_context_default_params();
++    params.n_ctx = 32;
++    params.n_batch = 8;
++    params.n_ubatch = 8;
++    params.n_seq_max = n_sequences;
++    params.n_rs_seq = n_rs_seq;
++    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    std::unique_ptr<llama_context, decltype(&llama_free)> context(
++            llama_init_from_model(model, params),
++            llama_free);
++    if (!context) {
++        error = "cannot create metadata-only context";
++        return false;
++    }
++    llama_memory_context_ptr memory_context;
++    if (llama_memory_t memory = llama_get_memory(context.get())) {
++        memory_context = memory->init_full();
++    }
++    ggml_cgraph * graph = context->graph_reserve(
++            n_tokens,
++            n_sequences,
++            n_outputs,
++            memory_context.get(),
++            true);
++    if (graph == nullptr || ggml_graph_n_nodes(graph) == 0 ||
++            !check_model_buffers(model) ||
++            !check_memory_buffers(context.get(), expect_recurrent) ||
++            !check_compute_buffers(context.get())) {
++        error = "metadata-only graph allocated payload, compute, or state storage";
++        return false;
++    }
++    const llm_graph_result * result = context->get_gf_res_reserve();
++    const skippy_execution_profile_guard guard = {
++        n_tokens,
++        n_sequences,
++        n_outputs,
++        0,
++        "renamed-multishard-v1",
++        "cpu",
++    };
++    const std::vector<skippy_stage_profile_input> profiles = {{
++        profile_id,
++        graph,
++        &result->get_block_boundaries(),
++        &result->get_state_effects(),
++        &bindings,
++        &result->get_request_input_bindings(),
++        llama_model_n_layer(model),
++        guard,
++        result->get_logits() != nullptr ? result->get_logits() : result->get_embd(),
++    }};
++    skippy_guarded_stage_slice_plan plan;
++    if (!skippy_build_guarded_stage_slice_plan(
++                profiles,
++                0,
++                llama_model_n_layer(model),
++                plan,
++                error) ||
++            plan.profiles.size() != 1 ||
++            plan.resident_parameter_identities.empty()) {
++        if (error.empty()) {
++            error = "metadata-only graph did not produce a guarded package-ID plan";
++        }
++        return false;
++    }
++    const std::set<std::string> package_ids = [&] {
++        std::set<std::string> ids;
++        for (const auto & binding : bindings) {
++            ids.insert(binding.identity);
++        }
++        return ids;
++    }();
++    for (const auto & identity : plan.resident_parameter_identities) {
++        if (package_ids.count(identity) == 0) {
++            error = "guarded plan contains a non-package parameter identity";
++            return false;
++        }
++    }
++    if (expect_recurrent) {
++        // Shared delta-net family contract: every recurrent layer must declare
++        // ownership of BOTH its conv (cache_r_l*) and SSM (cache_s_l*) storage,
++        // with at least one ordered write per kind per layer.
++        const auto & effects = result->get_state_effects();
++        const int32_t n_layer = llama_model_n_layer(model);
++        for (int32_t il = 0; il < n_layer; ++il) {
++            if (!model->hparams.is_recr(il)) {
++                continue; // hybrid families: full-attention layers own no recurrent storage
++            }
++            bool conv_read = false, ssm_read = false;
++            int64_t conv_writes = 0, ssm_writes = 0;
++            for (const auto & effect : effects) {
++                if (effect.layer != il) {
++                    continue;
++                }
++                if (effect.kind == skippy_state_kind::recurrent_conv) {
++                    conv_read |= effect.access == skippy_state_access::read;
++                    conv_writes += effect.access == skippy_state_access::write;
++                } else if (effect.kind == skippy_state_kind::recurrent_ssm) {
++                    ssm_read |= effect.access == skippy_state_access::read;
++                    ssm_writes += effect.access == skippy_state_access::write;
++                }
++            }
++            if (!conv_read || conv_writes == 0 || !ssm_read || ssm_writes == 0) {
++                error = "delta-net recurrent state ownership incomplete at layer " + std::to_string(il) +
++                    " (conv read=" + (conv_read ? "1" : "0") + " writes=" + std::to_string(conv_writes) +
++                    " ssm read=" + (ssm_read ? "1" : "0") + " writes=" + std::to_string(ssm_writes) + ")";
++                return false;
++            }
++            // Every declared write must reference its real graph node: a CPY (or
++            // zeroing SCALE for ordinal 0) whose destination is the registered
++            // storage. A discarded copy node or a non-write tensor registered as
++            // the effect node fails here instead of mis-ordering stage plans.
++            for (const auto & effect : effects) {
++                if (effect.layer != il || effect.access != skippy_state_access::write) {
++                    continue;
++                }
++                const ggml_tensor * node = effect.effect_node;
++                if (node == nullptr) {
++                    error = "delta-net state write at layer " + std::to_string(il) + " has no effect node";
++                    return false;
++                }
++                const ggml_op expect = effect.write_ordinal == 0 ? GGML_OP_SCALE : GGML_OP_CPY;
++                if (node->op != expect) {
++                    error = "delta-net state write at layer " + std::to_string(il) +
++                        " registers a non-write node (op=" + std::to_string(static_cast<int>(node->op)) + ")";
++                    return false;
++                }
++                if (skippy_state_canonical_storage(node->src[node->op == GGML_OP_CPY ? 1 : 0]) != effect.storage) {
++                    error = "delta-net state write at layer " + std::to_string(il) +
++                        " does not target its registered storage";
++                    return false;
++                }
++                bool in_graph = false;
++                for (int i = 0; i < ggml_graph_n_nodes(graph) && !in_graph; ++i) {
++                    in_graph = ggml_graph_node(graph, i) == node;
++                }
++                if (!in_graph) {
++                    error = "delta-net state write node at layer " + std::to_string(il) +
++                        " is not present in the graph";
++                    return false;
++                }
++            }
++        }
++    }
++    dependencies = plan.resident_parameter_identities;
++    return true;
++}
++
++bool rejects_invalid_bindings(
++        const llama_model * model,
++        const std::vector<skippy_package_tensor_binding_input> & valid) {
++    std::vector<skippy_parameter_binding> bindings;
++    std::string error;
++    auto rejects = [&](std::vector<skippy_package_tensor_binding_input> changed) {
++        error.clear();
++        return !skippy_bind_package_tensors(model, changed, bindings, error) && !error.empty();
++    };
++    auto changed = valid;
++    changed[1].tensor_id = changed[0].tensor_id;
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    std::reverse(changed.begin(), changed.end());
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    changed[1].native_name = changed[0].native_name;
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    changed.pop_back();
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    changed.push_back(valid.back());
++    changed.back().tensor_id = "package.tensor.extra";
++    changed.back().native_name = "native.tensor.extra";
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    changed[0].type = changed[0].type == GGML_TYPE_F32 ? GGML_TYPE_F16 : GGML_TYPE_F32;
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    ++changed[0].dimensions[0];
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    ++changed[0].stored_length;
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    changed[0].split_no = static_cast<uint16_t>(1 - changed[0].split_no);
++    if (!rejects(changed)) { return false; }
++    changed = valid;
++    ++changed[0].data_offset;
++    return rejects(changed);
++}
++
++std::string plan_string(const skippy_stage_plan * plan, skippy_stage_plan_string_ref_v1 reference) {
++    const char * data = nullptr;
++    size_t length = 0;
++    skippy_error * error = nullptr;
++    if (skippy_stage_plan_string_v1(plan, reference, &data, &length, &error) != SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return {};
++    }
++    return std::string(data, length);
++}
++
++bool check_public_stage_plan_abi(
++        const package_inventory & inventory,
++        const std::vector<std::string> & paths,
++        int32_t layer_count) {
++    std::vector<const char *> shard_paths;
++    for (const auto & path : paths) {
++        shard_paths.push_back(path.c_str());
++    }
++    std::vector<skippy_stage_planner_tensor_v1> tensors;
++    for (const auto & source : inventory.tensors) {
++        skippy_stage_planner_tensor_v1 tensor{};
++        tensor.abi_version = 1;
++        tensor.struct_size = sizeof(tensor);
++        tensor.tensor_id = source.tensor_id.c_str();
++        tensor.native_name = source.native_name.c_str();
++        tensor.ggml_type = source.type;
++        tensor.dimension_count = source.dimensions.size();
++        std::copy(source.dimensions.begin(), source.dimensions.end(), tensor.dimensions);
++        tensor.split_no = source.split_no;
++        tensor.data_offset = source.data_offset;
++        tensor.stored_length = source.stored_length;
++        tensors.push_back(tensor);
++    }
++    const std::vector<skippy_stage_planner_profile_v1> profiles = {
++        {1, sizeof(skippy_stage_planner_profile_v1), "batched", 8, 2, 8, 0},
++        {1, sizeof(skippy_stage_planner_profile_v1), "decode", 1, 1, 1, 0},
++        {1, sizeof(skippy_stage_planner_profile_v1), "prefill", 8, 1, 8, 0},
++    };
++    const std::string package_id = "sha256:" + std::string(64, 'a');
++    const std::string graph_configuration_id = "skippy.test.graph.v1";
++    const std::string backend_id = "skippy.test.backend";
++    skippy_stage_planner_config_v1 config = {1, sizeof(skippy_stage_planner_config_v1),
++        package_id.c_str(), shard_paths.data(), shard_paths.size(), tensors.data(), tensors.size(),
++        profiles.data(), profiles.size(), graph_configuration_id.c_str(), backend_id.c_str()};
++    skippy_error * error = nullptr;
++    skippy_stage_planner * planner = nullptr;
++    if (skippy_stage_planner_create_v1(&config, &planner, &error) != SKIPPY_STATUS_OK || planner == nullptr) {
++        std::fprintf(stderr, "public stage planner creation failed: %s\n", error == nullptr ? "" : error->message);
++        skippy_error_free(error);
++        return false;
++    }
++    std::unique_ptr<skippy_stage_planner, decltype(&skippy_stage_planner_free)> planner_owner(
++            planner, skippy_stage_planner_free);
++    skippy_stage_plan * source = nullptr;
++    skippy_stage_plan * final = nullptr;
++    for (int32_t cut = 1; cut < layer_count; ++cut) {
++        skippy_stage_plan * cut_source = nullptr;
++        skippy_stage_plan * cut_final = nullptr;
++        if (skippy_stage_planner_realize_v1(planner, 0, cut, &cut_source, &error) != SKIPPY_STATUS_OK ||
++                skippy_stage_planner_realize_v1(planner, cut, layer_count, &cut_final, &error) != SKIPPY_STATUS_OK) {
++            std::fprintf(stderr, "public stage realization failed at cut %d: %s\n",
++                    cut, error == nullptr ? "" : error->message);
++            skippy_error_free(error);
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++            return false;
++        }
++        const skippy_stage_plan * cut_chain[] = {cut_source, cut_final};
++        if (skippy_stage_plan_validate_chain_v1(cut_chain, 2, &error) != SKIPPY_STATUS_OK) {
++            std::fprintf(stderr, "public stage chain failed at cut %d: %s\n",
++                    cut, error == nullptr ? "" : error->message);
++            skippy_error_free(error);
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++            return false;
++        }
++        if (cut == 1) {
++            source = cut_source;
++            final = cut_final;
++        } else {
++            skippy_stage_plan_free(cut_source);
++            skippy_stage_plan_free(cut_final);
++        }
++    }
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> source_owner(source, skippy_stage_plan_free);
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> final_owner(final, skippy_stage_plan_free);
++    const skippy_stage_plan * chain[] = {source, final};
++    if (skippy_stage_plan_validate_chain_v1(chain, 2, &error) != SKIPPY_STATUS_OK) {
++        std::fprintf(stderr, "public stage chain failed: %s\n", error == nullptr ? "" : error->message);
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_stage_plan_desc_v1 descriptor{};
++    skippy_stage_plan_profile_desc_v1 profile{};
++    skippy_stage_plan_value_desc_v1 resident{};
++    if (skippy_stage_plan_describe_v1(source, &descriptor, &error) != SKIPPY_STATUS_OK ||
++            descriptor.abi_version != 1 || descriptor.profile_count != profiles.size() ||
++            descriptor.resident_tensor_count == 0 || plan_string(source, descriptor.package_id) != package_id ||
++            plan_string(source, descriptor.plan_id).compare(0, 15, "skippy-plan:v1:") != 0 ||
++            skippy_stage_plan_profile_at_v1(source, 0, &profile, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, profile.profile_id) != "batched" ||
++            plan_string(source, profile.graph_configuration_id) != graph_configuration_id ||
++            plan_string(source, profile.backend_id) != backend_id ||
++            skippy_stage_plan_resident_tensor_at_v1(source, 0, &resident, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, resident.identity).compare(0, 15, "package.tensor.") != 0) {
++        std::fprintf(stderr, "public stage descriptors are incomplete\n");
++        skippy_error_free(error);
++        return false;
++    }
++    for (size_t index = 0; index < profiles.size(); ++index) {
++        if (skippy_stage_plan_profile_at_v1(source, index, &profile, &error) != SKIPPY_STATUS_OK ||
++                plan_string(source, profile.profile_id) != profiles[index].profile_id ||
++                plan_string(source, profile.graph_configuration_id) != graph_configuration_id ||
++                plan_string(source, profile.backend_id) != backend_id) {
++            skippy_error_free(error);
++            return false;
++        }
++    }
++    skippy_stage_plan * repeated = nullptr;
++    if (skippy_stage_planner_realize_v1(planner, 0, 1, &repeated, &error) != SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return false;
++    }
++    std::unique_ptr<skippy_stage_plan, decltype(&skippy_stage_plan_free)> repeated_owner(
++            repeated, skippy_stage_plan_free);
++    skippy_stage_plan_desc_v1 repeated_descriptor{};
++    if (skippy_stage_plan_describe_v1(repeated, &repeated_descriptor, &error) != SKIPPY_STATUS_OK ||
++            plan_string(source, descriptor.plan_id) != plan_string(repeated, repeated_descriptor.plan_id)) {
++        skippy_error_free(error);
++        return false;
++    }
++    const std::string original_plan_id = plan_string(source, descriptor.plan_id);
++    const auto identity_plan_id = [&](const skippy_stage_planner_config_v1 & identity_config) {
++        skippy_stage_planner * identity_planner = nullptr;
++        skippy_stage_plan * identity_plan = nullptr;
++        skippy_stage_plan_desc_v1 identity_descriptor{};
++        skippy_error * identity_error = nullptr;
++        if (skippy_stage_planner_create_v1(&identity_config, &identity_planner, &identity_error) != SKIPPY_STATUS_OK ||
++                identity_planner == nullptr ||
++                skippy_stage_planner_realize_v1(identity_planner, 0, 1, &identity_plan, &identity_error) !=
++                        SKIPPY_STATUS_OK ||
++                identity_plan == nullptr ||
++                skippy_stage_plan_describe_v1(identity_plan, &identity_descriptor, &identity_error) !=
++                        SKIPPY_STATUS_OK) {
++            skippy_error_free(identity_error);
++            skippy_stage_plan_free(identity_plan);
++            skippy_stage_planner_free(identity_planner);
++            return std::string{};
++        }
++        const std::string identity = plan_string(identity_plan, identity_descriptor.plan_id);
++        skippy_stage_plan_free(identity_plan);
++        skippy_stage_planner_free(identity_planner);
++        return identity;
++    };
++    auto changed_identity = config;
++    changed_identity.graph_configuration_id = "skippy.test.graph.v2";
++    const std::string changed_graph_plan_id = identity_plan_id(changed_identity);
++    changed_identity = config;
++    changed_identity.backend_id = "skippy.test.other-backend";
++    const std::string changed_backend_plan_id = identity_plan_id(changed_identity);
++    if (changed_graph_plan_id.empty() || changed_backend_plan_id.empty() ||
++            changed_graph_plan_id == original_plan_id || changed_backend_plan_id == original_plan_id ||
++            changed_graph_plan_id == changed_backend_plan_id) {
++        return false;
++    }
++    skippy_stage_plan * partial = reinterpret_cast<skippy_stage_plan *>(1);
++    if (skippy_stage_planner_realize_v1(planner, -1, 1, &partial, &error) == SKIPPY_STATUS_OK || partial != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    const skippy_stage_plan * invalid_chain[] = {source, source};
++    if (skippy_stage_plan_validate_chain_v1(invalid_chain, 2, &error) == SKIPPY_STATUS_OK) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    auto malformed = config;
++    malformed.abi_version = 0;
++    skippy_stage_planner * partial_planner = reinterpret_cast<skippy_stage_planner *>(1);
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    malformed = config;
++    malformed.struct_size = offsetof(skippy_stage_planner_config_v1, graph_configuration_id);
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    malformed = config;
++    malformed.graph_configuration_id = "";
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    malformed = config;
++    malformed.backend_id = nullptr;
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    error = nullptr;
++    auto reversed_paths = shard_paths;
++    std::reverse(reversed_paths.begin(), reversed_paths.end());
++    malformed = config;
++    malformed.shard_paths = reversed_paths.data();
++    partial_planner = nullptr;
++    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++            partial_planner != nullptr) {
++        skippy_error_free(error);
++        return false;
++    }
++    skippy_error_free(error);
++    return true;
++}
++
++int run_proof(const char * source_path, const char * output_directory, bool expect_recurrent) {
++    std::string error;
++    std::vector<std::string> generated_paths;
++    if (!write_two_renamed_splits(source_path, output_directory, generated_paths, error)) {
++        std::fprintf(stderr, "renamed split generation failed: %s\n", error.c_str());
++        return 1;
++    }
++    const std::vector<std::string> reversed = {generated_paths[1], generated_paths[0]};
++    package_inventory inventory;
++    if (!inspect_package_splits(reversed, inventory, error) ||
++            inventory.ordered_paths != generated_paths) {
++        std::fprintf(stderr, "split inspection/order failed: %s\n", error.c_str());
++        return 2;
++    }
++    package_inventory rejected;
++    if (inspect_package_splits({generated_paths[0]}, rejected, error) ||
++            inspect_package_splits({generated_paths[0], generated_paths[0]}, rejected, error) ||
++            inspect_package_splits(
++                {generated_paths[0], generated_paths[1], generated_paths[1]}, rejected, error)) {
++        std::fprintf(stderr, "invalid split inventory was accepted\n");
++        return 3;
++    }
++    std::vector<const char *> load_paths;
++    for (const auto & path : inventory.ordered_paths) {
++        load_paths.push_back(path.c_str());
++    }
++    llama_model_params model_params = llama_model_default_params();
++    model_params.n_gpu_layers = 0;
++    model_params.load_mode = LLAMA_LOAD_MODE_NONE;
++    model_params.use_extra_bufts = false;
++    model_params.no_alloc = true;
++    llama_file_read_accounting accounting;
++    llama_file_read_accounting_begin(&accounting);
++    llama_model * model_raw = llama_model_load_from_splits(
++            load_paths.data(),
++            load_paths.size(),
++            model_params);
++    llama_file_read_accounting_end(&accounting);
++    std::unique_ptr<llama_model, decltype(&llama_model_free)> model(model_raw, llama_model_free);
++    if (!model || accounting.calls != 0 || accounting.bytes != 0 || !check_model_buffers(model.get())) {
++        std::fprintf(stderr, "metadata-only split load read or allocated weight payloads\n");
++        return 4;
++    }
++    std::vector<skippy_parameter_binding> bindings;
++    if (!skippy_bind_package_tensors(model.get(), inventory.tensors, bindings, error)) {
++        std::fprintf(stderr, "exact package tensor binding failed: %s\n", error.c_str());
++        return 5;
++    }
++    if (!rejects_invalid_bindings(model.get(), inventory.tensors)) {
++        std::fprintf(stderr, "invalid package tensor binding was accepted\n");
++        return 6;
++    }
++    std::vector<std::string> prefill;
++    std::vector<std::string> batched;
++    std::vector<std::string> decode;
++    if (!build_profile(model.get(), bindings, expect_recurrent, "prefill", 8, 1, 8, prefill, error) ||
++            !build_profile(model.get(), bindings, expect_recurrent, "batched", 8, 2, 8, batched, error) ||
++            !build_profile(model.get(), bindings, expect_recurrent, "decode", 1, 1, 1, decode, error)) {
++        std::fprintf(stderr, "renamed multishard graph proof failed: %s\n", error.c_str());
++        return 7;
++    }
++    if (expect_recurrent) {
++        // Rollback lane: n_rs_seq > 0 routes delta-net conv state writes through
++        // the multi-snapshot loop; ownership must hold there too (qwen35 and the
++        // other rollback-allowlisted delta-net archs do not clamp n_rs_seq).
++        std::vector<std::string> rollback;
++        if (!build_profile(model.get(), bindings, expect_recurrent, "rollback", 8, 1, 8, rollback, error, 2)) {
++            std::fprintf(stderr, "renamed multishard rollback proof failed: %s\n", error.c_str());
++            return 9;
++        }
++    }
++    if (prefill != batched || prefill != decode) {
++        std::fprintf(stderr, "package-ID dependency closure differs across graph profiles\n");
++        return 8;
++    }
++    if (!check_public_stage_plan_abi(inventory, inventory.ordered_paths, llama_model_n_layer(model.get()))) {
++        std::fprintf(stderr, "public stage-plan ABI proof failed\n");
++        return 9;
++    }
++    std::printf(
++            "renamed multishard metadata planning: tensors=%zu dependencies=%zu payload_reads=%zu payload_bytes=%zu recurrent=%d\n",
++            bindings.size(),
++            prefill.size(),
++            accounting.calls,
++            accounting.bytes,
++            expect_recurrent ? 1 : 0);
++    return 0;
++}
++
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 4) {
++        std::fprintf(stderr, "usage: %s MODEL_PATH OUTPUT_DIRECTORY EXPECT_RECURRENT\n", argv[0]);
++        return 64;
++    }
++    llama_backend_init();
++    const int result = run_proof(argv[1], argv[2], std::string(argv[3]) == "1");
++    llama_backend_free();
++    return result;
++}
+diff --git a/src/skippy/tests/stage_plan_header.c b/src/skippy/tests/stage_plan_header.c
+new file mode 100644
+index 000000000..2e5a5e1a6
+--- /dev/null
++++ b/src/skippy/tests/stage_plan_header.c
+@@ -0,0 +1,10 @@
++#include "skippy/stage_plan.h"
++
++int main(void) {
++    struct skippy_stage_plan_desc_v1 descriptor = {0};
++    struct skippy_stage_planner_config_v1 config = {0};
++    config.graph_configuration_id = "skippy.test.graph.v1";
++    config.backend_id = "skippy.test.backend";
++    return sizeof(descriptor) > 0 && config.graph_configuration_id != 0 &&
++            config.backend_id != 0 && SKIPPY_STAGE_PLAN_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
++}
+diff --git a/src/skippy/tests/stage_plan_header.cpp b/src/skippy/tests/stage_plan_header.cpp
+new file mode 100644
+index 000000000..beb86aaae
+--- /dev/null
++++ b/src/skippy/tests/stage_plan_header.cpp
+@@ -0,0 +1,13 @@
++#include "skippy/stage_plan.h"
++
++#include <cstddef>
++#include <type_traits>
++
++int main() {
++    static_assert(std::is_standard_layout<skippy_stage_planner_config_v1>::value, "C ABI layout required");
++    static_assert(std::is_standard_layout<skippy_stage_plan_profile_desc_v1>::value, "C ABI layout required");
++    static_assert(std::is_trivial<skippy_stage_plan_state_desc_v1>::value, "C ABI triviality required");
++    static_assert(offsetof(skippy_stage_planner_config_v1, graph_configuration_id) >
++            offsetof(skippy_stage_planner_config_v1, profile_count), "identity fields must be appended");
++    return SKIPPY_STAGE_PLAN_PROFILE_DESC_V1_ABI_VERSION == 1 ? 0 : 1;
++}
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+new file mode 100644
+index 000000000..380cf4976
+--- /dev/null
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -0,0 +1,1036 @@
++#include "ggml.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++#include "skippy/executable_graph.h"
++#include "../../../ggml/src/ggml-impl.h"
++#include "skippy/stage_slice_plan.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cmath>
++#include <cstring>
++#include <string>
++#include <vector>
++
++static bool contains_tensor(
++        const std::vector<const ggml_tensor *> & tensors,
++        const ggml_tensor * expected) {
++    return std::find(tensors.begin(), tensors.end(), expected) != tensors.end();
++}
++
++struct semantic_fixture {
++    explicit semantic_fixture(const char * prefix) {
++        ggml_init_params params = {
++            ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false), nullptr, true,
++        };
++        context.reset(ggml_init(params));
++        request = ggml_new_tensor_1d(context.get(), GGML_TYPE_F32, 4);
++        parameter = ggml_new_tensor_1d(context.get(), GGML_TYPE_F32, 4);
++        state = ggml_new_tensor_1d(context.get(), GGML_TYPE_F32, 4);
++        ggml_set_input(request);
++        ggml_set_name(request, (std::string(prefix) + ".request").c_str());
++        ggml_set_name(parameter, (std::string(prefix) + ".parameter").c_str());
++        ggml_set_name(state, (std::string(prefix) + ".state").c_str());
++        entry = ggml_mul(context.get(), request, parameter);
++        side = ggml_scale(context.get(), entry, 2.0f);
++        exit_0 = ggml_add(context.get(), entry, side);
++        prepared = ggml_add(context.get(), exit_0, state);
++        write_0 = ggml_cpy(context.get(), prepared, state);
++        exit_1 = ggml_mul(context.get(), prepared, parameter);
++        write_1 = ggml_cpy(context.get(), exit_1, state);
++        ggml_set_name(entry, (std::string(prefix) + ".entry").c_str());
++        ggml_set_name(exit_0, (std::string(prefix) + ".exit0").c_str());
++        ggml_set_name(exit_1, (std::string(prefix) + ".exit1").c_str());
++        graph = ggml_new_graph_custom(context.get(), 64, false);
++        ggml_build_forward_expand(graph, write_0);
++        ggml_build_forward_expand(graph, write_1);
++        ggml_build_forward_expand(graph, exit_1);
++        boundaries = {
++            {skippy_block_boundary_kind::entry, 0, entry},
++            {skippy_block_boundary_kind::exit, 0, exit_0},
++            {skippy_block_boundary_kind::entry, 1, exit_0},
++            {skippy_block_boundary_kind::exit, 1, exit_1},
++        };
++        effects = {
++            {skippy_state_kind::recurrent_conv, skippy_state_access::read, 1, state, nullptr},
++            {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, write_0, 0},
++            {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, write_1, 1},
++        };
++        parameters = {{parameter, "weight.shared"}};
++        requests = {{request, "tokens"}};
++    }
++
++    ggml_context_ptr context;
++    ggml_cgraph * graph = nullptr;
++    ggml_tensor * request = nullptr;
++    ggml_tensor * parameter = nullptr;
++    ggml_tensor * state = nullptr;
++    ggml_tensor * entry = nullptr;
++    ggml_tensor * side = nullptr;
++    ggml_tensor * exit_0 = nullptr;
++    ggml_tensor * prepared = nullptr;
++    ggml_tensor * write_0 = nullptr;
++    ggml_tensor * exit_1 = nullptr;
++    ggml_tensor * write_1 = nullptr;
++    std::vector<skippy_block_boundary> boundaries;
++    std::vector<skippy_state_effect> effects;
++    std::vector<skippy_parameter_binding> parameters;
++    std::vector<skippy_request_input_binding> requests;
++};
++
++static int check_semantic_identities() {
++    semantic_fixture left("left");
++    semantic_fixture right("renamed");
++    skippy_graph_semantics left_semantics;
++    skippy_graph_semantics right_semantics;
++    std::string error;
++    if (!skippy_build_graph_semantics(left.graph, left.boundaries, left.effects,
++                left.parameters, left.requests, left_semantics, error) ||
++            !skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, right_semantics, error) ||
++            left_semantics.identity != right_semantics.identity) {
++        std::fprintf(stderr, "pointer-different renamed semantic graphs disagree: %s\n", error.c_str());
++        return 60;
++    }
++
++    const skippy_execution_profile_guard guard = {4, 1, 4, 0, "semantic-config", "cpu"};
++    const std::vector<skippy_stage_profile_input> left_profiles = {{
++        "semantic", left.graph, &left.boundaries, &left.effects,
++        &left.parameters, &left.requests, 2, guard, left.exit_1,
++    }};
++    const std::vector<skippy_stage_profile_input> right_profiles = {{
++        "semantic", right.graph, &right.boundaries, &right.effects,
++        &right.parameters, &right.requests, 2, guard, right.exit_1,
++    }};
++    skippy_guarded_stage_slice_plan source;
++    skippy_guarded_stage_slice_plan final;
++    if (!skippy_build_guarded_stage_slice_plan(left_profiles, 0, 1, source, error) ||
++            !skippy_build_guarded_stage_slice_plan(right_profiles, 1, 2, final, error)) {
++        std::fprintf(stderr, "semantic stage plans failed: %s\n", error.c_str());
++        return 61;
++    }
++    const std::vector<const skippy_guarded_stage_slice_plan *> chain = {&source, &final};
++    if (!skippy_validate_guarded_stage_chain(chain, error) ||
++            source.profiles[0].graph == final.profiles[0].graph ||
++            source.profiles[0].graph_identity != final.profiles[0].graph_identity ||
++            source.profiles[0].profile_identity != final.profiles[0].profile_identity ||
++            source.profiles[0].slice.activation_export_identities !=
++                    final.profiles[0].slice.activation_import_identities) {
++        std::fprintf(stderr, "semantic frontier chain failed: %s\n", error.c_str());
++        return 62;
++    }
++    skippy_guarded_stage_slice_plan whole;
++    if (!skippy_build_guarded_stage_slice_plan(left_profiles, 0, 2, whole, error)) {
++        std::fprintf(stderr, "single-stage semantic plan failed: %s\n", error.c_str());
++        return 80;
++    }
++    const std::vector<const skippy_guarded_stage_slice_plan *> single_stage = {&whole};
++    if (!skippy_validate_guarded_stage_chain(single_stage, error)) {
++        std::fprintf(stderr, "single-stage semantic chain failed: %s\n", error.c_str());
++        return 81;
++    }
++    auto changed_profile = whole;
++    changed_profile.profiles[0].profile_identity[0] ^= 1;
++    const std::vector<const skippy_guarded_stage_slice_plan *> changed_profile_chain = {&changed_profile};
++    if (skippy_validate_guarded_stage_chain(changed_profile_chain, error)) {
++        std::fprintf(stderr, "single-stage profile identity tamper was accepted\n");
++        return 82;
++    }
++    auto changed_whole_slice = whole;
++    changed_whole_slice.profiles[0].slice.slice_identity[0] ^= 1;
++    const std::vector<const skippy_guarded_stage_slice_plan *> changed_slice_chain = {&changed_whole_slice};
++    if (skippy_validate_guarded_stage_chain(changed_slice_chain, error)) {
++        std::fprintf(stderr, "single-stage slice identity tamper was accepted\n");
++        return 83;
++    }
++    auto changed_range = whole;
++    changed_range.profiles[0].slice = source.profiles[0].slice;
++    const std::vector<const skippy_guarded_stage_slice_plan *> changed_range_chain = {&changed_range};
++    if (skippy_validate_guarded_stage_chain(changed_range_chain, error)) {
++        std::fprintf(stderr, "single-stage slice range substitution was accepted\n");
++        return 88;
++    }
++    skippy_guarded_stage_slice_plan right_whole;
++    if (!skippy_build_guarded_stage_slice_plan(right_profiles, 0, 2, right_whole, error)) {
++        std::fprintf(stderr, "right full-range semantic plan failed: %s\n", error.c_str());
++        return 89;
++    }
++    auto changed_adjacent = final;
++    changed_adjacent.profiles[0].slice = right_whole.profiles[0].slice;
++    const std::vector<const skippy_guarded_stage_slice_plan *> changed_adjacent_chain = {
++        &source, &changed_adjacent,
++    };
++    if (skippy_validate_guarded_stage_chain(changed_adjacent_chain, error)) {
++        std::fprintf(stderr, "adjacent-stage slice range substitution was accepted\n");
++        return 90;
++    }
++
++    skippy_executable_graph executable;
++    if (!skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error) ||
++            executable.slice_identity != source.profiles[0].slice.slice_identity ||
++            executable.node_identities != source.profiles[0].slice.node_identities) {
++        std::fprintf(stderr, "semantic executable clone failed: %s\n", error.c_str());
++        return 63;
++    }
++    auto changed_slice = source.profiles[0].slice;
++    changed_slice.node_identities[0][0] ^= 1;
++    if (skippy_build_executable_graph(left.graph, changed_slice, executable, error)) {
++        std::fprintf(stderr, "tampered executable semantic mapping was accepted\n");
++        return 64;
++    }
++    auto changed_import = final.profiles[0].slice;
++    changed_import.activation_imports[0] = right.request;
++    if (skippy_build_executable_graph(right.graph, changed_import, executable, error)) {
++        std::fprintf(stderr, "swapped executable import pointer was accepted\n");
++        return 78;
++    }
++    auto changed_export = source.profiles[0].slice;
++    changed_export.activation_exports[0] = left.entry;
++    if (skippy_build_executable_graph(left.graph, changed_export, executable, error)) {
++        std::fprintf(stderr, "swapped executable export pointer was accepted\n");
++        return 79;
++    }
++    const int32_t stale_op_param = left.exit_0->op_params[0];
++    left.exit_0->op_params[0] ^= 1;
++    if (skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error)) {
++        std::fprintf(stderr, "stale executable op parameter was accepted\n");
++        return 84;
++    }
++    left.exit_0->op_params[0] = stale_op_param;
++    const int32_t stale_flags = left.exit_0->flags;
++    left.exit_0->flags ^= GGML_TENSOR_FLAG_OUTPUT;
++    if (skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error)) {
++        std::fprintf(stderr, "stale executable flags were accepted\n");
++        return 85;
++    }
++    left.exit_0->flags = stale_flags;
++    const size_t stale_stride = left.exit_0->nb[1];
++    left.exit_0->nb[1] += sizeof(float);
++    if (skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error)) {
++        std::fprintf(stderr, "stale executable stride was accepted\n");
++        return 86;
++    }
++    left.exit_0->nb[1] = stale_stride;
++    ggml_tensor * stale_source = left.exit_0->src[0];
++    left.exit_0->src[0] = left.request;
++    if (skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error)) {
++        std::fprintf(stderr, "stale executable source reference was accepted\n");
++        return 87;
++    }
++    left.exit_0->src[0] = stale_source;
++    const size_t stale_parameter_stride = left.parameter->nb[1];
++    left.parameter->nb[1] += sizeof(float);
++    if (skippy_build_executable_graph(left.graph, source.profiles[0].slice, executable, error)) {
++        std::fprintf(stderr, "stale executable parameter metadata was accepted\n");
++        return 91;
++    }
++    left.parameter->nb[1] = stale_parameter_stride;
++    auto changed_snapshot = source.profiles[0].slice;
++    changed_snapshot.source_value_identities.begin()->second[0] ^= 1;
++    if (skippy_build_executable_graph(left.graph, changed_snapshot, executable, error)) {
++        std::fprintf(stderr, "tampered executable source snapshot was accepted\n");
++        return 92;
++    }
++
++    const int32_t op_param = right.exit_1->op_params[0];
++    right.exit_1->op_params[0] ^= 1;
++    skippy_graph_semantics changed_semantics;
++    if (!skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error) ||
++            changed_semantics.identity == left_semantics.identity) {
++        std::fprintf(stderr, "operation parameter perturbation did not change graph identity\n");
++        return 65;
++    }
++    right.exit_1->op_params[0] = op_param;
++    const size_t stride = right.exit_1->nb[1];
++    right.exit_1->nb[1] += sizeof(float);
++    if (!skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error) ||
++            changed_semantics.identity == left_semantics.identity) {
++        std::fprintf(stderr, "stride perturbation did not change graph identity\n");
++        return 66;
++    }
++    right.exit_1->nb[1] = stride;
++    const int32_t flags = right.exit_1->flags;
++    right.exit_1->flags |= GGML_TENSOR_FLAG_OUTPUT;
++    if (!skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error) ||
++            changed_semantics.identity == left_semantics.identity) {
++        std::fprintf(stderr, "stable flag perturbation did not change graph identity\n");
++        return 67;
++    }
++    right.exit_1->flags = flags;
++
++    auto reordered_effects = right.effects;
++    std::reverse(reordered_effects.begin(), reordered_effects.end());
++    if (!skippy_build_graph_semantics(right.graph, right.boundaries, reordered_effects,
++                right.parameters, right.requests, changed_semantics, error) ||
++            changed_semantics.identity != left_semantics.identity) {
++        std::fprintf(stderr, "state effect enumeration changed ordered semantics: %s\n", error.c_str());
++        return 68;
++    }
++    auto invalid_effects = right.effects;
++    std::swap(invalid_effects[1].write_ordinal, invalid_effects[2].write_ordinal);
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, invalid_effects,
++                right.parameters, right.requests, changed_semantics, error)) {
++        std::fprintf(stderr, "reversed state-write order was accepted\n");
++        return 69;
++    }
++
++    const int32_t unknown_flags = right.entry->flags;
++    right.entry->flags |= 1 << 20;
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error)) {
++        std::fprintf(stderr, "unknown semantic flags were accepted\n");
++        return 70;
++    }
++    right.entry->flags = unknown_flags;
++    ggml_tensor * original_source = right.entry->src[0];
++    right.entry->src[0] = right.exit_1;
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error)) {
++        std::fprintf(stderr, "forward semantic reference was accepted\n");
++        return 71;
++    }
++    ggml_tensor * foreign = ggml_new_tensor_1d(right.context.get(), GGML_TYPE_F32, 4);
++    right.entry->src[0] = foreign;
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error)) {
++        std::fprintf(stderr, "unresolved semantic reference was accepted\n");
++        return 72;
++    }
++    right.entry->src[0] = original_source;
++
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, {}, changed_semantics, error)) {
++        std::fprintf(stderr, "missing request-input binding was accepted\n");
++        return 73;
++    }
++    auto duplicate_requests = right.requests;
++    duplicate_requests.push_back(right.requests.front());
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, duplicate_requests, changed_semantics, error)) {
++        std::fprintf(stderr, "duplicate request-input binding was accepted\n");
++        return 74;
++    }
++    ggml_tensor * other_request = ggml_new_tensor_1d(right.context.get(), GGML_TYPE_F32, 4);
++    ggml_set_input(other_request);
++    duplicate_requests = right.requests;
++    duplicate_requests.push_back({other_request, "tokens"});
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, duplicate_requests, changed_semantics, error)) {
++        std::fprintf(stderr, "duplicate request-input identity was accepted\n");
++        return 75;
++    }
++    auto conflicting_requests = right.requests;
++    conflicting_requests.push_back({right.parameter, "conflict"});
++    if (skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, conflicting_requests, changed_semantics, error)) {
++        std::fprintf(stderr, "conflicting structural binding was accepted\n");
++        return 76;
++    }
++
++    right.state->flags |= GGML_TENSOR_FLAG_INPUT;
++    if (!skippy_build_graph_semantics(right.graph, right.boundaries, right.effects,
++                right.parameters, right.requests, changed_semantics, error)) {
++        std::fprintf(stderr, "registered state owner was treated as a request input: %s\n", error.c_str());
++        return 77;
++    }
++    right.state->flags &= ~GGML_TENSOR_FLAG_INPUT;
++    return 0;
++}
++
++static int check_middle_stage_selection() {
++    std::vector<uint8_t> buffer(ggml_tensor_overhead() * 96 + ggml_graph_overhead_custom(96, false));
++    ggml_init_params params = { buffer.size(), buffer.data(), true };
++    ggml_context * ctx = ggml_init(params);
++
++    ggml_tensor * tokens = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * request = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_set_input(tokens);
++    ggml_set_input(request);
++    ggml_tensor * parameter_0 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_2 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * state = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++
++    ggml_tensor * entry_0 = ggml_mul(ctx, tokens, parameter_0);
++    ggml_tensor * pass_through = ggml_mul(ctx, entry_0, parameter_0);
++    ggml_tensor * request_only = ggml_view_1d(ctx, request, 4, 0);
++    ggml_tensor * exit_0 = ggml_add(ctx, ggml_add(ctx, entry_0, parameter_0), request_only);
++    ggml_tensor * local_state_read = ggml_add(ctx, state, request);
++    ggml_tensor * exit_1 = ggml_add(ctx, exit_0, ggml_mul(ctx, local_state_read, parameter_1));
++    ggml_tensor * state_write = ggml_cpy(ctx, exit_1, state);
++    ggml_tensor * exit_2 = ggml_add(
++            ctx,
++            ggml_add(ctx, ggml_mul(ctx, exit_1, parameter_2), pass_through),
++            request_only);
++    ggml_tensor * logits = ggml_mul(ctx, exit_2, parameter_2);
++
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 96, false);
++    ggml_build_forward_expand(graph, pass_through);
++    ggml_build_forward_expand(graph, state_write);
++    ggml_build_forward_expand(graph, logits);
++
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_0},
++        {skippy_block_boundary_kind::entry, 1, exit_0},
++        {skippy_block_boundary_kind::exit, 1, exit_1},
++        {skippy_block_boundary_kind::entry, 2, exit_1},
++        {skippy_block_boundary_kind::exit, 2, exit_2},
++    };
++    const std::vector<skippy_state_effect> effects = {
++        {skippy_state_kind::recurrent_conv, skippy_state_access::read, 1, state, nullptr},
++        {skippy_state_kind::recurrent_conv, skippy_state_access::write, 1, state, state_write, 0},
++    };
++    const std::vector<skippy_parameter_binding> parameter_bindings = {
++        {parameter_0, "block.0.weight"},
++        {parameter_1, "block.1.weight"},
++        {parameter_2, "block.2.weight"},
++    };
++    const std::vector<skippy_request_input_binding> request_bindings = {
++        {tokens, "tokens"},
++        {request, "request.sideband"},
++    };
++
++    skippy_stage_slice_selection selection;
++    std::string error;
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                request_bindings,
++                3,
++                1,
++                2,
++                selection,
++                error)) {
++        std::fprintf(stderr, "middle stage selection failed: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 1;
++    }
++    if (selection.parameter_identities != std::vector<std::string>{"block.1.weight"}) {
++        std::fprintf(stderr, "middle stage selected the wrong parameters:");
++        for (const std::string & identity : selection.parameter_identities) {
++            std::fprintf(stderr, " %s", identity.c_str());
++        }
++        std::fprintf(stderr, "\n");
++        ggml_free(ctx);
++        return 2;
++    }
++    if (!contains_tensor(selection.activation_imports, exit_0) ||
++            !contains_tensor(selection.activation_imports, pass_through) ||
++            !contains_tensor(selection.activation_exports, exit_1) ||
++            !contains_tensor(selection.activation_exports, pass_through) ||
++            contains_tensor(selection.activation_imports, request_only) ||
++            contains_tensor(selection.activation_exports, request_only)) {
++        std::fprintf(stderr, "middle stage lost an activation or pass-through frontier\n");
++        ggml_free(ctx);
++        return 3;
++    }
++    if (!contains_tensor(selection.request_inputs, request) ||
++            contains_tensor(selection.request_inputs, tokens)) {
++        std::fprintf(stderr, "middle stage request-input classification is incorrect\n");
++        ggml_free(ctx);
++        return 4;
++    }
++    if (selection.state_effects.size() != 2) {
++        std::fprintf(stderr, "middle stage did not retain its state owner and write effect\n");
++        ggml_free(ctx);
++        return 5;
++    }
++    if (selection.node_indices.size() < 4) {
++        std::fprintf(stderr, "middle stage omitted locally resolvable state preparation\n");
++        ggml_free(ctx);
++        return 6;
++    }
++
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                request_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error) ||
++            !contains_tensor(selection.activation_exports, pass_through) ||
++            contains_tensor(selection.activation_exports, request_only)) {
++        std::fprintf(stderr, "source stage did not export its detached pass-through value: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 7;
++    }
++
++    const skippy_stage_slice_selection normalized = selection;
++    std::vector<skippy_parameter_binding> reversed_bindings = parameter_bindings;
++    std::reverse(reversed_bindings.begin(), reversed_bindings.end());
++    if (!skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                reversed_bindings,
++                request_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error) ||
++            selection.node_indices != normalized.node_indices ||
++            selection.activation_imports != normalized.activation_imports ||
++            selection.activation_exports != normalized.activation_exports ||
++            selection.request_inputs != normalized.request_inputs ||
++            selection.parameter_identities != normalized.parameter_identities) {
++        std::fprintf(stderr, "stage selection changed with parameter enumeration order: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 8;
++    }
++
++    const skippy_execution_profile_guard prefill_guard = {
++        8,
++        1,
++        8,
++        0,
++        "config-a",
++        "cpu",
++    };
++    const skippy_execution_profile_guard decode_guard = {
++        1,
++        1,
++        1,
++        0,
++        "config-a",
++        "cpu",
++    };
++    std::vector<skippy_parameter_binding> decode_parameter_bindings = parameter_bindings;
++    decode_parameter_bindings[1].identity = "block.1.decode_weight";
++    std::vector<skippy_stage_profile_input> profiles = {
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard, logits},
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard, logits},
++    };
++    skippy_guarded_stage_slice_plan guarded_plan;
++    if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error) ||
++            guarded_plan.layer_count != 3 ||
++            guarded_plan.layer_start != 1 ||
++            guarded_plan.layer_end != 2 ||
++            guarded_plan.profiles.size() != 2 ||
++            guarded_plan.profiles[0].profile_id != "decode" ||
++            guarded_plan.profiles[1].profile_id != "prefill" ||
++            guarded_plan.profiles[0].guard.n_tokens != 1 ||
++            guarded_plan.profiles[1].guard.n_tokens != 8 ||
++            guarded_plan.profiles[0].slice.parameter_identities != std::vector<std::string>{"block.1.decode_weight"} ||
++            guarded_plan.profiles[1].slice.parameter_identities != std::vector<std::string>{"block.1.weight"} ||
++            guarded_plan.resident_parameter_identities !=
++                    std::vector<std::string>{"block.1.decode_weight", "block.1.weight"}) {
++        std::fprintf(stderr, "guarded profile plan was not normalized: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 9;
++    }
++    const skippy_guarded_stage_slice_plan normalized_plan = guarded_plan;
++    std::reverse(profiles.begin(), profiles.end());
++    if (!skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error) ||
++            guarded_plan.profiles[0].profile_id != normalized_plan.profiles[0].profile_id ||
++            guarded_plan.profiles[1].profile_id != normalized_plan.profiles[1].profile_id ||
++            guarded_plan.profiles[0].slice.node_indices != normalized_plan.profiles[0].slice.node_indices ||
++            guarded_plan.profiles[1].slice.node_indices != normalized_plan.profiles[1].slice.node_indices ||
++            guarded_plan.resident_parameter_identities != normalized_plan.resident_parameter_identities) {
++        std::fprintf(stderr, "guarded profile plan changed with input order: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 10;
++    }
++    profiles.push_back(profiles.front());
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "duplicate execution profile identity was accepted\n");
++        ggml_free(ctx);
++        return 11;
++    }
++    profiles.pop_back();
++    profiles[0].guard.n_sequences = 0;
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "invalid execution profile guard was accepted\n");
++        ggml_free(ctx);
++        return 12;
++    }
++    profiles[0].guard = decode_guard;
++    profiles[0].guard.n_tokens = 5;
++    profiles[0].guard.n_sequences = 2;
++    if (skippy_build_guarded_stage_slice_plan(profiles, 1, 2, guarded_plan, error)) {
++        std::fprintf(stderr, "uneven multi-sequence execution profile was accepted\n");
++        ggml_free(ctx);
++        return 13;
++    }
++    profiles[0].guard = decode_guard;
++
++    std::vector<skippy_stage_profile_input> ordered_profiles = {
++        {"decode", graph, &boundaries, &effects, &decode_parameter_bindings, &request_bindings, 3, decode_guard, logits},
++        {"prefill", graph, &boundaries, &effects, &parameter_bindings, &request_bindings, 3, prefill_guard, logits},
++    };
++    skippy_guarded_stage_slice_plan source_plan;
++    skippy_guarded_stage_slice_plan middle_plan;
++    skippy_guarded_stage_slice_plan final_plan;
++    if (!skippy_build_guarded_stage_slice_plan(ordered_profiles, 0, 1, source_plan, error) ||
++            !skippy_build_guarded_stage_slice_plan(ordered_profiles, 1, 2, middle_plan, error) ||
++            !skippy_build_guarded_stage_slice_plan(ordered_profiles, 2, 3, final_plan, error)) {
++        std::fprintf(stderr, "complete guarded stage chain could not be built: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 14;
++    }
++    const std::vector<const skippy_guarded_stage_slice_plan *> stage_chain = {
++        &source_plan,
++        &middle_plan,
++        &final_plan,
++    };
++    if (!skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "complete guarded stage chain was rejected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 15;
++    }
++    const auto removed_export = source_plan.profiles[0].slice.activation_exports.back();
++    source_plan.profiles[0].slice.activation_exports.pop_back();
++    if (skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "incomplete activation frontier was accepted\n");
++        ggml_free(ctx);
++        return 16;
++    }
++    source_plan.profiles[0].slice.activation_exports.push_back(removed_export);
++    middle_plan.profiles[0].guard.n_tokens += 1;
++    if (skippy_validate_guarded_stage_chain(stage_chain, error)) {
++        std::fprintf(stderr, "mismatched adjacent profile guards were accepted\n");
++        ggml_free(ctx);
++        return 17;
++    }
++    middle_plan.profiles[0].guard.n_tokens -= 1;
++
++    const std::vector<skippy_block_boundary> foreign_state_boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_1},
++        {skippy_block_boundary_kind::entry, 1, exit_1},
++        {skippy_block_boundary_kind::exit, 1, exit_2},
++        {skippy_block_boundary_kind::entry, 2, exit_2},
++        {skippy_block_boundary_kind::exit, 2, logits},
++    };
++    if (skippy_select_stage_slice(
++                graph,
++                foreign_state_boundaries,
++                effects,
++                parameter_bindings,
++                request_bindings,
++                3,
++                0,
++                1,
++                selection,
++                error)) {
++        std::fprintf(stderr, "slice accepted persistent state owned by another layer\n");
++        ggml_free(ctx);
++        return 18;
++    }
++
++    ggml_set_input(parameter_1);
++    if (skippy_select_stage_slice(
++                graph,
++                boundaries,
++                effects,
++                parameter_bindings,
++                request_bindings,
++                3,
++                1,
++                2,
++                selection,
++                error)) {
++        std::fprintf(stderr, "multiply classified parameter was accepted\n");
++        ggml_free(ctx);
++        return 19;
++    }
++
++    ggml_free(ctx);
++    return 0;
++}
++
++static bool count_compute(void * data) {
++    ++*static_cast<int *>(data);
++    return false;
++}
++
++static int check_executable_slice(bool export_norm) {
++    ggml_init_params params = {ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * input = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * weight = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * state = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_set_input(input);
++    ggml_set_input(weight);
++    ggml_set_input(state);
++    ggml_tensor * imported = ggml_scale(ctx.get(), input, 2.0f);
++    ggml_tensor * passthrough = ggml_scale(ctx.get(), input, 7.0f);
++    ggml_tensor * norm = ggml_rms_norm(ctx.get(), imported, 1e-5f);
++    ggml_tensor * omitted = ggml_scale(ctx.get(), norm, 3.0f);
++    ggml_tensor * product = ggml_mul(ctx.get(), norm, weight);
++    ggml_tensor * write_1 = ggml_cpy(ctx.get(), product, state);
++    ggml_tensor * view = ggml_view_1d(ctx.get(), product, 2, sizeof(float));
++    ggml_tensor * output = ggml_cont(ctx.get(), view);
++    ggml_tensor * write_2 = ggml_cpy(ctx.get(), imported, state);
++    ggml_tensor * ordered_only = ggml_scale(ctx.get(), weight, 100.0f);
++    ggml_cgraph * source = ggml_new_graph_custom(ctx.get(), 64, false);
++    ggml_build_forward_expand(source, passthrough);
++    ggml_build_forward_expand(source, omitted);
++    ggml_build_forward_expand(source, write_1);
++    ggml_build_forward_expand(source, output);
++    ggml_build_forward_expand(source, write_2);
++    ggml_build_forward_order(source, ordered_only);
++    const std::vector<ggml_tensor *> selected = {norm, product, write_1, view, output, write_2, ordered_only};
++    std::vector<int32_t> indices;
++    int norm_index = -1;
++    for (int i = 0; i < source->n_nodes; ++i) {
++        if (source->nodes[i] == norm) {
++            norm_index = i;
++        }
++        if (std::find(selected.begin(), selected.end(), source->nodes[i]) != selected.end()) {
++            indices.push_back(i);
++        }
++    }
++    if (indices.size() != selected.size() || indices[1] != indices[0] + 2 ||
++            ggml_node_get_use_count(source, norm_index) != 2) {
++        return 20;
++    }
++    std::vector<ggml_tensor> source_snapshots;
++    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get()); tensor; tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
++        source_snapshots.push_back(*tensor);
++    }
++    const std::vector<const ggml_tensor *> imports = {imported, passthrough};
++    std::vector<const ggml_tensor *> exports = {output, passthrough, view};
++    if (export_norm) {
++        exports.push_back(norm);
++    }
++    skippy_executable_graph slice;
++    std::string error;
++    if (!skippy_build_executable_graph(source, indices, imports, exports, slice, error)) {
++        std::fprintf(stderr, "executable graph failed: %s\n", error.c_str());
++        return 21;
++    }
++    if (slice.graph->n_nodes != int(selected.size()) || slice.graph->n_leafs != 4 ||
++            slice.tensors.count(input) || slice.tensors.count(omitted) ||
++            slice.graph->visited_hash_set.keys == source->visited_hash_set.keys ||
++            ggml_node_get_use_count(slice.graph, 0) != 1) {
++        return 22;
++    }
++    for (size_t i = 0; i < selected.size(); ++i) {
++        if (slice.graph->nodes[i] != slice.tensors.at(selected[i])) {
++            return 23;
++        }
++    }
++    if (slice.tensors.at(imported)->op != GGML_OP_NONE ||
++            slice.tensors.at(imported)->src[0] || slice.tensors.at(imported)->view_src ||
++            (slice.tensors.at(imported)->flags & GGML_TENSOR_FLAG_COMPUTE) ||
++            (slice.tensors.at(ordered_only)->flags & GGML_TENSOR_FLAG_COMPUTE) ||
++            slice.tensors.at(view)->view_src != slice.tensors.at(product) ||
++            slice.tensors.at(view)->view_offs != sizeof(float) ||
++            !(slice.tensors.at(product)->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++            slice.tensors.at(write_1)->view_src != slice.tensors.at(state) ||
++            slice.tensors.at(write_2)->view_src != slice.tensors.at(state)) {
++        return 24;
++    }
++    if (ggml_can_fuse(slice.graph, 0, {GGML_OP_RMS_NORM, GGML_OP_MUL}) == export_norm) {
++        return 25;
++    }
++    // Every tensor has its own visited slot and exact operand-edge count, not a copy of the full graph's counts.
++    for (const auto & entry : slice.tensors) {
++        const ggml_tensor * tensor = entry.second;
++        size_t slot = ggml_hash_find(&slice.graph->visited_hash_set, tensor);
++        if (slot == GGML_HASHSET_FULL || !ggml_bitset_get(slice.graph->visited_hash_set.used, slot)) {
++            return 26;
++        }
++        int uses = 0;
++        for (int i = 0; i < slice.graph->n_nodes; ++i) {
++            for (const ggml_tensor * src : slice.graph->nodes[i]->src) {
++                uses += src == tensor;
++            }
++        }
++        if (slice.graph->use_counts[slot] != uses || tensor->data || tensor->buffer || tensor->extra) {
++            return 27;
++        }
++    }
++    ggml_backend_ptr cpu(ggml_backend_cpu_init());
++    ggml_backend_cpu_set_n_threads(cpu.get(), 1);
++    ggml_backend_t backends[] = {cpu.get()};
++    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, nullptr, 1, 64, false, true));
++    if (ggml_backend_sched_get_buffer_size(sched.get(), cpu.get()) != 0 ||
++            !ggml_backend_sched_alloc_graph(sched.get(), slice.graph) ||
++            ggml_backend_sched_get_buffer_size(sched.get(), cpu.get()) == 0) {
++        return 28;
++    }
++    const float x[] = {2, 4, 6, 8};
++    const float w[] = {1, 2, 3, 4};
++    const float side[] = {7, 14, 21, 28};
++    ggml_backend_tensor_set(slice.tensors.at(imported), x, 0, sizeof(x));
++    ggml_backend_tensor_set(slice.tensors.at(weight), w, 0, sizeof(w));
++    ggml_backend_tensor_set(slice.tensors.at(passthrough), side, 0, sizeof(side));
++    int compute_calls = 0;
++    ggml_backend_cpu_set_abort_callback(cpu.get(), count_compute, &compute_calls);
++    if (ggml_backend_sched_graph_compute(sched.get(), slice.graph) != GGML_STATUS_SUCCESS) {
++        return 29;
++    }
++    float actual[4];
++    ggml_backend_tensor_get(slice.tensors.at(output), actual, 0, 2 * sizeof(float));
++    for (int i = 0; i < 2; ++i) {
++        float expected = x[i + 1] * w[i + 1] / std::sqrt(30.0f + 1e-5f);
++        if (std::fabs(actual[i] - expected) > 1e-5f) {
++            return 30;
++        }
++    }
++    ggml_backend_tensor_get(slice.tensors.at(state), actual, 0, sizeof(actual));
++    if (std::memcmp(actual, x, sizeof(x)) != 0) {
++        return 31;
++    }
++    ggml_backend_tensor_get(slice.tensors.at(passthrough), actual, 0, sizeof(actual));
++    if (std::memcmp(actual, side, sizeof(side)) != 0) {
++        return 32;
++    }
++    if (export_norm) {
++        ggml_backend_tensor_get(slice.tensors.at(norm), actual, 0, sizeof(actual));
++        for (int i = 0; i < 4; ++i) {
++            if (std::fabs(actual[i] - x[i] / std::sqrt(30.0f + 1e-5f)) > 1e-5f) {
++                return 33;
++            }
++        }
++    }
++    // The CPU abort hook runs once per computed (possibly fused) kernel, not once per graph node.
++    if (compute_calls != (export_norm ? 5 : 4)) {
++        std::fprintf(stderr, "unexpected kernel count: %d (export_norm=%d)\n", compute_calls, export_norm);
++        return 34;
++    }
++    size_t snapshot = 0;
++    for (ggml_tensor * tensor = ggml_get_first_tensor(ctx.get()); tensor; tensor = ggml_get_next_tensor(ctx.get(), tensor)) {
++        if (std::memcmp(tensor, &source_snapshots[snapshot++], sizeof(*tensor)) != 0) {
++            return 35;
++        }
++    }
++    std::fprintf(stderr, "executable slice: nodes=%d leaves=%d kernels=%d exported_norm=%d\n",
++                 slice.graph->n_nodes, slice.graph->n_leafs, compute_calls, export_norm);
++    return 0;
++}
++
++static int check_invalid_executable_slices() {
++    ggml_init_params params = {ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(32, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * x = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * a = ggml_scale(ctx.get(), x, 2.0f);
++    ggml_tensor * b = ggml_scale(ctx.get(), a, 3.0f);
++    ggml_tensor * foreign = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 32, false);
++    ggml_build_forward_expand(graph, b);
++    skippy_executable_graph result;
++    std::string error;
++    auto rejects = [&](std::vector<int32_t> indices, std::vector<const ggml_tensor *> imports,
++                       std::vector<const ggml_tensor *> exports) {
++        if (skippy_build_executable_graph(graph, indices, imports, exports, result, error)) {
++            return false;
++        }
++        return !error.empty() && !result.graph && !result.context && result.tensors.empty();
++    };
++    if (!rejects({1}, {}, {b}) || !rejects({0, 0}, {}, {a}) ||
++            !rejects({1, 0}, {}, {b}) || !rejects({2}, {}, {}) ||
++            !rejects({-1}, {}, {}) || !rejects({1}, {a, a}, {b}) ||
++            !rejects({0, 1}, {a}, {b}) || !rejects({1}, {foreign}, {b}) ||
++            !rejects({1}, {a}, {foreign}) || !rejects({1}, {a}, {b, b})) {
++        return 40;
++    }
++    // An import-only pass-through is a real allocated leaf, not an empty graph view.
++    if (!skippy_build_executable_graph(graph, {}, {a}, {a}, result, error) ||
++            result.graph->n_nodes != 0 || result.graph->n_leafs != 1 ||
++            !(result.tensors.at(a)->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return 41;
++    }
++    b->src[0] = b;
++    if (!rejects({1}, {}, {b})) {
++        return 42;
++    }
++    b->src[0] = a;
++    b->op = GGML_OP_CUSTOM;
++    if (!rejects({1}, {a}, {b})) {
++        return 43;
++    }
++    b->op = GGML_OP_SCALE;
++    ggml_tensor * imported_view = ggml_view_1d(ctx.get(), x, 3, sizeof(float));
++    ggml_tensor * nested_view = ggml_view_1d(ctx.get(), imported_view, 2, sizeof(float));
++    ggml_build_forward_expand(graph, nested_view);
++    // Both views have flattened x as their base. Never bind nested_view to an unrelated copy of x.
++    if (!rejects({3}, {imported_view}, {nested_view})) {
++        return 44;
++    }
++    ggml_tensor * storage_only_view = ggml_view_1d(ctx.get(), foreign, 2, 0);
++    storage_only_view->src[0] = nullptr;
++    ggml_build_forward_expand(graph, storage_only_view);
++    if (!skippy_build_executable_graph(graph, {4}, {}, {storage_only_view}, result, error) ||
++            result.graph->n_nodes != 1 || result.graph->n_leafs != 1 ||
++            result.tensors.at(storage_only_view)->view_src != result.tensors.at(foreign) ||
++            !(result.tensors.at(foreign)->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return 45;
++    }
++    const size_t slot = ggml_hash_find(&result.graph->visited_hash_set, result.tensors.at(foreign));
++    if (slot == GGML_HASHSET_FULL || !ggml_bitset_get(result.graph->visited_hash_set.used, slot)) {
++        return 46;
++    }
++    return 0;
++}
++
++static int check_state_preparation_execution(bool empty_zero, bool empty_extra) {
++    ggml_init_params params = {ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false), nullptr, true};
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * state = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, 2, 4);
++    ggml_tensor * input = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 2);
++    ggml_tensor * main_ids = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, 1);
++    ggml_tensor * extra_ids = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, empty_extra ? 0 : 1);
++    for (auto * request : {input, main_ids, extra_ids}) { ggml_set_input(request); }
++    ggml_tensor * zero = ggml_scale_inplace(ctx.get(), ggml_view_1d(ctx.get(), state, empty_zero ? 0 : 2, 0), 0);
++    ggml_tensor * main = ggml_get_rows(ctx.get(), state, main_ids);
++    ggml_tensor * extra = ggml_cpy(ctx.get(), ggml_get_rows(ctx.get(), state, extra_ids),
++            ggml_view_2d(ctx.get(), state, 2, empty_extra ? 0 : 1, state->nb[1], 4 * sizeof(float)));
++    ggml_tensor * entry = ggml_scale(ctx.get(), input, 1);
++    ggml_tensor * output = ggml_add(ctx.get(), entry, main);
++    ggml_tensor * final = ggml_cpy(ctx.get(), output, ggml_view_1d(ctx.get(), state, 2, 0));
++    ggml_tensor * rollback = ggml_cpy(ctx.get(), main, ggml_view_1d(ctx.get(), state, 2, 2 * sizeof(float)));
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 64, false);
++    for (auto * root : {zero, main, extra, final, rollback, output}) { ggml_build_forward_expand(graph, root); }
++    const auto kind = skippy_state_kind::recurrent_conv;
++    const auto write = skippy_state_access::write;
++    const std::vector<skippy_state_effect> effects = {
++        {kind, write, 0, state, zero, 0},
++        {kind, write, 0, state, extra, 1},
++        {kind, write, 0, state, final, 2},
++        {kind, write, 0, state, rollback, 3},
++        {kind, skippy_state_access::read, 0, state, nullptr},
++    };
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry},
++        {skippy_block_boundary_kind::exit, 0, output},
++    };
++    const std::vector<skippy_request_input_binding> request_bindings = {
++        {input, "input"},
++        {main_ids, "state.main_indices"},
++        {extra_ids, "state.extra_indices"},
++    };
++    skippy_stage_slice_selection selection;
++    skippy_executable_graph slice;
++    std::string error;
++    if (!skippy_select_stage_slice(graph, boundaries, effects, {}, request_bindings, 1, 0, 1,
++                selection, error, output) ||
++            !selection.activation_imports.empty() || selection.state_effects.size() != effects.size() ||
++            !skippy_build_executable_graph(graph, selection, slice, error)) {
++        std::fprintf(stderr, "state preparation slice failed: %s\n", error.c_str());
++        return 50;
++    }
++    for (auto * root : {zero, main, extra, final, rollback}) {
++        if (!slice.tensors.count(root)) { return 51; }
++    }
++    ggml_backend_ptr cpu(ggml_backend_cpu_init());
++    ggml_backend_cpu_set_n_threads(cpu.get(), 1);
++    ggml_backend_t backends[] = {cpu.get()};
++    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, nullptr, 1, 64, false, true));
++    if (!ggml_backend_sched_alloc_graph(sched.get(), slice.graph)) { return 52; }
++    const float initial[] = {9, 10, 2, 3, 7, 8, 11, 12};
++    const float delta[] = {5, 6};
++    const int32_t main_id = 0;
++    const int32_t extra_id = 1;
++    ggml_backend_tensor_set(slice.tensors.at(state), initial, 0, sizeof(initial));
++    ggml_backend_tensor_set(slice.tensors.at(input), delta, 0, sizeof(delta));
++    ggml_backend_tensor_set(slice.tensors.at(main_ids), &main_id, 0, sizeof(main_id));
++    if (!empty_extra) { ggml_backend_tensor_set(slice.tensors.at(extra_ids), &extra_id, 0, sizeof(extra_id)); }
++    if (ggml_backend_sched_graph_compute(sched.get(), slice.graph) != GGML_STATUS_SUCCESS) { return 53; }
++    float actual[8];
++    ggml_backend_tensor_get(slice.tensors.at(state), actual, 0, sizeof(actual));
++    const float expected[] = {
++        empty_zero ? 14.0f : 5.0f, empty_zero ? 16.0f : 6.0f,
++        empty_zero ? 9.0f : 0.0f, empty_zero ? 10.0f : 0.0f,
++        empty_extra ? 7.0f : 2.0f, empty_extra ? 8.0f : 3.0f, 11, 12,
++    };
++    if (std::memcmp(actual, expected, sizeof(expected)) != 0) {
++        std::fprintf(stderr, "state preparation values changed (empty_zero=%d):", empty_zero);
++        for (float value : actual) { std::fprintf(stderr, " %g", value); }
++        std::fprintf(stderr, "\n");
++        return 54;
++    }
++    std::fprintf(stderr, "state preparation execution: empty_zero=%d empty_extra=%d ordered_writes=4 untouched_tail=2\n", empty_zero, empty_extra);
++    return 0;
++}
++
++static int check_explicit_final_output() {
++    std::vector<uint8_t> buffer(ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false));
++    ggml_init_params params = { buffer.size(), buffer.data(), true };
++    ggml_context * ctx = ggml_init(params);
++    ggml_tensor * request = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_0 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_1 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_tensor * parameter_2 = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
++    ggml_set_input(request);
++    ggml_tensor * entry_0 = ggml_mul(ctx, request, parameter_0);
++    ggml_tensor * exit_0 = ggml_add(ctx, entry_0, parameter_0);
++    ggml_tensor * exit_1 = ggml_add(ctx, exit_0, parameter_1);
++    ggml_tensor * exit_2 = ggml_add(ctx, exit_1, parameter_2);
++    ggml_tensor * logits = ggml_mul(ctx, exit_2, parameter_2);
++    ggml_tensor * trailing_unrelated = ggml_mul(ctx, request, parameter_0);
++
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 64, false);
++    ggml_build_forward_expand(graph, logits);
++    ggml_build_forward_order(graph, trailing_unrelated);
++    int32_t trailing_index = -1;
++    for (int32_t index = 0; index < ggml_graph_n_nodes(graph); ++index) {
++        if (ggml_graph_node(graph, index) == trailing_unrelated) {
++            trailing_index = index;
++            break;
++        }
++    }
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry_0},
++        {skippy_block_boundary_kind::exit, 0, exit_0},
++        {skippy_block_boundary_kind::entry, 1, exit_0},
++        {skippy_block_boundary_kind::exit, 1, exit_1},
++        {skippy_block_boundary_kind::entry, 2, exit_1},
++        {skippy_block_boundary_kind::exit, 2, exit_2},
++    };
++    const std::vector<skippy_parameter_binding> parameters = {
++        {parameter_0, "block.0.weight"},
++        {parameter_1, "block.1.weight"},
++        {parameter_2, "block.2.weight"},
++    };
++    const std::vector<skippy_request_input_binding> requests = {
++        {request, "tokens"},
++    };
++    skippy_stage_slice_selection selection;
++    std::string error;
++    if (!skippy_select_stage_slice(graph, boundaries, {}, parameters, requests, 3, 2, 3,
++                selection, error, logits) ||
++            selection.parameter_identities != std::vector<std::string>{"block.2.weight"} ||
++            !contains_tensor(selection.activation_imports, exit_1) ||
++            !selection.activation_exports.empty() || trailing_index < 0 ||
++            std::find(selection.node_indices.begin(), selection.node_indices.end(),
++                    trailing_index) != selection.node_indices.end()) {
++        std::fprintf(stderr, "explicit final output cone was not selected: %s\n", error.c_str());
++        ggml_free(ctx);
++        return 78;
++    }
++    if (skippy_select_stage_slice(graph, boundaries, {}, parameters, requests, 3, 2, 3,
++                selection, error)) {
++        std::fprintf(stderr, "final slice accepted without an explicit output root\n");
++        ggml_free(ctx);
++        return 79;
++    }
++    ggml_free(ctx);
++    return 0;
++}
++
++int main() {
++    int result = check_semantic_identities();
++    if (!result) { result = check_middle_stage_selection(); }
++    if (!result) { result = check_explicit_final_output(); }
++    if (!result) { result = check_state_preparation_execution(false, false); }
++    if (!result) { result = check_state_preparation_execution(true, false); }
++    if (!result) { result = check_state_preparation_execution(true, true); }
++    if (!result) { result = check_executable_slice(false); }
++    if (!result) { result = check_executable_slice(true); }
++    if (!result) { result = check_invalid_executable_slices(); }
++    if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
++    return result;
++}
+-- 
+2.54.0 (Apple Git-157)
+

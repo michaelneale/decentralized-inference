@@ -355,14 +355,15 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         generated_patch_check = ROOT / "scripts" / "check-skippy-generated-family-patch.sh"
         generated_patch_check_text = generated_patch_check.read_text(encoding="utf-8")
         self.assertIn("llvm@22", generated_patch_check_text)
-        self.assertIn("0076-skippy-generate-model-family-stage-controls.patch", generated_patch_check_text)
+        self.assertIn("0012-skippy-generate-model-family-stage-controls.patch", generated_patch_check_text)
         self.assertIn("generate-skippy-family-patch.py", generated_patch_check_text)
         self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
         self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
         self.assertIn("-R '^skippy_'", generated_patch_check_text)
 
         native_build = _step_block(workflow, "Build patched llama.cpp ABI")
-        self.assertIn('LLAMA_STAGE_BUILD_TESTS: "ON"', native_build)
+        self.assertIn('LLAMA_STAGE_UPSTREAM_TESTS: "ON"', native_build)
+        self.assertIn("uv run --no-project --with jinja2==3.1.6", native_build)
 
         # Truthful success reporting requires generated patch + parity + live
         # + battery gates to be green on every cadence.

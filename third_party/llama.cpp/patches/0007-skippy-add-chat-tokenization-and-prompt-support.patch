@@ -1,0 +1,1654 @@
+From 0d3c137c1fa062b3f908f36318fa9c616a996740 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:22 +1000
+Subject: [PATCH 07/11] skippy: add chat, tokenization, and prompt support
+
+---
+ common/chat-auto-parser-generator.cpp |  51 ++-
+ common/chat-diff-analyzer.cpp         |  10 +-
+ common/chat-peg-parser.cpp            |  15 +-
+ common/chat-peg-parser.h              |   2 +-
+ common/chat.cpp                       | 250 ++++++++++++-
+ common/chat.h                         |   5 +-
+ common/ngram-cache.cpp                | 153 +++++++-
+ common/stage-chat.cpp                 | 362 ++++++++++++++++++
+ models/templates/Inkling.jinja        | 514 ++++++++++++++++++++++++++
+ 9 files changed, 1327 insertions(+), 35 deletions(-)
+ create mode 100644 common/stage-chat.cpp
+ create mode 100644 models/templates/Inkling.jinja
+
+diff --git a/common/chat-auto-parser-generator.cpp b/common/chat-auto-parser-generator.cpp
+index d7e117e4d..4707c524a 100644
+--- a/common/chat-auto-parser-generator.cpp
++++ b/common/chat-auto-parser-generator.cpp
+@@ -22,6 +22,18 @@ static void foreach_function(const json & tools, const std::function<void(const
+     }
+ }
+ 
++static bool is_ascii_space(char c) {
++    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\v';
++}
++
++static std::string lazy_trigger_marker(const std::string & marker) {
++    std::string trimmed = marker;
++    while (!trimmed.empty() && is_ascii_space(trimmed.back())) {
++        trimmed.pop_back();
++    }
++    return trimmed.empty() ? marker : trimmed;
++}
++
+ namespace autoparser {
+ 
+ parser_build_context::parser_build_context(common_chat_peg_builder & p, const generation_params & inputs) :
+@@ -102,7 +114,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &
+         // Set grammar triggers based on tool section markers (fall back to per-call markers)
+         if (data.grammar_lazy) {
+             data.grammar_triggers = {
+-                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, trigger_marker }
++                { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, lazy_trigger_marker(trigger_marker) }
+             };
+             if (autoparser.tools.format.openai_wrapper_trigger) {
+                 // model emits the OpenAI function wrapper, trigger on it
+@@ -396,7 +408,9 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
+         auto schema_info = common_schema_info();
+         schema_info.resolve_refs(params);
+ 
+-        // Build parser for each argument, separating required and optional
++        // Object member order is semantically irrelevant. Split the declared
++        // arguments into required and optional sets so the grammar can enforce
++        // presence structurally instead of validating after the fact.
+         std::vector<common_peg_parser> required_parsers;
+         std::vector<common_peg_parser> optional_parsers;
+         for (const auto & [param_name, param_schema] : properties.items()) {
+@@ -421,22 +435,33 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
+             }
+         }
+ 
+-        // Build required arg sequence in definition order
+-        common_peg_parser args_seq = p.eps();
+-        for (size_t i = 0; i < required_parsers.size(); i++) {
+-            if (i > 0) {
+-                args_seq = args_seq + p.space();
+-            }
+-            args_seq = args_seq + required_parsers[i];
+-        }
+-
+-        // Build optional args with flexible ordering
++        // Optional arguments may appear in any order, any number of times, and
++        // interleaved anywhere among the required arguments.
++        common_peg_parser optional_run = p.eps();
+         if (!optional_parsers.empty()) {
+             common_peg_parser any_opt = p.choice();
+             for (const auto & opt : optional_parsers) {
+                 any_opt |= opt;
+             }
+-            args_seq = args_seq + p.repeat(p.space() + any_opt, 0, -1);
++            optional_run = p.rule("tool-" + name + "-optional", p.zero_or_more(any_opt + p.space()));
++        }
++
++        // Required arguments must each appear exactly once, in any order.
++        // permute() generates every ordering while structurally requiring all of
++        // them, so the grammar sampler prevents both omission and duplication --
++        // matching the generic JSON tool path (common/chat.cpp). Optional
++        // arguments are allowed before each required argument (and after the
++        // last) so required and optional fields may be freely interleaved.
++        common_peg_parser args_seq = p.eps();
++        if (!required_parsers.empty()) {
++            std::vector<common_peg_parser> required_slots;
++            required_slots.reserve(required_parsers.size());
++            for (const auto & req : required_parsers) {
++                required_slots.push_back(optional_run + req + p.space());
++            }
++            args_seq = args_seq + p.permute("tool-" + name + "-required", required_slots) + optional_run;
++        } else {
++            args_seq = args_seq + optional_run;
+         }
+ 
+         if (!arguments.start.empty()) {
+diff --git a/common/chat-diff-analyzer.cpp b/common/chat-diff-analyzer.cpp
+index a7e370578..39ffa20f1 100644
+--- a/common/chat-diff-analyzer.cpp
++++ b/common/chat-diff-analyzer.cpp
+@@ -484,7 +484,8 @@ void analyze_reasoning::compare_reasoning_presence() {
+     json assistant_with_reasoning = json{
+         { "role",              "assistant"                },
+         { "content",           ASSISTANT_MSG              },
+-        { "reasoning_content", THINKING_CONTENT           }
++        { "reasoning_content", THINKING_CONTENT           },
++        { "thinking",          THINKING_CONTENT           }
+     };
+ 
+     template_params params;
+@@ -617,13 +618,15 @@ void analyze_reasoning::compare_reasoning_scope() {
+     json assistant_reasoning_content = json{
+         { "role",              "assistant"      },
+         { "content",           ASSISTANT_MSG    },
+-        { "reasoning_content", THINKING_CONTENT }
++        { "reasoning_content", THINKING_CONTENT },
++        { "thinking",          THINKING_CONTENT }
+     };
+ 
+     json assistant_reasoning_tools = json{
+         { "role",              "assistant"                                                                  },
+         { "content",           nullptr                                                                      },
+         { "reasoning_content", THINKING_CONTENT                                                             },
++        { "thinking",          THINKING_CONTENT                                                             },
+         { "tool_calls",
+          json::array({ build_tool_call(FUN_FIRST, json{ { ARG_FIRST, "VVVV" }, { ARG_SECOND, "XXXX" } }) }) }
+     };
+@@ -692,7 +695,8 @@ analyze_content::analyze_content(const common_chat_template & tmpl, const analyz
+     json assistant_with_reasoning = json{
+         { "role",              "assistant"      },
+         { "content",           ""               },
+-        { "reasoning_content", THINKING_CONTENT }
++        { "reasoning_content", THINKING_CONTENT },
++        { "thinking",          THINKING_CONTENT }
+     };
+ 
+     template_params params_content_only;
+diff --git a/common/chat-peg-parser.cpp b/common/chat-peg-parser.cpp
+index 79b97a80f..c38639d03 100644
+--- a/common/chat-peg-parser.cpp
++++ b/common/chat-peg-parser.cpp
+@@ -386,11 +386,12 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
+     }
+ 
+     if (is_arg_name && current_tool) {
++        const std::string arg_name(trim(node.text));
+         std::string arg_entry;
+         if (arg_count > 0) {
+             arg_entry = ",";
+         }
+-        arg_entry += ordered_json(trim(node.text)).dump() + ":";
++        arg_entry += ordered_json(arg_name).dump() + ":";
+         ++arg_count;
+ 
+         auto & target = args_target();
+@@ -667,10 +668,10 @@ common_peg_parser common_chat_peg_builder::build_json_tools_function_is_key(
+         // Arguments — either wrapped in args_key or parsed directly
+         common_peg_parser args_parser = eps();
+         if (args_key.empty()) {
+-            args_parser = tool_args(schema(json(), "tool-" + name + "-schema", params));
++            args_parser = tool_args(schema(json_object(), "tool-" + name + "-schema", params));
+         } else {
+             args_parser = literal("\"" + effective_args_key + "\"") + space() + literal(":") + space() +
+-                          tool_args(schema(json(), "tool-" + name + "-schema", params));
++                          tool_args(schema(json_object(), "tool-" + name + "-schema", params));
+         }
+         inner_fields.push_back(args_parser);
+ 
+@@ -731,7 +732,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_nested_keys(
+         auto nested_name = literal("\"" + nested_name_field + "\"") + space() + literal(":") + space() +
+                           atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
+         auto nested_args = literal("\"" + nested_args_field + "\"") + space() + literal(":") + space() +
+-                          tool_args(schema(json(), "tool-" + name + "-schema", params));
++                          tool_args(schema(json_object(), "tool-" + name + "-schema", params));
+ 
+         auto nested_object = literal("{") + space() +
+                             nested_name + space() + literal(",") + space() +
+@@ -787,7 +788,9 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
+ 
+     auto tool_choices    = choice();
+     auto name_key_parser = literal("\"" + effective_name_key + "\"");
+-    auto args_key_parser = literal("\"" + effective_args_key + "\"");
++    auto args_key_parser = effective_args_key == "arguments"
++                               ? choice({ literal("\"arguments\""), literal("\"args\"") })
++                               : literal("\"" + effective_args_key + "\"");
+ 
+     for (const auto & tool_def : tools) {
+         if (!tool_def.contains("function")) {
+@@ -800,7 +803,7 @@ common_peg_parser common_chat_peg_builder::build_json_tools_flat_keys(
+         auto tool_name_ = name_key_parser + space() + literal(":") + space() +
+                          atomic(literal("\"") + tool_name(literal(name)) + literal("\""));
+         auto tool_args_ = args_key_parser + space() + literal(":") + space() +
+-                         tool_args(schema(json(), "tool-" + name + "-schema", params));
++                         tool_args(schema(json_object(), "tool-" + name + "-schema", params));
+ 
+         // Build ID parsers if keys are provided
+         common_peg_parser id_parser = eps();
+diff --git a/common/chat-peg-parser.h b/common/chat-peg-parser.h
+index 114fa049f..7723d4e35 100644
+--- a/common/chat-peg-parser.h
++++ b/common/chat-peg-parser.h
+@@ -5,6 +5,7 @@
+ 
+ #include <map>
+ #include <optional>
++#include <set>
+ #include <vector>
+ 
+ class common_chat_peg_mapper {
+@@ -106,7 +107,6 @@ class common_chat_peg_builder : public common_peg_parser_builder {
+     common_peg_parser tool_arg_string_value(const common_peg_parser & p) { return tag(TOOL_ARG_STRING_VALUE, p); }
+     common_peg_parser tool_arg_json_value(const common_peg_parser & p) { return tag(TOOL_ARG_VALUE, p); }
+ 
+-
+     // Matches every parser exactly once, in any order.
+     common_peg_parser permute(const std::string & rule_prefix, const std::vector<common_peg_parser> & parsers);
+ 
+diff --git a/common/chat.cpp b/common/chat.cpp
+index 743ecde0a..00f1d9ca8 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -226,6 +226,11 @@ json common_chat_msg::to_json_oaicompat(bool concat_typed_text) const {
+                 });
+             }
+         }
++    } else if (!content_present) {
++        // Preserve an omitted OpenAI-compatible content field. Some templates
++        // distinguish this from explicit null and an empty string.
++    } else if (content_is_null) {
++        jmsg["content"] = nullptr;
+     } else {
+         jmsg["content"] = "";
+     }
+@@ -390,6 +395,7 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
+ 
+             auto has_content    = message.contains("content");
+             auto has_tool_calls = message.contains("tool_calls");
++            msg.content_present = has_content;
+             if (has_content) {
+                 const auto & content = message.at("content");
+                 if (content.is_string()) {
+@@ -408,7 +414,9 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
+                         msg_part.text = part.at("text");
+                         msg.content_parts.push_back(msg_part);
+                     }
+-                } else if (!content.is_null()) {
++                } else if (content.is_null()) {
++                    msg.content_is_null = true;
++                } else {
+                     throw std::invalid_argument("Invalid 'content' type: expected string or array, got " +
+                                                 content.dump() +
+                                                 " (ref: https://github.com/ggml-org/llama.cpp/issues/8367)");
+@@ -444,11 +452,6 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
+                     msg.tool_calls.push_back(tc);
+                 }
+             }
+-            if (!has_content && !has_tool_calls) {
+-                throw std::invalid_argument(
+-                    "Expected 'content' or 'tool_calls' (ref: https://github.com/ggml-org/llama.cpp/issues/8367 & "
+-                    "https://github.com/ggml-org/llama.cpp/issues/12279)");
+-            }
+             if (message.contains("reasoning_content")) {
+                 msg.reasoning_content = message.at("reasoning_content");
+             }
+@@ -709,6 +712,113 @@ std::string common_chat_format_example(const struct common_chat_templates *
+     "  {{- '<|im_start|>assistant\n' -}}\n"                                               \
+     "{%- endif -%}"
+ 
++// Fallback copied from the official zai-org/GLM-4.7-Flash chat_template.jinja.
++// In particular, the generation-prompt branch that emits a leading </think>
++// when enable_thinking=false is upstream GLM template behavior, not skippy policy.
++static const char * GLM_4_7_FALLBACK_TEMPLATE_SRC = R"jinja([gMASK]<sop>
++{%- if tools -%}
++<|system|>
++# Tools
++
++You may call one or more functions to assist with the user query.
++
++You are provided with function signatures within <tools></tools> XML tags:
++<tools>
++{% for tool in tools %}
++{{ tool | tojson(ensure_ascii=False) }}
++{% endfor %}
++</tools>
++
++For each function call, output the function name and arguments within the following XML format:
++<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>{%- endif -%}
++{%- macro visible_text(content) -%}
++    {%- if content is string -%}
++        {{- content }}
++    {%- elif content is iterable and content is not mapping -%}
++        {%- for item in content -%}
++            {%- if item is mapping and item.type == 'text' -%}
++                {{- item.text }}
++            {%- elif item is string -%}
++                {{- item }}
++            {%- endif -%}
++        {%- endfor -%}
++    {%- else -%}
++        {{- content }}
++    {%- endif -%}
++{%- endmacro -%}
++{%- set ns = namespace(last_user_index=-1) %}
++{%- for m in messages %}
++    {%- if m.role == 'user' %}
++        {% set ns.last_user_index = loop.index0 -%}
++    {%- endif %}
++{%- endfor %}
++{% for m in messages %}
++{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
++{%- elif m.role == 'assistant' -%}
++<|assistant|>
++{%- set reasoning_content = '' %}
++{%- set content = visible_text(m.content) %}
++{%- if m.reasoning_content is string %}
++    {%- set reasoning_content = m.reasoning_content %}
++{%- else %}
++    {%- if '</think>' in content %}
++        {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
++        {%- set content = content.split('</think>')[-1].lstrip('\n') %}
++    {%- endif %}
++{%- endif %}
++{%- if ((clear_thinking is defined and not clear_thinking) or loop.index0 > ns.last_user_index) and reasoning_content -%}
++{{ '<think>' + reasoning_content.strip() +  '</think>'}}
++{%- else -%}
++{{ '</think>' }}
++{%- endif -%}
++{%- if content.strip() -%}
++{{ content.strip() }}
++{%- endif -%}
++{% if m.tool_calls %}
++{% for tc in m.tool_calls %}
++{%- if tc.function %}
++    {%- set tc = tc.function %}
++{%- endif %}
++{{- '<tool_call>' + tc.name -}}
++{% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
++{% endif %}
++{%- elif m.role == 'tool' -%}
++{%- if m.content is string -%}
++{%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
++    {{- '<|observation|>' }}
++{%- endif %}
++{{- '<tool_response>' }}
++{{- m.content }}
++{{- '</tool_response>' }}
++{%- else -%}
++<|observation|>{% for tr in m.content %}
++<tool_response>{{ tr.output if tr.output is defined else tr }}</tool_response>{% endfor -%}
++{% endif -%}
++{%- elif m.role == 'system' -%}
++<|system|>{{ visible_text(m.content) }}
++{%- endif -%}
++{%- endfor -%}
++{%- if add_generation_prompt -%}
++    <|assistant|>{{- '</think>' if (enable_thinking is defined and not enable_thinking) else '<think>' -}}
++{%- endif -%})jinja";
++
++static std::string common_chat_vocab_piece(const struct llama_vocab * vocab, llama_token token) {
++    return token == LLAMA_TOKEN_NULL ? std::string() : common_token_to_piece(vocab, token, true);
++}
++
++static bool common_chat_model_has_glm4_vocab(const struct llama_model * model) {
++    if (model == nullptr) {
++        return false;
++    }
++    const auto * vocab = llama_model_get_vocab(model);
++    if (vocab == nullptr) {
++        return false;
++    }
++    return common_chat_vocab_piece(vocab, llama_vocab_bos(vocab)) == "[gMASK]" &&
++           common_chat_vocab_piece(vocab, llama_vocab_eos(vocab)) == "<|endoftext|>" &&
++           common_chat_vocab_piece(vocab, llama_vocab_eot(vocab)) == "<|user|>";
++}
++
+ void common_chat_templates_free(struct common_chat_templates * tmpls) {
+     delete tmpls;
+ }
+@@ -773,6 +883,10 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model *
+     } else {
+         default_template_src = chat_template_override;
+     }
++    if (default_template_src.empty() && template_tool_use_src.empty() && common_chat_model_has_glm4_vocab(model)) {
++        LOG_DBG("%s: using built-in GLM 4.7 fallback chat template\n", __func__);
++        default_template_src = GLM_4_7_FALLBACK_TEMPLATE_SRC;
++    }
+     if (default_template_src.empty() || default_template_src == "chatml") {
+         if (!template_tool_use_src.empty()) {
+             default_template_src = template_tool_use_src;
+@@ -2957,6 +3071,122 @@ static common_chat_params common_chat_params_init_minimax_m3(const common_chat_t
+     return data;
+ }
+ 
++// Inkling / TML typed-content-block parser: <|end_message|> separates blocks within a turn,
++// <|content_model_end_sampling|> is the sole end-of-generation token (mirrors sglang TmlDetector).
++static common_chat_params common_chat_params_init_inkling(const common_chat_template &          tmpl,
++                                                          const autoparser::generation_params & inputs) {
++    common_chat_params data;
++
++    const std::string MSG_MODEL    = "<|message_model|>";
++    const std::string MSG_USER     = "<|message_user|>";
++    const std::string MSG_SYSTEM   = "<|message_system|>";
++    const std::string MSG_TOOL     = "<|message_tool|>";
++    const std::string THINK        = "<|content_thinking|>";
++    const std::string TEXT         = "<|content_text|>";
++    const std::string END_MESSAGE  = "<|end_message|>";
++    const std::string END_SAMPLING = "<|content_model_end_sampling|>";
++    const std::string INVOKE_TOOL  = "<|content_invoke_tool_json|>";
++
++    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
++    data.generation_prompt  = common_chat_template_generation_prompt_impl(tmpl, inputs);
++    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
++    data.supports_thinking  = true;
++    data.thinking_start_tag = THINK;
++    data.thinking_end_tags  = {END_MESSAGE};
++    data.preserved_tokens   = {
++        MSG_MODEL, MSG_USER, MSG_SYSTEM, MSG_TOOL,
++        THINK, TEXT, END_MESSAGE, END_SAMPLING, INVOKE_TOOL,
++    };
++
++    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
++    data.message_delimiters = {
++        { COMMON_CHAT_ROLE_ASSISTANT, MSG_MODEL },
++        { COMMON_CHAT_ROLE_USER,      MSG_USER },
++        { COMMON_CHAT_ROLE_SYSTEM,    MSG_SYSTEM },
++        { COMMON_CHAT_ROLE_TOOL,      MSG_TOOL },
++    };
++
++    auto extract_reasoning = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
++
++    if (inputs.has_continuation()) {
++        const auto & msg = inputs.continue_msg;
++
++        data.generation_prompt = MSG_MODEL + THINK + msg.reasoning_content;
++        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
++            data.generation_prompt += END_MESSAGE + TEXT + msg.render_content();
++        }
++
++        data.prompt += data.generation_prompt;
++    }
++
++    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
++        auto generation_prompt = p.literal(MSG_MODEL);
++        auto end               = p.end();
++
++        // thinking block; may also reappear mid-turn (after content), so it is both an optional
++        // prefix and a choice inside the block loops. With reasoning_format=NONE keep it
++        // (markers included) inline as content
++        common_peg_parser reasoning_block = p.eps();
++        if (extract_reasoning) {
++            reasoning_block = p.literal(THINK) +
++                              p.reasoning(p.until_one_of({ END_MESSAGE, TEXT, END_SAMPLING })) +
++                              p.optional(p.literal(END_MESSAGE));
++        } else {
++            reasoning_block = p.content(p.literal(THINK) +
++                                        p.until_one_of({ END_MESSAGE, TEXT, END_SAMPLING }) +
++                                        p.optional(p.literal(END_MESSAGE)));
++        }
++        auto reasoning = p.optional(reasoning_block);
++
++        // TML re-emits <|message_model|> before each content block; a turn may contain several
++        // text blocks (one per content part), so the block repeats and bodies concatenate.
++        // THINK stops the content scan so a mid-turn thinking block is never leaked as text
++        auto text_block = p.optional(p.literal(MSG_MODEL)) +
++                          p.optional(p.literal(TEXT)) +
++                          p.content(p.until_one_of({ THINK, END_MESSAGE, END_SAMPLING })) +
++                          p.optional(p.literal(END_MESSAGE));
++        auto text_content = p.one_or_more(p.choice({ reasoning_block, text_block }));
++
++        if (!has_tools || inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_NONE) {
++            return generation_prompt + reasoning + text_content +
++                   p.optional(p.literal(END_SAMPLING)) + end;
++        }
++
++        // each call is its own block (role opener + bare name echo + JSON section);
++        // force_tool_calls=true makes the JSON section required so a pure-text answer fails the
++        // block cleanly; parallel calls are separate blocks, hence repeat + parallel=false
++        // The canonical TML history form uses "args", but Inkling can emit the
++        // OpenAI spelling "arguments". The standard parser's "arguments" alias
++        // accepts both generated forms.
++        auto tool_section = p.standard_json_tools(
++            INVOKE_TOOL, END_MESSAGE, inputs.tools, /* parallel_tool_calls = */ false,
++            /* force_tool_calls = */ true,
++            /* name_key          = */ "name",
++            /* args_key          = */ "arguments",
++            /* array_wrapped     = */ false);
++        // the name-echo scan must stop at any block marker: a greedy until(INVOKE_TOOL) returns
++        // NEED_MORE_INPUT mid-stream, which choice() treats as a match and shadows the text branch
++        auto tool_block = p.optional(p.literal(MSG_MODEL)) +
++                          p.until_one_of({ INVOKE_TOOL, TEXT, THINK, END_MESSAGE, END_SAMPLING }) +
++                          tool_section;
++        auto tool_calls = inputs.parallel_tool_calls ? p.one_or_more(tool_block) : tool_block;
++        // turns may interleave narration, thinking and calls; parse block-by-block (tool block
++        // first) since a whole-body choice would let the text branch swallow tool blocks into
++        // visible content
++        auto mixed_body = p.one_or_more(p.choice({ tool_block, reasoning_block, text_block }));
++        auto body       = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED
++                              ? tool_calls
++                              : mixed_body;
++
++        return generation_prompt + reasoning + body +
++               p.optional(p.literal(END_SAMPLING)) + end;
++    });
++
++    data.parser = parser.save();
++
++    return data;
++}
++
+ namespace workaround {
+ 
+ static void map_developer_role_to_system(json & messages) {
+@@ -3534,6 +3764,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
+         return common_chat_params_init_cohere2moe(tmpl, params);
+     }
+ 
++    // Inkling / TML: this marker combination is unique to the template
++    if (src.find("<|content_thinking|>") != std::string::npos &&
++        src.find("<|content_text|>") != std::string::npos &&
++        src.find("<|message_model|>") != std::string::npos) {
++        LOG_DBG("Using specialized template: Inkling\n");
++        return common_chat_params_init_inkling(tmpl, params);
++    }
++
+     if (is_lfm2_template(src)) {
+         LOG_DBG("Using specialized template: LFM2\n");
+         return common_chat_params_init_lfm2(tmpl, params, /* tool_list_tokens = */ true);
+diff --git a/common/chat.h b/common/chat.h
+index cb39e3458..1826f5f47 100644
+--- a/common/chat.h
++++ b/common/chat.h
+@@ -85,6 +85,8 @@ struct common_chat_msg {
+     std::string                               reasoning_content;
+     std::string                               tool_name;
+     std::string                               tool_call_id;
++    bool                                      content_present = true;
++    bool                                      content_is_null = false;
+ 
+     common_json to_json_oaicompat(bool concat_typed_text = false) const;
+ 
+@@ -121,7 +123,8 @@ struct common_chat_msg {
+     bool operator==(const common_chat_msg & other) const {
+         return role == other.role && content == other.content && content_parts == other.content_parts &&
+                tool_calls == other.tool_calls && reasoning_content == other.reasoning_content &&
+-               tool_name == other.tool_name && tool_call_id == other.tool_call_id;
++               tool_name == other.tool_name && tool_call_id == other.tool_call_id &&
++               content_present == other.content_present && content_is_null == other.content_is_null;
+     }
+ 
+     bool operator!=(const common_chat_msg & other) const { return !(*this == other); }
+diff --git a/common/ngram-cache.cpp b/common/ngram-cache.cpp
+index dce54b364..bc3ab811b 100644
+--- a/common/ngram-cache.cpp
++++ b/common/ngram-cache.cpp
+@@ -1,14 +1,156 @@
+ #include "ngram-cache.h"
+ #include "common.h"
+ #include "log.h"
++#include "../include/skippy.h"
+ 
+ #include <cinttypes>
+ #include <cstdint>
+ #include <cstdio>
+ #include <fstream>
++#include <limits>
+ #include <thread>
+ #include <algorithm>
+ 
++struct skippy_ngram_cache {
++    uint16_t ngram_min;
++    uint16_t ngram_max;
++    std::vector<llama_token> history;
++    common_ngram_cache context;
++    common_ngram_cache dynamic;
++    common_ngram_cache static_cache;
++};
++
++static bool skippy_ngram_cache_valid_config(uint16_t ngram_min, uint16_t ngram_max) {
++    return ngram_min >= LLAMA_NGRAM_MIN && ngram_min <= ngram_max && ngram_max <= LLAMA_NGRAM_MAX;
++}
++
++static void skippy_ngram_cache_clear_request_state(skippy_ngram_cache * cache) {
++    cache->history.clear();
++    cache->context.clear();
++    cache->dynamic.clear();
++    cache->static_cache.clear();
++}
++
++static enum skippy_status skippy_ngram_cache_update(
++        skippy_ngram_cache * cache,
++        const llama_token * token_ids,
++        size_t token_count,
++        bool reset) {
++    if (cache == nullptr || (token_count > 0 && token_ids == nullptr)) {
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (token_count == 0) {
++        if (reset) {
++            skippy_ngram_cache_clear_request_state(cache);
++        }
++        return SKIPPY_STATUS_OK;
++    }
++    if (token_count > static_cast<size_t>(std::numeric_limits<int>::max()) ||
++            cache->history.size() > static_cast<size_t>(std::numeric_limits<int>::max()) - token_count) {
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (reset) {
++        skippy_ngram_cache_clear_request_state(cache);
++        cache->history.assign(token_ids, token_ids + token_count);
++        common_ngram_cache_update(
++                cache->context,
++                cache->ngram_min,
++                cache->ngram_max,
++                cache->history,
++                static_cast<int>(token_count),
++                false);
++        return SKIPPY_STATUS_OK;
++    }
++    cache->history.insert(cache->history.end(), token_ids, token_ids + token_count);
++    common_ngram_cache_update(
++            cache->context,
++            cache->ngram_min,
++            cache->ngram_max,
++            cache->history,
++            static_cast<int>(token_count),
++            false);
++    return SKIPPY_STATUS_OK;
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_create(
++        uint16_t ngram_min,
++        uint16_t ngram_max,
++        struct skippy_ngram_cache ** out_cache,
++        struct skippy_error ** /* out_error */) {
++    if (out_cache == nullptr || !skippy_ngram_cache_valid_config(ngram_min, ngram_max)) {
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    *out_cache = new skippy_ngram_cache{ ngram_min, ngram_max, {}, {}, {}, {} };
++    return SKIPPY_STATUS_OK;
++}
++
++extern "C" SKIPPY_COMMON_API void skippy_ngram_cache_free(struct skippy_ngram_cache * cache) {
++    delete cache;
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_reset(
++        struct skippy_ngram_cache * cache,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_error ** /* out_error */) {
++    return skippy_ngram_cache_update(cache, token_ids, token_count, true);
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_append(
++        struct skippy_ngram_cache * cache,
++        const llama_token * token_ids,
++        size_t token_count,
++        struct skippy_error ** /* out_error */) {
++    return skippy_ngram_cache_update(cache, token_ids, token_count, false);
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_ngram_cache_draft(
++        struct skippy_ngram_cache * cache,
++        const llama_token * continuation_prefix,
++        size_t continuation_prefix_count,
++        uint16_t max_draft_tokens,
++        llama_token * output_tokens,
++        size_t output_token_capacity,
++        size_t * out_token_count,
++        struct skippy_error ** /* out_error */) {
++    if (out_token_count == nullptr || cache == nullptr ||
++            (continuation_prefix_count > 0 && continuation_prefix == nullptr)) {
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    *out_token_count = 0;
++    if (max_draft_tokens == 0 || cache->history.empty()) {
++        return SKIPPY_STATUS_OK;
++    }
++
++    std::vector<llama_token> input = cache->history;
++    std::vector<llama_token> draft;
++    if (continuation_prefix_count == 0) {
++        draft.push_back(input.back());
++    } else {
++        input.insert(input.end(), continuation_prefix, continuation_prefix + continuation_prefix_count);
++        draft.push_back(continuation_prefix[continuation_prefix_count - 1]);
++    }
++    common_ngram_cache_draft(
++            input,
++            draft,
++            max_draft_tokens,
++            cache->ngram_min,
++            cache->ngram_max,
++            cache->context,
++            cache->dynamic,
++            cache->static_cache);
++    const size_t drafted_count = draft.size() - 1;
++    *out_token_count = drafted_count;
++    if (drafted_count == 0) {
++        return SKIPPY_STATUS_OK;
++    }
++    if (output_tokens == nullptr || output_token_capacity < drafted_count) {
++        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
++    }
++    std::copy(draft.begin() + 1, draft.end(), output_tokens);
++    return SKIPPY_STATUS_OK;
++}
++
+ void common_ngram_cache_update(common_ngram_cache & ngram_cache, int ngram_min, int ngram_max,
+                               std::vector<llama_token> & inp, int nnew, bool print_progress) {
+     const int64_t t_start_ms = ggml_time_ms();
+@@ -97,12 +239,13 @@ static llama_token try_draft(common_ngram_cache & nc_static, const common_ngram
+ // Try to draft a token from primary cache (context/dynamic), validate with static cache:
+ static llama_token try_draft(
+     common_ngram_cache & nc_primary, const std::vector<common_ngram> & ngrams_primary, common_ngram_cache_part & part_static,
+-    const int * min_sample_size, const int * min_percent) {
++    const int * min_sample_size, const int * min_percent, int ngram_min) {
+ 
+     llama_token drafted_token = LLAMA_TOKEN_NULL;
+ 
+     for (int i = ngrams_primary.size()-1; i >= 0 && drafted_token == LLAMA_TOKEN_NULL; --i) {
+         const common_ngram ngram_primary = ngrams_primary[i];
++        const int threshold_index = ngram_min + i - 1;
+ 
+         common_ngram_cache::iterator part_primary_it = nc_primary.find(ngram_primary);
+         if (part_primary_it == nc_primary.end()) {
+@@ -131,10 +274,10 @@ static llama_token try_draft(
+             sum_count_primary += count_primary;
+         }
+ 
+-        if (sum_count_primary < min_sample_size[i]) {
++        if (sum_count_primary < min_sample_size[threshold_index]) {
+             continue;
+         }
+-        if (100*max_count_primary < min_percent[i]*sum_count_primary) {
++        if (100*max_count_primary < min_percent[threshold_index]*sum_count_primary) {
+             continue;;
+         }
+         drafted_token = max_token;
+@@ -179,10 +322,10 @@ void common_ngram_cache_draft(
+             ngrams_cd.push_back(ngram_cd);
+         }
+         if (drafted_token == LLAMA_TOKEN_NULL) {
+-            drafted_token = try_draft(nc_context, ngrams_cd, part_static, draft_min_sample_size_lax, draft_min_percent_lax);
++            drafted_token = try_draft(nc_context, ngrams_cd, part_static, draft_min_sample_size_lax, draft_min_percent_lax, ngram_min);
+         }
+         if (drafted_token == LLAMA_TOKEN_NULL) {
+-            drafted_token = try_draft(nc_dynamic, ngrams_cd, part_static, draft_min_sample_size_strict, draft_min_percent_strict);
++            drafted_token = try_draft(nc_dynamic, ngrams_cd, part_static, draft_min_sample_size_strict, draft_min_percent_strict, ngram_min);
+         }
+         if (drafted_token == LLAMA_TOKEN_NULL) {
+             drafted_token = try_draft(nc_static, ngram_static);
+diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
+new file mode 100644
+index 000000000..180c0a884
+--- /dev/null
++++ b/common/stage-chat.cpp
+@@ -0,0 +1,362 @@
++#include "chat.h"
++#include "skippy.h"
++
++#include "json.h"
++
++#include <cstdlib>
++#include <cstring>
++#include <exception>
++#include <limits>
++#include <string>
++#include <vector>
++
++using json = common_json;
++
++using skippy_chat_templates_create_fn = void * (*)(const llama_model * model);
++using skippy_chat_templates_free_fn = void (*)(void * templates);
++
++extern "C" LLAMA_API void * skippy_model_chat_templates_get_or_init(
++        struct skippy_model * model,
++        skippy_chat_templates_create_fn create,
++        skippy_chat_templates_free_fn free_templates);
++extern "C" LLAMA_API void skippy_model_chat_templates_lock(struct skippy_model * model);
++extern "C" LLAMA_API void skippy_model_chat_templates_unlock(struct skippy_model * model);
++
++class skippy_chat_templates_lock_guard {
++public:
++    explicit skippy_chat_templates_lock_guard(skippy_model * model) : model(model) {
++        skippy_model_chat_templates_lock(model);
++    }
++
++    ~skippy_chat_templates_lock_guard() {
++        skippy_model_chat_templates_unlock(model);
++    }
++
++private:
++    skippy_model * model;
++};
++
++static void * skippy_common_chat_templates_create(const llama_model * model) {
++    return common_chat_templates_init(model, "").release();
++}
++
++static void skippy_common_chat_templates_free(void * templates) {
++    common_chat_templates_free(static_cast<common_chat_templates *>(templates));
++}
++
++static skippy_error * skippy_common_make_error(enum skippy_status status, const char * message) {
++    skippy_error * error = new skippy_error{};
++    error->status = status;
++
++    if (message == nullptr) {
++        error->message = nullptr;
++        return error;
++    }
++
++    const size_t len = std::strlen(message);
++    char * owned = static_cast<char *>(std::malloc(len + 1));
++    if (owned == nullptr) {
++        error->status = SKIPPY_STATUS_ERROR;
++        error->message = nullptr;
++        return error;
++    }
++
++    std::memcpy(owned, message, len + 1);
++    error->message = owned;
++    return error;
++}
++
++static void skippy_common_set_error(
++        skippy_error ** out_error,
++        enum skippy_status status,
++        const char * message) {
++    if (out_error != nullptr) {
++        *out_error = skippy_common_make_error(status, message);
++    }
++}
++
++static enum skippy_status skippy_common_success(skippy_error ** out_error) {
++    if (out_error != nullptr) {
++        *out_error = nullptr;
++    }
++    return SKIPPY_STATUS_OK;
++}
++
++static bool skippy_common_buffer_too_small(
++        const std::string & value,
++        char * output,
++        size_t output_capacity,
++        size_t * out_bytes) {
++    if (out_bytes != nullptr) {
++        *out_bytes = value.size();
++    }
++    return output == nullptr || output_capacity < value.size();
++}
++
++static void skippy_common_copy_output(const std::string & value, char * output) {
++    if (!value.empty()) {
++        std::memcpy(output, value.data(), value.size());
++    }
++}
++
++static json skippy_common_parse_json_or_null(const char * value) {
++    if (value == nullptr || value[0] == '\0') {
++        return json();
++    }
++    return json::parse(value);
++}
++
++static std::string skippy_common_tool_choice_string(const char * tool_choice_json) {
++    json value = skippy_common_parse_json_or_null(tool_choice_json);
++    if (value.is_null()) {
++        return "auto";
++    }
++    if (value.is_string()) {
++        return value.get<std::string>();
++    }
++    if (value.is_object()) {
++        const std::string type = value.value("type", std::string("auto"));
++        if (type == "function" || type == "tool") {
++            return "required";
++        }
++        if (type == "any") {
++            return "required";
++        }
++        if (type == "auto" || type == "none" || type == "required") {
++            return type;
++        }
++    }
++    throw std::invalid_argument("Invalid tool_choice: " + value.dump());
++}
++
++static json skippy_common_grammar_triggers_to_json(const std::vector<common_grammar_trigger> & triggers) {
++    json out = json::array();
++    for (const auto & trigger : triggers) {
++        json item = {
++            {"type", static_cast<int>(trigger.type)},
++            {"value", trigger.value},
++        };
++        if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN) {
++            item["token"] = static_cast<int>(trigger.token);
++        }
++        out.push_back(std::move(item));
++    }
++    return out;
++}
++
++static json skippy_common_chat_metadata_json(
++        const common_chat_params & params,
++        common_reasoning_format reasoning_format,
++        bool parse_tool_calls,
++        bool skip_chat_parsing) {
++    return {
++        {"chat_format", static_cast<int>(params.format)},
++        {"reasoning_format", common_reasoning_format_name(reasoning_format)},
++        {"generation_prompt", params.generation_prompt},
++        {"parse_tool_calls", parse_tool_calls},
++        {"chat_parser", params.parser},
++        {"grammar", params.grammar},
++        {"grammar_lazy", params.grammar_lazy},
++        {"grammar_triggers", skippy_common_grammar_triggers_to_json(params.grammar_triggers)},
++        {"preserved_tokens", params.preserved_tokens},
++        {"additional_stops", params.additional_stops},
++        {"skip_chat_parsing", skip_chat_parsing},
++    };
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_apply_chat_template_json(
++        struct skippy_model * model,
++        const char * messages_json,
++        const char * tools_json,
++        const char * tool_choice_json,
++        bool add_assistant,
++        bool override_enable_thinking,
++        bool enable_thinking,
++        bool parallel_tool_calls,
++        const char * reasoning_format_name,
++        const char * chat_template_kwargs_json,
++        const char * chat_template,
++        bool use_jinja,
++        const char * grammar,
++        const char * json_schema,
++        bool skip_chat_parsing,
++        char * output_text,
++        size_t output_text_capacity,
++        size_t * out_text_bytes,
++        char * output_metadata_json,
++        size_t output_metadata_json_capacity,
++        size_t * out_metadata_json_bytes,
++        struct skippy_error ** out_error) {
++    if (messages_json == nullptr) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "messages_json is required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (out_text_bytes == nullptr || out_metadata_json_bytes == nullptr) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "output byte counters are required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (output_text_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
++        output_metadata_json_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "chat template output capacity exceeds int32_t range");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    const llama_model * native_model = skippy_model_native_model(model);
++    if (native_model == nullptr) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "model is required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
++    std::string prompt;
++    std::string metadata;
++    try {
++        json messages = json::parse(messages_json);
++        json tools = skippy_common_parse_json_or_null(tools_json);
++
++        common_chat_templates_inputs inputs;
++        inputs.messages              = common_chat_msgs_parse_oaicompat(messages);
++        inputs.tools                 = common_chat_tools_parse_oaicompat(tools);
++        inputs.tool_choice           = common_chat_tool_choice_parse_oaicompat(skippy_common_tool_choice_string(tool_choice_json));
++        inputs.add_generation_prompt = add_assistant;
++        inputs.use_jinja             = use_jinja;
++        inputs.parallel_tool_calls   = parallel_tool_calls;
++        if (override_enable_thinking) {
++            const char * value = enable_thinking ? "true" : "false";
++            inputs.enable_thinking = enable_thinking;
++            inputs.chat_template_kwargs["enable_thinking"] = value;
++            inputs.chat_template_kwargs["enableThinking"] = value;
++            inputs.chat_template_kwargs["enable_reasoning"] = value;
++            inputs.chat_template_kwargs["use_reasoning"] = value;
++            inputs.chat_template_kwargs["reasoning_enabled"] = value;
++            inputs.chat_template_kwargs["use_thinking"] = value;
++            inputs.chat_template_kwargs["thinking_enabled"] = value;
++            inputs.chat_template_kwargs["enable_think"] = value;
++            inputs.chat_template_kwargs["think_enabled"] = value;
++            if (!enable_thinking) {
++                inputs.chat_template_kwargs["reasoning_effort"] = "0";
++            }
++        }
++        if (reasoning_format_name != nullptr && reasoning_format_name[0] != '\0') {
++            inputs.reasoning_format = common_reasoning_format_from_name(reasoning_format_name);
++        }
++        if (json_schema != nullptr && json_schema[0] != '\0') {
++            inputs.json_schema = json_schema;
++        }
++        json chat_template_kwargs = skippy_common_parse_json_or_null(chat_template_kwargs_json);
++        if (!chat_template_kwargs.is_null()) {
++            if (!chat_template_kwargs.is_object()) {
++                throw std::runtime_error("chat_template_kwargs must be a JSON object");
++            }
++            for (const auto & [key, value] : chat_template_kwargs.items()) {
++                inputs.chat_template_kwargs[key] = value.dump();
++            }
++        }
++        if (override_enable_thinking && !enable_thinking) {
++            inputs.chat_template_kwargs["reasoning_effort"] = "0";
++        }
++
++        common_chat_templates_ptr custom_tmpls;
++        common_chat_templates * tmpls = nullptr;
++        if (chat_template != nullptr && chat_template[0] != '\0') {
++            custom_tmpls = common_chat_templates_init(native_model, chat_template);
++            tmpls = custom_tmpls.get();
++        } else {
++            tmpls = static_cast<common_chat_templates *>(
++                    skippy_model_chat_templates_get_or_init(
++                        model,
++                        skippy_common_chat_templates_create,
++                        skippy_common_chat_templates_free));
++        }
++        if (tmpls == nullptr) {
++            throw std::runtime_error("failed to initialize model chat templates");
++        }
++        skippy_chat_templates_lock_guard templates_lock(model);
++        common_chat_params params = common_chat_templates_apply(tmpls, inputs);
++        if (grammar != nullptr && grammar[0] != '\0') {
++            params.grammar = grammar;
++            params.grammar_lazy = false;
++            params.grammar_triggers.clear();
++        }
++        prompt = params.prompt;
++
++        const bool parse_tool_calls = !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
++        metadata = skippy_common_chat_metadata_json(
++                params,
++                inputs.reasoning_format,
++                parse_tool_calls,
++                skip_chat_parsing).dump();
++    } catch (const std::exception & e) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED,
++            ("failed to apply chat template: " + std::string(e.what())).c_str());
++        return SKIPPY_STATUS_UNSUPPORTED;
++    } catch (...) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "failed to apply chat template");
++        return SKIPPY_STATUS_UNSUPPORTED;
++    }
++
++    const bool prompt_too_small = skippy_common_buffer_too_small(prompt, output_text, output_text_capacity, out_text_bytes);
++    const bool metadata_too_small = skippy_common_buffer_too_small(metadata, output_metadata_json, output_metadata_json_capacity, out_metadata_json_bytes);
++    if (prompt_too_small || metadata_too_small) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "chat template output buffer is too small");
++        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
++    }
++
++    skippy_common_copy_output(prompt, output_text);
++    skippy_common_copy_output(metadata, output_metadata_json);
++    return skippy_common_success(out_error);
++}
++
++extern "C" SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
++        const char * generated_text,
++        const char * metadata_json,
++        bool is_partial,
++        char * output_message_json,
++        size_t output_message_json_capacity,
++        size_t * out_message_json_bytes,
++        struct skippy_error ** out_error) {
++    if (generated_text == nullptr || metadata_json == nullptr) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "generated_text and metadata_json are required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (out_message_json_bytes == nullptr) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "out_message_json_bytes is required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (output_message_json_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "parse output capacity exceeds int32_t range");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
++    std::string output;
++    try {
++        json metadata = json::parse(metadata_json);
++        common_chat_parser_params params;
++        params.format = static_cast<common_chat_format>(metadata.value("chat_format", 0));
++        const std::string reasoning_format = metadata.value("reasoning_format", std::string());
++        if (!reasoning_format.empty()) {
++            params.reasoning_format = common_reasoning_format_from_name(reasoning_format);
++        }
++        params.generation_prompt = metadata.value("generation_prompt", std::string());
++        params.parse_tool_calls = metadata.value("parse_tool_calls", true);
++        const std::string parser = metadata.value("chat_parser", std::string());
++        if (!parser.empty()) {
++            params.parser.load(parser);
++        }
++
++        common_chat_msg msg = common_chat_parse(generated_text, is_partial, params);
++        output = common_chat_msgs_to_json_oaicompat({ msg }).at(0).dump();
++    } catch (const std::exception & e) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED,
++            ("failed to parse chat response: " + std::string(e.what())).c_str());
++        return SKIPPY_STATUS_UNSUPPORTED;
++    } catch (...) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_UNSUPPORTED, "failed to parse chat response");
++        return SKIPPY_STATUS_UNSUPPORTED;
++    }
++
++    if (skippy_common_buffer_too_small(output, output_message_json, output_message_json_capacity, out_message_json_bytes)) {
++        skippy_common_set_error(out_error, SKIPPY_STATUS_BUFFER_TOO_SMALL, "parse output buffer is too small");
++        return SKIPPY_STATUS_BUFFER_TOO_SMALL;
++    }
++    skippy_common_copy_output(output, output_message_json);
++    return skippy_common_success(out_error);
++}
+diff --git a/models/templates/Inkling.jinja b/models/templates/Inkling.jinja
+new file mode 100644
+index 000000000..95874d23d
+--- /dev/null
++++ b/models/templates/Inkling.jinja
+@@ -0,0 +1,514 @@
++{#- Keep Python's floating type spelling when the jinja engine compacts 1.0 to 1. -#}
++{%- macro json_scalar(value) -%}
++  {%- set serialized = value | tojson(ensure_ascii=false, separators=(',', ':')) -%}
++  {%- if value is float and '.' not in serialized and 'e' not in (serialized | lower) -%}
++    {{- serialized -}}{{- '.0' -}}
++  {%- else -%}
++    {{- serialized -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{%- macro canonical_json(value) -%}
++  {%- if value is mapping -%}
++    {{- '{' -}}
++    {%- for key, item in value | dictsort(case_sensitive=true) -%}
++      {{- (key | string) | tojson(ensure_ascii=false, separators=(',', ':')) -}}{{- ':' -}}
++      {{- canonical_json(item) -}}
++      {%- if not loop.last -%}{{- ',' -}}{%- endif -%}
++    {%- endfor -%}
++    {{- '}' -}}
++  {%- elif value is sequence and value is not string -%}
++    {{- '[' -}}
++    {%- for item in value -%}
++      {{- canonical_json(item) -}}
++      {%- if not loop.last -%}{{- ',' -}}{%- endif -%}
++    {%- endfor -%}
++    {{- ']' -}}
++  {%- else -%}
++    {{- json_scalar(value) -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{#- Advance across insignificant JSON whitespace. -#}
++{%- macro json_skip_ws(source, state) -%}
++  {%- set scan = namespace(done=false) -%}
++  {%- for ignored in range(source | length) -%}
++    {%- if not scan.done and state.pos < source | length -%}
++      {%- set ch = source[state.pos] -%}
++      {%- if ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n' -%}
++        {%- set state.pos = state.pos + 1 -%}
++      {%- else -%}
++        {%- set scan.done = true -%}
++      {%- endif -%}
++    {%- endif -%}
++  {%- endfor -%}
++{%- endmacro -%}
++
++{#-
++  Decode a JSON string under Transformers, then re-encode it like json.dumps.
++  llama.cpp converts string arguments to objects after capability detection;
++  the fallback keeps engine-only parsing safe without runtime-only filters.
++-#}
++{%- macro json_string(source, state) -%}
++  {%- if lipsum is defined -%}
++    {%- set out = namespace(decoded='', done=false, code=0, low=0) -%}
++    {%- set hex_values = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 'a': 10, 'b': 11, 'c': 12, 'd': 13, 'e': 14, 'f': 15} -%}
++    {%- set state.pos = state.pos + 1 -%}
++    {%- for ignored in range(source | length) -%}
++      {%- if not out.done and state.pos < source | length -%}
++        {%- set ch = source[state.pos] -%}
++        {%- set state.pos = state.pos + 1 -%}
++        {%- if ch == '"' -%}
++          {%- set out.done = true -%}
++        {%- elif ch != '\\' -%}
++          {%- set out.decoded = out.decoded + ch -%}
++        {%- elif state.pos < source | length -%}
++          {%- set escape = source[state.pos] -%}
++          {%- set state.pos = state.pos + 1 -%}
++          {%- if escape == '"' -%}{%- set out.decoded = out.decoded + '"' -%}
++          {%- elif escape == '\\' -%}{%- set out.decoded = out.decoded + '\\' -%}
++          {%- elif escape == '/' -%}{%- set out.decoded = out.decoded + '/' -%}
++          {%- elif escape == 'b' -%}{%- set out.decoded = out.decoded + '\b' -%}
++          {%- elif escape == 'f' -%}{%- set out.decoded = out.decoded + '\f' -%}
++          {%- elif escape == 'n' -%}{%- set out.decoded = out.decoded + '\n' -%}
++          {%- elif escape == 'r' -%}{%- set out.decoded = out.decoded + '\r' -%}
++          {%- elif escape == 't' -%}{%- set out.decoded = out.decoded + '\t' -%}
++          {%- elif escape == 'u' -%}
++            {%- set out.code = 0 -%}
++            {%- for offset in range(4) -%}
++              {%- set digit = source[state.pos + offset] | lower -%}
++              {%- set out.code = out.code * 16 + hex_values[digit] -%}
++            {%- endfor -%}
++            {%- set state.pos = state.pos + 4 -%}
++            {%- if out.code >= 55296 and out.code <= 56319 and source[state.pos:state.pos + 2] == '\\u' -%}
++              {%- set out.low = 0 -%}
++              {%- for offset in range(4) -%}
++                {%- set digit = source[state.pos + 2 + offset] | lower -%}
++                {%- set out.low = out.low * 16 + hex_values[digit] -%}
++              {%- endfor -%}
++              {%- if out.low >= 56320 and out.low <= 57343 -%}
++                {%- set out.code = 65536 + (out.code - 55296) * 1024 + out.low - 56320 -%}
++                {%- set state.pos = state.pos + 6 -%}
++              {%- endif -%}
++            {%- endif -%}
++            {%- set out.decoded = out.decoded + ('%c' % out.code) -%}
++          {%- else -%}
++            {%- set out.decoded = out.decoded + escape -%}
++          {%- endif -%}
++        {%- endif -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {%- set state.string_value = out.decoded -%}
++    {{- out.decoded | tojson(ensure_ascii=false, separators=(',', ':')) -}}
++  {%- else -%}
++    {%- set out = namespace(start=state.pos, escaped=false, done=false) -%}
++    {%- set state.pos = state.pos + 1 -%}
++    {%- for ignored in range(source | length) -%}
++      {%- if not out.done and state.pos < source | length -%}
++        {%- set ch = source[state.pos] -%}
++        {%- set state.pos = state.pos + 1 -%}
++        {%- if out.escaped -%}
++          {%- set out.escaped = false -%}
++        {%- elif ch == '\\' -%}
++          {%- set out.escaped = true -%}
++        {%- elif ch == '"' -%}
++          {%- set out.done = true -%}
++        {%- endif -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {%- set state.string_value = source[out.start:state.pos] -%}
++    {{- source[out.start:state.pos] -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{#-
++  Move the cursor across one complete JSON value without rendering it. Object
++  parsing uses the raw slice to sort members before recursively rendering them.
++-#}
++{%- macro json_scan_value(source, state) -%}
++  {{- json_skip_ws(source, state) -}}
++  {%- set scan = namespace(depth=0, quoted=false, escaped=false, done=false) -%}
++  {%- for ignored in range(source | length) -%}
++    {%- if not scan.done and state.pos < source | length -%}
++      {%- set ch = source[state.pos] -%}
++      {%- if scan.quoted -%}
++        {%- set state.pos = state.pos + 1 -%}
++        {%- if ch == '"' and not scan.escaped -%}
++          {%- set scan.quoted = false -%}
++        {%- elif ch == '\\' and not scan.escaped -%}
++          {%- set scan.escaped = true -%}
++        {%- else -%}
++          {%- set scan.escaped = false -%}
++        {%- endif -%}
++      {%- elif ch == '"' -%}
++        {%- set scan.quoted = true -%}
++        {%- set state.pos = state.pos + 1 -%}
++      {%- elif ch == '{' or ch == '[' -%}
++        {%- set scan.depth = scan.depth + 1 -%}
++        {%- set state.pos = state.pos + 1 -%}
++      {%- elif ch == '}' or ch == ']' -%}
++        {%- if scan.depth > 0 -%}
++          {%- set scan.depth = scan.depth - 1 -%}
++          {%- set state.pos = state.pos + 1 -%}
++        {%- else -%}
++          {%- set scan.done = true -%}
++        {%- endif -%}
++      {%- elif ch == ',' and scan.depth == 0 -%}
++        {%- set scan.done = true -%}
++      {%- else -%}
++        {%- set state.pos = state.pos + 1 -%}
++      {%- endif -%}
++    {%- endif -%}
++  {%- endfor -%}
++{%- endmacro -%}
++
++{#- Parse and canonically render one JSON value from source at state.pos. -#}
++{%- macro canonical_json_text_value(source, state) -%}
++  {{- json_skip_ws(source, state) -}}
++  {%- if state.pos >= source | length -%}
++    {{- '{}' -}}
++  {%- elif source[state.pos] == '"' -%}
++    {{- json_string(source, state) -}}
++  {%- elif source[state.pos] == '{' -%}
++    {%- set state.pos = state.pos + 1 -%}
++    {{- json_skip_ws(source, state) -}}
++    {%- set object_state = namespace(pairs=[], done=false) -%}
++    {%- if state.pos < source | length and source[state.pos] == '}' -%}
++      {%- set state.pos = state.pos + 1 -%}
++      {%- set object_state.done = true -%}
++    {%- endif -%}
++    {%- for ignored in range(source | length) -%}
++      {%- if not object_state.done -%}
++        {{- json_skip_ws(source, state) -}}
++        {%- set key = json_string(source, state) -%}
++        {%- set sort_key = state.string_value -%}
++        {{- json_skip_ws(source, state) -}}
++        {%- if state.pos < source | length and source[state.pos] == ':' -%}
++          {%- set state.pos = state.pos + 1 -%}
++        {%- endif -%}
++        {{- json_skip_ws(source, state) -}}
++        {%- set value_start = state.pos -%}
++        {{- json_scan_value(source, state) -}}
++        {#- json.loads keeps the final member when a key is duplicated. -#}
++        {%- set unique = namespace(pairs=[]) -%}
++        {%- for previous in object_state.pairs -%}
++          {%- if previous[0] != sort_key -%}
++            {%- set unique.pairs = unique.pairs + [previous] -%}
++          {%- endif -%}
++        {%- endfor -%}
++        {%- set object_state.pairs = unique.pairs + [[sort_key, key, source[value_start:state.pos]]] -%}
++        {{- json_skip_ws(source, state) -}}
++        {%- if state.pos < source | length and source[state.pos] == ',' -%}
++          {%- set state.pos = state.pos + 1 -%}
++        {%- else -%}
++          {%- if state.pos < source | length and source[state.pos] == '}' -%}
++            {%- set state.pos = state.pos + 1 -%}
++          {%- endif -%}
++          {%- set object_state.done = true -%}
++        {%- endif -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {{- '{' -}}
++    {%- for pair in object_state.pairs | sort(case_sensitive=true, attribute=0) -%}
++      {{- pair[1] -}}{{- ':' -}}
++      {%- set child_state = namespace(pos=0, string_value='') -%}
++      {{- canonical_json_text_value(pair[2], child_state) -}}
++      {%- if not loop.last -%}{{- ',' -}}{%- endif -%}
++    {%- endfor -%}
++    {{- '}' -}}
++  {%- elif source[state.pos] == '[' -%}
++    {%- set state.pos = state.pos + 1 -%}
++    {{- '[' -}}
++    {{- json_skip_ws(source, state) -}}
++    {%- set array_state = namespace(done=false, first=true) -%}
++    {%- if state.pos < source | length and source[state.pos] == ']' -%}
++      {%- set state.pos = state.pos + 1 -%}
++      {%- set array_state.done = true -%}
++    {%- endif -%}
++    {%- for ignored in range(source | length) -%}
++      {%- if not array_state.done -%}
++        {%- if not array_state.first -%}{{- ',' -}}{%- endif -%}
++        {%- set array_state.first = false -%}
++        {{- canonical_json_text_value(source, state) -}}
++        {{- json_skip_ws(source, state) -}}
++        {%- if state.pos < source | length and source[state.pos] == ',' -%}
++          {%- set state.pos = state.pos + 1 -%}
++        {%- else -%}
++          {%- if state.pos < source | length and source[state.pos] == ']' -%}
++            {%- set state.pos = state.pos + 1 -%}
++          {%- endif -%}
++          {%- set array_state.done = true -%}
++        {%- endif -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {{- ']' -}}
++  {%- else -%}
++    {%- set scalar = namespace(start=state.pos, done=false) -%}
++    {%- for ignored in range(source | length) -%}
++      {%- if not scalar.done and state.pos < source | length -%}
++        {%- set ch = source[state.pos] -%}
++        {%- if ch == ',' or ch == '}' or ch == ']' or ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n' -%}
++          {%- set scalar.done = true -%}
++        {%- else -%}
++          {%- set state.pos = state.pos + 1 -%}
++        {%- endif -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {%- set token = source[scalar.start:state.pos] -%}
++    {%- if token == 'true' or token == 'false' or token == 'null' -%}
++      {{- token -}}
++    {%- elif '.' in token or 'e' in token or 'E' in token -%}
++      {{- json_scalar(token | float) -}}
++    {%- else -%}
++      {{- token | int | tojson(ensure_ascii=false, separators=(',', ':')) -}}
++    {%- endif -%}
++  {%- endif -%}
++{%- endmacro -%}
++
++{%- macro canonical_json_text(source) -%}
++  {%- set text = source | trim -%}
++  {%- if not text -%}
++    {{- '{}' -}}
++  {%- else -%}
++    {%- set state = namespace(pos=0, string_value='') -%}
++    {{- canonical_json_text_value(text, state) -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{#-
++  OpenAI clients use either an argument mapping or a JSON-encoded object.
++  Non-object/empty oddities degrade to {} instead of raising.  Object parsing
++  recursively sorts keys, keeps the last duplicate key (json.loads behavior),
++  decodes JSON escapes under Transformers, and preserves array order.
++-#}
++{%- macro canonical_arguments(arguments) -%}
++  {%- if arguments is mapping -%}
++    {{- canonical_json(arguments) -}}
++  {%- elif arguments is string -%}
++    {%- set source = arguments | trim -%}
++    {%- if source and source[0] == '{' -%}
++      {{- canonical_json_text(source) -}}
++    {%- else -%}
++      {{- '{}' -}}
++    {%- endif -%}
++  {%- else -%}
++    {{- '{}' -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{#-
++  Match Python f"{float(effort):.2f}" followed by trailing-zero removal.
++  llama.cpp's jinja engine has no round filter; the bit table handles binary64 midpoint equality.
++-#}
++{%- macro reasoning_effort_text(effort) -%}
++  {%- set eff = effort -%}
++  {%- if eff is string -%}
++    {%- set e = eff | trim | lower -%}
++    {%- if e == 'none' -%}{%- set eff = 0.0 -%}
++    {%- elif e == 'minimal' -%}{%- set eff = 0.1 -%}
++    {%- elif e == 'low' -%}{%- set eff = 0.2 -%}
++    {%- elif e == 'medium' -%}{%- set eff = 0.7 -%}
++    {%- elif e == 'high' -%}{%- set eff = 0.9 -%}
++    {%- elif e == 'xhigh' -%}{%- set eff = 0.99 -%}
++    {%- elif e == 'max' -%}{%- set eff = 0.99 -%}
++    {%- else -%}{%- set eff = e | float(-1.0) -%}
++    {%- endif -%}
++  {%- endif -%}
++  {%- set value = eff | float -%}
++  {%- if value < 0 or value > 0.99 -%}
++    {{- raise_exception('Invalid reasoning_effort: ' + (effort | string) + '; expected none/minimal/low/medium/high/xhigh/max or a number in [0.0, 0.99]') -}}
++  {%- endif -%}
++  {%- if value == value | int and value >= 0 and value <= 1 -%}
++    {{- value | int -}}
++  {%- else -%}
++    {%- set midpoint_rounds_up = '1011011011010100100100100111000111000111100011100011111100000001111110000001111110000001111111000000' -%}
++    {%- set rounded = namespace(hundredths=0) -%}
++    {%- for lower_hundredth in range(100) -%}
++      {%- set boundary = (lower_hundredth + 0.5) / 100 -%}
++      {%- if value > boundary or (value == boundary and midpoint_rounds_up[lower_hundredth] == '1') -%}
++        {%- set rounded.hundredths = lower_hundredth + 1 -%}
++      {%- endif -%}
++    {%- endfor -%}
++    {%- if rounded.hundredths == 100 -%}
++      {{- '1' -}}
++    {%- elif rounded.hundredths == 0 -%}
++      {{- '0' -}}
++    {%- elif rounded.hundredths % 10 == 0 -%}
++      {{- '0.' -}}{{- (rounded.hundredths / 10) | int -}}
++    {%- elif rounded.hundredths < 10 -%}
++      {{- '0.0' -}}{{- rounded.hundredths -}}
++    {%- else -%}
++      {{- '0.' -}}{{- rounded.hundredths -}}
++    {%- endif -%}
++  {%- endif -%}
++{%- endmacro -%}
++
++{%- macro role_token(role) -%}
++  {%- if role == 'user' -%}{{- '<|message_user|>' -}}
++  {%- elif role == 'assistant' -%}{{- '<|message_model|>' -}}
++  {%- elif role == 'system' or role == 'developer' -%}{{- '<|message_system|>' -}}
++  {%- elif role == 'tool' -%}{{- '<|message_tool|>' -}}
++  {%- endif -%}
++{%- endmacro -%}
++
++{%- macro emit_message(role, kind, content='', author_name='') -%}
++  {{- role_token(role) -}}
++  {%- if author_name -%}{{- author_name -}}{%- endif -%}
++  {%- if kind == 'text' -%}
++    {{- '<|content_text|>' -}}{{- content -}}
++  {%- elif kind == 'thinking' -%}
++    {{- '<|content_thinking|>' -}}{{- content -}}
++  {%- elif kind == 'xml' -%}
++    {{- '<|content_xml|>' -}}{{- content -}}
++  {%- elif kind == 'invoke_tool_json' -%}
++    {{- '<|content_invoke_tool_json|>' -}}{{- content -}}
++  {%- elif kind == 'image' -%}
++    {{- '<|content_image|><|image|>' -}}
++  {%- elif kind == 'audio' -%}
++    {{- '<|content_audio_input|><|audio|><|audio_end|>' -}}
++  {%- endif -%}
++  {{- '<|end_message|>' -}}
++{%- endmacro -%}
++
++{%- set effort_value = 0.0 if (enable_thinking is defined and enable_thinking is not none and not enable_thinking) else (reasoning_effort if (reasoning_effort is defined and reasoning_effort is not none) else 0.9) -%}
++{%- set eff_ns = namespace(emitted=false) -%}
++{%- set first_ns = namespace(idx=-1) -%}
++{%- for m in messages -%}
++  {%- if first_ns.idx == -1 and m.get('role') not in ['system', 'developer'] -%}
++    {%- set first_ns.idx = loop.index0 -%}
++  {%- endif -%}
++{%- endfor -%}
++
++{%- if tools is defined and tools -%}
++  {{- '<|message_system|>tool_declare<|content_xml|>[' -}}
++  {%- for tool in tools -%}
++    {%- set function = tool.get('function', {}) if tool.get('function', {}) is mapping else {} -%}
++    {%- set description = function.get('description') or '' -%}
++    {%- set parameters = function.get('parameters') or {} -%}
++    {%- set tool_type = tool.get('type', 'function') -%}
++    {{- '{"description":' -}}{{- canonical_json(description) -}}
++    {{- ',"name":' -}}{{- canonical_json(function.get('name')) -}}
++    {{- ',"parameters":' -}}{{- canonical_json(parameters) -}}
++    {{- ',"type":' -}}{{- canonical_json(tool_type) -}}{{- '}' -}}
++    {%- if not loop.last -%}{{- ',' -}}{%- endif -%}
++  {%- endfor -%}
++  {{- ']<|end_message|>' -}}
++{%- endif -%}
++
++{#- Last-user boundary used only by the opt-in preserve_thinking=false mode. -#}
++{%- set thinking_state = namespace(last_user_index=messages | length - 1, found_user=false) -%}
++{%- for index in range(messages | length - 1, -1, -1) -%}
++  {%- if not thinking_state.found_user and messages[index].get('role') == 'user' -%}
++    {%- set thinking_state.last_user_index = index -%}
++    {%- set thinking_state.found_user = true -%}
++  {%- endif -%}
++{%- endfor -%}
++
++{%- for message in messages -%}
++  {%- set message_index = loop.index0 -%}
++  {%- set role = message.get('role') -%}
++  {%- if not eff_ns.emitted and loop.index0 == first_ns.idx -%}
++    {{- emit_message('system', 'text', 'Thinking effort level: ' + reasoning_effort_text(effort_value)) -}}
++    {%- set eff_ns.emitted = true -%}
++  {%- endif -%}
++  {%- if role == 'tool' -%}
++    {%- set resolved = namespace(name=message.get('name') or '') -%}
++    {%- if not resolved.name and message.get('tool_call_id') -%}
++      {%- for prior in messages[:message_index] -%}
++        {%- if prior.get('role') == 'assistant' -%}
++          {%- for call in prior.get('tool_calls') or [] -%}
++            {%- if call.get('id') and (call.get('id') | string) == message.get('tool_call_id') -%}
++              {%- set prior_function = call.get('function', {}) if call.get('function', {}) is mapping else {} -%}
++              {%- set resolved.name = prior_function.get('name') or '' -%}
++            {%- endif -%}
++          {%- endfor -%}
++        {%- endif -%}
++      {%- endfor -%}
++    {%- endif -%}
++    {%- set tool_content = message.get('content', '') -%}
++    {%- if tool_content is none -%}
++      {%- set tool_content = '' -%}
++    {%- elif tool_content is mapping or (tool_content is sequence and tool_content is not string) -%}
++      {%- set tool_content = canonical_json(tool_content) -%}
++    {%- elif tool_content is not string -%}
++      {%- set tool_content = canonical_json(tool_content) -%}
++    {%- endif -%}
++    {{- emit_message('tool', 'text', tool_content, resolved.name | string) -}}
++  {%- elif role == 'user' or role == 'assistant' or role == 'system' or role == 'developer' -%}
++    {%- set turn_out -%}
++    {%- if role == 'assistant' and message.get('reasoning_content') is string and message.get('reasoning_content') and
++          ((preserve_thinking is not defined) or preserve_thinking is not false or message_index > thinking_state.last_user_index) -%}
++      {{- emit_message('assistant', 'thinking', message.get('reasoning_content')) -}}
++    {%- endif -%}
++
++    {%- set content = message.get('content', '') -%}
++    {#- Makes llama.cpp retain typed arrays rather than flattening them. -#}
++    {%- set content_probe = content[0] if content is sequence and content | length > 0 else none -%}
++    {%- if content is string -%}
++      {%- if '<__media_' in content -%}
++        {#- Flattened media markers: each part becomes its own message block. The runtime may
++            randomize the marker suffix, so split on the stable prefix and re-emit the exact
++            marker text; the runtime then expands it into the typed content sentinel plus the
++            media embedding rows. -#}
++        {%- for segment in content.split('<__media_') -%}
++          {%- if loop.first -%}
++            {%- if segment -%}{{- emit_message(role, 'text', segment) -}}{%- endif -%}
++          {%- else -%}
++            {%- set mparts = segment.split('>') -%}
++            {%- set rest = mparts[1:] | join('>') -%}
++            {{- role_token(role) -}}{{- '<__media_' + mparts[0] + '>' -}}{{- '<|end_message|>' -}}
++            {%- if rest -%}{{- emit_message(role, 'text', rest) -}}{%- endif -%}
++          {%- endif -%}
++        {%- endfor -%}
++      {%- elif content -%}
++        {{- emit_message(role, 'text', content) -}}
++      {%- endif -%}
++    {%- elif content is sequence -%}
++      {%- for part in content -%}
++        {%- if part is string -%}
++          {{- emit_message(role, 'text', part) -}}
++        {%- elif part is mapping -%}
++          {%- set part_type = part.get('type') -%}
++          {%- if part_type is none or part_type == 'text' or part_type == 'input_text' -%}
++            {%- set part_text = part.get('text', '') -%}
++            {{- emit_message(role, 'text', part_text if part_text is string else '') -}}
++          {%- elif part_type == 'image' or part_type == 'input_image' or part_type == 'image_url' -%}
++            {{- emit_message(role, 'image') -}}
++          {%- elif part_type == 'audio' or part_type == 'input_audio' or part_type == 'audio_url' -%}
++            {{- emit_message(role, 'audio') -}}
++          {%- endif -%}
++        {%- endif -%}
++      {%- endfor -%}
++    {%- endif -%}
++
++    {%- if role == 'assistant' -%}
++      {%- for call in message.get('tool_calls') or [] -%}
++        {%- set function = call.get('function', {}) if call.get('function', {}) is mapping else {} -%}
++        {%- if function.get('name') is string -%}
++          {%- set raw_arguments = function.get('arguments') or {} -%}
++          {%- set arguments_json = canonical_arguments(raw_arguments) -%}
++          {%- set invocation = '{"name":' + canonical_json(function.get('name')) + ',"args":' + arguments_json + '}' -%}
++          {{- emit_message('assistant', 'invoke_tool_json', invocation, function.get('name')) -}}
++        {%- endif -%}
++      {%- endfor -%}
++    {%- endif -%}
++    {%- endset -%}
++    {{- turn_out -}}
++    {#- Close each historical model turn, but never emit a bare terminator for an
++        assistant message that rendered no blocks. -#}
++    {%- if role == 'assistant' and turn_out -%}
++      {{- '<|content_model_end_sampling|>' -}}
++    {%- endif -%}
++  {%- else -%}
++    {{- raise_exception('Unknown message role: ' + (role | string)) -}}
++  {%- endif -%}
++{%- endfor -%}
++
++{%- if not eff_ns.emitted -%}
++  {{- emit_message('system', 'text', 'Thinking effort level: ' + reasoning_effort_text(effort_value)) -}}
++{%- endif -%}
++
++{%- if add_generation_prompt is defined and add_generation_prompt -%}
++  {{- '<|message_model|>' -}}
++{%- endif -%}
++{#- Unsloth translation to jinja from TML's parser #}
+-- 
+2.54.0 (Apple Git-157)
+

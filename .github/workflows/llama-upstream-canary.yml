@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for cmd in cargo just sccache jq python3 cmake ninja hf lipo brew xcrun; do
+          for cmd in cargo just sccache jq python3 uv cmake ninja hf git-lfs lipo brew xcrun; do
             if ! command -v "$cmd" >/dev/null 2>&1; then
               echo "missing on family-certify image: $cmd" >&2
               missing=1
@@ -83,6 +83,7 @@ jobs:
           else
             echo "SKIPPY_REWRITER_LLVM_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
           fi
+          git lfs install --force
           if (( missing == 1 )); then
             echo "bake the missing tools into the family-certify runner image; this job installs nothing" >&2
             exit 1
@@ -173,10 +174,12 @@ jobs:
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'
         # The family-certify service can itself be launched under Rosetta.
         # Select the native slice for the build shell as well as the CMake
-        # target so host detection and produced archives are both arm64.
+        # target so host detection and produced archives are both arm64. Build
+        # and run the complete upstream llama.cpp CTest suite in addition to
+        # the private Skippy native tests.
         env:
-          LLAMA_STAGE_BUILD_TESTS: "ON"
-        run: arch -arm64 bash scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64
+          LLAMA_STAGE_UPSTREAM_TESTS: "ON"
+        run: uv run --no-project --with jinja2==3.1.6 -- arch -arm64 bash scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64
 
       - name: Verify native archive architecture
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true'

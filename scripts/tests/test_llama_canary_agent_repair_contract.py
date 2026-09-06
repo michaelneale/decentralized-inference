@@ -235,7 +235,11 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         # use the same arch -arm64 guard as the workflow's own build step,
         # and refuse to certify a non-arm64 archive (run 33140672269 rebuilt
         # x86_64 from a plain build-llama.sh call).
-        self.assertIn("LLAMA_STAGE_BUILD_TESTS=ON arch -arm64 scripts/build-llama.sh", wrapper)
+        self.assertIn(
+            "LLAMA_STAGE_UPSTREAM_TESTS=ON uv run --no-project --with jinja2==3.1.6 --",
+            wrapper,
+        )
+        self.assertIn("arch -arm64 scripts/build-llama.sh", wrapper)
         self.assertIn("-DCMAKE_OSX_ARCHITECTURES=arm64 || return 1", wrapper)
         self.assertIn("refusing to certify: native archive is not arm64", wrapper)
 
