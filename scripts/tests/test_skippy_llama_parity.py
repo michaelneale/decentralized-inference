@@ -404,5 +404,104 @@ class SkippyLlamaParityTests(unittest.TestCase):
         )
 
 
+class BoundaryRegistrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def test_unregistered_runnable_row_fails_without_reason(self):
+        rows = [{"llama_model": "somearch", "status": "certified"}]
+        failures = self.parity.validate_boundary_registration(rows, set())
+        self.assertEqual(failures, 1)
+
+    def test_unregistered_row_with_reason_passes(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "unsupported_reason": "non-causal encoder",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 0)
+
+    def test_registered_row_with_reason_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "unsupported_reason": "stale classification",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+
+    def test_registered_row_without_reason_passes(self):
+        rows = [{"llama_model": "somearch", "status": "certified"}]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 0)
+
+    def test_non_runnable_statuses_skipped(self):
+        rows = [{"llama_model": "otherarch", "status": "implementation_base"}]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 0)
+
+    def test_needs_boundary_registration_rows_lists_pending(self):
+        rows = [
+            {"llama_model": "aaa", "status": "certified"},
+            {"llama_model": "bbb", "status": "certified"},
+            {
+                "llama_model": "ccc",
+                "status": "certified",
+                "unsupported_reason": "deliberate",
+            },
+            {"llama_model": "ddd", "status": "certified"},
+        ]
+        pending = self.parity.needs_boundary_registration_rows(rows, {"ddd"})
+        self.assertEqual(pending, ["aaa", "bbb"])
+
+
+class ModelPinTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def test_valid_pin_passes(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {
+                    "repo": "org/some-gguf",
+                    "revision": "0" * 40,
+                    "file": "model-Q4_K_M.gguf",
+                    "size_bytes": 123,
+                    "blob_sha256": "a" * 64,
+                },
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 0)
+
+    def test_floating_pin_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {"repo": "org/some-gguf"},
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 1)
+
+    def test_malformed_blob_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {
+                    "repo": "org/some-gguf",
+                    "revision": "0" * 40,
+                    "file": "model.gguf",
+                    "size_bytes": 5,
+                    "blob_sha256": "not-hex",
+                },
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

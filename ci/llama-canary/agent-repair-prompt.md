@@ -63,3 +63,34 @@ Notes:
 - Do not modify files outside `third_party/llama.cpp/patches/` unless the
   Rust ABI mirrors in `crates/` genuinely need to track a patch ABI change
   (bump `PREPARE_SCHEMA`/ABI version together in that case).
+
+## New upstream model families (boundary registration)
+
+`scripts/skippy-llama-parity.py validate` fails when a runnable parity row
+(status `certified`, `candidate`, or `candidate_stateful`) refers to a model
+file in `.deps/llama.cpp/src/models/` that does not register per-layer
+`begin_block`/`end_block` stage boundaries. Use
+`scripts/skippy-llama-parity.py classify-boundaries` to list exactly those
+models. For each one:
+
+1. **Either register the family**: add `begin_block(inpL, il)` /
+   `end_block(cur, il)` hooks in the model's build loop following the
+   existing registrations (see `src/models/qwen3.cpp`, patch 0072, and the
+   llama-patch-changes skill), AND pin the smallest practical GGUF for the
+   family as an immutable `model_pin` row in
+   `docs/skippy/llama-parity-candidates.json` (repo, 40-hex revision, file,
+   size_bytes, 64-hex blob_sha256 — the `file_integrity` schema of
+   `ci/llama-canary/family-certified.json`), AND mirror the same model in
+   `ci/llama-canary/family-certified.json`. The repair PR must update both
+   manifests in the same commit and rerun the row via
+   `scripts/skippy-family-battery.sh`; a family cannot be marked supported
+   without executable evidence. Floating refs (repo without revision, or a
+   moving tag) are rejected by `validate`.
+2. **Or classify it explicitly**: set the row's status to
+   `needs_boundary_registration` (support work queued, not yet runnable) and
+   leave the certification untouched, or add an `unsupported_reason` string
+   for families we deliberately do not serve.
+
+A new upstream model file with no manifest row at all still fails validation
+as `missing_candidate` — the repair PR must classify every new family before
+the battery can pass.
