@@ -330,6 +330,12 @@ build_model_package_tool() {
     fi
 
     local tool_rel tool_path source_path configured cargo_target_dir
+    local -a cargo_env=(
+        "LLAMA_STAGE_LINK_MODE=dynamic"
+        "LLAMA_STAGE_LIB_DIR=$stage_dir/lib"
+        "LLAMA_STAGE_BUILD_DIR=$LLAMA_STAGE_BUILD_DIR"
+        "LLAMA_STAGE_BACKEND=$(build_backend)"
+    )
     tool_rel="$(model_package_tool_path)"
     tool_path="$stage_dir/$tool_rel"
     configured="${MESH_NATIVE_RUNTIME_MODEL_PACKAGE_TOOL:-}"
@@ -342,11 +348,18 @@ build_model_package_tool() {
         fi
         source_path="$configured"
     else
-        env \
-            LLAMA_STAGE_LINK_MODE=dynamic \
-            LLAMA_STAGE_LIB_DIR="$stage_dir/lib" \
-            LLAMA_STAGE_BUILD_DIR="$LLAMA_STAGE_BUILD_DIR" \
-            LLAMA_STAGE_BACKEND="$(build_backend)" \
+        if [[ "$runtime_os" == "macos" ]]; then
+            if ! command -v ld64.lld >/dev/null 2>&1; then
+                echo "LLVM ld64.lld is required to build the macOS model package tool" >&2
+                exit 1
+            fi
+            # Cargo's encoded flags override the checked-in target rustflags,
+            # whose absolute `-fuse-ld=/path/to/ld64.lld` form is rejected by
+            # Apple clang. The portable driver name is also used by the
+            # repository's setup-macos-lld action.
+            cargo_env+=("CARGO_ENCODED_RUSTFLAGS=-Clink-arg=-fuse-ld=lld")
+        fi
+        env "${cargo_env[@]}" \
             cargo build --release --locked --target "$TARGET_TRIPLE" \
                 -p skippy-model-package
         cargo_target_dir="$(
