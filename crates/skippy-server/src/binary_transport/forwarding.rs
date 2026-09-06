@@ -2,8 +2,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use skippy_protocol::{
-    StageConfig,
-    binary::{StageWireMessage, activation_state_flags_from_frame_flags},
+    StageActivationCodec, StageActivationCodecPolicy, StageConfig,
+    binary::{
+        StageWireMessage, activation_state_flags_from_frame_flags,
+        select_lossless_activation_codec_with_state_flags,
+    },
 };
 use skippy_runtime::{ActivationFrame, RuntimeActivationDType};
 
@@ -55,12 +58,20 @@ pub(crate) fn forwarded_stage_message_timed(
     }
     let mut state = incoming.state;
     state.source_stage_index = config.stage_index as i32;
-    state.activation_codec = config.activation_codec;
     state.flags |= activation_state_flags_from_frame_flags(output.desc.flags);
+    let activation_codec = select_output_activation_codec(
+        config.activation_codec,
+        config.activation_codec_policy,
+        incoming,
+        output,
+        activation_width,
+        state.flags,
+    )?;
+    state.activation_codec = activation_codec;
     let encode_started = Instant::now();
     let activation =
         encode_output_activation_payload(
-            config.activation_codec,
+            activation_codec,
             incoming,
             output,
             activation_width,
@@ -95,6 +106,38 @@ pub(crate) fn forwarded_stage_message_timed(
         },
         activation_encode_ms: encode_started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+fn select_output_activation_codec(
+    configured_codec: StageActivationCodec,
+    policy: StageActivationCodecPolicy,
+    incoming: &StageWireMessage,
+    output: &ActivationFrame,
+    activation_width: i32,
+    state_flags: i32,
+) -> Result<StageActivationCodec> {
+    if !policy.compatible(configured_codec) {
+        bail!(
+            "activation codec policy {policy:?} is incompatible with configured codec {configured_codec:?}"
+        );
+    }
+    match policy {
+        StageActivationCodecPolicy::Fixed => Ok(configured_codec),
+        StageActivationCodecPolicy::AutoLosslessV1 => match output.desc.dtype {
+            RuntimeActivationDType::F32 => Ok(select_lossless_activation_codec_with_state_flags(
+                incoming.token_count,
+                activation_width,
+                &output.payload,
+                state_flags,
+                &[
+                    StageActivationCodec::RawF32V1,
+                    StageActivationCodec::Bf16RneV1,
+                    StageActivationCodec::F16RneV1,
+                ],
+            )?),
+            dtype => bail!("unsupported activation dtype selection: {dtype:?}"),
+        },
+    }
 }
 
 fn encode_output_activation_payload(
@@ -264,6 +307,108 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.activation.len(), 16);
+    }
+
+    #[test]
+    fn auto_lossless_selects_bf16_when_both_half_formats_are_exact() {
+        let mut config = stage_config();
+        config.activation_codec = StageActivationCodec::RawF32V1;
+        config.activation_codec_policy = StageActivationCodecPolicy::AutoLosslessV1;
+        let forwarded = forwarded_stage_message_timed(
+            &config,
+            &incoming_message(),
+            &f32_frame(0, 1, &[1.0, 2.0]),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(
+            forwarded.message.state.activation_codec,
+            StageActivationCodec::Bf16RneV1
+        );
+        assert_eq!(forwarded.message.activation.len(), 4);
+    }
+
+    #[test]
+    fn auto_lossless_selects_f16_when_only_f16_is_exact() {
+        let mut config = stage_config();
+        config.activation_codec = StageActivationCodec::RawF32V1;
+        config.activation_codec_policy = StageActivationCodecPolicy::AutoLosslessV1;
+        let forwarded = forwarded_stage_message_timed(
+            &config,
+            &incoming_message(),
+            &f32_frame(0, 1, &[1.000_976_6, 2.0]),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(
+            forwarded.message.state.activation_codec,
+            StageActivationCodec::F16RneV1
+        );
+    }
+
+    #[test]
+    fn auto_lossless_uses_raw_for_mixed_primary_and_sideband_requirements() {
+        let mut config = stage_config();
+        config.activation_codec = StageActivationCodec::RawF32V1;
+        config.activation_codec_policy = StageActivationCodecPolicy::AutoLosslessV1;
+        let forwarded = forwarded_stage_message_timed(
+            &config,
+            &incoming_message(),
+            &f32_frame(
+                skippy_protocol::binary::ACTIVATION_FLAG_RWKV7_V_FIRST,
+                1,
+                &[1.000_976_6, 2.0, 65_536.0, 4.0],
+            ),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(
+            forwarded.message.state.activation_codec,
+            StageActivationCodec::RawF32V1
+        );
+        assert_eq!(forwarded.message.activation.len(), 16);
+    }
+
+    #[test]
+    fn auto_lossless_rejects_a_non_raw_fallback() {
+        let mut config = stage_config();
+        config.activation_codec = StageActivationCodec::F16RneV1;
+        config.activation_codec_policy = StageActivationCodecPolicy::AutoLosslessV1;
+        let error = forwarded_stage_message_timed(
+            &config,
+            &incoming_message(),
+            &f32_frame(0, 1, &[1.0, 2.0]),
+            2,
+        )
+        .err()
+        .expect("invalid AutoLosslessV1 fallback must fail");
+
+        assert!(format!("{error:#}").contains("incompatible with configured codec"));
+    }
+
+    #[test]
+    fn first_stage_applies_auto_lossless_selection() {
+        let mut config = stage_config();
+        config.stage_index = 0;
+        config.layer_start = 0;
+        config.activation_codec = StageActivationCodec::RawF32V1;
+        config.activation_codec_policy = StageActivationCodecPolicy::AutoLosslessV1;
+        let forwarded = forwarded_stage_message_timed(
+            &config,
+            &incoming_message(),
+            &f32_frame(0, 1, &[1.0, 2.0]),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(forwarded.message.state.source_stage_index, 0);
+        assert_eq!(
+            forwarded.message.state.activation_codec,
+            StageActivationCodec::Bf16RneV1
+        );
     }
 
     #[test]

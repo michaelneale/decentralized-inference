@@ -11,11 +11,12 @@ pub use activation::{
     select_lossless_activation_codec_with_state_flags,
 };
 pub use codec::{
-    read_stage_message, read_stage_message_for_codec, recv_ready, recv_reply, send_ready,
-    send_reply_ack, send_reply_ack_with_stats, send_reply_message, send_reply_predicted,
-    send_reply_predicted_tokens_with_stats, send_reply_predicted_tokens_with_window_and_stats,
-    send_reply_predicted_with_stats, send_reply_predicted_with_tokens_and_stats,
-    send_reply_predicted_with_tokens_window_and_stats, write_stage_message,
+    read_stage_message, read_stage_message_for_codec, read_stage_message_for_codec_policy,
+    recv_ready, recv_reply, send_ready, send_reply_ack, send_reply_ack_with_stats,
+    send_reply_message, send_reply_predicted, send_reply_predicted_tokens_with_stats,
+    send_reply_predicted_tokens_with_window_and_stats, send_reply_predicted_with_stats,
+    send_reply_predicted_with_tokens_and_stats, send_reply_predicted_with_tokens_window_and_stats,
+    write_stage_message,
 };
 pub use types::sampling_flags;
 pub use types::{
@@ -426,6 +427,85 @@ mod tests {
         assert_invalid_data(
             read_stage_message(Cursor::new(bytes), 2),
             "unknown stage activation codec",
+        );
+    }
+
+    #[test]
+    fn stage_message_auto_lossless_policy_admits_only_exact_codec_set() {
+        let f32_payload = [1.0_f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        for codec in [
+            crate::StageActivationCodec::RawF32V1,
+            crate::StageActivationCodec::Bf16RneV1,
+            crate::StageActivationCodec::F16RneV1,
+        ] {
+            let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
+            state.source_stage_index = 0;
+            state.activation_codec = codec;
+            let message = StageWireMessage {
+                kind: WireMessageKind::DecodeEmbd,
+                pos_start: 0,
+                token_count: 1,
+                state,
+                request_id: 7,
+                session_id: 9,
+                sampling: None,
+                chat_sampling_metadata: None,
+                tokens: Vec::new(),
+                positions: Vec::new(),
+                activation: encode_activation_payload_with_state_flags(
+                    codec,
+                    1,
+                    2,
+                    &f32_payload,
+                    0,
+                )
+                .unwrap(),
+                raw_bytes: Vec::new(),
+            };
+            let mut bytes = Vec::new();
+            write_stage_message(&mut bytes, &message).unwrap();
+            let decoded = read_stage_message_for_codec_policy(
+                Cursor::new(bytes),
+                2,
+                crate::StageActivationCodec::RawF32V1,
+                crate::StageActivationCodecPolicy::AutoLosslessV1,
+            )
+            .unwrap();
+            assert_eq!(decoded.state.activation_codec, codec);
+        }
+
+        let codec = crate::StageActivationCodec::S8RowF32RneV1;
+        let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd);
+        state.source_stage_index = 0;
+        state.activation_codec = codec;
+        let message = StageWireMessage {
+            kind: WireMessageKind::DecodeEmbd,
+            pos_start: 0,
+            token_count: 1,
+            state,
+            request_id: 7,
+            session_id: 9,
+            sampling: None,
+            chat_sampling_metadata: None,
+            tokens: Vec::new(),
+            positions: Vec::new(),
+            activation: encode_activation_payload_with_state_flags(codec, 1, 2, &f32_payload, 0)
+                .unwrap(),
+            raw_bytes: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        write_stage_message(&mut bytes, &message).unwrap();
+        assert_invalid_data(
+            read_stage_message_for_codec_policy(
+                Cursor::new(bytes),
+                2,
+                crate::StageActivationCodec::RawF32V1,
+                crate::StageActivationCodecPolicy::AutoLosslessV1,
+            ),
+            "stage activation codec mismatch",
         );
     }
 

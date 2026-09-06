@@ -175,7 +175,7 @@ fn handle_binary_connection_messages(
             upstream,
             worker_control,
             input_activation_width,
-            config.activation_codec,
+            config,
             next_message.take(),
             pending_prefill_replies,
             request_summary.message_count,

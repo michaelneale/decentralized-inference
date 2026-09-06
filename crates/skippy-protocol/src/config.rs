@@ -137,8 +137,9 @@ impl StageActivationCodecPolicy {
     ) -> bool {
         match self {
             Self::Fixed => configured_codec == frame_codec,
-            // F16 is lossy and S8 stays excluded until its reported
-            // conformance defects are resolved.
+            // S8 stays excluded until its reported conformance defects are
+            // resolved. F16/BF16 are admitted only when the producer's
+            // selector proves exact round-trip for the complete frame.
             Self::AutoLosslessV1 => {
                 configured_codec == StageActivationCodec::RawF32V1
                     && matches!(

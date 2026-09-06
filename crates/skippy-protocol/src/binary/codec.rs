@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use crate::StageActivationCodec;
+use crate::{StageActivationCodec, StageActivationCodecPolicy};
 
 use super::{
     MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
@@ -345,13 +345,26 @@ pub fn read_stage_message_for_codec(
     n_embd: i32,
     expected_codec: StageActivationCodec,
 ) -> io::Result<StageWireMessage> {
-    read_stage_message_inner(reader, n_embd, Some(expected_codec))
+    read_stage_message_inner(
+        reader,
+        n_embd,
+        Some((expected_codec, StageActivationCodecPolicy::Fixed)),
+    )
+}
+
+pub fn read_stage_message_for_codec_policy(
+    reader: impl Read,
+    n_embd: i32,
+    configured_codec: StageActivationCodec,
+    policy: StageActivationCodecPolicy,
+) -> io::Result<StageWireMessage> {
+    read_stage_message_inner(reader, n_embd, Some((configured_codec, policy)))
 }
 
 fn read_stage_message_inner(
     mut reader: impl Read,
     n_embd: i32,
-    expected_codec: Option<StageActivationCodec>,
+    expected_codec: Option<(StageActivationCodec, StageActivationCodecPolicy)>,
 ) -> io::Result<StageWireMessage> {
     let kind = WireMessageKind::try_from(read_i32(&mut reader)?)?;
     let pos_start = read_i32(&mut reader)?;
@@ -382,7 +395,9 @@ fn read_stage_message_inner(
         }
         0
     } else {
-        if expected_codec.is_some_and(|expected| expected != state.activation_codec) {
+        if expected_codec
+            .is_some_and(|(configured, policy)| !policy.permits(configured, state.activation_codec))
+        {
             return Err(invalid_data("stage activation codec mismatch"));
         }
         let expected_bytes = activation_wire_bytes_for_codec_with_state_flags(
