@@ -258,13 +258,24 @@ print(r["llama_model"], r["repo"], r["revision"], r["file"], r["size_bytes"], r[
   echo
   echo "--- [$ROW_INDEX/$ROW_COUNT] $MODEL_NAME ($PAYLOAD_KIND) ---"
 
-  if ! GGUF_PATH="$("$HF_DOWNLOAD_BIN" download "$REPO" "$FILE" --revision "$REVISION" 2>>"$ROW_DIR/download.log" | tail -n 1)" \
-      || [[ -z "$GGUF_PATH" || ! -f "$GGUF_PATH" ]]; then
+  if ! RAW_HF_PATH="$("$HF_DOWNLOAD_BIN" download "$REPO" "$FILE" --revision "$REVISION" 2>>"$ROW_DIR/download.log" | tail -n 1)" \
+      || [[ -z "$RAW_HF_PATH" ]]; then
     echo "row $MODEL_NAME: download failed (see $ROW_DIR/download.log)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:download")
     continue
   fi
-  ACTUAL_SIZE="$(stat -f%z "$GGUF_PATH" 2>/dev/null || stat -c%s "$GGUF_PATH")"
+  # hf CLI prints the final artifact path as either a bare path or a
+  # documented key/value line (`path=/...`, also tolerated: `path: /...`).
+  GGUF_PATH="${RAW_HF_PATH#path=}"
+  GGUF_PATH="${GGUF_PATH#path: }"
+  if [[ ! -f "$GGUF_PATH" ]]; then
+    echo "row $MODEL_NAME: download produced no final file path (see $ROW_DIR/download.log)" | tee -a "$ROW_DIR/row.log"
+    FAILED_ROWS+=("$MODEL_NAME:download")
+    continue
+  fi
+  # The HF cache stores snapshots as symlinks to blobs: stat the link TARGET
+  # (-L), otherwise stat reports the symlink length instead of the blob size.
+  ACTUAL_SIZE="$(stat -Lf%z "$GGUF_PATH" 2>/dev/null || stat -Lc%s "$GGUF_PATH")"
   if [[ "$ACTUAL_SIZE" != "$SIZE" ]]; then
     echo "row $MODEL_NAME: pinned size mismatch ($ACTUAL_SIZE != $SIZE)" | tee -a "$ROW_DIR/row.log"
     FAILED_ROWS+=("$MODEL_NAME:size")

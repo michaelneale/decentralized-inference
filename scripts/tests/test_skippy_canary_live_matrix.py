@@ -228,6 +228,90 @@ class LiveMatrixScriptTests(unittest.TestCase):
             self.assertIn("sha256 mismatch", result.stdout)
             self.assertIn("mockfamily:sha256", result.stdout)
 
+    def test_one_mocked_row_accepts_all_hf_output_forms_and_symlink(self):
+        """The hf CLI reports the final artifact path in several shapes, and
+        the HF cache stores snapshot entries as symlinks. The download gate
+        must accept `path=/...`, `path: /...`, and a bare path, resolve the
+        symlink to the real blob, and still pass the size and SHA gates
+        (stat on a symlink reports the link length, not the blob size)."""
+        import hashlib
+        import tempfile
+
+        payload = b"symlinked-gguf-bytes-for-matrix-row"
+        blob = hashlib.sha256(payload).hexdigest()
+        forms = ["path={}", "path: {}", "{}"]
+        for form in forms:
+            with self.subTest(form=form.split("{}")[0].strip() or "bare"):
+                with tempfile.TemporaryDirectory() as tmp_name:
+                    tmp = Path(tmp_name)
+                    # HF-cache shape: blobs/<sha> real file, snapshots/<rev>/
+                    # symlink pointing at it.
+                    real = tmp / "blobs" / blob
+                    real.parent.mkdir()
+                    real.write_bytes(payload)
+                    snapshot_dir = tmp / "snapshots" / ("1" * 40)
+                    snapshot_dir.mkdir(parents=True)
+                    snapshot = snapshot_dir / "model-Q4_K_M.gguf"
+                    snapshot.symlink_to(real)
+
+                    hf_mock = tmp / "hf-mock"
+                    hf_mock.write_text(
+                        "#!/usr/bin/env bash\n"
+                        'printf "%s\\n" "' + form.format(snapshot) + '"\n'
+                    )
+                    hf_mock.chmod(0o755)
+
+                    pkg_tool = tmp / "pkg-tool-mock"
+                    pkg_tool.write_text("#!/usr/bin/env bash\nexit 0\n")
+                    pkg_tool.chmod(0o755)
+                    smoke_mock = tmp / "smoke-mock.sh"
+                    smoke_mock.write_text("#!/usr/bin/env bash\nexit 0\n")
+                    smoke_mock.chmod(0o755)
+
+                    manifest = tmp / "manifest.json"
+                    manifest.write_text(
+                        json.dumps(
+                            {
+                                "candidates": [
+                                    {
+                                        "llama_model": "mockfamily",
+                                        "status": "certified",
+                                        "model_pin": {
+                                            "repo": "org/mock-gguf",
+                                            "revision": "1" * 40,
+                                            "file": "model-Q4_K_M.gguf",
+                                            "size_bytes": len(payload),
+                                            "blob_sha256": blob,
+                                            "selector": "Q4_K_M",
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                    result = subprocess.run(
+                        [str(SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        cwd=tmp,
+                        env={
+                            **os.environ,
+                            "SKIPPY_PARITY_MANIFEST": str(manifest),
+                            "SKIPPY_CANARY_LIVE_MATRIX_PKG_TOOL": str(pkg_tool),
+                            "SKIPPY_CANARY_LIVE_MATRIX_SPLIT_SMOKE": str(smoke_mock),
+                            "SKIPPY_CANARY_LIVE_MATRIX_HF_DOWNLOAD": str(hf_mock),
+                            "SKIPPY_CANARY_LIVE_MATRIX_ROOT": str(tmp / "evidence"),
+                            "SKIPPY_CANARY_LIVE_MATRIX_WORK_ROOT": str(tmp / "work"),
+                            "STAGE_SERVER_BIN": "/usr/bin/true",
+                            "MESH_LLM_BIN": "/usr/bin/true",
+                        },
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f"form={form!r} stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+                    )
+                    self.assertIn("verified pinned source", result.stdout)
+
     def test_prepare_builds_exact_producers_and_records_provenance(self):
         """--prepare must build this run's host binary and patched native
         runtime and write producer-provenance.json; the provenance writer
