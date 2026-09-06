@@ -378,6 +378,35 @@ fn test_hydrate_gpu_facts_uses_uuid_and_cuda_for_tegra_soc() {
     assert!(survey.gpus[0].unified_memory);
 }
 
+// Snapshot: when no collector set gpu_name, the placeholder "GPU {index}"
+// join that backfills it is unchanged by this PR; gpu_name_source labels it
+// Unknown so nothing downstream mistakes a placeholder for real hardware.
+#[test]
+fn test_hydrate_gpu_facts_backfill_tags_unknown_gpu_name_source() {
+    let mut survey = HardwareSurvey {
+        gpu_count: 2,
+        gpu_vram: vec![8_000_000_000, 8_000_000_000],
+        ..Default::default()
+    };
+
+    hydrate_gpu_facts(&mut survey, &[Metric::GpuFacts, Metric::GpuName]);
+
+    assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0, GPU 1"));
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::Unknown));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[serial(real_collector)]
+fn test_tegra_collector_gpu_name_absent_leaves_source_none() {
+    // This CI host has no /sys/firmware/devicetree/base/model, so both the
+    // name and its source must stay absent — never a guessed source for a
+    // name that was never actually read.
+    let survey = TegraCollector.collect(&[Metric::GpuName]);
+    assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
+}
+
 #[test]
 fn test_summarize_gpu_name_single() {
     assert_eq!(
@@ -660,6 +689,7 @@ fn test_hardware_survey_default() {
     let s = HardwareSurvey::default();
     assert_eq!(s.vram_bytes, 0);
     assert_eq!(s.gpu_name, None);
+    assert_eq!(s.gpu_name_source, None);
     assert_eq!(s.gpu_count, 0);
     assert_eq!(s.hostname, None);
     assert!(s.gpu_vram.is_empty());
@@ -842,6 +872,28 @@ fn test_healthy_gpu_probe_without_vram_metric_does_not_probe_system_ram() {
     assert_eq!(survey.vram_bytes, 0);
 }
 
+// Snapshot: this probe's gpu_name value must stay exactly what it was before
+// gpu_name_source existed (the display_name join over the probed GPUs).
+// gpu_name_source is new; gpu_name is not.
+#[test]
+fn test_skippy_probe_gpu_name_unchanged_and_source_tagged() {
+    let mut survey = HardwareSurvey::default();
+    let handled = apply_gpu_probe_outcome_to_survey(
+        &mut survey,
+        &[Metric::GpuName],
+        Ok::<Vec<GpuFacts>, ()>(vec![synthetic_gpu(0, None)]),
+        || 0,
+    );
+    assert!(handled);
+    assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0"));
+    let expected_source = if cfg!(target_os = "macos") {
+        GpuNameSource::MetalDefaultDevice
+    } else {
+        GpuNameSource::NativeRuntimeDevice
+    };
+    assert_eq!(survey.gpu_name_source, Some(expected_source));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn test_probe_fallback_leaves_vram_untouched_on_macos() {
@@ -882,6 +934,7 @@ fn test_skippy_backend_error_uses_cpu_only_budget_without_legacy_fallback() {
 
     assert!(handled);
     assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
     assert_eq!(survey.gpu_count, 0);
     assert!(survey.gpu_vram.is_empty());
     assert!(survey.gpus.is_empty());
@@ -909,6 +962,7 @@ fn test_skippy_backend_empty_result_uses_cpu_only_budget_without_legacy_fallback
 
     assert!(handled);
     assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
     assert_eq!(survey.gpu_count, 0);
     assert!(survey.gpu_vram.is_empty());
     assert!(survey.gpus.is_empty());

@@ -13,7 +13,7 @@ mod tests;
 use parsers::macos_metal_gpu_budget;
 pub use parsers::*;
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GpuFacts {
     pub index: usize,
     pub display_name: String,
@@ -120,12 +120,18 @@ impl std::fmt::Display for PinnedGpuResolverError {
 
 impl std::error::Error for PinnedGpuResolverError {}
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HardwareSurvey {
     pub vram_bytes: u64,
     /// GPU name as reported by the OS/driver (e.g. Metal, nvidia-smi, ROCm).
     /// Best-effort and OS-reported, not an independently verified measurement.
     pub gpu_name: Option<String>,
+    /// Collection mechanism behind `gpu_name`. A source, not a verification —
+    /// it names which probe produced the string, not that the string is a
+    /// confirmed-accurate GPU identifier. `None` when no naming probe ran
+    /// (`gpu_name` is then also `None`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_name_source: Option<GpuNameSource>,
     pub gpu_count: u8,
     pub hostname: Option<String>,
     pub is_soc: bool,
@@ -138,6 +144,46 @@ pub struct HardwareSurvey {
     pub gpu_reserved: Vec<Option<u64>>,
     /// Per-GPU facts in device-enumeration order.
     pub gpus: Vec<GpuFacts>,
+}
+
+/// Where a `HardwareSurvey.gpu_name` value came from. Each variant names a
+/// collection mechanism, not a claim that the resulting string is a verified
+/// GPU identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuNameSource {
+    /// The system *default* Metal device at collection time (macOS) — the
+    /// device the runtime's enumeration reported, equivalent to what
+    /// `MTLCreateSystemDefaultDevice` names. On switchable-graphics Macs the
+    /// default device is a moment-in-time fact: it can differ between
+    /// collections as the OS switches GPUs, and it names one adapter, not
+    /// the set of adapters present. Not a standalone Metal API query and not
+    /// a verification that the string matches Apple's own device name.
+    MetalDefaultDevice,
+    /// macOS `sysctl -n machdep.cpu.brand_string`, reused as the GPU name on
+    /// Apple Silicon where CPU and GPU share one die. Names the CPU package
+    /// the OS reports — never a queried GPU identifier.
+    CpuBrandString,
+    /// The skippy native-runtime's backend device enumeration reporting a
+    /// non-Metal accelerator (CUDA, ROCm, Vulkan, SYCL, ...). Names whichever
+    /// accelerator the loaded runtime enumerated; does not by itself say
+    /// which of those backends answered.
+    NativeRuntimeDevice,
+    /// `nvidia-smi --query-gpu=name` output.
+    NvidiaSmi,
+    /// `rocm-smi --showproductname` output.
+    RocmSmi,
+    /// `xpu-smi discovery` JSON output (Intel GPUs).
+    XpuSmi,
+    /// Windows `Win32_VideoController` CIM/WMI query (`Name` field).
+    WindowsVideoController,
+    /// A device-tree model string read from sysfs
+    /// (`/sys/firmware/devicetree/base/model`), used on Tegra/Jetson boards.
+    Sysfs,
+    /// A name is present but was not produced by any naming probe above —
+    /// e.g. a placeholder ("GPU 0") backfilled from GPU count/VRAM data
+    /// alone. Never treat this as identifying real hardware.
+    Unknown,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -454,6 +500,23 @@ fn apply_gpu_probe_outcome_to_survey<E>(
     if metrics.contains(&Metric::GpuName) {
         let names: Vec<String> = gpus.iter().map(|gpu| gpu.display_name.clone()).collect();
         survey.gpu_name = summarize_gpu_name(&names);
+        if survey.gpu_name.is_some() {
+            // Derive the source from the actual backend device names the
+            // runtime reported, not from the target OS: a macOS host running
+            // MoltenVK/Vulkan stamps non-MTL device names and must not be
+            // labelled MetalDefaultDevice.
+            let is_metal = gpus.iter().any(|gpu| {
+                gpu.backend_device
+                    .as_deref()
+                    .map(|d| d.starts_with("MTL"))
+                    .unwrap_or(false)
+            });
+            survey.gpu_name_source = Some(if is_metal {
+                GpuNameSource::MetalDefaultDevice
+            } else {
+                GpuNameSource::NativeRuntimeDevice
+            });
+        }
     }
     if metrics.contains(&Metric::GpuCount) {
         survey.gpu_count = u8::try_from(gpus.len()).unwrap_or(u8::MAX);
@@ -513,6 +576,9 @@ impl Collector for DefaultCollector {
             }
             if metrics.contains(&Metric::GpuName) {
                 survey.gpu_name = sanitize_macos_gpu_name(query_metal_device_name());
+                if survey.gpu_name.is_some() {
+                    survey.gpu_name_source = Some(GpuNameSource::MetalDefaultDevice);
+                }
             }
             if metrics.contains(&Metric::GpuCount) {
                 survey.gpu_count = 1;
@@ -695,6 +761,9 @@ impl Collector for DefaultCollector {
                 if let Some(ref names) = nvidia_names {
                     if metrics.contains(&Metric::GpuName) {
                         survey.gpu_name = summarize_gpu_name(names);
+                        if survey.gpu_name.is_some() {
+                            survey.gpu_name_source = Some(GpuNameSource::NvidiaSmi);
+                        }
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -710,6 +779,9 @@ impl Collector for DefaultCollector {
                                 let names = parse_rocm_gpu_names(&s);
                                 if metrics.contains(&Metric::GpuName) {
                                     survey.gpu_name = summarize_gpu_name(&names);
+                                    if survey.gpu_name.is_some() {
+                                        survey.gpu_name_source = Some(GpuNameSource::RocmSmi);
+                                    }
                                 }
                                 if metrics.contains(&Metric::GpuCount) {
                                     survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -735,6 +807,10 @@ impl Collector for DefaultCollector {
                                             gpus.iter().map(|gpu| gpu.name.clone()).collect();
                                         if metrics.contains(&Metric::GpuName) {
                                             survey.gpu_name = summarize_gpu_name(&names);
+                                            if survey.gpu_name.is_some() {
+                                                survey.gpu_name_source =
+                                                    Some(GpuNameSource::XpuSmi);
+                                            }
                                         }
                                         if metrics.contains(&Metric::GpuCount) {
                                             survey.gpu_count =
@@ -830,6 +906,9 @@ impl Collector for DefaultCollector {
                 if let Some(ref names) = nvidia_names {
                     if metrics.contains(&Metric::GpuName) {
                         survey.gpu_name = summarize_gpu_name(names);
+                        if survey.gpu_name.is_some() {
+                            survey.gpu_name_source = Some(GpuNameSource::NvidiaSmi);
+                        }
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -839,6 +918,9 @@ impl Collector for DefaultCollector {
                         windows_gpus.iter().map(|(name, _)| name.clone()).collect();
                     if metrics.contains(&Metric::GpuName) {
                         survey.gpu_name = summarize_gpu_name(&names);
+                        if survey.gpu_name.is_some() {
+                            survey.gpu_name_source = Some(GpuNameSource::WindowsVideoController);
+                        }
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -871,6 +953,9 @@ impl Collector for TegraCollector {
             survey.gpu_name = std::fs::read_to_string("/sys/firmware/devicetree/base/model")
                 .ok()
                 .and_then(|model| parse_tegra_model_name(&model));
+            if survey.gpu_name.is_some() {
+                survey.gpu_name_source = Some(GpuNameSource::Sysfs);
+            }
         }
 
         if metrics.contains(&Metric::VramBytes) {
@@ -1286,6 +1371,9 @@ fn hydrate_gpu_facts_with_identities(
             .map(|gpu| gpu.display_name.clone())
             .collect();
         survey.gpu_name = summarize_gpu_name(&names);
+        if survey.gpu_name.is_some() {
+            survey.gpu_name_source = Some(GpuNameSource::Unknown);
+        }
     }
 }
 
