@@ -411,6 +411,9 @@ public:
         result.SourceManager == nullptr || result.Context == nullptr) {
       return;
     }
+    if (constructor->getParent()->isLambda()) {
+      return;
+    }
 
     ASTContext &context = *result.Context;
     const SourceManager &sm = *result.SourceManager;
