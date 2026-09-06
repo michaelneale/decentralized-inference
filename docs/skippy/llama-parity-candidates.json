@@ -1129,11 +1129,20 @@
     {
       "llama_model": "qwen35",
       "family": "qwen35",
-      "status": "needs_boundary_registration",
+      "status": "certified",
       "recurrent": "all",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; KvRecurrent cache restore passed in llama-parity-finish-batch2-kvrecurrent-20260506; keep recurrent ownership sticky; q8 validated; full-state rejected as too large; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; KvRecurrent cache restore passed in llama-parity-finish-batch2-kvrecurrent-20260506; keep recurrent ownership sticky; q8 validated; full-state rejected as too large; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration; begin_block/end_block boundaries registered in patch 0078; split-serving admission restored",
       "repo": "mradermacher/UnifiedReward-Edit-qwen35-4b-i1-GGUF",
-      "include": "UnifiedReward-Edit-qwen35-4b.i1-IQ2_M.gguf"
+      "include": "UnifiedReward-Edit-qwen35-4b.i1-IQ2_M.gguf",
+      "model_pin": {
+        "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+        "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+        "file": "Qwen3.5-0.8B-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 532517120,
+        "blob_sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "qwen3vlmoe",

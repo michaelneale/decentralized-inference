@@ -1,0 +1,65 @@
+From 0fde672256669eababd0421daea91ae500db2ec6 Mon Sep 17 00:00:00 2001
+From: Paul Hogan
+ <aa47084cc925686dd999d536dbab05031a0190b47817919f91866bb89d81fb55@meshllm.communities.buzz.xyz>
+Date: Sun, 6 Sep 2026 13:19:08 +1000
+Subject: [PATCH] skippy: register Qwen3.5 block boundaries
+
+---
+ src/CMakeLists.txt    | 18 ++++++++++++++++++
+ src/models/qwen35.cpp |  4 ++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a46f32c13..9922906c8 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -213,6 +213,24 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_generate_granite_hybrid_fixture PROPERTIES
+         FIXTURES_SETUP skippy-noalloc-granite-hybrid-fixture)
+ 
++    add_test(
++        NAME skippy_generate_qwen35_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch qwen35
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_qwen35_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-qwen35-fixture)
++
++    add_test(
++        NAME skippy_renamed_multishard_planning_qwen35
++        COMMAND skippy-renamed-multishard-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/qwen35-dense.gguf"
++            "${SKIPPY_MODEL_FIXTURE_DIR}/renamed-qwen35"
++            1)
++    set_tests_properties(skippy_renamed_multishard_planning_qwen35 PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-qwen35-fixture)
++
+     add_test(
+         NAME skippy_model_loader_accounting_dense
+         COMMAND skippy-model-loader-accounting
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 7535be893..9694a21cd 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -169,6 +169,8 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+ 
+     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
+     for (int il = il_start; il < il_end; ++il) {
++        begin_block(inpL, il);
++
+         res->t_layer_inp[il] = inpL;
+ 
+         ggml_tensor * inpSA = inpL;
+@@ -214,6 +216,8 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+         cur = build_cvec(cur, il);
+         cb(cur, "l_out", il);
+ 
++        end_block(cur, il);
++
+         // Input for next layer
+         inpL = cur;
+     }
+-- 
+2.54.0 (Apple Git-157)
+
