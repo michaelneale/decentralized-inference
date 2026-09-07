@@ -179,6 +179,7 @@ family_module!(p0_command_r_command_r, "p0", "command-r", "command_r");
 family_module!(p0_cohere2_cohere2, "p0", "cohere2", "cohere2");
 family_module!(p0_minimax_m2_minimax_m27, "p0", "minimax-m2", "minimax_m27");
 family_module!(p0_lfm2_lfm2, "p0", "lfm2", "lfm2");
+family_module!(p0_lfm2_lfm2_vl, "p0", "lfm2", "lfm2_vl");
 family_module!(
     p0_hunyuan_dense_hunyuan_dense,
     "p0",
@@ -427,6 +428,11 @@ const FAMILY_SPECS: &[FamilySpec] = &[
     },
     FamilySpec {
         priority: "p0",
+        llama_model: "lfm2",
+        family: "lfm2_vl",
+    },
+    FamilySpec {
+        priority: "p0",
         llama_model: "hunyuan-dense",
         family: "hunyuan_dense",
     },
@@ -668,7 +674,7 @@ const FAMILY_SPECS: &[FamilySpec] = &[
 ];
 
 #[test]
-fn p0_p1_manifest_rows_all_have_family_modules() {
+fn certified_p0_p1_manifest_rows_all_have_family_modules() {
     let expected = p0_p1_manifest_rows();
     let declared = FAMILY_SPECS
         .iter()
@@ -682,6 +688,6 @@ fn p0_p1_manifest_rows_all_have_family_modules() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         expected, declared,
-        "every P0/P1 manifest row must have a dedicated test module"
+        "every certified P0/P1 manifest row must have a dedicated test module"
     );
 }

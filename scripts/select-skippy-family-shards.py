@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select certified family tests from two generated shard series."""
+"""Select certified family tests from generated shards or upstream paths."""
 
 from __future__ import annotations
 
@@ -59,15 +59,86 @@ def select(base: dict, current: dict, include_sentinels: bool) -> dict:
     return {"mode": "targeted", "families": sorted(families), "reason": "mapped-shards-changed"}
 
 
+def load_family_map(path: Path) -> dict[str, list[str]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    families = payload.get("families")
+    if payload.get("schema_version") != 1 or not isinstance(families, dict):
+        raise ValueError(f"invalid generated family source map: {path}")
+    result: dict[str, list[str]] = {}
+    for family, sources in families.items():
+        if (
+            not isinstance(family, str)
+            or not family
+            or not isinstance(sources, list)
+            or not sources
+            or any(not isinstance(source, str) or not source for source in sources)
+        ):
+            raise ValueError("generated family source map contains an invalid record")
+        result[family] = sources
+    return result
+
+
+def select_upstream_paths(
+    changed_paths: list[str], family_map: dict[str, list[str]], include_sentinels: bool
+) -> dict:
+    paths = {path.strip() for path in changed_paths if path.strip()}
+    if not paths:
+        return {"mode": "none", "families": [], "reason": "no-upstream-changes"}
+
+    owners_by_source: dict[str, set[str]] = {}
+    for family, sources in family_map.items():
+        for source in sources:
+            owners_by_source.setdefault(source, set()).add(family)
+
+    families: set[str] = set()
+    for path in paths:
+        owners = owners_by_source.get(path)
+        if owners is None:
+            reason = (
+                "unmapped-model-source-changed"
+                if path.startswith("src/models/") and path.endswith(".cpp")
+                else "shared-upstream-source-changed"
+            )
+            return {"mode": "full", "families": [], "reason": reason}
+        families.update(owners)
+
+    if include_sentinels:
+        families.update(SENTINELS)
+    return {
+        "mode": "targeted",
+        "families": sorted(families),
+        "reason": "mapped-upstream-model-sources-changed",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", type=Path, required=True)
-    parser.add_argument("--current", type=Path, required=True)
+    parser.add_argument("--base", type=Path)
+    parser.add_argument("--current", type=Path)
+    parser.add_argument("--changed-paths", type=Path)
+    parser.add_argument("--family-map", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--include-sentinels", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = select(load(args.base), load(args.current), args.include_sentinels)
+        shard_mode = args.base is not None or args.current is not None
+        path_mode = args.changed_paths is not None or args.family_map is not None
+        if shard_mode == path_mode:
+            raise ValueError(
+                "provide either --base/--current or --changed-paths/--family-map"
+            )
+        if shard_mode:
+            if args.base is None or args.current is None:
+                raise ValueError("--base and --current must be provided together")
+            result = select(load(args.base), load(args.current), args.include_sentinels)
+        else:
+            if args.changed_paths is None or args.family_map is None:
+                raise ValueError("--changed-paths and --family-map must be provided together")
+            result = select_upstream_paths(
+                args.changed_paths.read_text(encoding="utf-8").splitlines(),
+                load_family_map(args.family_map),
+                args.include_sentinels,
+            )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

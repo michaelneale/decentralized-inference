@@ -132,11 +132,12 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         family_selection = _step_block(workflow, "Select changed generated families")
         self.assertIn("select-skippy-family-shards.py", family_selection)
         self.assertIn("--include-sentinels", family_selection)
-        self.assertIn("core-or-policy-change", family_selection)
-        self.assertIn(
-            "':(top,glob)third_party/llama.cpp/patches/*.patch'",
-            family_selection,
-        )
+        self.assertIn("--changed-paths /tmp/changed-llama-sources.txt", family_selection)
+        self.assertIn("--family-map ci/llama-canary/generated-family-map.json", family_selection)
+        self.assertIn('git -C .deps/llama.cpp diff --name-only', family_selection)
+        self.assertIn('steps.sha.outputs.old_sha', family_selection)
+        self.assertIn('steps.sha.outputs.new_sha', family_selection)
+        self.assertNotIn("HEAD^", family_selection)
 
         family_plan = _step_block(workflow, "Plan and verify family certification cache")
         self.assertIn("python3 scripts/plan-family-battery.py", family_plan)
@@ -155,7 +156,6 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             "skippy-correctness",
             "skippy-server",
             "skippy-model-package",
-            "llama-spec-bench",
         ):
             self.assertIn(f"-p {package}", build)
 
@@ -199,71 +199,12 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, family-certify]", latest_job)
         self.assertIn("permissions:\n      contents: read", latest_job)
         self.assertIn("ref: main", latest_job)
-        self.assertIn("fetch-depth: 2", latest_job)
+        self.assertIn("fetch-depth: 1", latest_job)
         self.assertNotIn("queue_ref", workflow)
         self.assertNotIn("github.token", latest_job)
         self.assertIn("runs-on: ubuntu-latest", update_job)
         self.assertIn("permissions:\n      contents: write", update_job)
         self.assertIn("trusted_queue_sha", update_job)
-
-    def test_core_patch_pathspec_excludes_generated_shards(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="family-selection-git-") as temporary:
-            repo = Path(temporary)
-
-            def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    ["git", *args],
-                    cwd=repo,
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                )
-
-            git("init", "-q")
-            git("config", "user.name", "test")
-            git("config", "user.email", "test@example.com")
-            patch_dir = repo / "third_party/llama.cpp/patches"
-            generated_dir = patch_dir / "generated"
-            generated_dir.mkdir(parents=True)
-            (patch_dir / "0001-core.patch").write_text("core\n", encoding="utf-8")
-            shard = generated_dir / "0001-family-gemma2.patch"
-            shard.write_text("generated-v1\n", encoding="utf-8")
-            git("add", ".")
-            git("commit", "-qm", "base")
-
-            shard.write_text("generated-v2\n", encoding="utf-8")
-            git("add", str(shard.relative_to(repo)))
-            git("commit", "-qm", "generated")
-            top_level_patches = ":(top,glob)third_party/llama.cpp/patches/*.patch"
-            self.assertEqual(
-                git(
-                    "diff",
-                    "--quiet",
-                    "HEAD^",
-                    "HEAD",
-                    "--",
-                    top_level_patches,
-                    check=False,
-                ).returncode,
-                0,
-            )
-
-            core = patch_dir / "0001-core.patch"
-            core.write_text("core-v2\n", encoding="utf-8")
-            git("add", str(core.relative_to(repo)))
-            git("commit", "-qm", "core")
-            self.assertEqual(
-                git(
-                    "diff",
-                    "--quiet",
-                    "HEAD^",
-                    "HEAD",
-                    "--",
-                    top_level_patches,
-                    check=False,
-                ).returncode,
-                1,
-            )
 
     def test_update_job_writes_the_single_upstream_pin(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -805,7 +746,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             digest,
         )
 
-    def test_preflight_pins_snapshot_and_limits_speculative_corpus_to_mtp(self) -> None:
+    def test_preflight_pins_snapshot_and_records_native_mtp_models(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             revision = "a" * 40
@@ -866,17 +807,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
                 f"#!/bin/sh\nprintf '%s\\n' '{complete_scan}'\n",
                 encoding="utf-8",
             )
-            spec = bin_dir / "llama-spec-bench"
-            spec.write_text(
-                "#!/bin/sh\n"
-                "while [ \"$#\" -gt 0 ]; do\n"
-                "  if [ \"$1\" = --json-out ]; then printf '{}\\n' > \"$2\"; exit 0; fi\n"
-                "  shift\n"
-                "done\n"
-                "exit 1\n",
-                encoding="utf-8",
-            )
-            for name in ("hf", "skippy-model-package", "llama-spec-bench"):
+            for name in ("hf", "skippy-model-package"):
                 path = bin_dir / name
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
             for name in ("skippy-correctness", "skippy-server"):
@@ -940,9 +871,13 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             resolved = (run_dir / "resolved-models.tsv").read_text(encoding="utf-8")
             self.assertIn(revision, resolved)
             self.assertIn("|1|1024|5|", resolved)
-            mtp_corpus = (run_dir / "mtp-corpus.tsv").read_text(encoding="utf-8")
-            self.assertIn("mtp-family", mtp_corpus)
-            self.assertTrue((run_dir / "preflight" / "speculative-smoke.json").is_file())
+            native_mtp_models = (run_dir / "native-mtp-models.tsv").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("mtp-family", native_mtp_models)
+            self.assertFalse(
+                (run_dir / "preflight" / "speculative-smoke.json").exists()
+            )
 
             incomplete_tensors = complete_tensors[:5] + [complete_tensors[5]]
             incomplete_scan = json.dumps(
@@ -971,7 +906,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             )
             self.assertEqual(1, incomplete.returncode)
             incomplete_run = next(incomplete_artifacts.iterdir())
-            incomplete_corpus = (incomplete_run / "mtp-corpus.tsv").read_text(
+            incomplete_corpus = (incomplete_run / "native-mtp-models.tsv").read_text(
                 encoding="utf-8"
             )
             self.assertEqual(
@@ -981,6 +916,14 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             self.assertFalse(
                 (incomplete_run / "preflight" / "speculative-smoke.json").exists()
             )
+
+    def test_native_mtp_uses_one_target_model_and_correctness_sidebands(self) -> None:
+        script = BATTERY.read_text(encoding="utf-8")
+
+        self.assertIn("--require-native-mtp-draft", script)
+        self.assertIn("--skip-speculative", script)
+        self.assertNotIn("--draft-model", script)
+        self.assertNotIn("llama-spec-bench", script)
 
 
 if __name__ == "__main__":

@@ -68,12 +68,11 @@ before compilation; Qwen4 experimental artifacts derive their wider boundary
 from `hyper_connection.count * embedding_length`. It emits
 deterministic bounded GitHub matrix shards; the current one-runner topology consumes one
 selected-family shard while retaining the plan as evidence. On a changed llama.cpp pin,
-the trusted checkout compares each generated family shard with the previous `main`
-commit and runs only the affected manifest families plus fixed architecture sentinels.
-Core patch, generator, policy, or selector changes fail closed to the full family
-battery. The checkout retains two commits so this comparison is available, and the
-core-patch pathspec is restricted to top-level patch files so generated shards do not
-force a full run. The runner's `.env` exports
+the canary diffs the actual old and new upstream revisions inside the prepared llama.cpp
+checkout. A change limited to model implementation files named by the generated-family
+map selects their certified families plus fixed architecture sentinels. Any shared
+upstream source, unmapped model source, or unavailable diff fails closed to the full
+bump battery; non-bump runs retain their cadence-owned cohort. The runner's `.env` exports
 `HF_CACHE` pointing at a pre-warmed HF cache that lives on the lab NFS models
 volume and `HF_HUB_OFFLINE=1` (NFS offers no `flock`, so `hf` on the runner is
 read-only; the cache is populated by a two-stage prewarm that downloads on
@@ -89,10 +88,12 @@ directly by the immutable snapshot SHA checked into
 `ci/llama-canary/family-certified.json`. The runtime preflight records the
 revisions, verifies all shard/tensor scans and declared runtime/MTP layer
 counts/model bytes, disk
-headroom and certification ports, and runs one cheap MTP speculative-corpus
-smoke. Only GGUFs with a complete native MTP/NextN tensor head across all
-shards run `llama-spec-bench`; those rows also require native MTP draft
-sidebands in staged correctness. Per-lane
+headroom and certification ports. Native MTP/NextN heads remain part of the
+single target model; the battery never reopens that model as a separate draft.
+Those rows require native draft sidebands in staged single-step and chain
+correctness, where each proposed token is verified against the target. The
+general `llama-spec-bench` target/draft benchmark remains available for explicit
+two-model experiments outside the family battery. Per-lane
 outcomes, immutable model manifests, summaries, model scans, preflight
 evidence, and logs are uploaded for 14 days even when the battery fails. Stage
 readiness uses a declared per-model override or a model-size-derived deadline,

@@ -602,7 +602,7 @@
     {
       "llama_model": "lfm2",
       "family": "lfm2_vl",
-      "status": "candidate_multimodal",
+      "status": "certified",
       "repo": "ggml-org/LFM2-VL-450M-GGUF",
       "include": [
         "LFM2-VL-450M-Q8_0.gguf",

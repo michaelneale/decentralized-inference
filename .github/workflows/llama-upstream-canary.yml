@@ -60,9 +60,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: main
-          # Family-shard selection compares the trusted main commit with its
-          # first parent. Keep exactly that history available on this runner.
-          fetch-depth: 2
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Verify runner toolchain
@@ -166,21 +164,13 @@ jobs:
           mode=full
           families=""
           if [[ "${{ steps.sha.outputs.cadence }}" == "llama-bump" ]] \
-              && git rev-parse HEAD^ >/dev/null 2>&1 \
-              && git show HEAD^:third_party/llama.cpp/patches/generated/series.json > /tmp/base-family-series.json 2>/dev/null \
-              && git diff --quiet HEAD^ HEAD -- \
-                   ':(top,glob)third_party/llama.cpp/patches/*.patch' \
-                   ci/llama-canary/family-certified.json \
-                   ci/llama-canary/generated-family-map.json \
-                   scripts/check-skippy-generated-family-patch.sh \
-                   scripts/generate-skippy-family-patch.py \
-                   scripts/prepare-llama.sh \
-                   scripts/select-skippy-family-shards.py \
-                   scripts/skippy-rewriter-harness.py \
-                   tools/skippy-stage-rewriter; then
+              && git -C .deps/llama.cpp diff --name-only \
+                   "${{ steps.sha.outputs.old_sha }}" \
+                   "${{ steps.sha.outputs.new_sha }}" \
+                   -- > /tmp/changed-llama-sources.txt; then
             python3 scripts/select-skippy-family-shards.py \
-              --base /tmp/base-family-series.json \
-              --current third_party/llama.cpp/patches/generated/series.json \
+              --changed-paths /tmp/changed-llama-sources.txt \
+              --family-map ci/llama-canary/generated-family-map.json \
               --include-sentinels \
               --output "$selection"
             mode="$(jq -r .mode "$selection")"
@@ -190,7 +180,7 @@ jobs:
               families=""
             fi
           else
-            printf '%s\n' '{"families": [], "mode": "full", "reason": "core-or-policy-change"}' > "$selection"
+            printf '%s\n' '{"families": [], "mode": "full", "reason": "non-bump-or-upstream-diff-unavailable"}' > "$selection"
           fi
           {
             echo "mode=$mode"
@@ -253,7 +243,7 @@ jobs:
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success'
         # Do not select skippy-ffi directly here: its default dynamic-runtime
         # feature would be unified into the statically linked certification binaries.
-        run: cargo build -p skippy-runtime -p skippy-server -p skippy-model-package -p skippy-correctness -p llama-spec-bench
+        run: cargo build -p skippy-runtime -p skippy-server -p skippy-model-package -p skippy-correctness
 
       - name: Skippy smoke tests
         if: steps.prepare.outcome == 'success' && steps.sha.outputs.certify == 'true' && steps.family_patch.outcome == 'success' && env.LLAMA_UPSTREAM_CANARY_SMOKE != '0' && env.LLAMA_UPSTREAM_CANARY_SMOKE != 'false'

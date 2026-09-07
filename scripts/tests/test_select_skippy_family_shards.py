@@ -55,6 +55,60 @@ class FamilyShardSelectionTests(unittest.TestCase):
         result = self.selector.select(self.series(shard), self.series(shard, version="0.4.0"), True)
         self.assertEqual(result["mode"], "full")
 
+    def test_mapped_upstream_model_change_selects_owners_and_sentinels(self) -> None:
+        result = self.selector.select_upstream_paths(
+            ["src/models/gemma2.cpp"],
+            {
+                "gemma2": ["src/models/gemma2.cpp"],
+                "qwen3-dense": ["src/models/qwen3.cpp"],
+            },
+            True,
+        )
+        self.assertEqual(result["mode"], "targeted")
+        self.assertEqual(
+            set(result["families"]),
+            {"gemma2", "qwen3-dense", "qwen3-moe", "mamba", "lfm2-vl"},
+        )
+
+    def test_shared_upstream_change_forces_full_battery(self) -> None:
+        result = self.selector.select_upstream_paths(
+            ["src/llama-model.cpp"],
+            {"gemma2": ["src/models/gemma2.cpp"]},
+            True,
+        )
+        self.assertEqual(result, {
+            "mode": "full",
+            "families": [],
+            "reason": "shared-upstream-source-changed",
+        })
+
+    def test_unmapped_upstream_model_change_forces_full_battery(self) -> None:
+        result = self.selector.select_upstream_paths(
+            ["src/models/new-family.cpp"],
+            {"gemma2": ["src/models/gemma2.cpp"]},
+            True,
+        )
+        self.assertEqual(result["mode"], "full")
+        self.assertEqual(result["reason"], "unmapped-model-source-changed")
+
+    def test_multiple_mapped_sources_select_every_affected_family(self) -> None:
+        result = self.selector.select_upstream_paths(
+            ["src/models/shared.cpp", "src/models/other.cpp"],
+            {
+                "a": ["src/models/shared.cpp"],
+                "b": ["src/models/shared.cpp", "src/models/other.cpp"],
+                "c": ["src/models/unmodified.cpp"],
+            },
+            False,
+        )
+        self.assertEqual(result["families"], ["a", "b"])
+
+    def test_empty_upstream_diff_selects_none(self) -> None:
+        result = self.selector.select_upstream_paths(
+            [], {"gemma2": ["src/models/gemma2.cpp"]}, True
+        )
+        self.assertEqual(result["mode"], "none")
+
 
 class FamilyShardGenerationTests(unittest.TestCase):
     def setUp(self) -> None:

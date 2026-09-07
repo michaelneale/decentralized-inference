@@ -33,6 +33,7 @@ pub(crate) fn p0_p1_manifest_rows() -> BTreeSet<(String, String, String)> {
     manifest
         .rows_by_priority(["p0", "p1"])
         .into_iter()
+        .filter(|row| is_parity_artifact_status(&row.status))
         .map(|row| {
             (
                 manifest.priority_for(row).to_string(),
