@@ -364,6 +364,45 @@ def main() -> int:
         )["builders"][0]
         assert hyperconnection_second["verdict"] == "already_transformed"
 
+        hyperconnection_initializer = run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection-initializer.json",
+            source_name="hyperconnection-initializer.cpp",
+            apply=False,
+        )["builders"][0]
+        assert hyperconnection_initializer["verdict"] == "transformable"
+        assert hyperconnection_initializer["proof"]["activation_in"] == "res_hc"
+        initializer_edit_kinds = {
+            edit["kind"] for edit in hyperconnection_initializer["edits"]
+        }
+        assert "insert_hyperconnection_import" in initializer_edit_kinds
+        assert "rewrite_hyperconnection_initializer" in initializer_edit_kinds
+        assert "guard_hyperconnection_embedding_prelude" in initializer_edit_kinds
+        assert "guard_hyperconnection_repeat" not in initializer_edit_kinds
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection-initializer-applied.json",
+            source_name="hyperconnection-initializer.cpp",
+            apply=True,
+        )
+        hyperconnection_initializer_source = (
+            source_root / "src/models/hyperconnection-initializer.cpp"
+        ).read_text(encoding="utf-8")
+        assert "res->t_skippy_activation_input = res_hc;" in hyperconnection_initializer_source
+        assert hyperconnection_initializer_source.count(
+            "if (!stage_filtered || il_start == 0)"
+        ) == 2
+        hyperconnection_initializer_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "hyperconnection-initializer-second.json",
+            source_name="hyperconnection-initializer.cpp",
+            apply=False,
+        )["builders"][0]
+        assert hyperconnection_initializer_second["verdict"] == "already_transformed"
+
         embedding_prelude = run(
             tool,
             source_root,
