@@ -27,6 +27,11 @@ on:
         required: false
         default: 1
         type: number
+      release_tag:
+        description: Optional release version to prepare and bind to the UI artifact.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -87,6 +92,19 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
+      - name: Prepare release UI version
+        if: ${{ inputs.release_tag != '' }}
+        working-directory: .
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UI_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$UI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$UI_SOURCE_SHA"
+          scripts/release-version.sh "$RELEASE_TAG"
+          echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"
       # The container image bakes a warm pnpm store at
       # /home/runner/.local/share/pnpm/store (mesh-llm-runner-images
       # scripts/warm-dependencies.sh). Point pnpm at it directly instead of
@@ -107,6 +125,19 @@ jobs:
         run: pnpm run build
       - name: Verify console distribution
         run: test -s dist/index.html
+      - name: Bind release UI identity and checksums
+        if: ${{ inputs.release_tag != '' }}
+        working-directory: .
+        shell: bash
+        env:
+          UI_SOURCE_SHA: ${{ inputs.source_sha }}
+          UI_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ui-distribution.py stamp \
+            --dist crates/mesh-llm-ui/dist \
+            --source-sha "$UI_SOURCE_SHA" \
+            --release-tag "$UI_RELEASE_TAG"
       - name: Upload immutable console distribution
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
