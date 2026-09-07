@@ -924,6 +924,9 @@ fn read_native_profile(
             value if value == skippy_ffi::StagePlanStateKind::RecurrentSsm as i32 => {
                 skippy_ffi::StagePlanStateKind::RecurrentSsm
             }
+            value if value == skippy_ffi::StagePlanStateKind::DerivedPersistent as i32 => {
+                skippy_ffi::StagePlanStateKind::DerivedPersistent
+            }
             unknown => anyhow::bail!("native state effect kind {unknown} is unsupported"),
         };
         let access = match state.access {

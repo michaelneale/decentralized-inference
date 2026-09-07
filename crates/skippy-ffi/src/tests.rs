@@ -2,9 +2,9 @@ use std::mem::{offset_of, size_of};
 
 use crate::{
     ABI_VERSION_MAJOR, ABI_VERSION_MINOR, ABI_VERSION_PATCH, AbiVersion, ActivationBoundaryDesc,
-    StagePlanDescV1, StagePlanProfileDescV1, StagePlanStateDescV1, StagePlanStringRefV1,
-    StagePlanValueDescV1, StagePlannerConfigV1, StagePlannerProfileV1, StagePlannerTensorV1,
-    runtime_abi_supported,
+    StagePlanDescV1, StagePlanProfileDescV1, StagePlanStateDescV1, StagePlanStateKind,
+    StagePlanStringRefV1, StagePlanValueDescV1, StagePlannerConfigV1, StagePlannerProfileV1,
+    StagePlannerTensorV1, runtime_abi_supported,
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -79,6 +79,7 @@ fn activation_boundary_descriptor_matches_native_layout() {
 #[test]
 #[cfg(target_pointer_width = "64")]
 fn stage_plan_types_match_native_layout() {
+    assert_eq!(StagePlanStateKind::DerivedPersistent as i32, 4);
     assert_eq!(size_of::<StagePlanStringRefV1>(), 16);
     assert_eq!(size_of::<StagePlannerTensorV1>(), 88);
     assert_eq!(offset_of!(StagePlannerTensorV1, dimensions), 32);
