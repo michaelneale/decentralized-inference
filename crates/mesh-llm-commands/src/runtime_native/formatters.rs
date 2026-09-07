@@ -2,7 +2,10 @@ use anyhow::{Error, Result};
 use mesh_llm_native_runtime::{
     CachePrunePlan, CandidateRejection, HostRuntimeProfile, InstalledNativeRuntime,
 };
-use mesh_llm_runtime_install::{NativeRuntimeInstallOutcome, NativeRuntimeInstallStatus};
+use mesh_llm_runtime_install::{
+    NativeRuntimeCatalogSources, NativeRuntimeInstallOutcome, NativeRuntimeInstallStatus,
+    NativeRuntimeResolutionError,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -42,7 +45,14 @@ pub(crate) struct NativeRuntimeDoctorReport {
 }
 
 pub(crate) trait RuntimeNativeFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()>;
+    /// Renders the available runtimes together with the catalogs that were
+    /// consulted to list them, so both output modes explain where the rows
+    /// came from.
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()>;
     fn render_installed(
         &self,
         installed: &[InstalledNativeRuntime],
@@ -72,7 +82,15 @@ pub(crate) fn runtime_native_formatter(json_output: bool) -> Box<dyn RuntimeNati
 }
 
 impl RuntimeNativeFormatter for HumanFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()> {
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()> {
+        eprintln!("🔎 Catalogs consulted");
+        for line in sources.describe() {
+            eprintln!("   {line}");
+        }
         print_available_human(rows);
         Ok(())
     }
@@ -94,6 +112,18 @@ impl RuntimeNativeFormatter for HumanFormatter {
     fn render_install_error(&self, error: &Error) -> Result<()> {
         eprintln!("❌ Native runtime install failed");
         eprintln!("   Reason: {error}");
+        // A resolution failure carries its explanation (catalogs consulted,
+        // rejected candidates) as structure; the causes underneath, such as
+        // the resolver's own verdict or a manifest that failed to parse, stay
+        // one per line.
+        if let Some(resolution) = error.downcast_ref::<NativeRuntimeResolutionError>() {
+            for line in resolution.explanation_lines() {
+                eprintln!("   {line}");
+            }
+        }
+        for cause in error.chain().skip(1) {
+            eprintln!("   cause: {cause}");
+        }
         eprintln!("   Try: mesh-llm runtime list --available");
         Ok(())
     }
@@ -136,8 +166,15 @@ impl RuntimeNativeFormatter for HumanFormatter {
 }
 
 impl RuntimeNativeFormatter for JsonFormatter {
-    fn render_available(&self, rows: &[AvailableRuntimeRow]) -> Result<()> {
-        print_json(rows)
+    fn render_available(
+        &self,
+        rows: &[AvailableRuntimeRow],
+        sources: &NativeRuntimeCatalogSources,
+    ) -> Result<()> {
+        print_json(&json!({
+            "catalogs": sources,
+            "runtimes": rows,
+        }))
     }
 
     fn render_installed(
@@ -153,16 +190,21 @@ impl RuntimeNativeFormatter for JsonFormatter {
             "status": install_status_label(outcome.status.clone()),
             "runtime": outcome.runtime,
             "resolution": outcome.resolution,
+            "catalogs": outcome.sources,
         }))
     }
 
     fn render_install_error(&self, error: &Error) -> Result<()> {
+        // `resolution` is the structured explanation of a failed selection
+        // (catalogs, plausible candidates and their rejection reasons); it is
+        // null for every other failure, and `context` keeps the cause chain.
         print_json(&json!({
             "status": "error",
             "error": {
                 "type": "native_runtime_install_failed",
                 "message": error.to_string(),
                 "context": error.chain().skip(1).map(ToString::to_string).collect::<Vec<_>>(),
+                "resolution": error.downcast_ref::<NativeRuntimeResolutionError>(),
             },
         }))
     }
@@ -268,6 +310,9 @@ fn print_install_human(outcome: &NativeRuntimeInstallOutcome) {
             eprintln!("   path: {}", outcome.runtime.path.display());
         }
     }
+    for line in outcome.sources.describe() {
+        eprintln!("   catalog: {line}");
+    }
 }
 
 fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
@@ -335,76 +380,7 @@ fn print_doctor_human(report: &NativeRuntimeDoctorReport) {
 }
 
 fn format_rejection(reason: &CandidateRejection) -> String {
-    match reason {
-        CandidateRejection::MeshVersionMismatch { expected, actual } => {
-            format!("MeshLLM version mismatch: expected {expected}, found {actual}")
-        }
-        CandidateRejection::SkippyAbiMismatch { expected, actual } => {
-            format!("Skippy ABI mismatch: expected {expected}, found {actual}")
-        }
-        CandidateRejection::OsMismatch { expected, actual } => {
-            format!("OS mismatch: expected {expected}, artifact is for {actual}")
-        }
-        CandidateRejection::ArchMismatch { expected, actual } => {
-            format!("CPU architecture mismatch: expected {expected}, artifact is for {actual}")
-        }
-        CandidateRejection::TargetTripleMismatch { expected, actual } => {
-            format!("target triple mismatch: expected {expected}, host is {actual}")
-        }
-        CandidateRejection::BackendNotSupported { backend } => {
-            format!("backend {backend} is not supported on this host")
-        }
-        CandidateRejection::CudaProfileMissing => {
-            "CUDA runtime requires CUDA, but no CUDA profile was detected".to_string()
-        }
-        CandidateRejection::CudaToolkitMajorMismatch {
-            required,
-            installed,
-        } => {
-            let installed = installed
-                .iter()
-                .map(|major| major.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "CUDA toolkit mismatch: runtime requires CUDA {required}, host has CUDA {installed} installed"
-            )
-        }
-        CandidateRejection::CudaToolkitMajorAboveDriver {
-            required,
-            driver_max,
-        } => {
-            format!(
-                "CUDA driver too old: runtime requires CUDA {required}, driver supports up to CUDA {driver_max}"
-            )
-        }
-        CandidateRejection::CudaToolkitNotDetected { required } => {
-            format!(
-                "no CUDA toolkit detected: runtime requires CUDA {required} libraries \
-                 (libcudart, libcublas, libcublasLt) on the loader path; \
-                 set MESH_LLM_CUDA_TOOLKIT_MAJORS if the toolkit is installed elsewhere"
-            )
-        }
-        CandidateRejection::CudaGpuArchUnsupported { supported } => {
-            format!(
-                "CUDA GPU architecture unsupported: runtime supports {}",
-                supported.join(", ")
-            )
-        }
-        CandidateRejection::RocmProfileMissing => {
-            "ROCm runtime requires ROCm, but no ROCm profile was detected".to_string()
-        }
-        CandidateRejection::RocmGpuArchUnsupported { supported } => {
-            format!(
-                "ROCm GPU architecture unsupported: runtime supports {}",
-                supported.join(", ")
-            )
-        }
-        CandidateRejection::VulkanProfileMissing => {
-            "Vulkan runtime requires Vulkan, but no Vulkan profile was detected".to_string()
-        }
-        CandidateRejection::SelectionMismatch { selection } => {
-            format!("selection mismatch: requested {selection}")
-        }
-    }
+    // The wording lives on `CandidateRejection` itself so the install
+    // diagnostics and this listing describe a rejection the same way.
+    reason.to_string()
 }
