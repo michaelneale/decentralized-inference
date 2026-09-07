@@ -498,6 +498,7 @@ pub(crate) async fn run_auto_load_runtime_model(
                 .or_else(|| model_overrides.map(|model| model.model.as_str())),
             runtime_profile: &profile,
             model_path: &model_path,
+            preindexed_split_package: None,
             model_bytes,
             mmproj_override: None,
             ctx_size_override,

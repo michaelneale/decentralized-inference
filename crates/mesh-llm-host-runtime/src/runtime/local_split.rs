@@ -164,7 +164,9 @@ pub(super) async fn start_runtime_split_model(
     // A strict-local standby must index its own file before election so the
     // elected coordinator can verify identical content without exchanging a
     // coordinator-local path or falling back to artifact transfer.
-    let preindexed_package = if local_source_required {
+    let preindexed_package = if let Some(package) = spec.preindexed_split_package {
+        Some(package.clone())
+    } else if local_source_required {
         Some(resolve_split_runtime_package(spec.model_path, model_ref, true).await?)
     } else {
         None
