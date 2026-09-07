@@ -22,8 +22,24 @@ use std::time::Instant;
 const ASYNC_FORWARD_TERMINAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct AsyncForwarder {
-    sender: mpsc::SyncSender<AsyncForwardJob>,
+    sender: Option<mpsc::SyncSender<AsyncForwardJob>>,
     pending: VecDeque<AsyncForwardReceipt>,
+    writer: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for AsyncForwarder {
+    /// Queued frames must not still be on the wire after the request that
+    /// owns them returns: a persistent lane is handed back for reuse, and a
+    /// teardown `Stop` written through another clone of the same socket
+    /// would interleave with a frame this forwarder is still writing.
+    /// Dropping the sender ends the writer loop once its queue drains, and
+    /// the join makes that ordering observable to the caller.
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
 }
 
 pub(crate) struct AsyncForwardReceipt {
@@ -52,10 +68,12 @@ impl AsyncForwarder {
             .set_write_timeout(Some(ASYNC_FORWARD_TERMINAL_TIMEOUT))
             .context("set async activation forward write timeout")?;
         let (sender, receiver) = mpsc::sync_channel::<AsyncForwardJob>(queue_capacity.max(1));
-        thread::spawn(move || run_forwarder(&mut writer, &receiver, &telemetry));
+        let writer_thread =
+            thread::spawn(move || run_forwarder(&mut writer, &receiver, &telemetry));
         Ok(Self {
-            sender,
+            sender: Some(sender),
             pending: VecDeque::new(),
+            writer: Some(writer_thread),
         })
     }
 
@@ -79,6 +97,8 @@ impl AsyncForwarder {
         self.reap_completed()?;
         let (done, receiver) = mpsc::channel();
         self.sender
+            .as_ref()
+            .ok_or_else(|| anyhow!("async activation forwarder stopped"))?
             .send(AsyncForwardJob {
                 message,
                 condition,
@@ -109,7 +129,7 @@ impl AsyncForwarder {
         }
     }
 
-    pub(super) fn flush(&mut self) -> Result<()> {
+    pub(crate) fn flush(&mut self) -> Result<()> {
         while let Some(receiver) = self.pending.pop_front() {
             receiver.finish()?;
         }
@@ -214,6 +234,106 @@ mod tests {
             activation: Vec::new(),
             raw_bytes: Vec::new(),
         }
+    }
+
+    /// A delayed discard must be fully written before a teardown `Stop` that
+    /// goes out through a different clone of the same socket, otherwise the
+    /// two frames interleave and poison a lane that is handed back for reuse.
+    #[test]
+    fn a_delayed_discard_lands_before_a_teardown_stop_on_another_clone() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let telemetry = Telemetry::new(None, 1, prefix_cache_test_config(), TelemetryLevel::Off);
+        let mut forwarder = AsyncForwarder::new(&client, telemetry, 8).unwrap();
+        // 250ms of simulated propagation: without the drop-time join, the
+        // teardown write below wins the race and the frames interleave.
+        let condition = WireCondition::new(250.0, None).unwrap();
+
+        forwarder
+            .send(
+                message(WireMessageKind::DiscardStaleWindows, 11),
+                condition,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        drop(forwarder);
+
+        write_stage_message_after_propagation(
+            &mut client,
+            &message(WireMessageKind::Stop, 22),
+            WireCondition::new(0.0, None).unwrap(),
+        )
+        .unwrap();
+
+        let first = read_stage_message(&mut server, 4).unwrap();
+        let second = read_stage_message(&mut server, 4).unwrap();
+
+        assert_eq!(first.kind, WireMessageKind::DiscardStaleWindows);
+        assert_eq!(first.pos_start, 11);
+        assert_eq!(second.kind, WireMessageKind::Stop);
+        assert_eq!(second.pos_start, 22);
+    }
+
+    /// The lane-reuse half of the same property: after a delayed discard and
+    /// the teardown `Stop`, the socket must be clean enough to serve the next
+    /// request. A frame left half-written by the torn-down forwarder would be
+    /// read as the next request's header, so this asserts both frames arrive
+    /// whole and in order and that the next request's traffic follows them
+    /// undisturbed on the same socket.
+    #[test]
+    fn a_reused_lane_carries_the_next_request_after_a_delayed_teardown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut lane = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let telemetry = Telemetry::new(None, 1, prefix_cache_test_config(), TelemetryLevel::Off);
+        let mut forwarder = AsyncForwarder::new(&lane, telemetry, 8).unwrap();
+        let delayed = WireCondition::new(250.0, None).unwrap();
+        let immediate = WireCondition::new(0.0, None).unwrap();
+
+        // First request: a discard still in flight when the request ends.
+        forwarder
+            .send(
+                message(WireMessageKind::DiscardStaleWindows, 31),
+                delayed,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        drop(forwarder);
+        write_stage_message_after_propagation(
+            &mut lane,
+            &message(WireMessageKind::Stop, 32),
+            immediate,
+        )
+        .unwrap();
+
+        // The pool hands the same socket to the next request.
+        write_stage_message_after_propagation(
+            &mut lane,
+            &message(WireMessageKind::VerifyWindow, 41),
+            immediate,
+        )
+        .unwrap();
+
+        let frames = (0..3)
+            .map(|_| read_stage_message(&mut server, 4).unwrap())
+            .collect::<Vec<_>>();
+        let observed = frames
+            .iter()
+            .map(|frame| (frame.kind, frame.pos_start))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                (WireMessageKind::DiscardStaleWindows, 31),
+                (WireMessageKind::Stop, 32),
+                (WireMessageKind::VerifyWindow, 41),
+            ],
+            "a lane returned to the pool must carry the next request intact"
+        );
     }
 
     #[test]

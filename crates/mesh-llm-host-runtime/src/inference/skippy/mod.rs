@@ -89,26 +89,36 @@ pub(crate) use stage::{
 pub(crate) use topology::{StageTopologyParticipant, plan_package_identity_topology};
 
 const BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV: &str = "MESH_LLM_BENCH_DOWNSTREAM_WIRE_DELAY_MS";
+const BENCH_DOWNSTREAM_WIRE_JITTER_MS_ENV: &str = "MESH_LLM_BENCH_DOWNSTREAM_WIRE_JITTER_MS";
+const BENCH_DOWNSTREAM_WIRE_STALL_MS_ENV: &str = "MESH_LLM_BENCH_DOWNSTREAM_WIRE_STALL_MS";
+const BENCH_DOWNSTREAM_WIRE_STALL_P_ENV: &str = "MESH_LLM_BENCH_DOWNSTREAM_WIRE_STALL_P";
 
 fn benchmark_downstream_wire_condition() -> Result<WireCondition> {
-    let delay_ms = match env::var(BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV) {
-        Ok(value) => parse_benchmark_downstream_wire_delay_ms(&value)?,
-        Err(env::VarError::NotPresent) => 0.0,
-        Err(env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("{BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV} must be valid UTF-8")
-        }
-    };
-    WireCondition::new(delay_ms, None)
+    let delay_ms = parse_benchmark_wire_env(BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV)?;
+    let jitter_ms = parse_benchmark_wire_env(BENCH_DOWNSTREAM_WIRE_JITTER_MS_ENV)?;
+    let stall_ms = parse_benchmark_wire_env(BENCH_DOWNSTREAM_WIRE_STALL_MS_ENV)?;
+    let stall_p = parse_benchmark_wire_env(BENCH_DOWNSTREAM_WIRE_STALL_P_ENV)?;
+    WireCondition::with_jitter(delay_ms, None, jitter_ms, stall_ms, stall_p)
 }
 
-fn parse_benchmark_downstream_wire_delay_ms(value: &str) -> Result<f64> {
-    let delay_ms = value.parse::<f64>().with_context(|| {
-        format!("{BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV} must be a finite non-negative number")
-    })?;
-    if !delay_ms.is_finite() || delay_ms < 0.0 {
-        anyhow::bail!("{BENCH_DOWNSTREAM_WIRE_DELAY_MS_ENV} must be a finite non-negative number");
+fn parse_benchmark_wire_env(name: &'static str) -> Result<f64> {
+    match env::var(name) {
+        Ok(value) => parse_benchmark_downstream_wire_value(name, &value),
+        Err(env::VarError::NotPresent) => Ok(0.0),
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be valid UTF-8")
+        }
     }
-    Ok(delay_ms)
+}
+
+fn parse_benchmark_downstream_wire_value(name: &str, value: &str) -> Result<f64> {
+    let parsed = value
+        .parse::<f64>()
+        .with_context(|| format!("{name} must be a finite non-negative number"))?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        anyhow::bail!("{name} must be a finite non-negative number");
+    }
+    Ok(parsed)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1473,9 +1483,12 @@ mod tests {
 
     #[test]
     fn benchmark_wire_delay_accepts_finite_non_negative_values() {
-        assert_eq!(parse_benchmark_downstream_wire_delay_ms("0").unwrap(), 0.0);
         assert_eq!(
-            parse_benchmark_downstream_wire_delay_ms("25.5").unwrap(),
+            parse_benchmark_downstream_wire_value("test", "0").unwrap(),
+            0.0
+        );
+        assert_eq!(
+            parse_benchmark_downstream_wire_value("test", "25.5").unwrap(),
             25.5
         );
     }
@@ -1483,7 +1496,7 @@ mod tests {
     #[test]
     fn benchmark_wire_delay_rejects_invalid_values() {
         for value in ["-1", "NaN", "inf", "not-a-number"] {
-            assert!(parse_benchmark_downstream_wire_delay_ms(value).is_err());
+            assert!(parse_benchmark_downstream_wire_value("test", value).is_err());
         }
     }
 

@@ -41,6 +41,7 @@ mod prefill_recording;
 pub(in crate::binary_transport) mod reply;
 mod session_lifecycle;
 mod session_tracker;
+mod stale_discard;
 mod summary;
 mod telemetry;
 
@@ -505,7 +506,7 @@ fn run_binary_stage(
                         native_mtp_enabled,
                         &prediction_return_sinks,
                         session_ownership,
-                        &task_control,
+                        task_control.clone(),
                         first_message,
                     )
                 })()

@@ -562,6 +562,7 @@ pub struct SpeculativeConfig {
     pub verify_window_min_tokens: Option<u32>,
     pub verify_window_max_tokens: Option<u32>,
     pub verify_window_pipeline_depth: Option<u32>,
+    pub verify_window_runahead_tokens: Option<u32>,
     pub spec_default: Option<BoolOrAuto>,
     pub(crate) legacy_draft_model_path_used: bool,
 }
@@ -613,6 +614,7 @@ impl SpeculativeConfig {
             verify_window_min_tokens: pick!(verify_window_min_tokens),
             verify_window_max_tokens: pick!(verify_window_max_tokens),
             verify_window_pipeline_depth: pick!(verify_window_pipeline_depth),
+            verify_window_runahead_tokens: pick!(verify_window_runahead_tokens),
             spec_default: pick!(spec_default),
             legacy_draft_model_path_used: overrides
                 .filter(|config| config.draft_model.is_some())
@@ -686,6 +688,8 @@ struct SpeculativeConfigRaw {
     #[serde(default)]
     verify_window_pipeline_depth: Option<u32>,
     #[serde(default)]
+    verify_window_runahead_tokens: Option<u32>,
+    #[serde(default)]
     spec_default: Option<BoolOrAuto>,
 }
 
@@ -730,6 +734,7 @@ impl<'de> Deserialize<'de> for SpeculativeConfig {
             verify_window_min_tokens: raw.verify_window_min_tokens,
             verify_window_max_tokens: raw.verify_window_max_tokens,
             verify_window_pipeline_depth: raw.verify_window_pipeline_depth,
+            verify_window_runahead_tokens: raw.verify_window_runahead_tokens,
             spec_default: raw.spec_default,
             legacy_draft_model_path_used: legacy_used,
         })
@@ -791,6 +796,10 @@ impl Serialize for SpeculativeConfig {
         map.serialize_entry(
             "verify_window_pipeline_depth",
             &self.verify_window_pipeline_depth,
+        )?;
+        map.serialize_entry(
+            "verify_window_runahead_tokens",
+            &self.verify_window_runahead_tokens,
         )?;
         map.serialize_entry("spec_default", &self.spec_default)?;
         map.end()

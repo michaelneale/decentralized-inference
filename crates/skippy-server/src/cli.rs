@@ -75,6 +75,24 @@ pub struct ServeBinaryArgs {
         help = "Artificial downstream activation bandwidth cap in megabits per second."
     )]
     pub downstream_wire_mbps: Option<f64>,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Mean of an exponentially distributed extra per-message downstream delay in milliseconds (models link jitter)."
+    )]
+    pub downstream_wire_jitter_ms: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Extra burst-stall delay in milliseconds applied with --downstream-wire-stall-p probability per message."
+    )]
+    pub downstream_wire_stall_ms: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Probability in [0, 1] that a downstream message is hit by --downstream-wire-stall-ms."
+    )]
+    pub downstream_wire_stall_p: f64,
     #[arg(long, default_value_t = 60)]
     pub downstream_connect_timeout_secs: u64,
     #[arg(

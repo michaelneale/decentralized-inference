@@ -448,7 +448,7 @@ message MeshSubprotocolOpen {
 }
 ```
 
-Outbound transfer uses mesh stream `0x0d` (`STREAM_SUBPROTOCOL`), followed by a length-prefixed `MeshSubprotocolOpen { name: "skippy-stage", major: 2 }`, the Skippy-owned stream kind `0x03`, a length-prefixed `StageArtifactTransferRequest`, a length-prefixed `StageArtifactTransferResponse`, and raw artifact bytes when accepted. Generation 7 requires this mesh-subprotocol path for control and artifacts; the dedicated stage ALPN accepts activation transport only.
+Outbound transfer uses mesh stream `0x0d` (`STREAM_SUBPROTOCOL`), followed by a length-prefixed `MeshSubprotocolOpen { name: "skippy-stage", major: 2 }`, the Skippy-owned stream kind `0x03`, a length-prefixed `StageArtifactTransferRequest`, a length-prefixed `StageArtifactTransferResponse`, and raw artifact bytes when accepted. Generation 8 requires this mesh-subprotocol path for control and artifacts; the dedicated stage ALPN accepts activation transport only.
 
 **Request:**
 ```proto

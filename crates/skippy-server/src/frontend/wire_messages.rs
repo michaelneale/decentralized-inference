@@ -163,6 +163,38 @@ pub(super) fn embedded_verify_window_message(
     })
 }
 
+/// Invalidates verify windows `min_window_id..=max_window_id` for a request
+/// after divergence. The downstream records the range at receive time so
+/// buffered stale windows are answered with an empty reply instead of being
+/// executed. The window-id range rides in `tokens`.
+pub(super) fn discard_stale_windows_message(
+    request_id: u64,
+    session_id: u64,
+    min_window_id: i32,
+    max_window_id: i32,
+) -> OpenAiResult<StageWireMessage> {
+    if min_window_id > max_window_id {
+        return Err(OpenAiError::backend(
+            "stale window discard range must be non-empty",
+        ));
+    }
+    let kind = WireMessageKind::DiscardStaleWindows;
+    Ok(StageWireMessage {
+        kind,
+        pos_start: 0,
+        token_count: 0,
+        state: StageStateHeader::new(kind),
+        request_id,
+        session_id,
+        sampling: None,
+        chat_sampling_metadata: None,
+        tokens: vec![min_window_id, max_window_id],
+        positions: Vec::new(),
+        activation: Vec::new(),
+        raw_bytes: Vec::new(),
+    })
+}
+
 pub(super) fn retire_verify_window_message(
     request_id: u64,
     session_id: u64,

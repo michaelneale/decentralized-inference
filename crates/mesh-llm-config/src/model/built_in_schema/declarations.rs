@@ -754,6 +754,10 @@ fn speculative_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
             &format!("{prefix}.verify_window_pipeline_depth"),
             ConfigValueSchema::Integer,
         ),
+        basic_setting(
+            &format!("{prefix}.verify_window_runahead_tokens"),
+            ConfigValueSchema::Integer,
+        ),
         basic_setting(&format!("{prefix}.spec_default"), bool_or_auto_schema()),
     ]
 }

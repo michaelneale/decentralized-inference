@@ -125,8 +125,11 @@ impl StageOpenAiBackend {
             return Ok(NativeMtpVerifyWindowControl::NoProposal);
         }
         let verify_inputs = native_mtp_verify_window_inputs(*current, &proposal_tokens);
-        let window =
-            verify_window_scheduler.open(prefill_token_count + *decoded_tokens, *decoded_tokens)?;
+        let window = verify_window_scheduler.open(
+            prefill_token_count + *decoded_tokens,
+            *decoded_tokens,
+            verify_inputs.len(),
+        )?;
         let message = embedded_verify_window_message(VerifyWindowMessageArgs {
             window_id: window.id,
             request_id,

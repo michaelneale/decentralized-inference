@@ -37,11 +37,11 @@ sequenceDiagram
     S0-->>D: PredictedToken
 ```
 
-Activation payloads dominate the wire path. Protocol generation 7 fixes every
+Activation payloads dominate the wire path. Protocol generation 8 fixes every
 activation frame to raw little-endian `f32`; there is no negotiated or
 per-request activation dtype.
 
-Generation 7 requires mesh-subprotocol control, list-valued status responses,
+Generation 8 requires mesh-subprotocol control, list-valued status responses,
 and strict local-content identity as one fail-closed capability bundle. The
 dedicated `skippy-stage/2` ALPN accepts activation transport only.
 

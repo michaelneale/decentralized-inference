@@ -1258,6 +1258,13 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
         behavior: WiringBehavior::None,
     },
     WiringEntry {
+        path: "speculative.verify_window_runahead_tokens",
+        status: WiringStatus::Wired,
+        owner: "n/a",
+        reason: "",
+        behavior: WiringBehavior::None,
+    },
+    WiringEntry {
         path: "speculative.spec_default",
         status: WiringStatus::Wired,
         owner: "n/a",

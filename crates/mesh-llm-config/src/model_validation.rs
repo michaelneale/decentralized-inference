@@ -9,7 +9,7 @@ use crate::model::{
     SkippyConfig, SpeculativeConfig, StringOrStringList, merge_hardware, merge_model_fit,
     merge_multimodal, merge_throughput,
 };
-use skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH;
+use skippy_protocol::{MAX_VERIFY_WINDOW_PIPELINE_DEPTH, MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS};
 
 use crate::validation_support::{
     looks_like_model_identifier, validate_allowed, validate_bool_or_auto, validate_hf_pair,
@@ -691,6 +691,14 @@ fn validate_verify_window_controls(
         &format!("{base_path}.verify_window_pipeline_depth"),
         1,
         u32::try_from(MAX_VERIFY_WINDOW_PIPELINE_DEPTH).expect("verify depth limit fits u32"),
+    )?;
+    validate_optional_u32_range(
+        config.verify_window_runahead_tokens,
+        &format!("{base_path}.verify_window_runahead_tokens"),
+        // Zero is the documented fixed-depth sentinel, so a model-level block
+        // can switch run-ahead back off when the global defaults enable it.
+        0,
+        u32::try_from(MAX_VERIFY_WINDOW_RUNAHEAD_TOKENS).expect("runahead limit fits u32"),
     )
 }
 
