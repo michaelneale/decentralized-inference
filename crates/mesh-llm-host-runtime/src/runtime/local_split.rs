@@ -443,6 +443,7 @@ async fn prepare_split_runtime_start(
     };
     let stage_admissions = realize_split_stage_admissions(
         spec.model_path,
+        model_ref,
         &package,
         &planned_topology,
         spec.runtime_profile,
@@ -460,15 +461,12 @@ async fn prepare_split_runtime_start(
 
 fn realize_split_stage_admissions(
     model_path: &Path,
+    model_ref: &str,
     package: &skippy::SkippyPackageIdentity,
     topology: &PlannedRuntimeSliceTopology,
     runtime_profile: &str,
 ) -> Result<Vec<skippy_protocol::StageAdmissionDescriptor>> {
     let package_ref = Path::new(&package.package_ref);
-    let package_dir = [model_path, package_ref]
-        .into_iter()
-        .find(|path| path.join("model-package.json").is_file())
-        .context("generation-8 split serving requires a local package-v2 directory")?;
     let lanes = u32::try_from(topology.slots).context("split lane count exceeds u32")?;
     let batched_tokens = lanes
         .checked_mul(8)
@@ -511,13 +509,32 @@ fn realize_split_stage_admissions(
         .iter()
         .map(|stage| (stage.layer_start, stage.layer_end))
         .collect::<Vec<_>>();
-    super::stage_admission::realize_stage_admissions(
-        package_dir,
-        &ranges,
-        &profiles,
-        &graph_configuration_id,
-        "skippy-backend:auto:v1",
-    )
+    if let Some(package_dir) = [model_path, package_ref]
+        .into_iter()
+        .find(|path| path.join("model-package.json").is_file())
+    {
+        super::stage_admission::realize_stage_admissions(
+            package_dir,
+            &ranges,
+            &profiles,
+            &graph_configuration_id,
+            "skippy-backend:auto:v1",
+        )
+    } else {
+        anyhow::ensure!(
+            model_path.is_file(),
+            "generation-8 direct-GGUF split source must be a local file: {}",
+            model_path.display()
+        );
+        super::stage_admission::realize_direct_gguf_stage_admissions(
+            model_ref,
+            package,
+            &ranges,
+            &profiles,
+            &graph_configuration_id,
+            "skippy-backend:auto:v1",
+        )
+    }
     .context("realize and admit generation-8 native stage chain")
 }
 

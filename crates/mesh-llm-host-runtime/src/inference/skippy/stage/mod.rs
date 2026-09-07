@@ -944,22 +944,48 @@ fn admitted_resident_tensor_names(
     let package_ref = package
         .map(|package| package.local_ref.as_str())
         .unwrap_or(&load.package_ref);
-    if !super::is_package_v2_ref(package_ref) {
+    let manifest: skippy_package_format::PackageManifest = if super::is_package_v2_ref(package_ref)
+    {
+        let manifest_path = Path::new(package_ref).join("model-package.json");
+        serde_json::from_slice(
+            &std::fs::read(&manifest_path)
+                .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+        )
+        .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?
+    } else if super::is_content_addressed_gguf_ref(&load.package_ref) {
+        let model_path = load
+            .model_path
+            .as_deref()
+            .context("direct-GGUF stage load requires a verified local model path")?;
+        let identity = super::verify_registered_content_source(
+            &load.model_id,
+            &load.package_ref,
+            &load.manifest_sha256,
+            load.source_model_sha256
+                .as_deref()
+                .context("direct-GGUF stage load requires a source SHA-256")?,
+        )?;
+        anyhow::ensure!(
+            identity.source_model_path == Path::new(model_path),
+            "verified direct-GGUF planning path differs from the stage load path"
+        );
+        super::direct_gguf_planning_manifest_from_identity(&load.model_id, &identity)?.0
+    } else if load.package_ref.starts_with("gguf://") {
+        let model_path = load
+            .model_path
+            .as_deref()
+            .context("direct-GGUF stage load requires a local model path")?;
+        let identity = super::synthetic_direct_gguf_package(&load.model_id, Path::new(model_path))?;
+        super::direct_gguf_planning_manifest_from_identity(&load.model_id, &identity)?.0
+    } else {
         return Ok(Vec::new());
-    }
-
-    let manifest_path = Path::new(package_ref).join("model-package.json");
-    let manifest: skippy_package_format::PackageManifest = serde_json::from_slice(
-        &std::fs::read(&manifest_path)
-            .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
-    )
-    .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+    };
     let package_id = manifest
         .computed_package_id()
-        .context("compute package-v2 identity for resident tensor binding")?;
+        .context("compute planning identity for resident tensor binding")?;
     anyhow::ensure!(
         package_id == load.admission.package_id,
-        "stage admission package identity differs from local package-v2 manifest"
+        "stage admission package identity differs from the local planning manifest"
     );
     let mut names = manifest
         .materialization_tensors(&load.admission.resident_tensor_ids)

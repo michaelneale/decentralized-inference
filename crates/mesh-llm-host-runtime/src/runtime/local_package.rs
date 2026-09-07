@@ -128,24 +128,34 @@ pub(super) fn split_effective_kv_cache_quant(
 }
 pub(super) async fn resolve_split_runtime_package(
     model_path: &Path,
-    _model_ref: &str,
+    model_ref: &str,
     local_source_required: bool,
 ) -> Result<skippy::SkippyPackageIdentity> {
-    anyhow::ensure!(
-        model_path.join("model-package.json").is_file(),
-        "generation-8 split serving accepts only a local package-v2 directory; convert the source with skippy-model-package"
-    );
-    let package_dir = model_path.to_path_buf();
+    let model_path = model_path.to_path_buf();
+    let model_ref = model_ref.to_string();
     tokio::task::spawn_blocking(move || {
-        let identity = skippy::identity_from_package_v2(&package_dir)?;
-        if local_source_required {
-            skippy::into_content_addressed_identity(identity)
+        if model_path.join("model-package.json").is_file() {
+            let identity = skippy::identity_from_package_v2(&model_path)?;
+            if local_source_required {
+                skippy::into_content_addressed_identity(identity)
+            } else {
+                Ok(identity)
+            }
         } else {
-            Ok(identity)
+            anyhow::ensure!(
+                model_path.is_file(),
+                "generation-8 split source must be a package-v2 directory or direct GGUF file: {}",
+                model_path.display()
+            );
+            if local_source_required {
+                skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
+            } else {
+                skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
+            }
         }
     })
     .await
-    .context("join identify package-v2 task")?
+    .context("join identify split source task")?
 }
 
 pub(super) fn split_kv_cache_quant(
