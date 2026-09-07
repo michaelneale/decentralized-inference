@@ -123,6 +123,8 @@ impl std::error::Error for PinnedGpuResolverError {}
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct HardwareSurvey {
     pub vram_bytes: u64,
+    /// GPU name as reported by the OS/driver (e.g. Metal, nvidia-smi, ROCm).
+    /// Best-effort and OS-reported, not an independently verified measurement.
     pub gpu_name: Option<String>,
     pub gpu_count: u8,
     pub hostname: Option<String>,
@@ -272,6 +274,30 @@ fn read_windows_video_controllers() -> Vec<(String, u64)> {
     parse_windows_video_controller_json(&output)
 }
 
+/// Owns an Objective-C object retained via the "create rule" (e.g.
+/// `MTLCreateSystemDefaultDevice`, `NS_RETURNS_RETAINED`) and releases it on
+/// drop, so every return path -- including early `?`/null-check returns --
+/// balances the retain instead of leaking the object.
+#[cfg(target_os = "macos")]
+struct RetainedObjcObject(*mut std::ffi::c_void);
+
+#[cfg(target_os = "macos")]
+impl Drop for RetainedObjcObject {
+    /// Releases the retained object, balancing the "create rule" retain.
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn objc_release(obj: *mut std::ffi::c_void);
+        }
+        unsafe { objc_release(self.0) };
+    }
+}
+
+/// Queries the Metal-recommended working-set size in bytes for the default
+/// device — best-effort, OS-reported, not a verified measurement.
 #[cfg(target_os = "macos")]
 fn query_metal_recommended_working_set_bytes() -> Option<u64> {
     use std::ffi::{c_char, c_void};
@@ -293,6 +319,7 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
         if device.is_null() {
             return None;
         }
+        let _device = RetainedObjcObject(device);
         let selector = c"recommendedMaxWorkingSetSize";
         let selector = sel_registerName(selector.as_ptr());
         if selector.is_null() {
@@ -300,6 +327,56 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
         }
         let bytes = objc_msgSend(device, selector) as u64;
         (bytes > 0).then_some(bytes)
+    }
+}
+
+/// Queries the GPU name as reported by the OS via `MTLDevice.name` (e.g.
+/// "Apple M4 Max" or "AMD Radeon Pro 5500M") — best-effort, not a verified
+/// measurement, but sourced from the GPU device rather than the CPU.
+#[cfg(target_os = "macos")]
+fn query_metal_device_name() -> Option<String> {
+    use std::ffi::{CStr, c_char, c_void};
+
+    // `objc_msgSend` is declared to return `usize` here (matching the other
+    // FFI declaration of the same linked symbol above) and the pointer
+    // results below are recovered with `as *mut/*const _` casts, to avoid a
+    // `clashing_extern_declarations` warning from two conflicting return
+    // types for one symbol.
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, ...) -> usize;
+    }
+
+    unsafe {
+        let metal =
+            libloading::Library::new("/System/Library/Frameworks/Metal.framework/Versions/A/Metal")
+                .ok()?;
+        let create_device = metal
+            .get::<unsafe extern "C" fn() -> *mut c_void>(b"MTLCreateSystemDefaultDevice")
+            .ok()?;
+        let device = create_device();
+        if device.is_null() {
+            return None;
+        }
+        let _device = RetainedObjcObject(device);
+        let name_sel = sel_registerName(c"name".as_ptr());
+        if name_sel.is_null() {
+            return None;
+        }
+        let name_obj = objc_msgSend(device, name_sel) as *mut c_void;
+        if name_obj.is_null() {
+            return None;
+        }
+        let utf8_sel = sel_registerName(c"UTF8String".as_ptr());
+        if utf8_sel.is_null() {
+            return None;
+        }
+        let utf8_ptr = objc_msgSend(name_obj, utf8_sel) as *const c_char;
+        if utf8_ptr.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(utf8_ptr).to_string_lossy().into_owned())
     }
 }
 
@@ -434,17 +511,8 @@ impl Collector for DefaultCollector {
                 survey.gpu_vram = vec![vram_bytes];
                 survey.gpu_reserved = vec![reserved_bytes];
             }
-            let macos_gpu_name = if metrics.contains(&Metric::GpuName) {
-                std::process::Command::new("sysctl")
-                    .args(["-n", "machdep.cpu.brand_string"])
-                    .output()
-                    .ok()
-                    .and_then(|out| String::from_utf8(out.stdout).ok())
-            } else {
-                None
-            };
-            if let Some(gpu_name) = macos_gpu_name {
-                survey.gpu_name = parse_macos_cpu_brand(&gpu_name);
+            if metrics.contains(&Metric::GpuName) {
+                survey.gpu_name = sanitize_macos_gpu_name(query_metal_device_name());
             }
             if metrics.contains(&Metric::GpuCount) {
                 survey.gpu_count = 1;
