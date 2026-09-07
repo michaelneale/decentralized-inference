@@ -334,6 +334,16 @@ pub struct GgufProjectorMeta {
 }
 
 impl GgufCompactMeta {
+    /// Number of decoder layers executed by the primary model graph.
+    ///
+    /// GGUF `block_count` includes appended NextN/MTP draft blocks, while
+    /// llama.cpp's `n_layer()` excludes them. Stage ranges must use the same
+    /// executable trunk count as llama.cpp.
+    pub fn executable_layer_count(&self) -> Option<u32> {
+        let layer_count = self.layer_count.checked_sub(self.nextn_predict_layers)?;
+        (layer_count > 0).then_some(layer_count)
+    }
+
     pub fn effective_kv_head_count(&self) -> Option<u32> {
         if self.kv_head_count > 0 {
             Some(self.kv_head_count)
@@ -1472,16 +1482,19 @@ mod tests {
         bytes.extend_from_slice(b"GGUF");
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&0i64.to_le_bytes());
-        bytes.extend_from_slice(&2i64.to_le_bytes());
+        bytes.extend_from_slice(&3i64.to_le_bytes());
         push_gguf_string(&mut bytes, "general.architecture");
         bytes.extend_from_slice(&(GgufType::String as u32).to_le_bytes());
         push_gguf_string(&mut bytes, "deepseek2");
+        push_u32_kv(&mut bytes, "deepseek2.block_count", 53);
         push_u32_kv(&mut bytes, "deepseek2.nextn_predict_layers", 1);
 
         let path = write_bytes("model-artifact-gguf-nextn", &bytes);
         let meta = scan_gguf_compact_meta(&path).expect("should parse GGUF");
         assert_eq!(meta.architecture, "deepseek2");
+        assert_eq!(meta.layer_count, 53);
         assert_eq!(meta.nextn_predict_layers, 1);
+        assert_eq!(meta.executable_layer_count(), Some(52));
         let _ = std::fs::remove_file(path);
     }
 
