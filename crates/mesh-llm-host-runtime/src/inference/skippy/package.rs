@@ -461,12 +461,6 @@ struct SyntheticGgufManifestFile {
     sha256: String,
 }
 
-#[derive(Clone, Copy)]
-enum SyntheticIdentityMode {
-    LegacyPath,
-    ContentAddressed,
-}
-
 pub fn synthetic_direct_gguf_package(
     model_id: &str,
     model_path: &Path,
@@ -474,7 +468,7 @@ pub fn synthetic_direct_gguf_package(
     if let Some(root) = safetensors_checkpoint_root(model_path) {
         return synthetic_safetensors_package(model_id, &root);
     }
-    synthetic_gguf_package(model_id, model_path, SyntheticIdentityMode::LegacyPath)
+    synthetic_gguf_package(model_id, model_path)
 }
 
 fn safetensors_checkpoint_root(model_path: &Path) -> Option<PathBuf> {
@@ -584,37 +578,21 @@ fn synthetic_safetensors_package(
     })
 }
 
-fn synthetic_gguf_package(
-    model_id: &str,
-    model_path: &Path,
-    identity_mode: SyntheticIdentityMode,
-) -> Result<SkippyPackageIdentity> {
-    // A content-addressed identity is sent across the mesh and used as a
-    // strict admission proof. Its first verification always hashes the bytes;
-    // only a hash-bound in-process fingerprint may be reused later. The
-    // persistent metadata-keyed cache remains a performance optimization for
-    // legacy path-local identities only.
-    let digest_cache = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => SidecarDigestCache::open_default(),
-        SyntheticIdentityMode::ContentAddressed => {
-            content_addressed::validate_source_set(model_path)?;
-            None
-        }
-    };
+fn synthetic_gguf_package(_model_id: &str, model_path: &Path) -> Result<SkippyPackageIdentity> {
+    // Direct local GGUF identity crosses the mesh and is therefore always
+    // content addressed. Absolute paths and filenames are node-local locators;
+    // they must never participate in model, package, or admission identity.
+    content_addressed::validate_source_set(model_path)?;
     let source_paths = direct_gguf_source_paths(model_path)?;
-    if matches!(identity_mode, SyntheticIdentityMode::ContentAddressed) {
-        for path in &source_paths {
-            anyhow::ensure!(
-                path.to_str().is_some(),
-                "canonical content-addressed GGUF path must be valid UTF-8: {}",
-                path.display()
-            );
-        }
+    for path in &source_paths {
+        anyhow::ensure!(
+            path.to_str().is_some(),
+            "canonical content-addressed GGUF path must be valid UTF-8: {}",
+            path.display()
+        );
     }
-    let verified_fingerprint = matches!(identity_mode, SyntheticIdentityMode::ContentAddressed)
-        .then(|| super::local_source::verified_path_fingerprint(&source_paths))
-        .flatten();
-    let source_files = direct_gguf_source_files_from_paths(source_paths, digest_cache.as_ref())?;
+    let verified_fingerprint = super::local_source::verified_path_fingerprint(&source_paths);
+    let source_files = direct_gguf_source_files_from_paths(source_paths, None)?;
     content_addressed::ensure_fingerprint_unchanged(
         &source_files,
         verified_fingerprint.as_deref(),
@@ -654,50 +632,18 @@ fn synthetic_gguf_package(
         verified_fingerprint.as_deref(),
     )?;
 
-    let source_model_sha256 = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => {
-            legacy_identity::aggregate_source_sha256(&source_files)
-        }
-        SyntheticIdentityMode::ContentAddressed => {
-            content_addressed::aggregate_source_sha256(&source_files)
-        }
-    };
-
-    let (package_ref, manifest_sha256) = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => {
-            let package_ref = format!("gguf://{}", source_model_path.display());
-            let manifest_sha256 = synthetic_manifest_sha256(SyntheticManifestInput {
-                model_id,
-                package_kind: "direct-gguf",
-                package_ref: &package_ref,
-                source_model_path: &source_model_path.to_string_lossy(),
-                source_model_sha256: &source_model_sha256,
-                source_model_bytes,
-                source_files: &source_files,
-                architecture: &compact.architecture,
-                context_length: compact.context_length,
-                layer_count: compact.layer_count,
-                activation_width: compact.embedding_size,
-                tensor_count,
-            })?;
-            (package_ref, manifest_sha256)
-        }
-        SyntheticIdentityMode::ContentAddressed => {
-            let package_ref =
-                super::local_source::content_addressed_package_ref(&source_model_sha256)?;
-            let manifest_sha256 = content_addressed::manifest_sha256(
-                &source_model_sha256,
-                source_model_bytes,
-                &source_files,
-                &compact.architecture,
-                compact.context_length,
-                compact.layer_count,
-                compact.embedding_size,
-                tensor_count,
-            )?;
-            (package_ref, manifest_sha256)
-        }
-    };
+    let source_model_sha256 = content_addressed::aggregate_source_sha256(&source_files);
+    let package_ref = super::local_source::content_addressed_package_ref(&source_model_sha256)?;
+    let manifest_sha256 = content_addressed::manifest_sha256(
+        &source_model_sha256,
+        source_model_bytes,
+        &source_files,
+        &compact.architecture,
+        compact.context_length,
+        compact.layer_count,
+        compact.embedding_size,
+        tensor_count,
+    )?;
 
     let identity = SkippyPackageIdentity {
         package_ref,
@@ -712,9 +658,7 @@ fn synthetic_gguf_package(
         tensor_count,
         generation: None,
     };
-    if matches!(identity_mode, SyntheticIdentityMode::ContentAddressed) {
-        super::local_source::register_content_addressed_identity(&identity, verified_fingerprint);
-    }
+    super::local_source::register_content_addressed_identity(&identity, verified_fingerprint);
     Ok(identity)
 }
 

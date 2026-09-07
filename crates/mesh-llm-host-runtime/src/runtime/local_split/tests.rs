@@ -1004,7 +1004,7 @@ async fn generation8_split_accepts_direct_gguf_without_package_v2() {
         .await
         .unwrap();
 
-    assert!(package.package_ref.starts_with("gguf://"));
+    assert!(package.package_ref.starts_with("local-gguf://sha256/"));
     assert_eq!(package.layer_count, 24);
     assert_eq!(package.source_model_path, gguf.canonicalize().unwrap());
     assert!(!root.path().join("model-package.json").exists());
