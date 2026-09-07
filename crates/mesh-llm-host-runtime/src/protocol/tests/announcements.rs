@@ -818,6 +818,7 @@ fn advertised_memory_roundtrips_through_proto_announcement() {
     let bare = crate::proto::node::PeerAnnouncement {
         endpoint_id: peer_id.as_bytes().to_vec(),
         role: NodeRole::Worker as i32,
+        vram_bytes: 9_500_000_000,
         ..Default::default()
     };
     let (_, mut ann) = proto_ann_to_local(&bare).expect("proto_ann_to_local must succeed");
@@ -859,6 +860,7 @@ fn platform_reserve_roundtrips_and_counts_in_the_partition() {
     let bare = crate::proto::node::PeerAnnouncement {
         endpoint_id: peer_id.as_bytes().to_vec(),
         role: NodeRole::Worker as i32,
+        vram_bytes: 57_600_000_000,
         ..Default::default()
     };
     let (_, mut ann) = proto_ann_to_local(&bare).expect("proto_ann_to_local must succeed");
@@ -895,6 +897,7 @@ fn malformed_memory_blocks_are_dropped_at_ingest() {
     let announce = |memory: crate::proto::node::MemoryInfo| crate::proto::node::PeerAnnouncement {
         endpoint_id: peer_id.as_bytes().to_vec(),
         role: NodeRole::Worker as i32,
+        vram_bytes: 12_000_000_000,
         hardware: Some(crate::proto::node::HardwareInfo {
             is_soc: Some(false),
             hostname: None,
@@ -960,5 +963,41 @@ fn malformed_memory_blocks_are_dropped_at_ingest() {
             ram_offload_bytes: 0,
         }),
         "absent reserves count as zero when the partition still adds up"
+    );
+}
+
+#[test]
+fn memory_block_exceeding_the_placement_budget_is_dropped_at_ingest() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD2; 32]).public());
+    let announce = |vram_bytes: u64| crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        vram_bytes,
+        hardware: Some(crate::proto::node::HardwareInfo {
+            is_soc: Some(false),
+            hostname: None,
+            gpus: vec![],
+            memory: Some(crate::proto::node::MemoryInfo {
+                total_bytes: Some(12_000_000_000),
+                usable_bytes: Some(12_000_000_000),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+
+    // The block explains the budget it travels with: more usable than the
+    // announced budget is a contradiction, so the block is dropped and the
+    // budget itself is kept.
+    let (_, ann) =
+        proto_ann_to_local(&announce(9_500_000_000)).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None);
+    assert_eq!(ann.vram_bytes, 9_500_000_000);
+
+    let (_, ann) =
+        proto_ann_to_local(&announce(12_000_000_000)).expect("proto_ann_to_local must succeed");
+    assert!(
+        ann.memory.is_some(),
+        "usable equal to the budget is consistent"
     );
 }

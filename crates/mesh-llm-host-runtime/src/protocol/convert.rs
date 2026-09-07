@@ -991,9 +991,13 @@ pub(crate) fn proto_ann_to_local(
         gpu_reserved_bytes: legacy_gpu_fields
             .gpu_reserved_bytes
             .or_else(|| pa.gpu_reserved_bytes.clone()),
+        // The block explains the budget it travels with; a usable share
+        // larger than that budget contradicts it and is dropped, so it can
+        // neither be shown nor rebroadcast.
         memory: hardware
             .and_then(|hardware| hardware.memory.as_ref())
-            .and_then(proto_memory_to_local),
+            .and_then(proto_memory_to_local)
+            .filter(|memory| memory.usable_bytes <= pa.vram_bytes),
         gpu_mem_bandwidth_gbps: legacy_gpu_fields
             .gpu_mem_bandwidth_gbps
             .or_else(|| pa.gpu_mem_bandwidth_gbps.clone()),
