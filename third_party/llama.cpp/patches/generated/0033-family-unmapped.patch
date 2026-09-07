@@ -4896,7 +4896,7 @@ index d094fd9f80bcf757b0fda0b30922c07605e52374..51faaf5a2717843bcde3ae234f5b3b84
  
      cb(cur, "result_norm", -1);
 diff --git a/src/models/muse-glimmer.cpp b/src/models/muse-glimmer.cpp
-index 0e94153088a954e9d5b61b31dbd70dfd959bf056..4ac6017ea417e0865078003a8babd3c3dc5358ec 100644
+index 0e94153088a954e9d5b61b31dbd70dfd959bf056..ab5e55a4ec675854052483163faeb0e6592946cb 100644
 --- a/src/models/muse-glimmer.cpp
 +++ b/src/models/muse-glimmer.cpp
 @@ -70,17 +70,24 @@ llama_model_muse_glimmer::graph::graph(const llama_model & model, const llm_grap
@@ -4904,13 +4904,14 @@ index 0e94153088a954e9d5b61b31dbd70dfd959bf056..4ac6017ea417e0865078003a8babd3c3
      ggml_tensor * inpL;
  
 -    inpL = build_inp_embd(model.tok_embd);
+-    inpL = build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1);
 +    const skippy_graph_filter & stage_filter = build_inputs.filter;
 +    const bool stage_filtered = stage_filter.enabled;
 +    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
 +    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
 +
 +    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
-     inpL = build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1);
++    inpL = stage_filtered && il_start > 0 ? inpL : build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1);
      cb(inpL, "embd_norm", -1);
  
      ggml_tensor * inp_pos = build_inp_pos();

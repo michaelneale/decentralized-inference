@@ -390,6 +390,10 @@ def main() -> int:
             source_root / "src/models/embedding-prelude.cpp"
         ).read_text(encoding="utf-8")
         assert (
+            "inpL = stage_filtered && il_start > 0 ? inpL : scale(inpL);"
+            in embedding_prelude_source
+        )
+        assert (
             "if ((!stage_filtered || il_start == 0) && (scale_embeddings))"
             in embedding_prelude_source
         )
