@@ -250,8 +250,8 @@ def main(argv: list[str] | None = None) -> int:
         "--diff-base",
         default="HEAD",
         help=(
-            "git revision used as the patch base; use the pinned upstream "
-            "revision to consolidate existing and newly generated model edits"
+            "git revision used as the generated patch base; it must contain "
+            "all static model semantics and no generated stage controls"
         ),
     )
     parser.add_argument(

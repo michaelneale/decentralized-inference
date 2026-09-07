@@ -375,10 +375,21 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
         self.assertIn("ORIGINAL_SOURCE_HEAD", generated_patch_check_text)
         self.assertIn("GENERATED_PATCH_COUNT", generated_patch_check_text)
+        self.assertIn('--diff-base "$CORE_SOURCE_HEAD"', generated_patch_check_text)
         self.assertIn("core-only generator input already contains", generated_patch_check_text)
         self.assertIn("stage_filter", generated_patch_check_text)
         self.assertIn("begin_block", generated_patch_check_text)
         self.assertIn("end_block", generated_patch_check_text)
+        stage_free_model_patch = (
+            ROOT
+            / "third_party"
+            / "llama.cpp"
+            / "patches"
+            / "0019-skippy-add-stage-free-model-semantics.patch"
+        ).read_text(encoding="utf-8")
+        self.assertNotRegex(stage_free_model_patch, r"\bstage_filter\b")
+        self.assertNotRegex(stage_free_model_patch, r"\bbegin_block\s*\(")
+        self.assertNotRegex(stage_free_model_patch, r"\bend_block\s*\(")
         self.assertIn("-R '^skippy_'", generated_patch_check_text)
         generator_index = generated_patch_check_text.index(
             'python3 "$ROOT/scripts/generate-skippy-family-patch.py"'
@@ -678,14 +689,17 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith(str(FAMILY_CERTIFY) + " ")
         ]
-        self.assertEqual(1, len(commands))
-        self.assertTrue(
-            commands[0]
-            .strip()
-            .endswith(
-                "--require-lanes --skip-build --skip-speculative"
-            )
+        self.assertEqual(3, len(commands))
+        self.assertEqual(
+            ["3", "1", "5"],
+            [command.split("--split-layer ", 1)[1].split()[0] for command in commands],
         )
+        for command in commands:
+            self.assertTrue(
+                command.strip().endswith(
+                    "--require-lanes --skip-build --skip-speculative"
+                )
+            )
 
     def test_family_battery_has_no_activation_wire_dtype_switches(self) -> None:
         script = BATTERY.read_text(encoding="utf-8")
@@ -705,9 +719,9 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith(str(FAMILY_CERTIFY) + " ")
         ]
-        self.assertEqual(2, len(commands))
+        self.assertEqual(6, len(commands))
         self.assertIn("--family test-family", commands[0])
-        self.assertIn("--family second-family", commands[1])
+        self.assertIn("--family second-family", commands[3])
 
     def test_family_filter_limits_the_resolved_dry_run(self) -> None:
         selected = self._dry_run("--families", "test-family")
@@ -750,7 +764,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
         self.assertIn("SKIPPY_MM_PROJECTOR=", smokes[0])
         self.assertIn("frontend::tests::multimodal", smokes[0])
         self.assertIn("--test-threads=1", smokes[0])
-        self.assertIn("family battery complete: 1/1", with_mmproj.stdout)
+        self.assertIn("family battery complete: 3/3", with_mmproj.stdout)
 
     def test_mmproj_failure_is_accounted_separately_from_core_certification(self) -> None:
         script = BATTERY.read_text(encoding="utf-8")

@@ -1,5 +1,5 @@
 {
-  "full_patch_sha256": "af107c55d3636056c702182e383aede21a93838741b3b3d84a3e4058911aa839",
+  "full_patch_sha256": "c7e41937bb6310955a7ae28a5ff6ff21d45f13ede7ccdb9e311d0e5779dd9866",
   "generator_version": "0.3.0",
   "schema_version": 1,
   "shards": [
@@ -8,7 +8,7 @@
         "cohere2"
       ],
       "file": "0001-family-cohere2.patch",
-      "sha256": "65953a59d2da21810f7a8337359f06e8e7cb7f9e9194008980cdb9f9903b1de9",
+      "sha256": "9bc7d74d6574a31cd9896420425003501543b7b09b6bff1735d4919dfc0a0bbf",
       "sources": [
         "src/models/cohere2.cpp"
       ]
@@ -18,7 +18,7 @@
         "deepseek2"
       ],
       "file": "0002-family-deepseek2.patch",
-      "sha256": "0bbbaaf72d4229bb42a99976cc635ce9d080bd067bafe836b84df4b76735ef74",
+      "sha256": "baa31d9664bfd7f36756cdf3f7c78879dbcce3ed4196b0f94f3dfb95c253ecd5",
       "sources": [
         "src/models/deepseek2.cpp"
       ]
@@ -28,7 +28,7 @@
         "falcon-dense"
       ],
       "file": "0003-family-falcon-dense.patch",
-      "sha256": "9eaba30d161ffe5e9e4a788b031e856941116df108620f9d798faec4e36ac926",
+      "sha256": "65a4fe45b09cbb896a202f402870a967fab90bc735ada39fb393674727d2a359",
       "sources": [
         "src/models/falcon.cpp"
       ]
@@ -38,7 +38,7 @@
         "falcon-h1"
       ],
       "file": "0004-family-falcon-h1.patch",
-      "sha256": "c4d126d2e2af6f739341d4784a68c1c0c1e20d91a4d362371ee3749cffc7f79c",
+      "sha256": "cacaf717a84eace869018d5b91c4f7bd5897488f55f4054aa2f09501b1553d51",
       "sources": [
         "src/models/falcon-h1.cpp"
       ]
@@ -48,7 +48,7 @@
         "gemma2"
       ],
       "file": "0005-family-gemma2.patch",
-      "sha256": "6a9712b12edf4718e82823520621456bb7836a85cd1b35b61b687f191fa83266",
+      "sha256": "d2ec6e70cbd413adc38ca57544c67f9886ea4e205ffd91ff6f0feab37cea5fc4",
       "sources": [
         "src/models/gemma2.cpp"
       ]
@@ -58,7 +58,7 @@
         "glm4"
       ],
       "file": "0006-family-glm4.patch",
-      "sha256": "69c424862f0a9eeb9bdcd95caedaa3eff6db6042179853b26e33bd099500789d",
+      "sha256": "46f5c0ca66923c2be58c0869bbb67d6adcd803e9ce61c2557d45067e891ab565",
       "sources": [
         "src/models/glm4.cpp"
       ]
@@ -69,7 +69,7 @@
         "glm47-flash"
       ],
       "file": "0007-family-glm45-air--glm47-flash.patch",
-      "sha256": "8c25797b916422ac206d98e70ed601172d03548d4209d7dd45671d57181d6d8b",
+      "sha256": "2fac8a6a19acb254a04a728baf355dc4ffb1d010c0f1c12c7d15b093fdb0f255",
       "sources": [
         "src/models/glm4-moe.cpp"
       ]
@@ -80,7 +80,7 @@
         "qwen4exp"
       ],
       "file": "0008-family-glm47-flash--qwen4exp.patch",
-      "sha256": "c56887a61dfe4371ac0f1db454cc4cebe0b5c80a73ad6cc1dab35425554fc4c6",
+      "sha256": "e1d660156a8158f5b306aa2ced27cf3645641606a485765b597110abfdbbcf6a",
       "sources": [
         "src/models/glm-dsa.cpp"
       ]
@@ -90,7 +90,7 @@
         "gpt-oss"
       ],
       "file": "0009-family-gpt-oss.patch",
-      "sha256": "246a1dbf91e950bb17dde2cf31bef4310c6fc6989c6adfa5001d90d3ed9c9bf1",
+      "sha256": "97a5d0e5e4a91c8432a4b6dbf105b72f470f6aaab579f34dbd5aa19984199d05",
       "sources": [
         "src/models/openai-moe.cpp"
       ]
@@ -100,7 +100,7 @@
         "granite-dense"
       ],
       "file": "0010-family-granite-dense.patch",
-      "sha256": "dcd2b180f0ccfd6ae37911c2dd656b3eb8a25d51050a073a819a4bcd8c6af89f",
+      "sha256": "e2f7616db20dbdfb58455af8007d4d886ef0d499e76a20cc578b832aea3552aa",
       "sources": [
         "src/models/granite.cpp"
       ]
@@ -110,7 +110,7 @@
         "granite-hybrid"
       ],
       "file": "0011-family-granite-hybrid.patch",
-      "sha256": "6eaa881b446c42edaaa3a75a51ff03b0284bbad05eda36f53e66065a56781aaf",
+      "sha256": "ab454f776bc365e60a317961d5cf46e05644b9aa4025c21ef9a2564652bd1f13",
       "sources": [
         "src/models/granite-hybrid.cpp"
       ]
@@ -120,7 +120,7 @@
         "internlm2"
       ],
       "file": "0012-family-internlm2.patch",
-      "sha256": "dead0c00880f7c09b7fd76631cd6478b65a652da3daea4394ea7a6e7fa0fb4a1",
+      "sha256": "c7b241802053271ced649645b35de2158f2059e3a4faea85e40188d05511043a",
       "sources": [
         "src/models/internlm2.cpp"
       ]
@@ -130,7 +130,7 @@
         "jamba2"
       ],
       "file": "0013-family-jamba2.patch",
-      "sha256": "965e263b32fd26c0e752b921283321abd68e82462fd2961d82d1e53688113800",
+      "sha256": "b12bf9e9779ecd3af2d0221e25234518f19875980dbad49e3a4ea59b1b40fa5e",
       "sources": [
         "src/models/jamba.cpp"
       ]
@@ -140,7 +140,7 @@
         "kimi-linear"
       ],
       "file": "0014-family-kimi-linear.patch",
-      "sha256": "d5cfdee171c1a784b4c596925fb5365213f99ae705959083b433f3ee2424ffff",
+      "sha256": "5c715acae2e032ccc0faa40282ea5954d24f7965896ece5f94bd1a139e477125",
       "sources": [
         "src/models/kimi-linear.cpp"
       ]
@@ -150,7 +150,7 @@
         "laguna"
       ],
       "file": "0015-family-laguna.patch",
-      "sha256": "8591b83d2dbee60ee743b640b8e1ae878afc1f9f90e3edf9731f7cac88d7462a",
+      "sha256": "875f7c913a6508a5e80cf17bad79b48c5a791b36bb84061028f0fab42dce8e8a",
       "sources": [
         "src/models/laguna.cpp"
       ]
@@ -161,7 +161,7 @@
         "lfm2-vl"
       ],
       "file": "0016-family-lfm2--lfm2-vl.patch",
-      "sha256": "8df768f910d9921936bec0e1fee6122001e2b4d1fb9941e6820028b73f150b3d",
+      "sha256": "6016e2f4363475e2b1e8e6cc544391265250d181c68320b6d2d83f5af30b065d",
       "sources": [
         "src/models/lfm2.cpp"
       ]
@@ -171,7 +171,7 @@
         "llama"
       ],
       "file": "0017-family-llama.patch",
-      "sha256": "3cc5af6044ee214e41cc1d07eb02e00369394e4607eb27547612889c2a906ce5",
+      "sha256": "a2d099654d43061f7b4d75da8f524801dce11b11459d85acbb40161ee870c139",
       "sources": [
         "src/models/llama.cpp",
         "src/models/olmo2.cpp"
@@ -183,9 +183,8 @@
         "mamba2"
       ],
       "file": "0018-family-mamba--mamba2.patch",
-      "sha256": "c4d5503a88fcb04399cc376db6686063d804137daa21199bc1602dcc807a1438",
+      "sha256": "d2a882bf7271fc32466415f31a8561cd6d508352647381e4bba2ce340daec063",
       "sources": [
-        "src/models/mamba-base.cpp",
         "src/models/mamba.cpp"
       ]
     },
@@ -194,7 +193,7 @@
         "mistral-small"
       ],
       "file": "0019-family-mistral-small.patch",
-      "sha256": "452f7cf09e22beca5aa215ac64a485fe4d8e75674e1f1678f52409201853d929",
+      "sha256": "ac996cf36fedfbf18af180da7069dc85fc95655585dccb6848a1d9bf462cd843",
       "sources": [
         "src/models/mistral3.cpp"
       ]
@@ -204,9 +203,8 @@
         "nemotron"
       ],
       "file": "0020-family-nemotron.patch",
-      "sha256": "084eb511dc7df114403d571354da707964b901ffd491cfcb05bce23abe4ea29c",
+      "sha256": "2875d75c4c4d90ea441c44e273431c5088ef18e8b1559bfa9436614e530ac87e",
       "sources": [
-        "src/models/nemotron-h-moe.cpp",
         "src/models/nemotron-h.cpp"
       ]
     },
@@ -216,7 +214,7 @@
         "phi4"
       ],
       "file": "0021-family-phi3--phi4.patch",
-      "sha256": "c57db786802f859a0a7251a7ddb0f8149bffb2a7718df254326d413054072ff6",
+      "sha256": "eda7adf4961ba82f48b13ec000c923a4e54fbba3888b9deb2207bf884312d34b",
       "sources": [
         "src/models/phi3.cpp"
       ]
@@ -226,7 +224,7 @@
         "qwen2-moe"
       ],
       "file": "0022-family-qwen2-moe.patch",
-      "sha256": "d9d7e955ec1f3fea6a707caf0ec46c7e06258d65285ea522081879e3acb714c3",
+      "sha256": "4730e12ccf28bf5f2441053c1e3dca8e2ae92a8d8ea0cdb0483fa9a80c382c8f",
       "sources": [
         "src/models/qwen2moe.cpp"
       ]
@@ -236,7 +234,7 @@
         "qwen2-vl"
       ],
       "file": "0023-family-qwen2-vl.patch",
-      "sha256": "c7de0af09e1e7184f0321e103391908eb01caf4a4ac8a429b856904123da83b6",
+      "sha256": "bc49d269f746a3962da0f0f648cfd7b8fbdca01e492dcba05790a45a562c3a23",
       "sources": [
         "src/models/qwen2vl.cpp"
       ]
@@ -246,7 +244,7 @@
         "qwen3-dense"
       ],
       "file": "0024-family-qwen3-dense.patch",
-      "sha256": "eacc5c28f80a66d56cec4162bdf38d835da1f266d2273a2c10bb76f571812e67",
+      "sha256": "81c22529ccd7f3ecf2203885822104bf4460ec9d7f66bebf3500f5452608090a",
       "sources": [
         "src/models/qwen3.cpp"
       ]
@@ -256,7 +254,7 @@
         "qwen3-moe"
       ],
       "file": "0025-family-qwen3-moe.patch",
-      "sha256": "9070242d8b2509849ebe7b73d2a993c4859cc513567d7fce176a94f0e03fc743",
+      "sha256": "49189e00a370a729db6374a4eff10a62675a8682192c2faba15edf2ae5d5dd88",
       "sources": [
         "src/models/qwen3moe.cpp"
       ]
@@ -266,7 +264,7 @@
         "qwen3-next"
       ],
       "file": "0026-family-qwen3-next.patch",
-      "sha256": "2f44c8cbe84bda7603331ba3592c64f7f69667589e06df8a7e434ec2c786063a",
+      "sha256": "a2adb0a6963c01b83987a009b1a0eb2fe300c8bbe439c47c4ddebee22bb9a2fd",
       "sources": [
         "src/models/qwen3next.cpp"
       ]
@@ -276,7 +274,7 @@
         "qwen3-vl"
       ],
       "file": "0027-family-qwen3-vl.patch",
-      "sha256": "4fe270914a00fbbb99bc7763022735c58821719784c6dc6178a99a8fba0a1e5c",
+      "sha256": "f052d29d7ecc97eeabd198aa0edc05b38d462b9f1f25928096fe556e9289311b",
       "sources": [
         "src/models/qwen3vl.cpp",
         "src/models/qwen3vlmoe.cpp"
@@ -287,7 +285,7 @@
         "qwen35"
       ],
       "file": "0028-family-qwen35.patch",
-      "sha256": "a689ca22da54d2975f9a576044e79339ada793075890a54b9b4d8acc8e145708",
+      "sha256": "0ccf68fca46432e68e5fd86f73d26891f511272992e7e95552f05bbd0a44dbb7",
       "sources": [
         "src/models/qwen35.cpp",
         "src/models/qwen35moe.cpp"
@@ -298,7 +296,7 @@
         "qwen4exp"
       ],
       "file": "0029-family-qwen4exp.patch",
-      "sha256": "81efa6168153a35193fdaab8a7fb3634faf97bc1066155b3a28c8a2f9db06694",
+      "sha256": "402f0f599f313977d88ea9633af8f74c7a9da387d1f1afbc8e35e31bc17201c4",
       "sources": [
         "src/models/qwen4exp.cpp"
       ]
@@ -308,7 +306,7 @@
         "rwkv6"
       ],
       "file": "0030-family-rwkv6.patch",
-      "sha256": "0da3a4b6aace2cad5de6fedbc1344ce5e0979b7a8304666c4702951160d19a0c",
+      "sha256": "ec5844784e4e780fc9d1f7fdf3011cb7fd75a8561834886a0b7e28e74119f4f3",
       "sources": [
         "src/models/rwkv6.cpp",
         "src/models/rwkv6qwen2.cpp"
@@ -319,7 +317,7 @@
         "rwkv7"
       ],
       "file": "0031-family-rwkv7.patch",
-      "sha256": "b612ca9e32429fd2bb06802d979167635bbeb111891e50879f244dc02f452062",
+      "sha256": "dd6119bef883cf646783f60a00af9e46ab3b7f297cddfba7eca4f45c9ec1cd98",
       "sources": [
         "src/models/arwkv7.cpp",
         "src/models/rwkv7.cpp"
@@ -330,7 +328,7 @@
         "smollm3"
       ],
       "file": "0032-family-smollm3.patch",
-      "sha256": "1b77df65e74a1be956592482960698a3895c4993b4b77d813e28bc92b047ca79",
+      "sha256": "3b068f8deddd06507cb2945c13455a4879fdb144af319250fa941179e433da48",
       "sources": [
         "src/models/smollm3.cpp"
       ]
@@ -338,7 +336,7 @@
     {
       "families": [],
       "file": "0033-family-unmapped.patch",
-      "sha256": "521ca237b5ac502fae922b07145678cf60d835b1937cc81a6263680154e6b8a6",
+      "sha256": "084de9f6191a9b2358e1b9b1a9dbd76eb778e1764ace75beae159d36b24b64a5",
       "sources": [
         "src/models/afmoe.cpp",
         "src/models/apertus.cpp",
@@ -362,7 +360,6 @@
         "src/models/deepseek.cpp",
         "src/models/deepseek32.cpp",
         "src/models/deepseek4.cpp",
-        "src/models/delta-net-base.cpp",
         "src/models/dots1.cpp",
         "src/models/dots3note.cpp",
         "src/models/dream.cpp",
@@ -400,7 +397,6 @@
         "src/models/minimax-01.cpp",
         "src/models/minimax-m2.cpp",
         "src/models/minimax-m3.cpp",
-        "src/models/models.h",
         "src/models/modern-bert.cpp",
         "src/models/mpt.cpp",
         "src/models/muse-glimmer.cpp",

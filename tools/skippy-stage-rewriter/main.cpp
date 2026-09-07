@@ -158,6 +158,33 @@ struct HyperconnectionPrelude {
   std::string tokens;
 };
 
+struct AltupPrelude {
+  const CompoundStmt *statement = nullptr;
+  const CallExpr *repeat_call = nullptr;
+  std::string width;
+  std::string tokens;
+  std::string count;
+};
+
+struct PerLayerTokenProjection {
+  const CallExpr *build_call = nullptr;
+  const CallExpr *project_call = nullptr;
+  const Stmt *build_statement = nullptr;
+};
+
+struct RangeAwareInput {
+  const CallExpr *build_call = nullptr;
+  const Stmt *build_statement = nullptr;
+  std::string variable;
+};
+
+struct RwkvFirstValue {
+  const CallExpr *time_mix_call = nullptr;
+  const Stmt *time_mix_statement = nullptr;
+  const Stmt *next_statement = nullptr;
+  std::string variable;
+};
+
 bool containsName(const Stmt *statement, llvm::StringRef target) {
   class Visitor final : public RecursiveASTVisitor<Visitor> {
   public:
@@ -747,6 +774,277 @@ hyperconnectionPrelude(const CompoundStmt *constructor_body,
   return result;
 }
 
+std::optional<AltupPrelude>
+altupPrelude(const CompoundStmt *constructor_body, const ForStmt *loop,
+             llvm::StringRef activation, llvm::StringRef carried,
+             const SourceManager &sm, const clang::LangOptions &lang) {
+  if (activation != carried || !containsName(constructor_body, "i_altup_act")) {
+    return std::nullopt;
+  }
+  const auto loop_offset = fileOffset(loop->getBeginLoc(), sm);
+  if (!loop_offset) {
+    return std::nullopt;
+  }
+
+  const CallExpr *repeat = nullptr;
+  class RepeatVisitor final : public RecursiveASTVisitor<RepeatVisitor> {
+  public:
+    RepeatVisitor(llvm::StringRef activation, uint64_t loop_offset,
+                  const SourceManager &sm, const CallExpr *&result)
+        : activation_(activation), loop_offset_(loop_offset), sm_(sm),
+          result_(result) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitCallExpr(CallExpr *call) {
+      const auto *callee = directCallee(call);
+      const auto offset = fileOffset(call->getBeginLoc(), sm_);
+      if (callee == nullptr || callee->getNameAsString() != "ggml_repeat_4d" ||
+          call->getNumArgs() != 6 || !offset || *offset >= loop_offset_ ||
+          !containsName(call->getArg(1), activation_)) {
+        return true;
+      }
+      result_ = result_ == nullptr ? call : nullptr;
+      ambiguous_ |= result_ == nullptr;
+      return true;
+    }
+
+    bool ambiguous() const { return ambiguous_; }
+
+  private:
+    llvm::StringRef activation_;
+    uint64_t loop_offset_;
+    const SourceManager &sm_;
+    const CallExpr *&result_;
+    bool ambiguous_ = false;
+  } repeat_visitor(activation, *loop_offset, sm, repeat);
+  repeat_visitor.TraverseStmt(const_cast<CompoundStmt *>(constructor_body));
+  if (repeat_visitor.ambiguous() || repeat == nullptr) {
+    return std::nullopt;
+  }
+
+  const Stmt *direct =
+      directChildContaining(constructor_body, repeat, sm, lang);
+  const auto *statement = llvm::dyn_cast_or_null<CompoundStmt>(direct);
+  if (statement == nullptr || !containsName(statement, "ggml_concat")) {
+    return std::nullopt;
+  }
+
+  const Expr *count_expression = repeat->getArg(4)->IgnoreParenImpCasts();
+  const auto *count_subtract = llvm::dyn_cast<BinaryOperator>(count_expression);
+  if (count_subtract == nullptr ||
+      count_subtract->getOpcode() != clang::BO_Sub) {
+    return std::nullopt;
+  }
+  const auto count = referencedName(count_subtract->getLHS());
+  const auto *one = llvm::dyn_cast<clang::IntegerLiteral>(
+      count_subtract->getRHS()->IgnoreParenImpCasts());
+  if (!count || one == nullptr || one->getValue() != 1) {
+    return std::nullopt;
+  }
+
+  AltupPrelude result;
+  result.statement = statement;
+  result.repeat_call = repeat;
+  result.width = sourceText(repeat->getArg(2)->getSourceRange(), sm, lang);
+  result.tokens = sourceText(repeat->getArg(3)->getSourceRange(), sm, lang);
+  result.count = *count;
+  if (result.width.empty() || result.tokens.empty() || result.count.empty()) {
+    return std::nullopt;
+  }
+  return result;
+}
+
+std::optional<PerLayerTokenProjection>
+perLayerTokenProjection(const CompoundStmt *constructor_body,
+                        const ForStmt *loop, llvm::StringRef activation,
+                        const FactVisitor &facts, const SourceManager &sm,
+                        const clang::LangOptions &lang) {
+  const auto loop_offset = fileOffset(loop->getBeginLoc(), sm);
+  if (!loop_offset || facts.calls.count("project_per_layer_inputs") == 0 ||
+      facts.calls.count("build_inp_per_layer") == 0) {
+    return std::nullopt;
+  }
+  const auto &project_calls = facts.calls.at("project_per_layer_inputs");
+  const auto &build_calls = facts.calls.at("build_inp_per_layer");
+  if (project_calls.size() != 1 || build_calls.size() != 1 ||
+      project_calls.front()->getNumArgs() < 2 ||
+      !containsName(project_calls.front()->getArg(0), activation)) {
+    return std::nullopt;
+  }
+  const auto project_offset =
+      fileOffset(project_calls.front()->getBeginLoc(), sm);
+  const auto build_offset = fileOffset(build_calls.front()->getBeginLoc(), sm);
+  if (!project_offset || !build_offset || *project_offset >= *loop_offset ||
+      *build_offset >= *loop_offset || *build_offset > *project_offset) {
+    return std::nullopt;
+  }
+  const Stmt *build_statement =
+      directChildContaining(constructor_body, build_calls.front(), sm, lang);
+  if (build_statement == nullptr) {
+    return std::nullopt;
+  }
+  return PerLayerTokenProjection{build_calls.front(), project_calls.front(),
+                                 build_statement};
+}
+
+std::optional<RangeAwareInput>
+rangeAwareInput(const CompoundStmt *constructor_body, const ForStmt *loop,
+                const CompoundStmt *loop_body, const FactVisitor &facts,
+                llvm::StringRef build_name, llvm::StringRef layer_predicate,
+                ASTContext &context, const SourceManager &sm,
+                const clang::LangOptions &lang) {
+  const auto calls = facts.calls.find(build_name.str());
+  if (calls == facts.calls.end() || calls->second.size() != 1 ||
+      !containsName(loop_body, layer_predicate)) {
+    return std::nullopt;
+  }
+  const CallExpr *call = calls->second.front();
+  const auto call_offset = fileOffset(call->getBeginLoc(), sm);
+  const auto loop_offset = fileOffset(loop->getBeginLoc(), sm);
+  const auto variable = assignedName(call, context);
+  if (!call_offset || !loop_offset || *call_offset >= *loop_offset ||
+      !variable || !containsName(loop_body, *variable)) {
+    return std::nullopt;
+  }
+  const Stmt *statement =
+      directChildContaining(constructor_body, call, sm, lang);
+  if (statement == nullptr) {
+    return std::nullopt;
+  }
+  return RangeAwareInput{call, statement, *variable};
+}
+
+std::optional<RwkvFirstValue>
+rwkvFirstValue(const CompoundStmt *constructor_body,
+               const CompoundStmt *loop_body, const FactVisitor &facts,
+               const SourceManager &sm, const clang::LangOptions &lang) {
+  const auto calls = facts.calls.find("build_rwkv7_time_mix");
+  if (calls == facts.calls.end() || calls->second.size() != 1 ||
+      calls->second.front()->getNumArgs() < 4) {
+    return std::nullopt;
+  }
+  const CallExpr *call = calls->second.front();
+  const auto variable = referencedName(call->getArg(3));
+  if (!variable) {
+    return std::nullopt;
+  }
+
+  const VarDecl *declaration = nullptr;
+  class DeclarationVisitor final
+      : public RecursiveASTVisitor<DeclarationVisitor> {
+  public:
+    DeclarationVisitor(llvm::StringRef variable, const VarDecl *&result)
+        : variable_(variable), result_(result) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitVarDecl(VarDecl *candidate) {
+      if (candidate->getName() != variable_) {
+        return true;
+      }
+      if (result_ != nullptr) {
+        ambiguous_ = true;
+      } else {
+        result_ = candidate;
+      }
+      return true;
+    }
+
+    bool ambiguous() const { return ambiguous_; }
+
+  private:
+    llvm::StringRef variable_;
+    const VarDecl *&result_;
+    bool ambiguous_ = false;
+  } declaration_visitor(*variable, declaration);
+  declaration_visitor.TraverseStmt(
+      const_cast<CompoundStmt *>(constructor_body));
+  if (declaration_visitor.ambiguous() || declaration == nullptr ||
+      !declaration->hasInit() ||
+      sourceText(declaration->getInit()->getSourceRange(), sm, lang) !=
+          "nullptr") {
+    return std::nullopt;
+  }
+
+  const Stmt *time_mix_statement =
+      directChildContaining(loop_body, call, sm, lang);
+  if (time_mix_statement == nullptr) {
+    return std::nullopt;
+  }
+  const Stmt *next_statement = nullptr;
+  bool found = false;
+  for (const Stmt *statement : loop_body->body()) {
+    if (found) {
+      next_statement = statement;
+      break;
+    }
+    found = statement == time_mix_statement;
+  }
+  if (!found || next_statement == nullptr) {
+    return std::nullopt;
+  }
+  return RwkvFirstValue{call, time_mix_statement, next_statement, *variable};
+}
+
+std::vector<const IfStmt *> stageZeroSidebands(const CompoundStmt *loop_body,
+                                               llvm::StringRef loop_var) {
+  class Visitor final : public RecursiveASTVisitor<Visitor> {
+  public:
+    Visitor(llvm::StringRef loop_var, std::vector<const IfStmt *> &results)
+        : loop_var_(loop_var), results_(results) {}
+
+    bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
+
+    bool VisitIfStmt(IfStmt *statement) {
+      if (containsName(statement->getCond(), loop_var_) &&
+          containsName(statement, "t_inp_embd")) {
+        results_.push_back(statement);
+      }
+      return true;
+    }
+
+  private:
+    llvm::StringRef loop_var_;
+    std::vector<const IfStmt *> &results_;
+  };
+
+  std::vector<const IfStmt *> results;
+  Visitor visitor(loop_var, results);
+  visitor.TraverseStmt(const_cast<CompoundStmt *>(loop_body));
+  return results;
+}
+
+std::vector<const IfStmt *> stageZeroEmbeddingModeChecks(
+    const CompoundStmt *constructor_body, const Stmt *embedding_statement,
+    const ForStmt *loop, llvm::StringRef carried, const SourceManager &sm,
+    const clang::LangOptions &lang) {
+  const auto embedding_range =
+      tokenRange(embedding_statement->getSourceRange(), sm, lang);
+  const auto loop_offset = fileOffset(loop->getBeginLoc(), sm);
+  if (!embedding_range || !loop_offset) {
+    return {};
+  }
+  const uint64_t embedding_end =
+      embedding_range->first + embedding_range->second;
+  std::vector<const IfStmt *> results;
+  for (const Stmt *statement : constructor_body->body()) {
+    const auto statement_offset = fileOffset(statement->getBeginLoc(), sm);
+    const auto *conditional = llvm::dyn_cast<IfStmt>(statement);
+    if (conditional == nullptr || !statement_offset ||
+        *statement_offset < embedding_end ||
+        *statement_offset >= *loop_offset) {
+      continue;
+    }
+    const std::string text = sourceText(statement->getSourceRange(), sm, lang);
+    if (llvm::StringRef(text).contains("ubatch.embd") &&
+        assignmentsTo(conditional, carried).empty()) {
+      results.push_back(conditional);
+    }
+  }
+  return results;
+}
+
 bool addReplace(std::vector<Edit> &edits, llvm::StringRef kind,
                 llvm::StringRef file, clang::SourceRange range,
                 llvm::StringRef replacement, const SourceManager &sm,
@@ -855,12 +1153,19 @@ public:
     // MTP/draft heads and encoder sidecars execute in a distinct context
     // attached to the final pipeline stage. They do not consume the primary
     // decoder's [layer_start, layer_end) interval and must never receive the
-    // generic stage-loop rewrite. Prove that role from the builder type or its
-    // graph inputs/results rather than from an architecture or file name.
+    // generic stage-loop rewrite. Prove that role from the builder type or
+    // its graph inputs/results rather than from an architecture or file name.
     const bool typed_mtp_builder =
         llvm::StringRef(qualified).contains("::graph_mtp::graph_mtp");
+    // A cross-context reference alone does not make the whole constructor a
+    // sidecar. Some model builders (for example a combined trunk/MTP graph)
+    // borrow tensors only in an auxiliary branch while still constructing a
+    // normal decoder graph from their own token embedding. Classify the whole
+    // constructor as a context sidecar only when it has no primary embedding
+    // producer of its own.
     const bool context_sidecar = constructor_body != nullptr &&
-                                 containsName(constructor_body, "ctx_other");
+                                 containsName(constructor_body, "ctx_other") &&
+                                 facts.calls["build_inp_embd"].empty();
     const bool encoder_sidecar =
         facts.calls["build_inp_embd_enc"].size() == 1 &&
         constructor_body != nullptr &&
@@ -1014,6 +1319,25 @@ public:
     const auto hyperconnection =
         hyperconnectionPrelude(constructor_body, loop, embedding_statement,
                                *activation, *carried, sm, lang);
+    const auto altup =
+        altupPrelude(constructor_body, loop, *activation, *carried, sm, lang);
+    const auto per_layer_projection = perLayerTokenProjection(
+        constructor_body, loop, *activation, facts, sm, lang);
+    const auto attention_positions =
+        rangeAwareInput(constructor_body, loop, loop_body, facts,
+                        "build_inp_pos", "is_recr", context, sm, lang);
+    const auto attention_scale = rangeAwareInput(
+        constructor_body, loop, loop_body, facts, "build_inp_attn_scale",
+        "n_no_rope_layer_step", context, sm, lang);
+    const auto ple_input =
+        rangeAwareInput(constructor_body, loop, loop_body, facts,
+                        "build_inp_ple", "is_ple", context, sm, lang);
+    const auto rwkv_first =
+        rwkvFirstValue(constructor_body, loop_body, facts, sm, lang);
+    const auto stage_zero_sidebands =
+        stageZeroSidebands(loop_body, report.proof.loop_var);
+    const auto stage_zero_embedding_checks = stageZeroEmbeddingModeChecks(
+        constructor_body, embedding_statement, loop, *carried, sm, lang);
     if (!completing_filter && *activation != *carried && !hyperconnection) {
       refuse(report,
              "layer-carried activation differs from the embedding without a "
@@ -1024,6 +1348,33 @@ public:
     if (hyperconnection) {
       report.proof.scope_evidence.emplace_back(
           "hyperconnection_activation_frontier");
+    }
+    if (altup) {
+      report.proof.scope_evidence.emplace_back("altup_activation_frontier");
+    }
+    if (per_layer_projection) {
+      report.proof.scope_evidence.emplace_back(
+          "per_layer_token_projection_sideband");
+    }
+    if (attention_positions) {
+      report.proof.scope_evidence.emplace_back(
+          "range_owned_attention_positions");
+    }
+    if (attention_scale) {
+      report.proof.scope_evidence.emplace_back("range_owned_attention_scale");
+    }
+    if (ple_input) {
+      report.proof.scope_evidence.emplace_back("range_owned_ple_input");
+    }
+    if (rwkv_first) {
+      report.proof.scope_evidence.emplace_back("rwkv_first_value_sideband");
+    }
+    if (!stage_zero_sidebands.empty()) {
+      report.proof.scope_evidence.emplace_back("stage_zero_loop_sideband");
+    }
+    if (!stage_zero_embedding_checks.empty()) {
+      report.proof.scope_evidence.emplace_back(
+          "stage_zero_embedding_mode_check");
     }
 
     std::vector<const BinaryOperator *> preloop_activation_assignments;
@@ -1044,6 +1395,9 @@ public:
         if (offset && *offset >= prelude_begin && *offset < *loop_begin) {
           const Stmt *statement =
               directChildContaining(constructor_body, assignment, sm, lang);
+          if (altup && statement == altup->statement) {
+            continue;
+          }
           if (const auto *conditional =
                   llvm::dyn_cast_or_null<IfStmt>(statement);
               conditional != nullptr && conditional->getElse() != nullptr) {
@@ -1061,14 +1415,28 @@ public:
     }
 
     const auto &output_calls = facts.calls["build_inp_out_ids"];
-    if (output_calls.size() > 1 && !completing_filter) {
-      refuse(report, "multiple build_inp_out_ids calls");
-      reports_.push_back(std::move(report));
-      return;
+    const CallExpr *output_call = nullptr;
+    if (output_calls.size() == 1) {
+      output_call = output_calls.front();
+    } else if (output_calls.size() > 1 && !completing_filter) {
+      const auto loop_end_offset = fileOffset(loop->getEndLoc(), sm);
+      std::vector<const CallExpr *> postloop_output_calls;
+      for (const CallExpr *candidate : output_calls) {
+        const auto candidate_offset = fileOffset(candidate->getBeginLoc(), sm);
+        if (loop_end_offset && candidate_offset &&
+            *candidate_offset > *loop_end_offset) {
+          postloop_output_calls.push_back(candidate);
+        }
+      }
+      if (postloop_output_calls.size() != 1) {
+        refuse(report, "multiple primary build_inp_out_ids calls");
+        reports_.push_back(std::move(report));
+        return;
+      }
+      output_call = postloop_output_calls.front();
+      report.proof.scope_evidence.emplace_back("sidecar_output_excluded");
     }
-    const CallExpr *output_call =
-        output_calls.size() == 1 ? output_calls.front() : nullptr;
-    report.proof.output_owner = !output_calls.empty();
+    report.proof.output_owner = output_call != nullptr;
 
     std::vector<const IfStmt *> terminal_ifs;
     class TerminalVisitor final : public RecursiveASTVisitor<TerminalVisitor> {
@@ -1118,7 +1486,35 @@ public:
       valid &=
           addInsert(report.edits, "insert_filter_declarations", report.file,
                     embedding_statement->getBeginLoc(), declarations, sm);
-      if (hyperconnection) {
+      if (altup) {
+        const std::string expression_indent = indent + "    ";
+        const std::string altup_import =
+            "[&]() -> ggml_tensor * {\n" + expression_indent +
+            "if (stage_filtered && il_start > 0) {\n" + expression_indent +
+            "    auto stage_inp = "
+            "std::make_unique<llm_graph_input_gemma3n_altup>(" +
+            altup->width + ", " + altup->count + ");\n" + expression_indent +
+            "    stage_inp->values = ggml_new_tensor_3d(ctx0, "
+            "GGML_TYPE_F32, " +
+            altup->width + ", " + altup->tokens + ", " + altup->count + ");\n" +
+            expression_indent +
+            "    cb(stage_inp->values, \"inp_gemma3n_altup\", -1);\n" +
+            expression_indent + "    ggml_set_input(stage_inp->values);\n" +
+            expression_indent +
+            "    ggml_tensor * values = stage_inp->values;\n" +
+            expression_indent +
+            "    res->t_skippy_activation_input = values;\n" +
+            expression_indent + "    res->add_input(std::move(stage_inp));\n" +
+            expression_indent + "    return values;\n" + expression_indent +
+            "}\n" + expression_indent + "return " + original_embedding + ";\n" +
+            indent + "}()";
+        valid &= addReplace(report.edits, "rewrite_altup_embedding_owner",
+                            report.file, embedding->getSourceRange(),
+                            altup_import, sm, lang);
+        valid &= addInsert(report.edits, "guard_altup_prelude", report.file,
+                           altup->statement->getLBracLoc(),
+                           "if (!stage_filtered || il_start == 0) ", sm);
+      } else if (hyperconnection) {
         valid &=
             addReplace(report.edits, "rewrite_hyperconnection_embedding_owner",
                        report.file, embedding->getSourceRange(),
@@ -1167,7 +1563,8 @@ public:
             "std::make_unique<llm_graph_input_hyperconnection>(" +
             hyperconnection->width + ", " + hyperconnection->multiplicity +
             ");\n" + repeat_indent +
-            "    stage_inp->values = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, " +
+            "    stage_inp->values = ggml_new_tensor_3d(ctx0, "
+            "GGML_TYPE_F32, " +
             hyperconnection->width + ", " + hyperconnection->multiplicity +
             ", " + hyperconnection->tokens + ");\n" + repeat_indent +
             "    cb(stage_inp->values, \"hc_stage_input\", -1);\n" +
@@ -1180,9 +1577,15 @@ public:
         if (hyperconnection->repeat_is_initializer) {
           const SourceLocation after_repeat = clang::Lexer::getLocForEndOfToken(
               hyperconnection->repeat_statement->getEndLoc(), 0, sm, lang);
+          std::string initializer_import = import;
+          if (!repeat_indent.empty() &&
+              llvm::StringRef(initializer_import).ends_with(repeat_indent)) {
+            initializer_import.resize(initializer_import.size() -
+                                      repeat_indent.size());
+          }
           valid &= addInsert(report.edits, "insert_hyperconnection_import",
                              report.file, after_repeat,
-                             "\n" + repeat_indent + import, sm);
+                             "\n" + repeat_indent + initializer_import, sm);
         } else {
           valid &= addInsert(
               report.edits, "insert_hyperconnection_import", report.file,
@@ -1211,6 +1614,228 @@ public:
             embedding->getSourceRange(),
             "stage_filtered && il_start > 0 ? build_inp_embd(nullptr) : " +
                 original_embedding,
+            sm, lang);
+      }
+
+      if (per_layer_projection) {
+        const std::string sideband_indent = indentationAt(
+            per_layer_projection->build_statement->getBeginLoc(), sm);
+        const std::string projection_fallback =
+            altup ? "stage_filtered && il_start > 0 ? "
+                    "ggml_view_2d_slice(ctx0, " +
+                        *carried + ", i_altup_act) : " + *activation
+                  : *activation;
+        const std::string sideband =
+            "ggml_tensor * inp_per_layer_proj = " + projection_fallback +
+            ";\n" + sideband_indent +
+            "ggml_tensor * inp_per_layer_sideband = nullptr;\n" +
+            sideband_indent + "ggml_tensor * inp_stage_tokens = nullptr;\n" +
+            sideband_indent +
+            "const skippy_activation_tokens & activation_tokens = "
+            "build_inputs.activation_tokens;\n" +
+            sideband_indent + "const bool use_activation_token_sideband =\n" +
+            sideband_indent + "    stage_filtered && il_start > 0 &&\n" +
+            sideband_indent + "    activation_tokens.tokens != nullptr &&\n" +
+            sideband_indent +
+            "    activation_tokens.token_count == ubatch.n_tokens &&\n" +
+            sideband_indent + "    model.per_layer_tok_embd != nullptr &&\n" +
+            sideband_indent + "    model.tok_embd != nullptr;\n" +
+            sideband_indent + "if (use_activation_token_sideband) {\n" +
+            sideband_indent +
+            "    auto stage_inp = "
+            "std::make_unique<llm_graph_input_stage_tokens>();\n" +
+            sideband_indent +
+            "    stage_inp->tokens = ggml_new_tensor_1d(ctx0, "
+            "GGML_TYPE_I32, ubatch.n_tokens);\n" +
+            sideband_indent +
+            "    cb(stage_inp->tokens, \"inp_stage_tokens\", -1);\n" +
+            sideband_indent + "    ggml_set_input(stage_inp->tokens);\n" +
+            sideband_indent + "    inp_stage_tokens = stage_inp->tokens;\n" +
+            sideband_indent +
+            "    inp_per_layer_sideband = ggml_get_rows(ctx0, "
+            "model.per_layer_tok_embd, inp_stage_tokens);\n" +
+            sideband_indent +
+            "    const int64_t per_layer_width = "
+            "model.per_layer_tok_embd->ne[0] / n_layer;\n" +
+            sideband_indent +
+            "    inp_per_layer_sideband = ggml_reshape_3d(ctx0, "
+            "inp_per_layer_sideband, per_layer_width, n_layer, n_tokens);\n" +
+            sideband_indent +
+            "    inp_per_layer_sideband = ggml_scale(ctx0, "
+            "inp_per_layer_sideband, sqrtf((float) per_layer_width));\n" +
+            sideband_indent +
+            "    cb(inp_per_layer_sideband, \"inp_per_layer_selected\", "
+            "-1);\n" +
+            sideband_indent +
+            "    inp_per_layer_proj = ggml_get_rows(ctx0, model.tok_embd, "
+            "inp_stage_tokens);\n" +
+            sideband_indent +
+            "    inp_per_layer_proj = ggml_scale(ctx0, "
+            "inp_per_layer_proj, sqrtf(n_embd));\n" +
+            sideband_indent +
+            "    cb(inp_per_layer_proj, \"inp_per_layer_proj_embd\", "
+            "-1);\n" +
+            sideband_indent + "    res->add_input(std::move(stage_inp));\n" +
+            sideband_indent + "}\n\n" + sideband_indent;
+        valid &= addInsert(
+            report.edits, "insert_per_layer_token_sideband", report.file,
+            per_layer_projection->build_statement->getBeginLoc(), sideband, sm);
+        const std::string original_build = sourceText(
+            per_layer_projection->build_call->getSourceRange(), sm, lang);
+        valid &= addReplace(
+            report.edits, "rewrite_per_layer_token_input", report.file,
+            per_layer_projection->build_call->getSourceRange(),
+            "use_activation_token_sideband ? inp_per_layer_sideband : " +
+                original_build,
+            sm, lang);
+        valid &= addReplace(
+            report.edits, "rewrite_per_layer_projection_source", report.file,
+            per_layer_projection->project_call->getArg(0)->getSourceRange(),
+            "inp_per_layer_proj", sm, lang);
+      }
+
+      if (attention_positions) {
+        const std::string input_indent = indentationAt(
+            attention_positions->build_statement->getBeginLoc(), sm);
+        const std::string scan =
+            "bool skippy_has_attention_layer = false;\n" + input_indent +
+            "for (int skippy_il = il_start; skippy_il < il_end; "
+            "++skippy_il) {\n" +
+            input_indent + "    if (!hparams.is_recr(skippy_il)) {\n" +
+            input_indent + "        skippy_has_attention_layer = true;\n" +
+            input_indent + "        break;\n" + input_indent + "    }\n" +
+            input_indent + "}\n\n" + input_indent;
+        valid &= addInsert(
+            report.edits, "insert_attention_range_scan", report.file,
+            attention_positions->build_statement->getBeginLoc(), scan, sm);
+        const std::string original = sourceText(
+            attention_positions->build_call->getSourceRange(), sm, lang);
+        valid &= addReplace(
+            report.edits, "guard_attention_position_input", report.file,
+            attention_positions->build_call->getSourceRange(),
+            "skippy_has_attention_layer ? " + original + " : nullptr", sm,
+            lang);
+      }
+
+      if (attention_scale) {
+        const std::string input_indent =
+            indentationAt(attention_scale->build_statement->getBeginLoc(), sm);
+        const std::string scan =
+            "bool skippy_uses_attention_scale = false;\n" + input_indent +
+            "for (int skippy_il = il_start; skippy_il < il_end; "
+            "++skippy_il) {\n" +
+            input_indent +
+            "    const bool skippy_use_rope = "
+            "hparams.n_no_rope_layer_step > 0 &&\n" +
+            input_indent +
+            "            (skippy_il + 1) % hparams.n_no_rope_layer_step != "
+            "0;\n" +
+            input_indent + "    if (!skippy_use_rope) {\n" + input_indent +
+            "        skippy_uses_attention_scale = true;\n" + input_indent +
+            "        break;\n" + input_indent + "    }\n" + input_indent +
+            "}\n\n" + input_indent;
+        valid &= addInsert(
+            report.edits, "insert_attention_scale_range_scan", report.file,
+            attention_scale->build_statement->getBeginLoc(), scan, sm);
+        const std::string original =
+            sourceText(attention_scale->build_call->getSourceRange(), sm, lang);
+        valid &= addReplace(
+            report.edits, "guard_attention_scale_input", report.file,
+            attention_scale->build_call->getSourceRange(),
+            "skippy_uses_attention_scale ? " + original + " : nullptr", sm,
+            lang);
+      }
+
+      if (ple_input) {
+        const std::string input_indent =
+            indentationAt(ple_input->build_statement->getBeginLoc(), sm);
+        const std::string scan =
+            "bool skippy_stage_contains_ple = false;\n" + input_indent +
+            "for (int skippy_il = il_start; skippy_il < il_end; "
+            "++skippy_il) {\n" +
+            input_indent +
+            "    if (hparams.is_ple(static_cast<uint32_t>(skippy_il))) {\n" +
+            input_indent + "        skippy_stage_contains_ple = true;\n" +
+            input_indent + "        break;\n" + input_indent + "    }\n" +
+            input_indent + "}\n\n" + input_indent;
+        valid &= addInsert(report.edits, "insert_ple_range_scan", report.file,
+                           ple_input->build_statement->getBeginLoc(), scan, sm);
+        const auto *conditional =
+            llvm::dyn_cast<IfStmt>(ple_input->build_statement);
+        if (conditional == nullptr) {
+          valid = false;
+        } else {
+          const Expr *input_condition = conditional->getCond();
+          valid &= addReplace(
+              report.edits, "guard_ple_input", report.file,
+              input_condition->getSourceRange(),
+              "(" + sourceText(input_condition->getSourceRange(), sm, lang) +
+                  ") && skippy_stage_contains_ple",
+              sm, lang);
+        }
+      }
+
+      if (rwkv_first) {
+        if (output_call == nullptr) {
+          valid = false;
+        } else {
+          const Stmt *output_statement =
+              directChildContaining(constructor_body, output_call, sm, lang);
+          if (output_statement == nullptr) {
+            valid = false;
+          } else {
+            const std::string input_indent =
+                indentationAt(output_statement->getBeginLoc(), sm);
+            const std::string input =
+                "if (stage_filtered && il_start > 0) {\n" + input_indent +
+                "    auto stage_inp = "
+                "std::make_unique<llm_graph_input_rwkv7_v_first>(n_embd);\n" +
+                input_indent +
+                "    stage_inp->values = ggml_new_tensor_2d(ctx0, "
+                "GGML_TYPE_F32, n_embd, n_tokens);\n" +
+                input_indent +
+                "    cb(stage_inp->values, \"inp_rwkv7_v_first\", -1);\n" +
+                input_indent + "    ggml_set_input(stage_inp->values);\n" +
+                input_indent + "    " + rwkv_first->variable +
+                " = stage_inp->values;\n" + input_indent +
+                "    res->add_input(std::move(stage_inp));\n" + input_indent +
+                "}\n\n" + input_indent;
+            valid &=
+                addInsert(report.edits, "insert_rwkv_first_input", report.file,
+                          output_statement->getBeginLoc(), input, sm);
+          }
+        }
+        const std::string export_indent =
+            indentationAt(rwkv_first->next_statement->getBeginLoc(), sm);
+        const std::string output =
+            "if (stage_filtered && !stage_filter.include_output && "
+            "il_start == 0 && " +
+            report.proof.loop_var + " == 0) {\n" + export_indent +
+            "    res->t_skippy_rwkv7_v_first = " + rwkv_first->variable +
+            ";\n" + export_indent + "}\n\n" + export_indent;
+        valid &=
+            addInsert(report.edits, "insert_rwkv_first_output", report.file,
+                      rwkv_first->next_statement->getBeginLoc(), output, sm);
+      }
+
+      for (const IfStmt *sideband : stage_zero_sidebands) {
+        const Expr *sideband_condition = sideband->getCond();
+        valid &= addReplace(
+            report.edits, "guard_stage_zero_loop_sideband", report.file,
+            sideband_condition->getSourceRange(),
+            "(!stage_filtered || il_start == 0) && (" +
+                sourceText(sideband_condition->getSourceRange(), sm, lang) +
+                ")",
+            sm, lang);
+      }
+
+      for (const IfStmt *check : stage_zero_embedding_checks) {
+        const Expr *check_condition = check->getCond();
+        valid &= addReplace(
+            report.edits, "guard_stage_zero_embedding_mode_check", report.file,
+            check_condition->getSourceRange(),
+            "(!stage_filtered || il_start == 0) && (" +
+                sourceText(check_condition->getSourceRange(), sm, lang) + ")",
             sm, lang);
       }
 
@@ -1367,12 +1992,41 @@ public:
       const SourceLocation after_loop =
           clang::Lexer::getLocForEndOfToken(loop->getEndLoc(), 0, sm, lang);
       const std::string boundary =
-          "\n" + indent +
-          "if (stage_filtered && !stage_filter.include_output) {\n" + indent +
-          "    cb(" + *carried + ", \"stage_boundary\", il_end - 1);\n" +
-          indent + "    res->t_embd = " + *carried + ";\n" + indent +
-          "    ggml_build_forward_expand(gf, " + *carried + ");\n" + indent +
-          "    return;\n" + indent + "}\n";
+          altup
+              ? "\n" + indent +
+                    "if (stage_filtered && !stage_filter.include_output) "
+                    "{\n" +
+                    indent + "    cb(" + *carried +
+                    ", \"stage_boundary\", il_end - 1);\n" + indent +
+                    "    ggml_tensor * stage_boundary = ggml_cont(ctx0, " +
+                    *carried + ");\n" + indent +
+                    "    cb(stage_boundary, \"stage_boundary_cont\", "
+                    "il_end - "
+                    "1);\n" +
+                    indent +
+                    "    res->t_skippy_gemma3n_altup = stage_boundary;\n" +
+                    indent +
+                    "    res->t_skippy_activation_output = "
+                    "stage_boundary;\n" +
+                    indent +
+                    "    res->t_embd = ggml_view_2d_slice(ctx0, "
+                    "stage_boundary, "
+                    "i_altup_act);\n" +
+                    indent +
+                    "    ggml_build_forward_expand(gf, stage_boundary);\n" +
+                    indent + "    return;\n" + indent + "}\n"
+              : "\n" + indent +
+                    "if (stage_filtered && !stage_filter.include_output) "
+                    "{\n" +
+                    indent + "    cb(" + *carried +
+                    ", \"stage_boundary\", il_end - 1);\n" + indent +
+                    (hyperconnection
+                         ? "    res->t_skippy_activation_output = " + *carried +
+                               ";\n" + indent
+                         : "") +
+                    "    res->t_embd = " + *carried + ";\n" + indent +
+                    "    ggml_build_forward_expand(gf, " + *carried + ");\n" +
+                    indent + "    return;\n" + indent + "}\n";
       valid &= addInsert(report.edits, "insert_stage_boundary", report.file,
                          after_loop, boundary, sm);
     }

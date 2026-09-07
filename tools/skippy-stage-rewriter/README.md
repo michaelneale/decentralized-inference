@@ -43,10 +43,11 @@ over the result to prove idempotence: every edited builder must report
 carry the structural evidence for their execution scope.
 
 The checked-in family shards are produced from a clean llama.cpp tree after the
-shared core Skippy patches and before any model-family patch. The first rewriter
-pass must see zero `already_transformed` builders and generates every model edit.
-The generator then diffs the result against the pinned upstream revision so the
-complete model-family delta is grouped by the certified-family source map:
+shared core patches and static model-semantics patches. Those static patches must
+contain no stage controls. The first rewriter pass must see zero
+`already_transformed` builders and generates every stage edit. The generator then
+diffs the result against that stage-free semantic baseline so static support can
+never leak into or poison the generated shards:
 
 ```sh
 python3 scripts/generate-skippy-family-patch.py \
@@ -54,7 +55,7 @@ python3 scripts/generate-skippy-family-patch.py \
   --build-dir .scratch/llama-central-build \
   --rewriter .scratch/skippy-stage-rewriter-build/skippy-stage-rewriter \
   --report .scratch/skippy-stage-rewriter-report.json \
-  --diff-base "$(cat .scratch/llama-full/.mesh-llm-upstream-sha)" \
+  --diff-base "$(git -C .scratch/llama-central rev-parse HEAD)" \
   --output target/generated-family-combined.patch \
   --shard-output-dir third_party/llama.cpp/patches/generated \
   --family-source-map ci/llama-canary/generated-family-map.json \
