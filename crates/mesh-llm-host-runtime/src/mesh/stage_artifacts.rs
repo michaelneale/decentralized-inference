@@ -234,14 +234,46 @@ impl Node {
         {
             self.record_stage_load_topology(load).await;
         }
-        let response = self
+        let status_filter = match &request {
+            crate::inference::skippy::StageControlRequest::Status(filter) => Some(filter.clone()),
+            _ => None,
+        };
+        let mut response = self
             .execute_stage_control_request_for_peer(remote, request)
             .await?;
+        self.append_locally_executing_statuses(status_filter, &mut response)
+            .await;
         self.record_stage_control_response(&response).await;
         let proto_response = stage_control_response_to_proto(response);
         write_len_prefixed(&mut send, &proto_response.encode_to_vec()).await?;
         let _ = send.finish();
         Ok(())
+    }
+
+    async fn append_locally_executing_statuses(
+        &self,
+        filter: Option<crate::inference::skippy::StageStatusFilter>,
+        response: &mut crate::inference::skippy::StageControlResponse,
+    ) {
+        let (Some(filter), crate::inference::skippy::StageControlResponse::Status(statuses)) =
+            (filter, response)
+        else {
+            return;
+        };
+        // StageControlState owns explicitly loaded downstream servers. The
+        // first stage executes inside the host runtime and publishes its
+        // actual load result through Node's runtime status state instead.
+        // Include only stages owned by this node so a peer never receives a
+        // relayed snapshot as authoritative status.
+        for local_status in self.locally_executing_stage_statuses(&filter).await {
+            if !statuses.iter().any(|status| {
+                status.topology_id == local_status.topology_id
+                    && status.run_id == local_status.run_id
+                    && status.stage_id == local_status.stage_id
+            }) {
+                statuses.push(local_status);
+            }
+        }
     }
 
     pub(crate) async fn prepare_stage_control_request(

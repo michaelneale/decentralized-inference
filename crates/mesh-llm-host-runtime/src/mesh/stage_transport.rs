@@ -546,11 +546,14 @@ impl StageTopologyState {
         failure: StageStatusRefreshFailure,
     ) {
         // A transient refresh failure (peer briefly unreachable, request
-        // timeout) must NOT mark the stage Failed — that discards a still-valid
-        // last-known status and can wrongly tear down a healthy split on a
-        // momentary blip. Only a definitive "missing from runtime" signal, where
-        // the peer answered but has no such stage, marks the stage Failed.
-        if failure == StageStatusRefreshFailure::Transient {
+        // timeout) must NOT mark the stage Failed. A newly published stage can
+        // also be absent from the responder until its embedded runtime records
+        // the first status, so retain Starting and retry. Once a stage has been
+        // observed Ready, a definitive "missing from runtime" response still
+        // marks it Failed.
+        if failure == StageStatusRefreshFailure::Transient
+            || status.state == crate::inference::skippy::StageRuntimeState::Starting
+        {
             return;
         }
         self.record_status(stage_runtime_status_from_snapshot(
@@ -758,6 +761,37 @@ impl Node {
 
     pub async fn stage_runtime_statuses(&self) -> Vec<StageRuntimeStatus> {
         self.stage_topologies.lock().await.runtime_statuses()
+    }
+
+    pub(crate) async fn locally_executing_stage_statuses(
+        &self,
+        filter: &crate::inference::skippy::StageStatusFilter,
+    ) -> Vec<crate::inference::skippy::StageStatusSnapshot> {
+        let local_node = self.endpoint.id();
+        self.stage_topologies
+            .lock()
+            .await
+            .runtime_statuses()
+            .into_iter()
+            .filter(|status| {
+                status.node_id == Some(local_node)
+                    && filter
+                        .topology_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.topology_id)
+                    && filter
+                        .run_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.run_id)
+                    && filter
+                        .stage_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.stage_id)
+            })
+            .map(|status| {
+                stage_snapshot_from_runtime_status(&status, status.state, status.error.clone())
+            })
+            .collect()
     }
 
     pub async fn refresh_stage_runtime_statuses(&self, timeout: std::time::Duration) {
