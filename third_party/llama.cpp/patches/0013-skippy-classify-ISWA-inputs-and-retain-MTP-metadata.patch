@@ -1,0 +1,191 @@
+From 464edc95accc869fc4bd6fa09fc413ecf3296000 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 22:39:32 +1000
+Subject: [PATCH] skippy: classify ISWA inputs and retain MTP metadata
+
+---
+ src/CMakeLists.txt                          | 18 +++++++++
+ src/llama-graph.cpp                         | 43 +++++++++++++++++++--
+ src/llama-graph.h                           |  2 +
+ src/skippy/stage_plan.cpp                   |  1 +
+ src/skippy/tests/noalloc_graph_planning.cpp |  5 +++
+ 5 files changed, 66 insertions(+), 3 deletions(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 3ba863063..6a35c3c43 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -265,6 +265,24 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_noalloc_graph_planning_qwen3 PROPERTIES
+         FIXTURES_REQUIRED skippy-noalloc-qwen3-fixture)
+ 
++    add_test(
++        NAME skippy_generate_gemma2_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch gemma2
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_gemma2_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-gemma2-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_iswa
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma2-dense.gguf"
++            0
++            "kv,kv")
++    set_tests_properties(skippy_noalloc_graph_planning_iswa PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-gemma2-fixture)
++
+     add_test(
+         NAME skippy_generate_deepseek4_fixture
+         COMMAND skippy-model-fixture-generator
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 0b6d17053..1d1987309 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -1771,6 +1771,28 @@ void llm_graph_context::request_inputs(llm_graph_input_attn_k * input) const {
+     request_input(input->self_kq_mask, "attention.mask");
+ }
+ 
++void llm_graph_context::request_inputs(llm_graph_input_attn_kv_iswa * input) const {
++    request_input(input->self_k_idxs, "attention.base.key_indices");
++    request_input(input->self_v_idxs, "attention.base.value_indices");
++    request_input(input->self_kq_mask, "attention.base.mask");
++    request_input(input->self_k_rot, "attention.base.key_rotation");
++    request_input(input->self_v_rot, "attention.base.value_rotation");
++    request_input(input->self_k_idxs_swa, "attention.swa.key_indices");
++    request_input(input->self_v_idxs_swa, "attention.swa.value_indices");
++    request_input(input->self_kq_mask_swa, "attention.swa.mask");
++    request_input(input->self_k_rot_swa, "attention.swa.key_rotation");
++    request_input(input->self_v_rot_swa, "attention.swa.value_rotation");
++}
++
++void llm_graph_context::request_inputs(llm_graph_input_attn_k_iswa * input) const {
++    request_input(input->self_k_idxs, "attention.base.key_indices");
++    request_input(input->self_kq_mask, "attention.base.mask");
++    request_input(input->self_k_rot, "attention.base.key_rotation");
++    request_input(input->self_k_idxs_swa, "attention.swa.key_indices");
++    request_input(input->self_kq_mask_swa, "attention.swa.mask");
++    request_input(input->self_k_rot_swa, "attention.swa.key_rotation");
++}
++
+ void llm_graph_context::request_inputs(llm_graph_input_rs * input) const {
+     request_input(input->s_copy, "recurrent.copy_indices");
+ }
+@@ -3431,13 +3453,17 @@ ggml_tensor * llm_graph_context::build_attn(
+     if (k_cur) {
+         const auto & k_idxs = is_swa ? inp->get_k_idxs_swa() : inp->get_k_idxs();
+ 
+-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
++        ggml_tensor * k_write = mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il);
++        ggml_build_forward_expand(gf, k_write);
++        state_write(skippy_state_kind::kv_key, k_write, k_write, il);
+     }
+ 
+     if (v_cur) {
+         const auto & v_idxs = is_swa ? inp->get_v_idxs_swa() : inp->get_v_idxs();
+ 
+-        ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
++        ggml_tensor * v_write = mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il);
++        ggml_build_forward_expand(gf, v_write);
++        state_write(skippy_state_kind::kv_value, v_write, v_write, il);
+     }
+ 
+     const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
+@@ -3446,6 +3472,9 @@ ggml_tensor * llm_graph_context::build_attn(
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+ 
++    state_read(skippy_state_kind::kv_key, k, il);
++    state_read(skippy_state_kind::kv_value, v, il);
++
+     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+     cb(cur, "kqv_out", il);
+ 
+@@ -3507,7 +3536,9 @@ ggml_tensor * llm_graph_context::build_attn(
+     if (k_cur) {
+         const auto & k_idxs = is_swa ? inp->get_k_idxs_swa() : inp->get_k_idxs();
+ 
+-        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
++        ggml_tensor * k_write = mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il);
++        ggml_build_forward_expand(gf, k_write);
++        state_write(skippy_state_kind::kv_key, k_write, k_write, il);
+     }
+ 
+     const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
+@@ -3517,6 +3548,8 @@ ggml_tensor * llm_graph_context::build_attn(
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+     ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+ 
++    state_read(skippy_state_kind::kv_key, k, il);
++
+     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
+     cb(cur, "kqv_out", il);
+ 
+@@ -3712,6 +3745,8 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
+     inp->self_k_rot_swa = mctx_cur->get_swa()->build_input_k_rot(ctx0);
+     inp->self_v_rot_swa = mctx_cur->get_swa()->build_input_v_rot(ctx0);
+ 
++    request_inputs(inp.get());
++
+     return (llm_graph_input_attn_kv_iswa *) res->add_input(std::move(inp));
+ }
+ 
+@@ -3740,6 +3775,8 @@ llm_graph_input_attn_k_iswa * llm_graph_context::build_attn_inp_k_iswa() const {
+ 
+     inp->self_k_rot_swa = mctx_cur->get_swa()->build_input_k_rot(ctx0);
+ 
++    request_inputs(inp.get());
++
+     return (llm_graph_input_attn_k_iswa *) res->add_input(std::move(inp));
+ }
+ 
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 97fb5ac86..513763c47 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -1270,6 +1270,8 @@ struct llm_graph_context {
+     void request_input(ggml_tensor * tensor, const char * identity) const;
+     void request_inputs(llm_graph_input_attn_kv * input) const;
+     void request_inputs(llm_graph_input_attn_k * input) const;
++    void request_inputs(llm_graph_input_attn_kv_iswa * input) const;
++    void request_inputs(llm_graph_input_attn_k_iswa * input) const;
+     void request_inputs(llm_graph_input_rs * input) const;
+     void request_inputs(llm_graph_input_dsv4 * input) const;
+ 
+diff --git a/src/skippy/stage_plan.cpp b/src/skippy/stage_plan.cpp
+index 701485f97..365f9f9fc 100644
+--- a/src/skippy/stage_plan.cpp
++++ b/src/skippy/stage_plan.cpp
+@@ -315,6 +315,7 @@ skippy_status skippy_stage_planner_create_v1(
+         params.load_mode = LLAMA_LOAD_MODE_NONE;
+         params.use_extra_bufts = false;
+         params.no_alloc = true;
++        params.load_mtp = true;
+         planner->model = model_owner(llama_model_load_from_splits(
+                 native_paths.data(), native_paths.size(), params), llama_model_free);
+         if (!planner->model) {
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index 70fe2a283..20d55631d 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -4,6 +4,7 @@
+ #include "llama-context.h"
+ #include "llama-kv-cache.h"
+ #include "llama-kv-cache-dsv4.h"
++#include "llama-kv-cache-iswa.h"
+ #include "llama-memory-hybrid.h"
+ #include "llama-memory-recurrent.h"
+ #include "llama-model.h"
+@@ -117,6 +118,10 @@ static bool check_memory_buffers(llama_context * context, bool expect_recurrent)
+                check_kv_buffers(dsv4->get_hca()) &&
+                check_kv_buffers(dsv4->get_lid());
+     }
++    if (auto * iswa = dynamic_cast<llama_kv_cache_iswa *>(memory)) {
++        return check_kv_buffers(iswa->get_base()) &&
++               check_kv_buffers(iswa->get_swa());
++    }
+     if (expect_recurrent) {
+         std::fprintf(stderr, "fixture did not construct recurrent memory\n");
+         return false;
