@@ -455,6 +455,7 @@ pub(in crate::runner) fn tokenizer_model_for_state_handoff(
             include_output: false,
             mtp_source: MtpSource::Disabled,
             filter_tensors_on_load,
+            resident_tensor_names: Vec::new(),
             checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
