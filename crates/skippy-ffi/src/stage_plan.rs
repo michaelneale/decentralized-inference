@@ -85,6 +85,7 @@ pub enum StagePlanStateKind {
     KvValue = 1,
     RecurrentConv = 2,
     RecurrentSsm = 3,
+    DerivedPersistent = 4,
 }
 
 #[repr(i32)]

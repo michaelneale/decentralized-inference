@@ -9,7 +9,7 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f479f336040024cead218ba1db930aab53dd511d 100644
+index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f438932345bd00c0cf637f56c251c13de5afd042 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
 @@ -124,8 +124,21 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
@@ -137,7 +137,20 @@ index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f479f336040024cead218ba1db930aab
      }
  
      // the final mixer is the output norm: there is no separate one
-@@ -838,7 +893,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
+@@ -525,6 +580,12 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
+         ggml_set_input(qsa->blk_pos);
+         ggml_set_input(qsa->bias);
+ 
++        request_input(qsa->k_idxs,    "qwen4exp.qsa.key_indices");
++        request_input(qsa->cell_blk,  "qwen4exp.qsa.cell_blocks");
++        request_input(qsa->blk_cells, "qwen4exp.qsa.block_cells");
++        request_input(qsa->blk_pos,   "qwen4exp.qsa.block_positions");
++        request_input(qsa->bias,      "qwen4exp.qsa.bias");
++
+         inp = qsa.get();
+         res->add_input(std::move(qsa));
+         qsa_inps.emplace((uint32_t) r, inp);
+@@ -838,7 +899,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
      ggml_tensor * conv_input = build_conv_state_at(inp, conv_states_all, qkv_mixed,
              conv_kernel_size - 1, conv_channels, il);
  
@@ -146,7 +159,7 @@ index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f479f336040024cead218ba1db930aab
      state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
      cb(state, "state_predelta", il);
  
-@@ -1071,7 +1126,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
+@@ -1071,7 +1132,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
  
      auto it = rs_rows.find(conv_states_all);
      if (it == rs_rows.end()) {
@@ -155,7 +168,7 @@ index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f479f336040024cead218ba1db930aab
      }
      ggml_tensor * rows = it->second;
  
-@@ -1093,7 +1148,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
+@@ -1093,7 +1154,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
              conv_states_all->nb[1],
              kv_head * row_size);
  
@@ -166,6 +179,14 @@ index abf6a0502fbfbcad3232228dc0f45c18fba2091d..f479f336040024cead218ba1db930aab
  
      return conv_input;
  }
+@@ -1108,6 +1171,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_inp_ple(
+ 
+     ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
+     ggml_set_input(ple_inp->rows);
++    request_input(ple_inp->rows, "qwen4exp.ple.rows");
+     ggml_tensor * rows = ple_inp->rows;
+     res->add_input(std::move(ple_inp));
+ 
 -- 
 2.54.0
 
