@@ -279,6 +279,8 @@ pub struct RuntimeConfig {
     pub use_mmap_prefetch: bool,
     pub use_mmap_buffer: bool,
     pub filter_tensors_on_load: bool,
+    pub resident_tensor_names: *const *const c_char,
+    pub resident_tensor_name_count: usize,
     pub include_embeddings: bool,
     pub include_output: bool,
     pub mtp_source: MtpSource,

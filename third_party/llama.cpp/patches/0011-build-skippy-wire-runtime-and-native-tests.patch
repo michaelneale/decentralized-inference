@@ -1,7 +1,7 @@
-From e12b1103a33d2e9b6ebeff7919bbacbe8bfc11a0 Mon Sep 17 00:00:00 2001
+From e9c3a5ca3c4d392c3ce9dee5a88a61c13f71df08 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:51 +1000
-Subject: [PATCH 11/11] build(skippy): wire runtime and native tests
+Subject: [PATCH] build(skippy): wire runtime and native tests
 
 ---
  CMakeLists.txt            | 10 ++++++++++

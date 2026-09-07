@@ -363,11 +363,21 @@ fn validate_topology_stages(load: &proto::stage::LoadStage) -> Result<(), StageF
 fn validate_status_stage_admission(
     status: &proto::stage::StageStatus,
 ) -> Result<(), StageFrameError> {
-    let Some(admission) = status.admission.as_ref() else {
-        if status.model_id.is_empty() {
-            return Ok(());
+    use proto::stage::stage_status::AdmissionState;
+    let admission = match status.admission_state.as_ref() {
+        Some(AdmissionState::Idle(_)) => {
+            if status.model_id.is_empty() {
+                return Ok(());
+            }
+            return Err(StageFrameError::InvalidStageAdmissionDescriptor(
+                "idle status must not identify a model",
+            ));
         }
-        return Err(StageFrameError::MissingStageAdmissionDescriptor);
+        Some(AdmissionState::Admitted(admitted)) => admitted
+            .descriptor
+            .as_ref()
+            .ok_or(StageFrameError::MissingStageAdmissionDescriptor)?,
+        None => return Err(StageFrameError::MissingStageAdmissionDescriptor),
     };
     validate_stage_admission_descriptor(admission)?;
     if admission.layer_start != status.layer_start || admission.layer_end != status.layer_end {
@@ -383,11 +393,21 @@ fn validate_status_stage_admission(
 fn validate_preparation_stage_admission(
     status: &proto::stage::StagePreparationStatus,
 ) -> Result<(), StageFrameError> {
-    let Some(admission) = status.admission.as_ref() else {
-        if status.model_id.is_empty() {
-            return Ok(());
+    use proto::stage::stage_preparation_status::AdmissionState;
+    let admission = match status.admission_state.as_ref() {
+        Some(AdmissionState::Idle(_)) => {
+            if status.model_id.is_empty() {
+                return Ok(());
+            }
+            return Err(StageFrameError::InvalidStageAdmissionDescriptor(
+                "idle preparation must not identify a model",
+            ));
         }
-        return Err(StageFrameError::MissingStageAdmissionDescriptor);
+        Some(AdmissionState::Admitted(admitted)) => admitted
+            .descriptor
+            .as_ref()
+            .ok_or(StageFrameError::MissingStageAdmissionDescriptor)?,
+        None => return Err(StageFrameError::MissingStageAdmissionDescriptor),
     };
     validate_stage_admission_descriptor(admission)?;
     if admission.layer_start != status.layer_start || admission.layer_end != status.layer_end {

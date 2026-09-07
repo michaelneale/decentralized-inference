@@ -132,6 +132,7 @@ impl ConnectionWorkerControl {
             if self.is_shutting_down() {
                 break false;
             }
+            let probe_started = Instant::now();
             match stream.peek(&mut probe) {
                 Ok(_) => break true,
                 Err(error)
@@ -141,7 +142,10 @@ impl ConnectionWorkerControl {
                             | io::ErrorKind::WouldBlock
                             | io::ErrorKind::TimedOut
                     ) => {}
-                Err(error) if timeout_armed && error.raw_os_error() == Some(EINVAL) => {}
+                Err(error)
+                    if timeout_armed
+                        && error.raw_os_error() == Some(EINVAL)
+                        && probe_started.elapsed() >= WORKER_SHUTDOWN_POLL => {}
                 Err(error) => {
                     let _ = stream.set_read_timeout(None);
                     return Err(error);

@@ -43,6 +43,7 @@ pub(crate) fn run_validate_safetensors_load(args: ValidateSafetensorsLoadArgs) -
     let runtime_config = RuntimeConfig {
         layer_end: if full_model { layer_count } else { 1 },
         filter_tensors_on_load: !full_model,
+        resident_tensor_names: Vec::new(),
         include_output: full_model,
         ctx_size: 128,
         n_batch: Some(128),

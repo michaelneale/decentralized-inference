@@ -1,7 +1,7 @@
-From c62a532a4d33561c48cddbb1feef3deea5975064 Mon Sep 17 00:00:00 2001
+From a85405855a560ceb6776b2822d68bb0b6e5bdfdf Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:13 +1000
-Subject: [PATCH 06/11] test(skippy): cover graph planning and stage contracts
+Subject: [PATCH] test(skippy): cover graph planning and stage contracts
 
 ---
  src/CMakeLists.txt                            |  310 +++++

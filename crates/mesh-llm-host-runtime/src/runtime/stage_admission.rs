@@ -99,29 +99,32 @@ pub struct StagePlannerProfile {
     pub n_recurrent_rollback_sequences: u32,
 }
 
-impl From<&RealizedStagePlan> for PlannedStageAdmission {
-    fn from(realized: &RealizedStagePlan) -> Self {
-        Self {
-            package_id: realized.package_id.clone(),
-            plan_id: realized.plan_id.clone(),
-            layer_start: realized.layer_start,
-            layer_end: realized.layer_end,
-            resident_tensor_ids: realized.resident_tensor_ids.clone(),
-            sidecars: realized.sidecars.clone(),
-            profiles: realized
-                .profiles
-                .iter()
-                .map(|profile| PlannedStageProfile {
-                    profile_id: profile.profile_id.clone(),
-                    graph_identity: profile.graph_identity.clone(),
-                    profile_identity: profile.profile_identity.clone(),
-                    slice_identity: profile.slice_identity.clone(),
-                    source_snapshot_identity: profile.source_snapshot_identity.clone(),
-                    graph_configuration_id: profile.graph_configuration_id.clone(),
-                    backend_id: profile.backend_id.clone(),
-                })
-                .collect(),
-        }
+fn planned_admission_from_discovery(
+    manifest: &PackageManifest,
+    range: (u32, u32),
+    sidecars: &[Sidecar],
+    discovered: &RealizedStagePlan,
+) -> PlannedStageAdmission {
+    PlannedStageAdmission {
+        package_id: manifest.package_id.clone(),
+        plan_id: discovered.plan_id.clone(),
+        layer_start: range.0,
+        layer_end: range.1,
+        resident_tensor_ids: discovered.resident_tensor_ids.clone(),
+        sidecars: sidecars.to_vec(),
+        profiles: discovered
+            .profiles
+            .iter()
+            .map(|profile| PlannedStageProfile {
+                profile_id: profile.profile_id.clone(),
+                graph_identity: profile.graph_identity.clone(),
+                profile_identity: profile.profile_identity.clone(),
+                slice_identity: profile.slice_identity.clone(),
+                source_snapshot_identity: profile.source_snapshot_identity.clone(),
+                graph_configuration_id: profile.graph_configuration_id.clone(),
+                backend_id: profile.backend_id.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -438,7 +441,11 @@ pub fn realize_stage_admissions(
             }
         })
         .collect::<Vec<_>>();
-    let (manifest, realized) = realize_native_stage_chain(
+    // Discover and freeze the planner-side expectations before production
+    // realization. The second native pass below is intentionally independent:
+    // admission compares two separately created graph plans instead of cloning
+    // the realized descriptor and comparing it with itself.
+    let (planned_manifest, discovered) = realize_native_stage_chain(
         package_dir,
         ranges,
         profiles,
@@ -446,12 +453,38 @@ pub fn realize_stage_admissions(
         backend_id,
         &sidecars_by_stage,
     )?;
-    realized
+    let planned = ranges
         .iter()
-        .map(|realized| {
-            let planned = PlannedStageAdmission::from(realized);
-            admit_stage_plan(&planned, realized, &manifest).context("admit native stage plan")?;
-            Ok(skippy_protocol::StageAdmissionDescriptor::from(&planned))
+        .zip(&sidecars_by_stage)
+        .zip(&discovered)
+        .map(|((range, sidecars), discovered)| {
+            let planned =
+                planned_admission_from_discovery(&planned_manifest, *range, sidecars, discovered);
+            admit_stage_plan(&planned, discovered, &planned_manifest)
+                .context("validate discovered native stage plan")?;
+            Ok(planned)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let (realized_manifest, realized) = realize_native_stage_chain(
+        package_dir,
+        ranges,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+        &sidecars_by_stage,
+    )?;
+    anyhow::ensure!(
+        planned_manifest.package_id == realized_manifest.package_id,
+        "package identity changed between native planning and realization"
+    );
+    planned
+        .iter()
+        .zip(&realized)
+        .map(|(planned, realized)| {
+            admit_stage_plan(planned, realized, &realized_manifest)
+                .context("admit independently realized native stage plan")?;
+            Ok(skippy_protocol::StageAdmissionDescriptor::from(planned))
         })
         .collect()
 }
@@ -1413,7 +1446,7 @@ mod tests {
             },
             sidecars: Vec::new(),
             generation: None,
-            native_abi_version: "0.1.51".to_string(),
+            native_abi_version: "0.1.52".to_string(),
             generator_version: "test".to_string(),
             created_at_unix_secs: 1,
         };
@@ -1499,6 +1532,30 @@ mod tests {
             sidecars: Vec::new(),
             profiles: profiles.iter().map(|p| realized_profile(p)).collect(),
         }
+    }
+
+    #[test]
+    fn planned_admission_uses_manifest_topology_and_sidecar_inputs() {
+        let mut m = manifest();
+        let sidecar = Sidecar {
+            kind: skippy_package_format::SidecarKind::Mmproj,
+            artifact_id: "weights-b".to_string(),
+            name: Some("vision".to_string()),
+        };
+        m.sidecars = vec![sidecar.clone()];
+        let mut discovered = realized(&m, &["package.tensor.a"], &["decode"]);
+        discovered.package_id = "wrong-package".to_string();
+        discovered.layer_start = 99;
+        discovered.layer_end = 100;
+        discovered.sidecars.clear();
+
+        let planned = planned_admission_from_discovery(&m, (2, 7), &[sidecar.clone()], &discovered);
+
+        assert_eq!(planned.package_id, m.package_id);
+        assert_eq!((planned.layer_start, planned.layer_end), (2, 7));
+        assert_eq!(planned.sidecars, vec![sidecar]);
+        assert_eq!(planned.plan_id, discovered.plan_id);
+        assert_eq!(planned.resident_tensor_ids, discovered.resident_tensor_ids);
     }
 
     #[test]

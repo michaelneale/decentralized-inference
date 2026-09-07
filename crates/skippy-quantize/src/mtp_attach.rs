@@ -200,6 +200,7 @@ fn runtime_config(
         include_output: true,
         mtp_source,
         filter_tensors_on_load: false,
+        resident_tensor_names: Vec::new(),
         kv_offload: None,
         kv_unified: None,
         swa_full: None,

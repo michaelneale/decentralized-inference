@@ -278,6 +278,10 @@ pub struct StageConfig {
     pub cache_idle_slots: Option<u32>,
     #[serde(default)]
     pub filter_tensors_on_load: bool,
+    /// Exact native tensor names resolved locally from admitted package-v2
+    /// tensor IDs. Empty preserves the legacy range-based loader filter.
+    #[serde(default)]
+    pub resident_tensor_names: Vec<String>,
     #[serde(default)]
     pub selected_device: Option<StageDevice>,
     #[serde(default)]

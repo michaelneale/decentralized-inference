@@ -207,6 +207,8 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("steps.resolve.outputs.dense_sha256", restore)
         self.assertIn("steps.resolve.outputs.recurrent_artifact_id", restore)
         self.assertIn("steps.resolve.outputs.recurrent_sha256", restore)
+        self.assertIn("tr '[:lower:]' '[:upper:]'", restore)
+        self.assertNotIn("${fixture^^}", restore)
         self.assertIn("steps.inputs.outputs.dense_model_artifact_id", workflow)
         self.assertIn("steps.inputs.outputs.dense_model_sha256", workflow)
         self.assertIn("steps.inputs.outputs.recurrent_model_artifact_id", workflow)

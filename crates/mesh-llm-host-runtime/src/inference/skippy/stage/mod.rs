@@ -854,6 +854,7 @@ fn stage_config(
             "selected backend device must not be empty"
         );
     }
+    let resident_tensor_names = admitted_resident_tensor_names(load, package)?;
     let mut config = StageConfig {
         run_id: load.run_id.clone(),
         topology_id: load.topology_id.clone(),
@@ -914,6 +915,7 @@ fn stage_config(
             load.load_mode,
             LoadMode::RuntimeSlice | LoadMode::LayerPackage
         ),
+        resident_tensor_names,
         checkpoint_quantization: None,
         checkpoint_imatrix: None,
         checkpoint_imatrix_sha256: None,
@@ -933,6 +935,44 @@ fn stage_config(
         },
     );
     Ok(config)
+}
+
+fn admitted_resident_tensor_names(
+    load: &StageLoadRequest,
+    package: Option<&super::materialization::ResolvedStagePackage>,
+) -> Result<Vec<String>> {
+    let package_ref = package
+        .map(|package| package.local_ref.as_str())
+        .unwrap_or(&load.package_ref);
+    if !super::is_package_v2_ref(package_ref) {
+        return Ok(Vec::new());
+    }
+
+    let manifest_path = Path::new(package_ref).join("model-package.json");
+    let manifest: skippy_package_format::PackageManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+    let package_id = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity for resident tensor binding")?;
+    anyhow::ensure!(
+        package_id == load.admission.package_id,
+        "stage admission package identity differs from local package-v2 manifest"
+    );
+    let mut names = manifest
+        .materialization_tensors(&load.admission.resident_tensor_ids)
+        .map_err(|error| anyhow!(error.to_string()))?
+        .into_iter()
+        .map(|tensor| tensor.native_name.to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    anyhow::ensure!(
+        !names.is_empty() && names.windows(2).all(|window| window[0] < window[1]),
+        "admitted resident tensor names must be non-empty, strictly sorted, and unique"
+    );
+    Ok(names)
 }
 
 fn peer_config(peer: &StagePeerDescriptor) -> PeerConfig {

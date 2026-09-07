@@ -760,35 +760,6 @@ impl Node {
         self.stage_topologies.lock().await.runtime_statuses()
     }
 
-    pub(crate) async fn cached_stage_statuses(
-        &self,
-        filter: &crate::inference::skippy::StageStatusFilter,
-    ) -> Vec<crate::inference::skippy::StageStatusSnapshot> {
-        self.stage_topologies
-            .lock()
-            .await
-            .runtime_statuses()
-            .into_iter()
-            .filter(|status| {
-                filter
-                    .topology_id
-                    .as_ref()
-                    .is_none_or(|value| value == &status.topology_id)
-                    && filter
-                        .run_id
-                        .as_ref()
-                        .is_none_or(|value| value == &status.run_id)
-                    && filter
-                        .stage_id
-                        .as_ref()
-                        .is_none_or(|value| value == &status.stage_id)
-            })
-            .map(|status| {
-                stage_snapshot_from_runtime_status(&status, status.state, status.error.clone())
-            })
-            .collect()
-    }
-
     pub async fn refresh_stage_runtime_statuses(&self, timeout: std::time::Duration) {
         let active_statuses = self.stage_topologies.lock().await.active_statuses();
         for status in active_statuses {

@@ -51,8 +51,6 @@ cmake -S "$ROOT/tools/skippy-stage-rewriter" -B "$TOOL_BUILD" -G Ninja \
   -DClang_DIR="$LLVM_PREFIX/lib/cmake/clang"
 cmake --build "$TOOL_BUILD"
 ctest --test-dir "$TOOL_BUILD" --output-on-failure
-ctest --test-dir "$LLAMA_BUILD_DIR" --output-on-failure -R '^skippy_' \
-  | tee "$ARTIFACT_ROOT/noalloc-graph-verifier.log"
 
 EXTRA_ARGS=(--extra-arg=-resource-dir --extra-arg="$("$LLVM_PREFIX"/bin/clang -print-resource-dir)")
 if command -v xcrun >/dev/null 2>&1; then
@@ -76,6 +74,33 @@ python3 "$ROOT/scripts/generate-skippy-family-patch.py" \
   --family-manifest "$FAMILY_MANIFEST" \
   "${EXTRA_ARGS[@]}"
 
+TRANSFORMED_TREE_TARGETS=(
+  llama
+  skippy-graph-build-inputs
+  skippy-hardware-application-probe
+  skippy-model-fixture-generator
+  skippy-model-loader-accounting
+  skippy-noalloc-graph-planning
+  skippy-renamed-multishard-planning
+  skippy-stage-plan-header-c
+  skippy-stage-plan-header-cpp
+  skippy-stage-slice-plan
+)
+if cmake --build "$LLAMA_BUILD_DIR" --target "${TRANSFORMED_TREE_TARGETS[@]}" 2>&1 \
+  | tee "$ARTIFACT_ROOT/transformed-tree-compile.log"; then
+  compile_result=pass
+else
+  compile_result=fail
+fi
+
+if [[ "$compile_result" == pass ]] && \
+  ctest --test-dir "$LLAMA_BUILD_DIR" --output-on-failure -R '^skippy_' 2>&1 \
+    | tee "$ARTIFACT_ROOT/noalloc-graph-verifier.log"; then
+  graph_verify_result=pass
+else
+  graph_verify_result=fail
+fi
+
 if diff -qr "$CHECKED_PATCH_DIR" "$GENERATED_PATCH_DIR" >/dev/null; then
   patch_result=pass
 else
@@ -92,8 +117,8 @@ python3 "$ROOT/scripts/skippy-rewriter-harness.py" \
   --mode validate \
   --patch-check "$patch_result" \
   --patch-drift-gate fail \
-  --compile-result pass \
-  --graph-verify-result pass
+  --compile-result "$compile_result" \
+  --graph-verify-result "$graph_verify_result"
 python3 "$ROOT/scripts/skippy-rewriter-harness.py" \
   --report "$SECOND_REPORT" \
   --mode idempotence

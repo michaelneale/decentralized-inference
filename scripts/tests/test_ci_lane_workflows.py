@@ -214,6 +214,14 @@ class CiLaneWorkflowTests(unittest.TestCase):
             self.assertIn(f'echo "{output}=$', action)
         for platform in ("linux", "macos", "windows"):
             self.assertIn(f'select(.platform == "{platform}")', action)
+        self.assertIn(
+            'smoke: [.matrices.smoke[] | select(.id != "metal-model-load")]',
+            action,
+        )
+        self.assertIn(
+            'smoke: [.matrices.smoke[] | select(.id == "metal-model-load")]',
+            action,
+        )
 
     def test_pr_planner_uses_only_immutable_source_manifests(self) -> None:
         action = (ROOT / ".github/actions/plan-ci/action.yml").read_text(

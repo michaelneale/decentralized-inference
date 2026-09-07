@@ -1,7 +1,7 @@
-From 404bfb7172b1a0be6e5a4e03252d3cf6b2ac1c40 Mon Sep 17 00:00:00 2001
+From 0474f32dab1250ce1bd29b0d04562039b4ea6cd3 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:22:42 +1000
-Subject: [PATCH 02/11] skippy: define public runtime ABI
+Subject: [PATCH] skippy: define public runtime ABI
 
 ---
  include/skippy.h                      |  28 +++
@@ -12,14 +12,14 @@ Subject: [PATCH 02/11] skippy: define public runtime ABI
  include/skippy/execution.h            | 264 ++++++++++++++++++++++++++
  include/skippy/model_package.h        | 103 ++++++++++
  include/skippy/model_source.h         |  84 ++++++++
- include/skippy/runtime.h              | 257 +++++++++++++++++++++++++
+ include/skippy/runtime.h              | 261 +++++++++++++++++++++++++
  include/skippy/sampling.h             |  74 ++++++++
  include/skippy/signals.h              |  53 ++++++
  include/skippy/speculative_decoding.h |  71 +++++++
  include/skippy/stage_plan.h           | 243 ++++++++++++++++++++++++
  include/skippy/state.h                | 187 ++++++++++++++++++
  include/skippy/tokenization.h         |  85 +++++++++
- 15 files changed, 1808 insertions(+)
+ 15 files changed, 1812 insertions(+)
  create mode 100644 include/skippy.h
  create mode 100644 include/skippy/activation.h
  create mode 100644 include/skippy/common.h
@@ -147,7 +147,7 @@ index 000000000..347576e05
 +#endif // SKIPPY_ACTIVATION_H
 diff --git a/include/skippy/common.h b/include/skippy/common.h
 new file mode 100644
-index 000000000..fbbb636ef
+index 000000000..b156cb5eb
 --- /dev/null
 +++ b/include/skippy/common.h
 @@ -0,0 +1,128 @@
@@ -199,7 +199,7 @@ index 000000000..fbbb636ef
 +
 +#define SKIPPY_ABI_VERSION_MAJOR 0
 +#define SKIPPY_ABI_VERSION_MINOR 1
-+#define SKIPPY_ABI_VERSION_PATCH 51
++#define SKIPPY_ABI_VERSION_PATCH 52
 +
 +#if defined(_MSC_VER)
 +#define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
@@ -924,10 +924,10 @@ index 000000000..5d77f4804
 +#endif // SKIPPY_MODEL_SOURCE_H
 diff --git a/include/skippy/runtime.h b/include/skippy/runtime.h
 new file mode 100644
-index 000000000..4c66e6772
+index 000000000..ea5b56324
 --- /dev/null
 +++ b/include/skippy/runtime.h
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,261 @@
 +#ifndef SKIPPY_RUNTIME_H
 +#define SKIPPY_RUNTIME_H
 +
@@ -994,6 +994,10 @@ index 000000000..4c66e6772
 +    bool use_mmap_prefetch;
 +    bool use_mmap_buffer;
 +    bool filter_tensors_on_load;
++    // Optional exact tensor closure for filtered stage loads. When non-empty,
++    // the loader retains only these canonical GGUF tensor names.
++    const char * const * resident_tensor_names;
++    size_t resident_tensor_name_count;
 +    bool include_embeddings;
 +    bool include_output;
 +    enum skippy_mtp_source mtp_source;

@@ -1,7 +1,7 @@
-From 35cd7c4e31abb7d904bcd9d5a9a7e598cf728076 Mon Sep 17 00:00:00 2001
+From ed08cd540fd3f1b15fda63e76a6553f75af16261 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:35 +1000
-Subject: [PATCH 09/11] ggml: optimize Apple Metal staging paths
+Subject: [PATCH] ggml: optimize Apple Metal staging paths
 
 ---
  ggml/src/ggml-metal/ggml-metal-device.m | 177 +++++++++++++++++++++++-

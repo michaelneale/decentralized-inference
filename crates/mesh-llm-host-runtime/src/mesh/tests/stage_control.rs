@@ -263,6 +263,33 @@ fn content_addressed_status_redacts_projector_at_wire_boundary() {
 }
 
 #[test]
+fn status_conversions_preserve_activation_codec_policy() {
+    let node_id = make_test_endpoint_id(0x91);
+    let mut load = test_stage_load_request();
+    load.activation_codec_policy = skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1;
+
+    let status = stage_status_from_load(&load, crate::inference::skippy::StageRuntimeState::Ready);
+    assert_eq!(status.activation_codec_policy, load.activation_codec_policy);
+    let runtime = stage_runtime_status_from_snapshot(Some(node_id), status);
+    assert_eq!(runtime.activation_codec_policy, load.activation_codec_policy);
+    let snapshot = stage_snapshot_from_runtime_status(
+        &runtime,
+        crate::inference::skippy::StageRuntimeState::Ready,
+        None,
+    );
+    assert_eq!(snapshot.activation_codec_policy, load.activation_codec_policy);
+    let preparation = stage_preparation_status_from_load(
+        &load,
+        crate::inference::skippy::StagePreparationState::Ready,
+        None,
+    );
+    assert_eq!(
+        preparation.activation_codec_policy,
+        load.activation_codec_policy
+    );
+}
+
+#[test]
 fn strict_local_load_uses_distinct_fail_closed_proto_command() {
     let requester = make_test_endpoint_id(0x85);
     let digest = "a".repeat(64);

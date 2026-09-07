@@ -1,7 +1,7 @@
-From 15da005af4dd9fa334f034e5862057b5e11e7cd4 Mon Sep 17 00:00:00 2001
+From 0299934c46f99122658acc4faa9c7467230aadcd Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:22 +1000
-Subject: [PATCH 07/11] skippy: add chat, tokenization, and prompt support
+Subject: [PATCH] skippy: add chat, tokenization, and prompt support
 
 ---
  common/chat-auto-parser-generator.cpp |  51 ++-

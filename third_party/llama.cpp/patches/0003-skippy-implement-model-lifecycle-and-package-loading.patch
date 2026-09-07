@@ -1,23 +1,23 @@
-From 49b0b39dafaba5ff1d572a445f7ce0e9e84098b8 Mon Sep 17 00:00:00 2001
+From db705a1fa9e18eaa80bcef47b0deae9494a00092 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:22:57 +1000
-Subject: [PATCH 03/11] skippy: implement model lifecycle and package loading
+Subject: [PATCH] skippy: implement model lifecycle and package loading
 
 ---
  src/skippy/abi.cpp                      |  52 ++
  src/skippy/devices.cpp                  | 106 +++
  src/skippy/model_lifecycle.cpp          | 146 ++++
- src/skippy/model_load_config.cpp        | 159 +++++
+ src/skippy/model_load_config.cpp        | 159 ++++
  src/skippy/model_load_config_internal.h |  25 +
- src/skippy/model_loading.cpp            | 911 ++++++++++++++++++++++++
+ src/skippy/model_loading.cpp            | 923 ++++++++++++++++++++++++
  src/skippy/model_loading_internal.h     |  38 +
  src/skippy/model_package.cpp            | 738 +++++++++++++++++++
- src/skippy/model_source.cpp             | 458 ++++++++++++
+ src/skippy/model_source.cpp             | 470 ++++++++++++
  src/skippy/package_tensor_binding.cpp   | 104 +++
  src/skippy/package_tensor_binding.h     |  27 +
  src/skippy/runtime_support.h            |  37 +
- src/skippy/runtime_types.h              | 159 +++++
- 13 files changed, 2960 insertions(+)
+ src/skippy/runtime_types.h              | 159 ++++
+ 13 files changed, 2984 insertions(+)
  create mode 100644 src/skippy/abi.cpp
  create mode 100644 src/skippy/devices.cpp
  create mode 100644 src/skippy/model_lifecycle.cpp
@@ -552,10 +552,10 @@ index 000000000..0f7c83139
 +        llama_context_params & params);
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
 new file mode 100644
-index 000000000..8cfc8e9bd
+index 000000000..0e23cfef2
 --- /dev/null
 +++ b/src/skippy/model_loading.cpp
-@@ -0,0 +1,911 @@
+@@ -0,0 +1,923 @@
 +#include "skippy.h"
 +#include "skippy/errors.h"
 +#include "skippy/environment.h"
@@ -934,6 +934,18 @@ index 000000000..8cfc8e9bd
 +            }
 +            filter.include_embeddings = config->include_embeddings;
 +            filter.include_output = config->include_output;
++            if (config->resident_tensor_name_count > 0 && config->resident_tensor_names == nullptr) {
++                throw std::invalid_argument("resident tensor name count requires a non-null array");
++            }
++            for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
++                const char * name = config->resident_tensor_names[i];
++                if (name == nullptr || name[0] == '\0') {
++                    throw std::invalid_argument("resident tensor names must be non-empty");
++                }
++                if (!filter.resident_tensor_names.emplace(name).second) {
++                    throw std::invalid_argument("resident tensor names must be unique");
++                }
++            }
 +            llama_model_loader_set_stage_filter(filter);
 +            enabled = true;
 +        }
@@ -2257,10 +2269,10 @@ index 000000000..ffd84c132
 +}
 diff --git a/src/skippy/model_source.cpp b/src/skippy/model_source.cpp
 new file mode 100644
-index 000000000..b0e475ee6
+index 000000000..2592ab088
 --- /dev/null
 +++ b/src/skippy/model_source.cpp
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,470 @@
 +#include "skippy/model_source.h"
 +
 +#include "skippy/errors.h"
@@ -2576,6 +2588,18 @@ index 000000000..b0e475ee6
 +            }
 +            filter.include_embeddings = config->include_embeddings;
 +            filter.include_output = config->include_output;
++            if (config->resident_tensor_name_count > 0 && config->resident_tensor_names == nullptr) {
++                throw std::invalid_argument("resident tensor name count requires a non-null array");
++            }
++            for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
++                const char * name = config->resident_tensor_names[i];
++                if (name == nullptr || name[0] == '\0') {
++                    throw std::invalid_argument("resident tensor names must be non-empty");
++                }
++                if (!filter.resident_tensor_names.emplace(name).second) {
++                    throw std::invalid_argument("resident tensor names must be unique");
++                }
++            }
 +            llama_model_loader_set_stage_filter(filter);
 +            enabled = true;
 +        }

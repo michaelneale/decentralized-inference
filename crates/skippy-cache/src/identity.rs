@@ -1,6 +1,6 @@
 use skippy_protocol::{FlashAttentionType, LoadMode, StageConfig};
 
-pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1.51/native-kv-page-v3";
+pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1.52/native-kv-page-v3";
 pub const NATIVE_KV_DTYPE: &str = "ggml-native-kv";
 const NATIVE_KV_LAYER_CONTIGUOUS_LAYOUT: i32 = 4;
 
@@ -318,6 +318,7 @@ mod identity_completeness_tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -619,6 +620,7 @@ mod identity_stability_tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,

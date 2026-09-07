@@ -1328,6 +1328,7 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         swa_full: options.swa_full,
         cache_idle_slots: options.cache_idle_slots,
         filter_tensors_on_load: false,
+        resident_tensor_names: Vec::new(),
         checkpoint_quantization: options
             .checkpoint_quantization
             .as_ref()

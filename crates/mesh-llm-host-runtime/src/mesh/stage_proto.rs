@@ -70,7 +70,7 @@ pub(super) fn stage_runtime_status_from_snapshot(
         layer_end: status.layer_end,
         admission: status.admission,
         activation_codec: status.activation_codec,
-        activation_codec_policy: Default::default(),
+        activation_codec_policy: status.activation_codec_policy,
         state: status.state,
         bind_addr: status.bind_addr,
         input_activation_boundary: status.input_activation_boundary,
@@ -114,7 +114,7 @@ pub(crate) fn stage_snapshot_from_runtime_status(
         layer_end: status.layer_end,
         admission: status.admission.clone(),
         activation_codec: status.activation_codec,
-        activation_codec_policy: Default::default(),
+        activation_codec_policy: status.activation_codec_policy,
         state,
         bind_addr: status.bind_addr.clone(),
         input_activation_boundary: status.input_activation_boundary,
@@ -910,7 +910,7 @@ pub(crate) fn stage_status_from_load(
         layer_end: load.layer_end,
         admission: Some(load.admission.clone()),
         activation_codec: load.activation_codec,
-        activation_codec_policy: Default::default(),
+        activation_codec_policy: load.activation_codec_policy,
         state,
         bind_addr: load.bind_addr.clone(),
         input_activation_boundary: None,
@@ -947,7 +947,7 @@ pub(super) fn stage_preparation_status_from_load(
         layer_end: load.layer_end,
         admission: Some(load.admission.clone()),
         activation_codec: load.activation_codec,
-        activation_codec_policy: Default::default(),
+        activation_codec_policy: load.activation_codec_policy,
         state,
         bytes_done: None,
         bytes_total: None,
@@ -1273,6 +1273,13 @@ pub(super) fn source_model_kind_from_proto(
 pub(super) fn stage_preparation_status_to_proto(
     status: crate::inference::skippy::StagePreparationStatus,
 ) -> skippy_stage_proto::StagePreparationStatus {
+    use skippy_stage_proto::stage_preparation_status::AdmissionState;
+    let admission_state = Some(match status.admission {
+        Some(descriptor) => AdmissionState::Admitted(skippy_stage_proto::StageAdmissionAdmitted {
+            descriptor: Some(descriptor.into()),
+        }),
+        None => AdmissionState::Idle(skippy_stage_proto::StageAdmissionIdle {}),
+    });
     skippy_stage_proto::StagePreparationStatus {
         topology_id: status.topology_id,
         run_id: status.run_id,
@@ -1293,7 +1300,7 @@ pub(super) fn stage_preparation_status_to_proto(
         coordinator_term: status.coordinator_term,
         coordinator_id: status.coordinator_id.map(|id| id.to_string()),
         lease_until_unix_ms: status.lease_until_unix_ms,
-        admission: status.admission.map(Into::into),
+        admission_state,
         activation_codec: stage_activation_codec_to_proto(status.activation_codec) as i32,
         activation_codec_policy: stage_activation_codec_policy_to_proto(
             status.activation_codec_policy,
@@ -1304,6 +1311,7 @@ pub(super) fn stage_preparation_status_to_proto(
 pub(super) fn stage_preparation_status_from_proto(
     status: skippy_stage_proto::StagePreparationStatus,
 ) -> anyhow::Result<crate::inference::skippy::StagePreparationStatus> {
+    use skippy_stage_proto::stage_preparation_status::AdmissionState;
     let coordinator_id = status.coordinator_id.and_then(|id| match id.parse() {
         Ok(id) => Some(id),
         Err(error) => {
@@ -1315,13 +1323,19 @@ pub(super) fn stage_preparation_status_from_proto(
             None
         }
     });
-    let admission = status
-        .admission
-        .map(TryInto::try_into)
-        .transpose()
-        .map_err(|error| {
-            anyhow::anyhow!("invalid stage preparation admission descriptor: {error}")
-        })?;
+    let admission = match status.admission_state {
+        Some(AdmissionState::Idle(_)) => None,
+        Some(AdmissionState::Admitted(admitted)) => Some(
+            admitted
+                .descriptor
+                .ok_or_else(|| anyhow::anyhow!("admitted stage preparation missing descriptor"))?
+                .try_into()
+                .map_err(|error| {
+                    anyhow::anyhow!("invalid stage preparation admission descriptor: {error}")
+                })?,
+        ),
+        None => return Err(anyhow::anyhow!("stage preparation missing admission state")),
+    };
     Ok(crate::inference::skippy::StagePreparationStatus {
         topology_id: status.topology_id,
         run_id: status.run_id,
@@ -1353,8 +1367,15 @@ pub(super) fn stage_preparation_status_from_proto(
 pub(super) fn stage_status_to_proto(
     status: crate::inference::skippy::StageStatusSnapshot,
 ) -> skippy_stage_proto::StageStatus {
+    use skippy_stage_proto::stage_status::AdmissionState;
     let projector_path =
         path_free_stage_projector_path(status.package_ref.as_deref(), status.projector_path);
+    let admission_state = Some(match status.admission {
+        Some(descriptor) => AdmissionState::Admitted(skippy_stage_proto::StageAdmissionAdmitted {
+            descriptor: Some(descriptor.into()),
+        }),
+        None => AdmissionState::Idle(skippy_stage_proto::StageAdmissionIdle {}),
+    });
     skippy_stage_proto::StageStatus {
         topology_id: status.topology_id,
         run_id: status.run_id,
@@ -1391,7 +1412,7 @@ pub(super) fn stage_status_to_proto(
         coordinator_term: status.coordinator_term,
         coordinator_id: status.coordinator_id.map(|id| id.to_string()),
         lease_until_unix_ms: status.lease_until_unix_ms,
-        admission: status.admission.map(Into::into),
+        admission_state,
         activation_codec: stage_activation_codec_to_proto(status.activation_codec) as i32,
         activation_codec_policy: stage_activation_codec_policy_to_proto(
             status.activation_codec_policy,
@@ -1402,13 +1423,22 @@ pub(super) fn stage_status_to_proto(
 pub(super) fn stage_status_from_proto(
     status: skippy_stage_proto::StageStatus,
 ) -> anyhow::Result<crate::inference::skippy::StageStatusSnapshot> {
+    use skippy_stage_proto::stage_status::AdmissionState;
     let projector_path =
         path_free_stage_projector_path(status.package_ref.as_deref(), status.projector_path);
-    let admission = status
-        .admission
-        .map(TryInto::try_into)
-        .transpose()
-        .map_err(|error| anyhow::anyhow!("invalid stage status admission descriptor: {error}"))?;
+    let admission = match status.admission_state {
+        Some(AdmissionState::Idle(_)) => None,
+        Some(AdmissionState::Admitted(admitted)) => Some(
+            admitted
+                .descriptor
+                .ok_or_else(|| anyhow::anyhow!("admitted stage status missing descriptor"))?
+                .try_into()
+                .map_err(|error| {
+                    anyhow::anyhow!("invalid stage status admission descriptor: {error}")
+                })?,
+        ),
+        None => return Err(anyhow::anyhow!("stage status missing admission state")),
+    };
     Ok(crate::inference::skippy::StageStatusSnapshot {
         topology_id: status.topology_id,
         run_id: status.run_id,

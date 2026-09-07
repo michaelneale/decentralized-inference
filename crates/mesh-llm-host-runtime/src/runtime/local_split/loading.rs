@@ -370,7 +370,7 @@ pub(super) async fn load_split_runtime_generation_inner(
     })
 }
 
-async fn stage0_runtime_options(
+pub(super) async fn stage0_runtime_options(
     spec: &SplitGenerationLoadSpec<'_>,
     settings: &SplitGenerationLoadSettings<'_>,
     downstream: &skippy::StagePeerDescriptor,
@@ -429,6 +429,8 @@ async fn stage0_runtime_options(
     runtime_options.config.layer_end = settings.stage0.layer_end;
     runtime_options.config.ctx_size = spec.ctx_size;
     runtime_options.config.lane_count = spec.slots as u32;
+    runtime_options.config.activation_codec = spec.generation.activation_codec;
+    runtime_options.config.activation_codec_policy = spec.generation.activation_codec_policy;
     runtime_options.config.filter_tensors_on_load = true;
     apply_split_generation_pinned_device(
         &mut runtime_options.config,

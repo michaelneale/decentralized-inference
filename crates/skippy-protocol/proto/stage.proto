@@ -228,6 +228,12 @@ message ActivationBoundaryDescriptor {
   uint64 required_sidebands = 7;
 }
 
+message StageAdmissionIdle {}
+
+message StageAdmissionAdmitted {
+  StageAdmissionDescriptor descriptor = 1;
+}
+
 message StageStatus {
   string topology_id = 1;
   string run_id = 2;
@@ -262,9 +268,14 @@ message StageStatus {
   uint64 lease_until_unix_ms = 31;
   optional ActivationBoundaryDescriptor input_activation_boundary = 32;
   optional ActivationBoundaryDescriptor output_activation_boundary = 33;
-  StageAdmissionDescriptor admission = 34;
+  reserved 34;
+  reserved "admission";
   StageActivationCodec activation_codec = 35;
   StageActivationCodecPolicy activation_codec_policy = 36;
+  oneof admission_state {
+    StageAdmissionIdle idle = 37;
+    StageAdmissionAdmitted admitted = 38;
+  }
 }
 
 message StageStatusList {
@@ -317,9 +328,14 @@ message StagePreparationStatus {
   uint64 coordinator_term = 17;
   optional string coordinator_id = 18;
   uint64 lease_until_unix_ms = 19;
-  StageAdmissionDescriptor admission = 20;
+  reserved 20;
+  reserved "admission";
   StageActivationCodec activation_codec = 21;
   StageActivationCodecPolicy activation_codec_policy = 22;
+  oneof admission_state {
+    StageAdmissionIdle idle = 23;
+    StageAdmissionAdmitted admitted = 24;
+  }
 }
 
 enum StageActivationCodec {

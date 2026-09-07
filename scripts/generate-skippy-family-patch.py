@@ -35,10 +35,9 @@ def run(command: list[str], *, cwd: Path, capture: bool = False) -> str:
         command,
         cwd=cwd,
         check=True,
-        text=True,
         stdout=subprocess.PIPE if capture else None,
     )
-    return result.stdout if capture else ""
+    return result.stdout.decode("utf-8", errors="strict") if capture else ""
 
 
 def git(root: Path, *args: str, capture: bool = False) -> str:
@@ -98,6 +97,10 @@ def validate_report(report_path: Path, *, idempotence: bool) -> dict:
 
 def patch_text(subject: str, diff: str) -> str:
     return PATCH_HEADER.format(subject=subject) + diff + "-- \n2.54.0\n\n"
+
+
+def write_utf8(path: Path, content: str) -> None:
+    path.write_bytes(content.encode("utf-8", errors="strict"))
 
 
 def load_family_map(path: Path) -> dict[str, list[str]]:
@@ -178,7 +181,7 @@ def write_family_shards(
             filename = f"{index:04d}-family-{label}.patch"
             shard_diff = "".join(sections[source] for source in sorted(sections))
             content = patch_text(f"skippy: generate {label} stage controls", shard_diff)
-            (temp / filename).write_text(content, encoding="utf-8")
+            write_utf8(temp / filename, content)
             shards.append({
                 "file": filename,
                 "families": list(families),
@@ -191,12 +194,10 @@ def write_family_shards(
             "full_patch_sha256": hashlib.sha256(diff.encode()).hexdigest(),
             "shards": shards,
         }
-        (temp / "series.json").write_text(
-            json.dumps(series, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        write_utf8(
+            temp / "series.json", json.dumps(series, indent=2, sort_keys=True) + "\n"
         )
-        (temp / "series").write_text(
-            "".join(f"{shard['file']}\n" for shard in shards), encoding="utf-8"
-        )
+        write_utf8(temp / "series", "".join(f"{shard['file']}\n" for shard in shards))
         if output_dir.exists():
             shutil.rmtree(output_dir)
         temp.rename(output_dir)
@@ -299,9 +300,9 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("generation produced an empty model patch")
 
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
+        write_utf8(
+            output,
             patch_text("skippy: generate model-family stage controls", diff),
-            encoding="utf-8",
         )
         series = (
             write_family_shards(diff, shard_output_dir, family_source_map, family_manifest)
@@ -320,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (OSError, RuntimeError, UnicodeError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

@@ -61,6 +61,7 @@ impl PackageManifest {
     pub fn computed_package_id(&self) -> Result<String, serde_json::Error> {
         let mut normalized = self.clone();
         normalized.package_id.clear();
+        normalized.created_at_unix_secs = 0;
         normalized
             .source_model
             .files

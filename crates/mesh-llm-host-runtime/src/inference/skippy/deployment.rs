@@ -162,6 +162,7 @@ pub(crate) fn stage0_config(
         swa_full: context.runtime_settings.swa_full,
         cache_idle_slots: context.runtime_settings.cache_idle_slots,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
         checkpoint_quantization: None,
         checkpoint_imatrix: None,
         checkpoint_imatrix_sha256: None,

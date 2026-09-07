@@ -1,20 +1,20 @@
-From 8a1087cea8a82abcc001509d50c8f0b22b90a5d7 Mon Sep 17 00:00:00 2001
+From a0ac2dda6cca8b1583a50082257edaf2f430c23e Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:40 +1000
-Subject: [PATCH 10/11] test(skippy): cover runtime and upstream compatibility
+Subject: [PATCH] test(skippy): cover runtime and upstream compatibility
 
 ---
  tests/CMakeLists.txt                          |  22 ++
  tests/test-chat-auto-parser.cpp               |  47 +++
- tests/test-chat.cpp                           | 285 +++++++++++++++++-
- tests/test-llama-archs.cpp                    | 122 +++++++-
+ tests/test-chat.cpp                           | 285 ++++++++++++++++-
+ tests/test-llama-archs.cpp                    | 122 ++++++-
  tests/test-skippy-activation-layout.cpp       |  64 ++++
  tests/test-skippy-kv-cells-contiguous.cpp     |  20 ++
- tests/test-skippy-kv-page-export.cpp          | 261 ++++++++++++++++
- tests/test-skippy-model-loader-accounting.cpp | 260 ++++++++++++++++
- .../test-skippy-recurrent-state-roundtrip.cpp | 159 ++++++++++
+ tests/test-skippy-kv-page-export.cpp          | 261 +++++++++++++++
+ tests/test-skippy-model-loader-accounting.cpp | 301 ++++++++++++++++++
+ .../test-skippy-recurrent-state-roundtrip.cpp | 159 +++++++++
  ...st-skippy-verify-checkpoint-retirement.cpp |  26 ++
- 10 files changed, 1252 insertions(+), 14 deletions(-)
+ 10 files changed, 1293 insertions(+), 14 deletions(-)
  create mode 100644 tests/test-skippy-activation-layout.cpp
  create mode 100644 tests/test-skippy-kv-cells-contiguous.cpp
  create mode 100644 tests/test-skippy-kv-page-export.cpp
@@ -1070,16 +1070,18 @@ index 000000000..96937c8dc
 +}
 diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
 new file mode 100644
-index 000000000..c8ad5f1b2
+index 000000000..7e87226dc
 --- /dev/null
 +++ b/tests/test-skippy-model-loader-accounting.cpp
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,301 @@
 +#include "llama.h"
 +#include "llama-model-loader.h"
 +
 +#include <cmath>
 +#include <cstdio>
 +#include <cstdlib>
++#include <string>
++#include <unordered_set>
 +#include <vector>
 +
 +struct progress_state {
@@ -1107,13 +1109,14 @@ index 000000000..c8ad5f1b2
 +
 +class stage_filter_guard {
 +public:
-+    stage_filter_guard() {
++    explicit stage_filter_guard(const std::unordered_set<std::string> & resident_tensor_names = {}) {
 +        llama_model_loader_stage_filter filter;
 +        filter.enabled = true;
 +        filter.layer_start = 0;
 +        filter.layer_end = 1;
 +        filter.include_embeddings = true;
 +        filter.include_output = true;
++        filter.resident_tensor_names = resident_tensor_names;
 +        llama_model_loader_set_stage_filter(filter);
 +    }
 +
@@ -1138,6 +1141,42 @@ index 000000000..c8ad5f1b2
 +            false,
 +            nullptr,
 +            nullptr);
++}
++
++static bool check_exact_resident_filter(const char * model_path) {
++    llama_model_loader loader = make_loader(model_path);
++    std::unordered_set<std::string> resident_tensor_names;
++    for (const auto & [name, _] : loader.weights_map) {
++        resident_tensor_names.insert(name);
++    }
++    if (resident_tensor_names.empty()) {
++        std::fprintf(stderr, "model has no resident tensor names\n");
++        return false;
++    }
++
++    llama_model_params params = llama_model_default_params();
++    llama_model * model = nullptr;
++    {
++        stage_filter_guard filter(resident_tensor_names);
++        model = llama_model_load_from_file(model_path, params);
++    }
++    if (model == nullptr) {
++        std::fprintf(stderr, "exact resident tensor filter rejected complete closure\n");
++        return false;
++    }
++    llama_model_free(model);
++
++    resident_tensor_names.insert("skippy.missing.admitted.tensor");
++    {
++        stage_filter_guard filter(resident_tensor_names);
++        model = llama_model_load_from_file(model_path, params);
++    }
++    if (model != nullptr) {
++        llama_model_free(model);
++        std::fprintf(stderr, "exact resident tensor filter accepted an absent tensor\n");
++        return false;
++    }
++    return true;
 +}
 +
 +static ggml_context_ptr make_accounting_context(const ggml_tensor * weight) {
@@ -1284,7 +1323,9 @@ index 000000000..c8ad5f1b2
 +
 +    llama_backend_init();
 +
-+    if (!check_context_load_lifecycle(argv[1]) || !check_contextless_fallback(argv[1])) {
++    if (!check_context_load_lifecycle(argv[1]) ||
++            !check_contextless_fallback(argv[1]) ||
++            !check_exact_resident_filter(argv[1])) {
 +        llama_backend_free();
 +        return EXIT_FAILURE;
 +    }
