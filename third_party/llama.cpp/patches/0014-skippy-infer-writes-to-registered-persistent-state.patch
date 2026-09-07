@@ -1,0 +1,312 @@
+From 09913cdd6e9d145e98179e65308f890e3e0a8349 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 22:48:55 +1000
+Subject: [PATCH] skippy: infer writes to registered persistent state
+
+---
+ src/CMakeLists.txt                          | 18 ++++++
+ src/skippy/state_effects.cpp                | 70 +++++++++++++++++++--
+ src/skippy/tests/noalloc_graph_planning.cpp | 36 +++++++++--
+ src/skippy/tests/stage_slice_plan.cpp       | 34 ++++++++++
+ 4 files changed, 148 insertions(+), 10 deletions(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 6a35c3c43..8e33bf974 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -283,6 +283,24 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_noalloc_graph_planning_iswa PROPERTIES
+         FIXTURES_REQUIRED skippy-noalloc-gemma2-fixture)
+ 
++    add_test(
++        NAME skippy_generate_kimi_linear_fixture
++        COMMAND skippy-model-fixture-generator
++            --arch kimi-linear
++            --seed 1
++            --out "${SKIPPY_MODEL_FIXTURE_DIR}")
++    set_tests_properties(skippy_generate_kimi_linear_fixture PROPERTIES
++        FIXTURES_SETUP skippy-noalloc-kimi-linear-fixture)
++
++    add_test(
++        NAME skippy_noalloc_graph_planning_kimi_linear
++        COMMAND skippy-noalloc-graph-planning
++            "${SKIPPY_MODEL_FIXTURE_DIR}/kimi-linear-moe.gguf"
++            1
++            "none,kda")
++    set_tests_properties(skippy_noalloc_graph_planning_kimi_linear PROPERTIES
++        FIXTURES_REQUIRED skippy-noalloc-kimi-linear-fixture)
++
+     add_test(
+         NAME skippy_generate_deepseek4_fixture
+         COMMAND skippy-model-fixture-generator
+diff --git a/src/skippy/state_effects.cpp b/src/skippy/state_effects.cpp
+index 69db4f530..755b40560 100644
+--- a/src/skippy/state_effects.cpp
++++ b/src/skippy/state_effects.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "ggml.h"
+ 
++#include <algorithm>
+ #include <cinttypes>
+ #include <cstdio>
+ #include <limits>
+@@ -284,9 +285,35 @@ bool skippy_infer_state_effects(
+         positions.emplace(ggml_graph_node(const_cast<ggml_cgraph *>(graph), index), index);
+     }
+ 
+-    std::unordered_set<const ggml_tensor *> explicit_storage;
++    struct explicit_owner {
++        skippy_state_kind kind = skippy_state_kind::derived_persistent;
++        int32_t layer = -1;
++        int64_t next_write_ordinal = 0;
++        int32_t last_write_position = -1;
++        bool initialized = false;
++        bool consistent = true;
++    };
++    std::unordered_map<const ggml_tensor *, explicit_owner> explicit_owners;
++    std::vector<const ggml_tensor *> explicit_storage_order;
++    std::unordered_set<const ggml_tensor *> explicit_write_nodes;
+     for (const auto & effect : explicit_effects) {
+-        explicit_storage.insert(effect.storage);
++        auto & owner = explicit_owners[effect.storage];
++        if (!owner.initialized) {
++            owner.kind = effect.kind;
++            owner.layer = effect.layer;
++            owner.initialized = true;
++            explicit_storage_order.push_back(effect.storage);
++        } else if (owner.kind != effect.kind || owner.layer != effect.layer) {
++            owner.consistent = false;
++        }
++        if (effect.access == skippy_state_access::write) {
++            explicit_write_nodes.insert(effect.effect_node);
++            owner.next_write_ordinal = std::max(owner.next_write_ordinal, effect.write_ordinal + 1);
++            const auto position = positions.find(effect.effect_node);
++            if (position != positions.end()) {
++                owner.last_write_position = std::max(owner.last_write_position, position->second);
++            }
++        }
+     }
+ 
+     struct inferred_owner {
+@@ -295,6 +322,7 @@ bool skippy_infer_state_effects(
+     };
+     std::unordered_map<const ggml_tensor *, inferred_owner> inferred;
+     std::vector<const ggml_tensor *> storage_order;
++    std::unordered_map<const ggml_tensor *, std::vector<const ggml_tensor *>> supplemental_writes;
+ 
+     for (int32_t index = 0; index < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++index) {
+         const ggml_tensor * node = ggml_graph_node(const_cast<ggml_cgraph *>(graph), index);
+@@ -302,8 +330,27 @@ bool skippy_infer_state_effects(
+             continue;
+         }
+         const ggml_tensor * storage = skippy_state_canonical_storage(write_destination(node));
+-        if (storage == nullptr || storage->buffer == nullptr ||
+-                positions.find(storage) != positions.end() || explicit_storage.count(storage) != 0) {
++        if (storage == nullptr || positions.find(storage) != positions.end()) {
++            continue;
++        }
++        const auto explicit_owner_it = explicit_owners.find(storage);
++        if (explicit_owner_it != explicit_owners.end()) {
++            if (explicit_write_nodes.count(node) != 0) {
++                continue;
++            }
++            if (!valid_write_destination(node, storage)) {
++                error = effect_error("graph node %zu has an unsupported registered-state mutation", index);
++                return false;
++            }
++            if (explicit_owner_it->second.consistent &&
++                    index <= explicit_owner_it->second.last_write_position) {
++                error = effect_error("graph node %zu is an unregistered state write before a registered write", index);
++                return false;
++            }
++            supplemental_writes[storage].push_back(node);
++            continue;
++        }
++        if (storage->buffer == nullptr) {
+             continue;
+         }
+         if (!valid_write_destination(node, storage)) {
+@@ -338,6 +385,21 @@ bool skippy_infer_state_effects(
+         inserted.first->second.writes.push_back(node);
+     }
+ 
++    for (const ggml_tensor * storage : explicit_storage_order) {
++        const auto supplemental = supplemental_writes.find(storage);
++        if (supplemental == supplemental_writes.end()) {
++            continue;
++        }
++        auto & owner = explicit_owners.at(storage);
++        if (!owner.consistent) {
++            continue;
++        }
++        for (const ggml_tensor * write : supplemental->second) {
++            effects.push_back({owner.kind, skippy_state_access::write, owner.layer,
++                    storage, write, owner.next_write_ordinal++});
++        }
++    }
++
+     for (const ggml_tensor * storage : storage_order) {
+         const auto & owner = inferred.at(storage);
+         effects.push_back({skippy_state_kind::derived_persistent,
+diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
+index 20d55631d..7aed9b2b7 100644
+--- a/src/skippy/tests/noalloc_graph_planning.cpp
++++ b/src/skippy/tests/noalloc_graph_planning.cpp
+@@ -445,7 +445,9 @@ static bool check_stage_slices(
+             }
+         }
+         if (model->hparams.is_recr(layer)) {
+-            if (layer > 0) {
++            if (model->arch == LLM_ARCH_KIMI_LINEAR || model->arch == LLM_ARCH_KIMI_K3) {
++                // KDA constructs its state preparation inside the block body.
++            } else if (layer > 0) {
+                 has_downstream_recurrent_layer = true;
+                 const ggml_tensor * entry = graph_result->get_block_boundaries()[2 * layer].tensor;
+                 int32_t entry_index = -1;
+@@ -567,7 +569,9 @@ static bool layer_has_state(
+ 
+ enum class layer_state_class {
+     kv,
++    k,
+     recurrent,
++    kda,
+     none,
+ };
+ 
+@@ -577,8 +581,12 @@ static bool parse_layer_classes(const char * spec, std::vector<layer_state_class
+         if (*c == ',' || *c == '\0') {
+             if (token == "kv") {
+                 classes.push_back(layer_state_class::kv);
++            } else if (token == "k") {
++                classes.push_back(layer_state_class::k);
+             } else if (token == "recurrent") {
+                 classes.push_back(layer_state_class::recurrent);
++            } else if (token == "kda") {
++                classes.push_back(layer_state_class::kda);
+             } else if (token == "none") {
+                 classes.push_back(layer_state_class::none);
+             } else {
+@@ -601,9 +609,10 @@ static bool check_state_effects(
+         const char * profile_name,
+         const std::vector<layer_state_class> & layer_classes,
+         size_t expected_conv_writes) {
+-    const auto & effects = graph_result->get_state_effects();
++    std::vector<skippy_state_effect> effects;
+     std::string effect_error;
+-    if (!skippy_validate_state_effects(effects, graph, effect_error)) {
++    if (!skippy_infer_state_effects(graph_result->get_state_effects(), graph,
++                graph_result->get_block_boundaries(), effects, effect_error)) {
+         std::fprintf(stderr, "metadata-only %s state effects invalid: %s\n",
+                 profile_name, effect_error.c_str());
+         return false;
+@@ -639,6 +648,11 @@ static bool check_state_effects(
+                      kv_value_reads == 1 && kv_value_writes == 1 &&
+                      recr_total == 0;
+                 break;
++            case layer_state_class::k:
++                ok = kv_key_reads == 1 && kv_key_writes == 1 &&
++                     kv_value_reads == 0 && kv_value_writes == 0 &&
++                     recr_total == 0;
++                break;
+             case layer_state_class::recurrent:
+                 ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 3 &&
+                      conv_writes == expected_conv_writes + 2 &&
+@@ -650,14 +664,21 @@ static bool check_state_effects(
+                     return false;
+                 }
+                 break;
++            case layer_state_class::kda:
++                ok = conv_reads == 1 && conv_writes == 5 &&
++                     ssm_reads == 1 && ssm_writes == 3 && kv_total == 0;
++                break;
+             case layer_state_class::none:
+                 ok = kv_total == 0 && recr_total == 0;
+                 break;
+         }
+         if (!ok) {
+             std::fprintf(stderr,
+-                    "metadata-only %s layer %d does not declare exactly its expected state class\n",
+-                    profile_name, il);
++                    "metadata-only %s layer %d does not declare exactly its expected state class "
++                    "(kv_key=%zu/%zu kv_value=%zu/%zu conv=%zu/%zu ssm=%zu/%zu)\n",
++                    profile_name, il, kv_key_reads, kv_key_writes,
++                    kv_value_reads, kv_value_writes, conv_reads, conv_writes,
++                    ssm_reads, ssm_writes);
+             return false;
+         }
+     }
+@@ -681,7 +702,10 @@ static bool check_state_effects(
+                 if (effect.write_ordinal == 1) { copy_position = i; extra_read = node->src[0]; }
+             }
+         }
+-        const ggml_op output_op = owner.kind == skippy_state_kind::recurrent_conv ? GGML_OP_GET_ROWS : GGML_OP_SSM_SCAN;
++        const bool is_kda = layer_classes[owner.layer] == layer_state_class::kda;
++        const ggml_op output_op = owner.kind == skippy_state_kind::recurrent_conv || is_kda
++                ? GGML_OP_GET_ROWS
++                : GGML_OP_SSM_SCAN;
+         for (int i = zero_position + 1; i < copy_position; ++i) {
+             const ggml_tensor * node = ggml_graph_node(graph, i);
+             if (node != extra_read && node->op == output_op &&
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 380cf4976..11ee232fc 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -4,6 +4,7 @@
+ #include "skippy/executable_graph.h"
+ #include "../../../ggml/src/ggml-impl.h"
+ #include "skippy/stage_slice_plan.h"
++#include "skippy/state_effects.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -649,6 +650,38 @@ static int check_middle_stage_selection() {
+     return 0;
+ }
+ 
++static int check_inferred_registered_state_write() {
++    std::vector<uint8_t> buffer(ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(32, false));
++    ggml_init_params params = { buffer.size(), buffer.data(), true };
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * input = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * state = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * entry = ggml_add(ctx.get(), input, state);
++    ggml_tensor * write = ggml_cpy(ctx.get(), entry, state);
++    ggml_tensor * output = ggml_mul(ctx.get(), entry, input);
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 32, false);
++    ggml_build_forward_expand(graph, write);
++    ggml_build_forward_expand(graph, output);
++    const std::vector<skippy_block_boundary> boundaries = {
++        {skippy_block_boundary_kind::entry, 0, entry},
++        {skippy_block_boundary_kind::exit, 0, output},
++    };
++    const std::vector<skippy_state_effect> explicit_effects = {
++        {skippy_state_kind::recurrent_conv, skippy_state_access::read, 0, state, nullptr},
++    };
++    std::vector<skippy_state_effect> effects;
++    std::string error;
++    if (!skippy_infer_state_effects(explicit_effects, graph, boundaries, effects, error) ||
++            effects.size() != 2 || effects[1].kind != skippy_state_kind::recurrent_conv ||
++            effects[1].access != skippy_state_access::write || effects[1].layer != 0 ||
++            effects[1].storage != state || effects[1].effect_node != write ||
++            effects[1].write_ordinal != 0) {
++        std::fprintf(stderr, "registered-state write inference failed: %s\n", error.c_str());
++        return 80;
++    }
++    return 0;
++}
++
+ static bool count_compute(void * data) {
+     ++*static_cast<int *>(data);
+     return false;
+@@ -1024,6 +1057,7 @@ static int check_explicit_final_output() {
+ int main() {
+     int result = check_semantic_identities();
+     if (!result) { result = check_middle_stage_selection(); }
++    if (!result) { result = check_inferred_registered_state_write(); }
+     if (!result) { result = check_explicit_final_output(); }
+     if (!result) { result = check_state_preparation_execution(false, false); }
+     if (!result) { result = check_state_preparation_execution(true, false); }
+-- 
+2.54.0 (Apple Git-157)
+

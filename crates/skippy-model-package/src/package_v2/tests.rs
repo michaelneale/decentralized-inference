@@ -73,12 +73,12 @@ fn writer_round_trips_all_source_tensors_without_role_selection() {
 }
 
 #[test]
-fn renamed_complete_shards_bind_every_file_and_tensor_exactly() {
+fn renamed_complete_shards_use_primary_count_and_bind_every_tensor() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("model-00001-of-00002.gguf");
     let second = temp.path().join("model-00002-of-00002.gguf");
     fixture(&first, &[tensor("first", 0)], Some((0, 2, 2)));
-    fixture(&second, &[tensor("second", 0)], Some((1, 2, 2)));
+    fixture(&second, &[tensor("second", 0)], Some((1, 2, 1)));
     let out = temp.path().join("package");
     write(&second, &out, false).unwrap();
     let manifest = read_manifest(&out);

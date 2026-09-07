@@ -877,13 +877,6 @@ fn validate_direct_gguf_shards(
                 metadata.get("split.no").and_then(serde_json::Value::as_u64) == Some(index as u64),
                 "direct GGUF split.no mismatch"
             );
-            anyhow::ensure!(
-                metadata
-                    .get("split.tensors.count")
-                    .and_then(serde_json::Value::as_u64)
-                    == Some(total_tensors as u64),
-                "incomplete direct GGUF tensor inventory: split.tensors.count mismatch"
-            );
         }
         for (key, value) in metadata {
             if key != "split.no" && key != "split.count" && key != "split.tensors.count" {
@@ -893,6 +886,15 @@ fn validate_direct_gguf_shards(
                 );
             }
         }
+    }
+    if shard_metadata.len() > 1 || first.contains_key("split.count") {
+        anyhow::ensure!(
+            first
+                .get("split.tensors.count")
+                .and_then(serde_json::Value::as_u64)
+                == Some(total_tensors as u64),
+            "incomplete direct GGUF tensor inventory: split.tensors.count mismatch"
+        );
     }
     Ok(())
 }
@@ -1318,6 +1320,33 @@ mod tests {
         ArtifactCatalog, SourceModel, Tensor, TensorCatalog, TensorIntegrity,
     };
     use skippy_runtime::TensorInfo;
+
+    fn split_metadata(
+        split_no: u64,
+        split_count: u64,
+        tensor_count: u64,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        [
+            ("split.no".to_string(), split_no.into()),
+            ("split.count".to_string(), split_count.into()),
+            ("split.tensors.count".to_string(), tensor_count.into()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn direct_gguf_inventory_uses_primary_global_tensor_count() {
+        let metadata = vec![split_metadata(0, 2, 3), split_metadata(1, 2, 2)];
+
+        validate_direct_gguf_shards(&metadata, 3).unwrap();
+
+        let stale_primary = vec![split_metadata(0, 2, 2), split_metadata(1, 2, 3)];
+        let error = validate_direct_gguf_shards(&stale_primary, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("split.tensors.count mismatch"), "{error}");
+    }
 
     #[test]
     fn package_v2_identity_rejects_v1_without_fallback() {

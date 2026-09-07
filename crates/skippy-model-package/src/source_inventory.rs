@@ -152,11 +152,6 @@ fn validate_shards(shards: &[SourceShard]) -> Result<()> {
                 metadata.get("split.no").and_then(|v| v.as_u64()) == Some(index as u64),
                 "source split.no mismatch"
             );
-            ensure!(
-                metadata.get("split.tensors.count").and_then(|v| v.as_u64())
-                    == Some(total_tensors as u64),
-                "incomplete source tensor inventory: split.tensors.count mismatch"
-            );
         }
         // Later shards may carry a subset, but may not contradict the primary
         // shard's model metadata or introduce metadata absent from that shard.
@@ -168,6 +163,17 @@ fn validate_shards(shards: &[SourceShard]) -> Result<()> {
                 );
             }
         }
+    }
+    if shards.len() > 1 || first.directory.metadata.contains_key("split.count") {
+        ensure!(
+            first
+                .directory
+                .metadata
+                .get("split.tensors.count")
+                .and_then(|v| v.as_u64())
+                == Some(total_tensors as u64),
+            "incomplete source tensor inventory: split.tensors.count mismatch"
+        );
     }
     Ok(())
 }
