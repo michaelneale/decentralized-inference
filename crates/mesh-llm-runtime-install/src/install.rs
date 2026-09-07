@@ -36,10 +36,11 @@ pub async fn install_native_runtime(
     })
     .await?;
     if manifest.artifacts.is_empty() {
-        bail!(
-            "no native runtime manifest entries found\n{}",
-            describe_catalogs(&sources)
-        );
+        return Err(NativeRuntimeResolutionError::empty_catalog(
+            sources,
+            options.selection.clone(),
+        )
+        .into());
     }
     let skippy_abi_version = options
         .skippy_abi_version
@@ -57,11 +58,25 @@ pub async fn install_native_runtime(
     let resolution = match resolver.resolve(&options.selection) {
         Ok(resolution) => resolution,
         Err(err) => {
-            let evaluated = resolver.evaluate(&options.selection).unwrap_or_default();
-            bail!(
-                "{err}\n{}",
-                describe_resolution_failure(&sources, &options.selection, &evaluated)
-            );
+            // The explanation becomes the outermost context of the resolver's
+            // own error: one line on top, the resolver's verdict and the
+            // deeper causes (an unreadable cache, a manifest that failed to
+            // parse) preserved underneath for the chain readers.
+            let explanation = match resolver.evaluate(&options.selection) {
+                Ok(evaluated) => NativeRuntimeResolutionError::rejected(
+                    sources,
+                    options.selection.clone(),
+                    &evaluated,
+                ),
+                // `evaluate` fails for the same reason `resolve` did when the
+                // candidates could not be enumerated at all; that is not a
+                // selection problem and must not read like one.
+                Err(_) => NativeRuntimeResolutionError::enumeration_failed(
+                    sources,
+                    options.selection.clone(),
+                ),
+            };
+            return Err(err.context(explanation));
         }
     };
     let mut outcome = install_resolved_runtime(&cache, resolution, &options).await?;
@@ -69,64 +84,179 @@ pub async fn install_native_runtime(
     Ok(outcome)
 }
 
-fn describe_catalogs(sources: &NativeRuntimeCatalogSources) -> String {
-    sources
-        .describe()
-        .into_iter()
-        .map(|line| format!("catalog: {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Why native runtime resolution failed, kept structured so `--json`
+/// consumers can read the catalogs and the candidates instead of parsing
+/// prose. It travels as the outermost context of the install error: its
+/// `Display` is a single line, the resolver's own verdict and the deeper
+/// causes stay underneath in the error chain, and
+/// `anyhow::Error::downcast_ref` recovers the structure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct NativeRuntimeResolutionError {
+    /// One-line verdict; also what this error displays as.
+    pub summary: String,
+    /// What the caller asked for.
+    pub selection: RuntimeSelection,
+    /// Which catalogs were consulted.
+    pub catalogs: NativeRuntimeCatalogSources,
+    /// Candidates that were plausible for this host and selection, with why
+    /// each one was rejected. Empty when the candidates could not be
+    /// enumerated at all.
+    pub candidates: Vec<RejectedCandidate>,
+    /// Candidates set aside before explaining anything: built for another
+    /// platform, or not matching an explicit selection.
+    pub set_aside: usize,
+    /// `true` when the candidates could not be enumerated (unreadable bundle
+    /// manifest, unreadable cache). The cause is in the error chain and the
+    /// catalog is not at fault.
+    pub enumeration_failed: bool,
 }
 
-/// Explains a failed selection: which catalogs were consulted, and why each
-/// candidate that matched the requested selection was rejected. Candidates
-/// that never matched the selection (another backend, another id) are
-/// summarised as a count so the explanation stays focused on what the user
-/// asked for.
-pub(crate) fn describe_resolution_failure(
-    sources: &NativeRuntimeCatalogSources,
-    selection: &RuntimeSelection,
-    evaluated: &[CandidateEvaluation],
-) -> String {
-    let mut lines = vec![describe_catalogs(sources)];
-    let (matching, others): (Vec<_>, Vec<_>) = evaluated.iter().partition(|candidate| {
-        !candidate
-            .rejection_reasons
+/// A plausible candidate and the reasons it was rejected.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RejectedCandidate {
+    pub id: String,
+    pub reasons: Vec<CandidateRejection>,
+}
+
+impl NativeRuntimeResolutionError {
+    /// The merged catalog listed nothing at all.
+    pub(crate) fn empty_catalog(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+    ) -> Self {
+        Self {
+            summary: "no native runtime manifest entries found".to_string(),
+            selection,
+            catalogs,
+            candidates: Vec::new(),
+            set_aside: 0,
+            enumeration_failed: false,
+        }
+    }
+
+    /// Every candidate was evaluated and none could be selected.
+    pub(crate) fn rejected(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+        evaluated: &[CandidateEvaluation],
+    ) -> Self {
+        let (plausible, set_aside): (Vec<_>, Vec<_>) = evaluated
             .iter()
-            .any(|reason| matches!(reason, CandidateRejection::SelectionMismatch { .. }))
-    });
-    if matching.is_empty() {
-        lines.push(format!(
-            "no catalog entry matches the requested selection ({} other candidates were not considered)",
-            others.len()
-        ));
-    } else {
-        for candidate in matching {
-            let reasons = if candidate.rejection_reasons.is_empty() {
+            .partition(|candidate| candidate_is_plausible(candidate));
+        let candidates = plausible
+            .into_iter()
+            .map(|candidate| RejectedCandidate {
+                id: candidate.artifact.id.clone(),
+                reasons: candidate.rejection_reasons.clone(),
+            })
+            .collect::<Vec<_>>();
+        let summary = if candidates.is_empty() {
+            format!(
+                "no native runtime candidate applies to this host and selection ({} set aside)",
+                set_aside.len()
+            )
+        } else {
+            format!(
+                "no compatible native runtime: {} candidate(s) rejected, {} set aside",
+                candidates.len(),
+                set_aside.len()
+            )
+        };
+        Self {
+            summary,
+            selection,
+            catalogs,
+            candidates,
+            set_aside: set_aside.len(),
+            enumeration_failed: false,
+        }
+    }
+
+    /// The candidates could not be enumerated, so nothing was evaluated.
+    pub(crate) fn enumeration_failed(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+    ) -> Self {
+        Self {
+            summary: "native runtime candidates could not be enumerated".to_string(),
+            selection,
+            catalogs,
+            candidates: Vec::new(),
+            set_aside: 0,
+            enumeration_failed: true,
+        }
+    }
+
+    /// Lines for a human reader: the catalogs consulted, then the plausible
+    /// candidates with their rejection reasons, then what was set aside.
+    pub fn explanation_lines(&self) -> Vec<String> {
+        let mut lines = self
+            .catalogs
+            .describe()
+            .into_iter()
+            .map(|line| format!("catalog: {line}"))
+            .collect::<Vec<_>>();
+        if self.enumeration_failed {
+            lines.push(
+                "the candidates could not be enumerated; the cause is reported below, the catalog is not at fault"
+                    .to_string(),
+            );
+            return lines;
+        }
+        for candidate in &self.candidates {
+            let reasons = if candidate.reasons.is_empty() {
                 "compatible".to_string()
             } else {
                 candidate
-                    .rejection_reasons
+                    .reasons
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("; ")
             };
-            lines.push(format!("candidate {}: {reasons}", candidate.artifact.id));
+            lines.push(format!("candidate {}: {reasons}", candidate.id));
         }
-        if !others.is_empty() {
+        if self.candidates.is_empty() && self.set_aside > 0 {
+            lines.push(
+                "no catalog entry applies to this host and the requested selection".to_string(),
+            );
+        }
+        if self.set_aside > 0 {
             lines.push(format!(
-                "{} other candidates did not match the requested selection",
-                others.len()
+                "{} other candidates were set aside: built for another platform, or not matching the requested selection",
+                self.set_aside
             ));
         }
+        if let RuntimeSelection::Backend { kind, .. } = &self.selection {
+            lines.push(format!(
+                "the {kind} runtime was requested explicitly; it was not replaced by another backend"
+            ));
+        }
+        lines
     }
-    if let RuntimeSelection::Backend { kind, .. } = selection {
-        lines.push(format!(
-            "the {kind} runtime was requested explicitly; it was not replaced by another backend"
-        ));
+}
+
+impl std::fmt::Display for NativeRuntimeResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary)
     }
-    lines.join("\n")
+}
+
+impl std::error::Error for NativeRuntimeResolutionError {}
+
+/// A candidate is worth explaining when it is built for this host and
+/// matches the requested selection; anything else is only counted, so a
+/// plain `runtime install` does not list every other platform's artifact.
+fn candidate_is_plausible(candidate: &CandidateEvaluation) -> bool {
+    !candidate.rejection_reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            CandidateRejection::SelectionMismatch { .. }
+                | CandidateRejection::OsMismatch { .. }
+                | CandidateRejection::ArchMismatch { .. }
+                | CandidateRejection::TargetTripleMismatch { .. }
+        )
+    })
 }
 
 pub(crate) async fn install_resolved_runtime(

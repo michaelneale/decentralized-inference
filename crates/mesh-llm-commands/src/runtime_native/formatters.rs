@@ -4,6 +4,7 @@ use mesh_llm_native_runtime::{
 };
 use mesh_llm_runtime_install::{
     NativeRuntimeCatalogSources, NativeRuntimeInstallOutcome, NativeRuntimeInstallStatus,
+    NativeRuntimeResolutionError,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -110,16 +111,18 @@ impl RuntimeNativeFormatter for HumanFormatter {
 
     fn render_install_error(&self, error: &Error) -> Result<()> {
         eprintln!("❌ Native runtime install failed");
-        // Resolution failures carry a multi-line explanation (catalogs
-        // consulted, rejected candidates); keep every line aligned.
-        let mut lines = error.to_string();
-        lines.truncate(lines.trim_end().len());
-        let mut lines = lines.lines();
-        if let Some(first) = lines.next() {
-            eprintln!("   Reason: {first}");
+        eprintln!("   Reason: {error}");
+        // A resolution failure carries its explanation (catalogs consulted,
+        // rejected candidates) as structure; the causes underneath, such as
+        // the resolver's own verdict or a manifest that failed to parse, stay
+        // one per line.
+        if let Some(resolution) = error.downcast_ref::<NativeRuntimeResolutionError>() {
+            for line in resolution.explanation_lines() {
+                eprintln!("   {line}");
+            }
         }
-        for line in lines {
-            eprintln!("           {line}");
+        for cause in error.chain().skip(1) {
+            eprintln!("   cause: {cause}");
         }
         eprintln!("   Try: mesh-llm runtime list --available");
         Ok(())
@@ -192,12 +195,16 @@ impl RuntimeNativeFormatter for JsonFormatter {
     }
 
     fn render_install_error(&self, error: &Error) -> Result<()> {
+        // `resolution` is the structured explanation of a failed selection
+        // (catalogs, plausible candidates and their rejection reasons); it is
+        // null for every other failure, and `context` keeps the cause chain.
         print_json(&json!({
             "status": "error",
             "error": {
                 "type": "native_runtime_install_failed",
                 "message": error.to_string(),
                 "context": error.chain().skip(1).map(ToString::to_string).collect::<Vec<_>>(),
+                "resolution": error.downcast_ref::<NativeRuntimeResolutionError>(),
             },
         }))
     }

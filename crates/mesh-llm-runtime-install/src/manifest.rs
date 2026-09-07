@@ -66,10 +66,18 @@ pub struct NativeRuntimeCatalogSources {
     /// Bundle directories whose artifacts were merged in.
     #[serde(default)]
     pub bundle_dirs: Vec<PathBuf>,
-    /// Artifacts contributed by the bundle directories (after deduplication
-    /// against the manifest).
+    /// Artifacts the bundle directories added to the catalog.
     #[serde(default)]
     pub bundle_artifacts: usize,
+    /// Bundled runtimes that the release catalog already listed (kept once,
+    /// served from the bundle).
+    #[serde(default)]
+    pub bundle_duplicates_of_catalog: usize,
+    /// Bundled runtimes that another bundle directory had already
+    /// contributed, for example the same runtime reached through an explicit
+    /// `--bundle-dir` and through the executable-adjacent directory.
+    #[serde(default)]
+    pub bundle_duplicates_of_bundles: usize,
 }
 
 impl NativeRuntimeCatalogSources {
@@ -106,12 +114,26 @@ impl NativeRuntimeCatalogSources {
                 .collect::<Vec<_>>()
                 .join(", ");
             // Every bundle directory carries exactly one runtime manifest;
-            // say how many of them were not already listed by the catalog.
-            lines.push(format!(
-                "bundle directories ({} runtimes, {} not already in the catalog): {dirs}",
+            // say how many of them the catalog gained, and where the others
+            // had already been listed.
+            let mut counts = format!(
+                "{} runtimes: {} added to the catalog",
                 self.bundle_dirs.len(),
                 self.bundle_artifacts
-            ));
+            );
+            if self.bundle_duplicates_of_catalog > 0 {
+                counts.push_str(&format!(
+                    ", {} already listed by the release catalog",
+                    self.bundle_duplicates_of_catalog
+                ));
+            }
+            if self.bundle_duplicates_of_bundles > 0 {
+                counts.push_str(&format!(
+                    ", {} duplicates of another bundle directory",
+                    self.bundle_duplicates_of_bundles
+                ));
+            }
+            lines.push(format!("bundle directories ({counts}): {dirs}"));
         }
         lines
     }
@@ -180,13 +202,16 @@ pub async fn load_release_manifest_with_sources(
         }
     }
     sources.manifest_artifacts = artifacts.len();
-    sources.bundle_artifacts = append_bundle_artifacts(
+    let merged = append_bundle_artifacts(
         &mut artifacts,
         &mut mesh_version,
         &mut skippy_abi,
         &options.bundle_dirs,
         manifest_loaded,
     )?;
+    sources.bundle_artifacts = merged.added;
+    sources.bundle_duplicates_of_catalog = merged.duplicates_of_catalog;
+    sources.bundle_duplicates_of_bundles = merged.duplicates_of_bundles;
     Ok((
         NativeRuntimeReleaseManifest {
             mesh_version,
@@ -261,7 +286,12 @@ pub(crate) fn verify_release_manifest_checksum(
     Ok(())
 }
 
+/// Derives the checksum URL from the manifest URL: `.sha256` goes on the
+/// path, the query string is kept, and a fragment is dropped since it never
+/// reaches the server (kept, it would end up inside the path and the server
+/// would answer with the manifest body instead of a checksum).
 pub(crate) fn release_manifest_checksum_url(url: &str) -> String {
+    let url = url.split_once('#').map_or(url, |(base, _)| base);
     match url.split_once('?') {
         Some((base, query)) => format!("{base}.sha256?{query}"),
         None => format!("{url}.sha256"),
@@ -337,8 +367,11 @@ pub(crate) fn append_bundle_artifacts(
     skippy_abi: &mut String,
     bundle_dirs: &[PathBuf],
     manifest_loaded: bool,
-) -> Result<usize> {
-    let mut appended = 0;
+) -> Result<BundleMergeCounts> {
+    // Entries below this index came from the release manifest; the ones
+    // appended afterwards came from earlier bundle directories.
+    let catalog_len = artifacts.len();
+    let mut counts = BundleMergeCounts::default();
     for dir in bundle_dirs {
         let manifest = NativeRuntimeManifest::read_from_dir(dir)
             .with_context(|| format!("read bundled native runtime {}", dir.display()))?;
@@ -350,18 +383,34 @@ pub(crate) fn append_bundle_artifacts(
             }
             *skippy_abi = manifest.runtime.skippy_abi.clone();
         }
-        // The same runtime can be both bundled and published. Keep one entry
-        // so listings stay unambiguous; the resolver still prefers the bundle
-        // directory as the source for that identity.
-        let duplicate = artifacts
+        // The same runtime can be both bundled and published, or reached
+        // through two bundle directories. Keep one entry so listings stay
+        // unambiguous; the resolver still prefers a bundle directory as the
+        // source for that identity.
+        match artifacts
             .iter()
-            .any(|existing| same_artifact_identity(existing, &manifest.runtime));
-        if !duplicate {
-            artifacts.push(manifest.runtime);
-            appended += 1;
+            .position(|existing| same_artifact_identity(existing, &manifest.runtime))
+        {
+            Some(index) if index < catalog_len => counts.duplicates_of_catalog += 1,
+            Some(_) => counts.duplicates_of_bundles += 1,
+            None => {
+                artifacts.push(manifest.runtime);
+                counts.added += 1;
+            }
         }
     }
-    Ok(appended)
+    Ok(counts)
+}
+
+/// What merging the bundle directories into the catalog produced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BundleMergeCounts {
+    /// Runtimes the bundles added to the catalog.
+    pub(crate) added: usize,
+    /// Bundled runtimes the release catalog already listed.
+    pub(crate) duplicates_of_catalog: usize,
+    /// Bundled runtimes an earlier bundle directory had already contributed.
+    pub(crate) duplicates_of_bundles: usize,
 }
 
 /// Two catalog entries describe the same runtime when their id and release
@@ -382,6 +431,11 @@ pub(crate) fn normalize_sha256(value: &str) -> Result<String> {
     if digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
         Ok(digest)
     } else {
-        bail!("native runtime manifest contains invalid sha256: {value}");
+        // Do not echo the value: when a checksum fetch answers with the wrong
+        // body (a manifest, an error page) it would be copied into the error.
+        bail!(
+            "invalid sha256 digest: expected 64 hexadecimal characters, got {} characters",
+            digest.len()
+        );
     }
 }
