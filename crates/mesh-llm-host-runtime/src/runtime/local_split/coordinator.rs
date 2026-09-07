@@ -640,6 +640,7 @@ impl SplitTopologyCoordinator {
         )?;
         let admissions = super::realize_split_stage_admissions(
             &self.model_path,
+            &self.model_ref,
             &self.package,
             &planned,
             &self.runtime_profile,

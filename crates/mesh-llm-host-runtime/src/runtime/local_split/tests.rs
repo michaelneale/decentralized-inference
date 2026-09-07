@@ -995,17 +995,55 @@ fn runtime_model_planning_bytes_rejects_legacy_layer_package() {
 }
 
 #[tokio::test]
-async fn generation8_split_rejects_direct_gguf_without_package_v2() {
+async fn generation8_split_accepts_direct_gguf_without_package_v2() {
     let root = tempfile::tempdir().unwrap();
     let gguf = root.path().join("model.gguf");
-    std::fs::write(&gguf, b"GGUF").unwrap();
+    write_fake_gguf_model(&gguf);
 
-    let error = resolve_split_runtime_package(&gguf, "test/model", false)
+    let package = resolve_split_runtime_package(&gguf, "test/model", false)
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-    assert!(error.contains("accepts only a local package-v2 directory"));
+    assert!(package.package_ref.starts_with("gguf://"));
+    assert_eq!(package.layer_count, 24);
+    assert_eq!(package.source_model_path, gguf.canonicalize().unwrap());
+    assert!(!root.path().join("model-package.json").exists());
+}
+
+#[tokio::test]
+async fn generation8_local_direct_gguf_identity_ignores_worker_path() {
+    let first_root = tempfile::tempdir().unwrap();
+    let second_root = tempfile::tempdir().unwrap();
+    let first = first_root.path().join("first.gguf");
+    let second = second_root.path().join("relocated.gguf");
+    write_fake_gguf_model(&first);
+    std::fs::copy(&first, &second).unwrap();
+
+    let first_package = resolve_split_runtime_package(&first, "test/model", true)
+        .await
+        .unwrap();
+    let second_package = resolve_split_runtime_package(&second, "test/model", true)
+        .await
+        .unwrap();
+
+    assert!(
+        first_package
+            .package_ref
+            .starts_with("local-gguf://sha256/")
+    );
+    assert_eq!(first_package.package_ref, second_package.package_ref);
+    assert_eq!(
+        first_package.manifest_sha256,
+        second_package.manifest_sha256
+    );
+    assert_eq!(
+        first_package.source_model_sha256,
+        second_package.source_model_sha256
+    );
+    assert_ne!(
+        first_package.source_model_path,
+        second_package.source_model_path
+    );
 }
 
 #[test]

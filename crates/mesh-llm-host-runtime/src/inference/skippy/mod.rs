@@ -67,13 +67,14 @@ pub use materialization::{
     prune_unpinned_materialized_stages, remove_materialized_stages_for_sources,
     resolve_hf_package_to_local,
 };
-#[cfg(test)]
-pub(crate) use package::synthetic_content_addressed_gguf_package;
 pub use package::{
     SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,
     synthetic_direct_gguf_package,
 };
-pub(crate) use package::{direct_gguf_source_paths, is_package_v2_ref};
+pub(crate) use package::{
+    direct_gguf_planning_manifest_from_identity, direct_gguf_source_paths, is_package_v2_ref,
+    synthetic_content_addressed_gguf_package,
+};
 pub(crate) use resolver::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
     resolve_skippy_config_for_selector,

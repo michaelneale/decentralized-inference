@@ -378,9 +378,57 @@ pub fn realize_native_stage_chain(
         "package-v2 manifest package_id does not match its content"
     );
 
+    realize_native_stage_chain_from_manifest(
+        &manifest,
+        NativePlannerSource::Package(package_dir),
+        ranges,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+        sidecars_by_stage,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum NativePlannerSource<'a> {
+    Package(&'a Path),
+    ExplicitShards(&'a [PathBuf]),
+}
+
+fn realize_native_stage_chain_from_manifest(
+    manifest: &PackageManifest,
+    source: NativePlannerSource<'_>,
+    ranges: &[(u32, u32)],
+    profiles: &[StagePlannerProfile],
+    graph_configuration_id: &str,
+    backend_id: &str,
+    sidecars_by_stage: &[Vec<Sidecar>],
+) -> anyhow::Result<(PackageManifest, Vec<RealizedStagePlan>)> {
+    anyhow::ensure!(!ranges.is_empty(), "stage plan chain is empty");
+    anyhow::ensure!(
+        ranges.len() == sidecars_by_stage.len(),
+        "stage ranges and sidecar selections differ in length"
+    );
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("validate stage-planning manifest")?;
+    let computed_package_id = manifest
+        .computed_package_id()
+        .context("compute stage-planning identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed_package_id,
+        "stage-planning package_id does not match its content"
+    );
+
+    let (package_dir, explicit_shard_paths) = match source {
+        NativePlannerSource::Package(path) => (Some(path), None),
+        NativePlannerSource::ExplicitShards(paths) => (None, Some(paths)),
+    };
     let inputs = PlannerInputs::new(
         package_dir,
-        &manifest,
+        explicit_shard_paths,
+        manifest,
         profiles,
         graph_configuration_id,
         backend_id,
@@ -409,7 +457,7 @@ pub fn realize_native_stage_chain(
     };
     ffi_result(status, error).context("validate native stage-plan chain")?;
     Ok((
-        manifest,
+        manifest.clone(),
         plans
             .into_iter()
             .map(|plan| plan.realized.clone())
@@ -489,6 +537,65 @@ pub fn realize_stage_admissions(
         .collect()
 }
 
+/// Realize and admit a direct GGUF chain from an in-memory source-complete
+/// planning manifest. The original shards are opened in place; no package or
+/// layer artifacts are written.
+pub fn realize_direct_gguf_stage_admissions(
+    model_id: &str,
+    identity: &crate::inference::skippy::SkippyPackageIdentity,
+    ranges: &[(u32, u32)],
+    profiles: &[StagePlannerProfile],
+    graph_configuration_id: &str,
+    backend_id: &str,
+) -> anyhow::Result<Vec<skippy_protocol::StageAdmissionDescriptor>> {
+    let (manifest, shard_paths) =
+        crate::inference::skippy::direct_gguf_planning_manifest_from_identity(model_id, identity)?;
+    let sidecars_by_stage = vec![Vec::new(); ranges.len()];
+    let (planned_manifest, discovered) = realize_native_stage_chain_from_manifest(
+        &manifest,
+        NativePlannerSource::ExplicitShards(&shard_paths),
+        ranges,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+        &sidecars_by_stage,
+    )?;
+    let planned = ranges
+        .iter()
+        .zip(&sidecars_by_stage)
+        .zip(&discovered)
+        .map(|((range, sidecars), discovered)| {
+            let planned =
+                planned_admission_from_discovery(&planned_manifest, *range, sidecars, discovered);
+            admit_stage_plan(&planned, discovered, &planned_manifest)
+                .context("validate discovered direct GGUF stage plan")?;
+            Ok(planned)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let (realized_manifest, realized) = realize_native_stage_chain_from_manifest(
+        &manifest,
+        NativePlannerSource::ExplicitShards(&shard_paths),
+        ranges,
+        profiles,
+        graph_configuration_id,
+        backend_id,
+        &sidecars_by_stage,
+    )?;
+    anyhow::ensure!(
+        planned_manifest.package_id == realized_manifest.package_id,
+        "direct GGUF planning identity changed between native passes"
+    );
+    planned
+        .iter()
+        .zip(&realized)
+        .map(|(planned, realized)| {
+            admit_stage_plan(planned, realized, &realized_manifest)
+                .context("admit independently realized direct GGUF stage plan")?;
+            Ok(skippy_protocol::StageAdmissionDescriptor::from(planned))
+        })
+        .collect()
+}
+
 struct PlannerInputs {
     package_id: CString,
     shard_paths: Vec<CString>,
@@ -503,7 +610,8 @@ struct PlannerInputs {
 
 impl PlannerInputs {
     fn new(
-        package_dir: &Path,
+        package_dir: Option<&Path>,
+        explicit_shard_paths: Option<&[PathBuf]>,
         manifest: &PackageManifest,
         profiles: &[StagePlannerProfile],
         graph_configuration_id: &str,
@@ -531,14 +639,29 @@ impl PlannerInputs {
         let mut shard_paths = Vec::with_capacity(source_artifacts.len());
         let mut shard_index_by_artifact = BTreeMap::new();
         for (index, artifact) in &source_artifacts {
-            let path = contained_package_path(package_dir, &artifact.path)?;
+            let path = match (package_dir, explicit_shard_paths) {
+                (Some(package_dir), None) => contained_package_path(package_dir, &artifact.path)?,
+                (None, Some(paths)) => paths
+                    .get(*index)
+                    .cloned()
+                    .with_context(|| format!("direct GGUF source shard {index} is missing"))?,
+                _ => anyhow::bail!(
+                    "stage planner requires exactly one package directory or explicit shard set"
+                ),
+            };
             anyhow::ensure!(
                 path.is_file(),
-                "package-v2 artifact is missing: {}",
+                "stage-planning source artifact is missing: {}",
                 path.display()
             );
-            shard_paths.push(path_cstring(&path, "package-v2 shard path")?);
+            shard_paths.push(path_cstring(&path, "stage-planning shard path")?);
             shard_index_by_artifact.insert(artifact.id.as_str(), *index);
+        }
+        if let Some(paths) = explicit_shard_paths {
+            anyhow::ensure!(
+                paths.len() == source_artifacts.len(),
+                "direct GGUF source shard count differs from planning manifest"
+            );
         }
 
         let tensor_by_id = manifest
