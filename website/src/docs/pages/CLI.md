@@ -593,6 +593,18 @@ the default local-discovery behavior.
 Use `--json` for machine-readable output. Runtime selection is constrained by
 the running Mesh version, platform, backend, and Skippy ABI.
 
+With `--available`, the JSON output is an object rather than a bare array:
+`catalogs` says what was consulted (the manifest file or URL and how many
+artifacts it listed, the bundle directories and how many runtimes they added,
+and the remote error when the release catalog was unreachable and the bundles
+carried the load), and `runtimes` holds the rows. `runtime install --json`
+reports the same `catalogs` object on success. When no runtime can be
+selected, its `error` object carries a `resolution` field with the catalogs,
+the candidates that were plausible for this host and their rejection reasons,
+the number of candidates set aside, and whether the candidates could not be
+enumerated at all; `resolution` is `null` for other failures, and `context`
+keeps the cause chain in every case.
+
 #### `runtime scan-refresh`
 
 Use this to ask exactly one remote, owner-attested node to rescan its managed
