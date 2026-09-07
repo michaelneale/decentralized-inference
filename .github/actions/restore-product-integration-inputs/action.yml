@@ -101,8 +101,9 @@ runs:
           curl_args+=(--header "Authorization: Bearer ${token}")
         fi
         for fixture in dense recurrent; do
-          file_var="${fixture^^}_FILE"
-          url_var="${fixture^^}_URL"
+          upper_fixture="$(printf '%s' "$fixture" | tr '[:lower:]' '[:upper:]')"
+          file_var="${upper_fixture}_FILE"
+          url_var="${upper_fixture}_URL"
           file="${!file_var}"
           url="${!url_var}"
           output="$HOME/.models/$file"

@@ -548,6 +548,29 @@ stop = ["END"]
     );
     assert_eq!(settings.embedded_openai.speculative_window, 7);
     assert_eq!(settings.embedded_openai.draft_n_gpu_layers, Some(11));
+    let downstream_stage = &generation.stages[1];
+    let stage0_options = stage0_runtime_options(
+        &spec,
+        &settings,
+        &skippy::StagePeerDescriptor {
+            stage_id: downstream_stage.stage_id.clone(),
+            stage_index: downstream_stage.stage_index,
+            endpoint: "127.0.0.1:41001".to_string(),
+            node_id: Some(downstream_stage.node_id),
+        },
+        "127.0.0.1:41001",
+        "127.0.0.1:41000",
+    )
+    .await
+    .expect("stage 0 runtime options should resolve");
+    assert_eq!(
+        stage0_options.config.activation_codec,
+        generation.activation_codec
+    );
+    assert_eq!(
+        stage0_options.config.activation_codec_policy,
+        generation.activation_codec_policy
+    );
     spec.capacity_budget_bytes = Some(0);
     assert_eq!(
         split_allocatable_memory_bytes(&spec),

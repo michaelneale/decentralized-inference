@@ -369,8 +369,9 @@ negative fixtures fail before topology publication.
 - Bind the plan digest one-way to the package identity: package catalog to
   `package_id`, then realized native stage descriptor to `plan_id`. Paths,
   native tensor names, process pointers, and enumeration order are excluded.
-- Introduce the native ABI as version `0.1.51` with the reserved stage-plan
-  feature bit 17 after the explicit build-input, package-binding, and renamed
+- The stage-plan surface entered at native ABI `0.1.51`; exact admitted tensor
+  closure binding advances it to `0.1.52`. Feature bit 17 remains reserved for
+  stage planning after the explicit build-input, package-binding, and renamed
   multi-shard metadata proofs pass.
 - Prefer additive ABI entry points during development; remove obsolete
   stage-filter APIs only at final cutover.

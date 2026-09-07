@@ -755,6 +755,7 @@ impl ResolvedCase {
                         path: path.clone(),
                         load_mode: RuntimeLoadMode::RuntimeSlice,
                         filter_tensors_on_load: false,
+                        resident_tensor_names: Vec::new(),
                     },
                     package_dir: None,
                 })
@@ -769,6 +770,7 @@ impl ResolvedCase {
                         path: package_dir.clone(),
                         load_mode: RuntimeLoadMode::LayerPackage,
                         filter_tensors_on_load: true,
+                        resident_tensor_names: Vec::new(),
                     },
                     package_dir: Some(package_dir.clone()),
                 })
@@ -1295,6 +1297,7 @@ fn stage_path(layout: &TestLayout, spec: FamilySpec, shape: StageShape) -> Resul
             path: layout.full_model.path.clone(),
             load_mode: RuntimeLoadMode::RuntimeSlice,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
         });
     }
     let package_dir = layout
@@ -1333,6 +1336,7 @@ fn materialize_stage(
         path: materialized.output_path,
         load_mode: RuntimeLoadMode::LayerPackage,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
     })
 }
 
@@ -1655,6 +1659,7 @@ fn open_stage_model(path: &StagePath, shape: StageShape, n_gpu_layers: i32) -> R
             include_output: shape.include_output,
             mtp_source: MtpSource::Disabled,
             filter_tensors_on_load: path.filter_tensors_on_load,
+            resident_tensor_names: Vec::new(),
             checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,

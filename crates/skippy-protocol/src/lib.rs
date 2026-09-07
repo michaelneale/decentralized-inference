@@ -70,12 +70,13 @@ mod tests {
     use super::proto::stage::{
         CancelPrepareStage, GetLayerInventory, GetStageStatus, LayerInventory, LayerRange,
         LoadStage, PrepareStage, PrepareStageAccepted, SourceModelKind, SourceResolutionPolicy,
-        StageActivationCodec, StageAdmissionDescriptor, StageAdmissionProfile,
-        StageAdmissionSidecar, StageAdmissionSidecarKind, StageArtifactTransferRequest,
-        StageArtifactTransferResponse, StageControlRequest, StageControlResponse, StageLoadMode,
-        StagePreparationState, StagePreparationStatus, StageReady, StageRuntimeState, StageStatus,
-        StageStatusAck, StageStatusList, StageStatusUpdate, StageTopologyStage, StageTransportOpen,
-        StopStage, stage_control_request, stage_control_response,
+        StageActivationCodec, StageAdmissionAdmitted, StageAdmissionDescriptor,
+        StageAdmissionProfile, StageAdmissionSidecar, StageAdmissionSidecarKind,
+        StageArtifactTransferRequest, StageArtifactTransferResponse, StageControlRequest,
+        StageControlResponse, StageLoadMode, StagePreparationState, StagePreparationStatus,
+        StageReady, StageRuntimeState, StageStatus, StageStatusAck, StageStatusList,
+        StageStatusUpdate, StageTopologyStage, StageTransportOpen, StopStage,
+        stage_control_request, stage_control_response, stage_preparation_status, stage_status,
     };
 
     fn admission(layer_start: u32, layer_end: u32) -> StageAdmissionDescriptor {
@@ -570,7 +571,11 @@ mod tests {
                         stage_index: 1,
                         layer_start: 8,
                         layer_end: 16,
-                        admission: Some(admission(8, 16)),
+                        admission_state: Some(stage_preparation_status::AdmissionState::Admitted(
+                            StageAdmissionAdmitted {
+                                descriptor: Some(admission(8, 16)),
+                            },
+                        )),
                         activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StagePreparationState::Loading as i32,
                         bytes_done: Some(10),
@@ -663,7 +668,11 @@ mod tests {
                     stage_index: 0,
                     layer_start: 0,
                     layer_end: 16,
-                    admission: Some(admission(0, 16)),
+                    admission_state: Some(stage_status::AdmissionState::Admitted(
+                        StageAdmissionAdmitted {
+                            descriptor: Some(admission(0, 16)),
+                        },
+                    )),
                     activation_codec: StageActivationCodec::F16RneV1 as i32,
                     state: StageRuntimeState::Ready as i32,
                     bind_addr: "127.0.0.1:0".to_string(),
@@ -728,7 +737,11 @@ mod tests {
                         stage_index: 1,
                         layer_start: 8,
                         layer_end: 16,
-                        admission: Some(admission(8, 16)),
+                        admission_state: Some(stage_preparation_status::AdmissionState::Admitted(
+                            StageAdmissionAdmitted {
+                                descriptor: Some(admission(8, 16)),
+                            },
+                        )),
                         activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StagePreparationState::Assigned as i32,
                         shutdown_generation: 7,
@@ -764,7 +777,11 @@ mod tests {
                         stage_index: 0,
                         layer_start: 0,
                         layer_end: 16,
-                        admission: Some(admission(0, 16)),
+                        admission_state: Some(stage_status::AdmissionState::Admitted(
+                            StageAdmissionAdmitted {
+                                descriptor: Some(admission(0, 16)),
+                            },
+                        )),
                         activation_codec: StageActivationCodec::F16RneV1 as i32,
                         state: StageRuntimeState::Ready as i32,
                         bind_addr: "127.0.0.1:51234".to_string(),
@@ -778,6 +795,55 @@ mod tests {
             ..frame.clone()
         };
         validate_stage_control_response(&status_list_response).unwrap();
+
+        let idle_status_response = StageControlResponse {
+            response: Some(stage_control_response::Response::StageStatuses(
+                StageStatusList {
+                    statuses: vec![StageStatus {
+                        admission_state: Some(stage_status::AdmissionState::Idle(
+                            super::proto::stage::StageAdmissionIdle {},
+                        )),
+                        ..Default::default()
+                    }],
+                },
+            )),
+            ..frame.clone()
+        };
+        validate_stage_control_response(&idle_status_response).unwrap();
+
+        let missing_status_state = StageControlResponse {
+            response: Some(stage_control_response::Response::StageStatuses(
+                StageStatusList {
+                    statuses: vec![StageStatus::default()],
+                },
+            )),
+            ..frame.clone()
+        };
+        assert!(matches!(
+            validate_stage_control_response(&missing_status_state),
+            Err(StageFrameError::MissingStageAdmissionDescriptor)
+        ));
+
+        let idle_model_status = StageControlResponse {
+            response: Some(stage_control_response::Response::StageStatuses(
+                StageStatusList {
+                    statuses: vec![StageStatus {
+                        model_id: "qwen".to_string(),
+                        admission_state: Some(stage_status::AdmissionState::Idle(
+                            super::proto::stage::StageAdmissionIdle {},
+                        )),
+                        ..Default::default()
+                    }],
+                },
+            )),
+            ..frame.clone()
+        };
+        assert!(matches!(
+            validate_stage_control_response(&idle_model_status),
+            Err(StageFrameError::InvalidStageAdmissionDescriptor(
+                "idle status must not identify a model"
+            ))
+        ));
 
         let missing_response = StageControlResponse {
             response: None,

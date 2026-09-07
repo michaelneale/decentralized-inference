@@ -339,6 +339,7 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             workflow, "Live package-v2 two-node matrix (model_pin proof)"
         )
         self.assertIn("scripts/skippy-canary-live-matrix.sh --prepare", live_matrix)
+        self.assertIn("set -o pipefail", live_matrix)
         self.assertIn("continue-on-error: true", live_matrix)
         self.assertIn("steps.live_matrix.outcome == 'failure'", battery_repair)
         self.assertIn("steps.live_matrix.outcome == 'failure'", fail_step)
@@ -373,6 +374,29 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
         self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
         self.assertIn("-R '^skippy_'", generated_patch_check_text)
+        generator_index = generated_patch_check_text.index(
+            'python3 "$ROOT/scripts/generate-skippy-family-patch.py"'
+        )
+        compile_index = generated_patch_check_text.index(
+            'cmake --build "$LLAMA_BUILD_DIR"'
+        )
+        self.assertIn(
+            '--target "${TRANSFORMED_TREE_TARGETS[@]}"',
+            generated_patch_check_text,
+        )
+        self.assertIn("skippy-stage-slice-plan", generated_patch_check_text)
+        verify_index = generated_patch_check_text.index(
+            'ctest --test-dir "$LLAMA_BUILD_DIR"'
+        )
+        self.assertLess(generator_index, compile_index)
+        self.assertLess(compile_index, verify_index)
+        self.assertIn('--compile-result "$compile_result"', generated_patch_check_text)
+        self.assertIn(
+            '--graph-verify-result "$graph_verify_result"',
+            generated_patch_check_text,
+        )
+        self.assertNotIn("--compile-result pass", generated_patch_check_text)
+        self.assertNotIn("--graph-verify-result pass", generated_patch_check_text)
 
         native_build = _step_block(workflow, "Build patched llama.cpp ABI")
         self.assertIn('LLAMA_STAGE_UPSTREAM_TESTS: "ON"', native_build)

@@ -264,6 +264,14 @@ fn package_v2_source_files(
 }
 
 fn package_v2_layer_weight_bytes(manifest: &PackageManifestV2) -> Result<Vec<u64>> {
+    if !manifest
+        .tensor_catalog
+        .entries
+        .iter()
+        .any(|tensor| tensor.layer_ordinal.is_some())
+    {
+        return Ok(Vec::new());
+    }
     let mut layer_bytes = vec![0_u64; manifest.layer_count as usize];
     for tensor in &manifest.tensor_catalog.entries {
         let Some(layer) = tensor.layer_ordinal else {
@@ -278,6 +286,9 @@ fn package_v2_layer_weight_bytes(manifest: &PackageManifestV2) -> Result<Vec<u64
         *slot = slot
             .checked_add(stored_length)
             .context("package-v2 layer byte count overflow")?;
+    }
+    if layer_bytes.contains(&0) {
+        return Ok(Vec::new());
     }
     Ok(layer_bytes)
 }
@@ -1122,6 +1133,9 @@ fn canonical_layer_package_ref(package_ref: &str, local_ref: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skippy_package_format::{
+        ArtifactCatalog, SourceModel, Tensor, TensorCatalog, TensorIntegrity,
+    };
     use skippy_runtime::TensorInfo;
 
     #[test]
@@ -1150,6 +1164,64 @@ mod tests {
 
         std::fs::write(&manifest, br#"{"schema_version":2}"#).unwrap();
         assert!(is_package_v2_ref(&root.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn package_v2_layer_weights_fall_back_when_ordinals_are_unavailable() {
+        let tensor = |id: &str, layer_ordinal, stored_length| Tensor {
+            id: id.to_string(),
+            name: id.to_string(),
+            ggml_type: 0,
+            dimensions: vec![1],
+            layer_ordinal,
+            storage: TensorStorage::Owned {
+                artifact_id: "source".to_string(),
+                data_offset: 0,
+                stored_length,
+                alignment: 1,
+                integrity: TensorIntegrity::ArtifactSha256,
+            },
+        };
+        let mut manifest = PackageManifestV2 {
+            schema_version: skippy_package_format::PACKAGE_SCHEMA_VERSION,
+            package_id: String::new(),
+            model_id: "fixture/model".to_string(),
+            source_model: SourceModel {
+                sha256: String::new(),
+                metadata_artifact_id: "source".to_string(),
+                repo: None,
+                revision: None,
+                primary_file: None,
+                canonical_ref: None,
+                distribution_id: None,
+                files: Vec::new(),
+            },
+            format: "gguf".to_string(),
+            layer_count: 2,
+            model_metadata: Default::default(),
+            artifact_catalog: ArtifactCatalog {
+                entries: Vec::new(),
+            },
+            tensor_catalog: TensorCatalog {
+                entries: vec![tensor("first", None, 10), tensor("second", None, 20)],
+            },
+            sidecars: Vec::new(),
+            generation: None,
+            native_abi_version: String::new(),
+            generator_version: String::new(),
+            created_at_unix_secs: 0,
+        };
+
+        assert!(package_v2_layer_weight_bytes(&manifest).unwrap().is_empty());
+
+        manifest.tensor_catalog.entries[0].layer_ordinal = Some(0);
+        assert!(package_v2_layer_weight_bytes(&manifest).unwrap().is_empty());
+
+        manifest.tensor_catalog.entries[1].layer_ordinal = Some(1);
+        assert_eq!(
+            package_v2_layer_weight_bytes(&manifest).unwrap(),
+            vec![10, 20]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
-From 26d0422f05926f785591a894c46ed2758bb8f33c Mon Sep 17 00:00:00 2001
+From 9918b1222c2d877b19b72e9a944241ec88040a22 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:03 +1000
-Subject: [PATCH 04/11] skippy: implement staged execution and state runtime
+Subject: [PATCH] skippy: implement staged execution and state runtime
 
 ---
  src/llama-graph.cpp                 |   44 +-
@@ -39,7 +39,7 @@ Subject: [PATCH 04/11] skippy: implement staged execution and state runtime
  create mode 100644 src/skippy/tokenization.cpp
 
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index a9ef9d1d0..c2953aac3 100644
+index 0749c9243..0b6d17053 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -46,10 +46,10 @@ bool skippy_graph_build_inputs::topology_equal(const skippy_graph_build_inputs &
@@ -114,7 +114,7 @@ index a9ef9d1d0..c2953aac3 100644
  
  
  ggml_tensor * llm_graph_context::build_cvec(
-@@ -3738,6 +3764,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
+@@ -3741,6 +3767,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
      inp->inp_hca.k_rot = mctx_cur->get_hca()->build_input_k_rot(ctx0);
      inp->inp_lid.k_rot = mctx_cur->get_lid()->build_input_k_rot(ctx0);
  

@@ -234,15 +234,9 @@ impl Node {
         {
             self.record_stage_load_topology(load).await;
         }
-        let response =
-            if let crate::inference::skippy::StageControlRequest::Status(filter) = &request {
-                crate::inference::skippy::StageControlResponse::Status(
-                    self.cached_stage_statuses(filter).await,
-                )
-            } else {
-                self.execute_stage_control_request_for_peer(remote, request)
-                    .await?
-            };
+        let response = self
+            .execute_stage_control_request_for_peer(remote, request)
+            .await?;
         self.record_stage_control_response(&response).await;
         let proto_response = stage_control_response_to_proto(response);
         write_len_prefixed(&mut send, &proto_response.encode_to_vec()).await?;

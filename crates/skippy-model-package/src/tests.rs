@@ -486,6 +486,7 @@ fn mid_stage_artifact_opens_with_the_stage_filter_applied() -> anyhow::Result<()
         include_embeddings: true,
         include_output: true,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
         ..RuntimeConfig::default()
     };
 

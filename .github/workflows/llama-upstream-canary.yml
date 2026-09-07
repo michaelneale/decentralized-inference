@@ -270,6 +270,7 @@ jobs:
           SKIPPY_CANARY_LIVE_MATRIX_BACKEND: metal
           SKIPPY_CANARY_LIVE_MATRIX_ROOT: ${{ github.workspace }}/target/family-battery/${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          set -o pipefail
           scripts/skippy-canary-live-matrix.sh --prepare 2>&1 | tee -a .deps/llama-canary-repair-battery.log
 
       - name: Supported-families certification battery (parity gate)

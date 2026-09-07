@@ -243,6 +243,18 @@ fn package_identity_binds_tensor_metadata() {
 }
 
 #[test]
+fn package_identity_excludes_creation_timestamp() {
+    let manifest = fixture();
+    let mut created_later = manifest.clone();
+    created_later.created_at_unix_secs = manifest.created_at_unix_secs + 86_400;
+
+    assert_eq!(
+        created_later.computed_package_id().unwrap(),
+        manifest.computed_package_id().unwrap()
+    );
+}
+
+#[test]
 fn unknown_manifest_fields_are_rejected() {
     let manifest = fixture();
     let mut encoded = serde_json::to_value(manifest).unwrap();

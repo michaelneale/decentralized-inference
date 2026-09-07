@@ -424,6 +424,7 @@ fn runtime_config_from_stage_config(
         include_output: config.downstream.is_none(),
         mtp_source: overrides.mtp_source,
         filter_tensors_on_load: config.filter_tensors_on_load,
+        resident_tensor_names: config.resident_tensor_names.clone(),
         checkpoint_quantization: config
             .checkpoint_quantization
             .as_deref()
@@ -540,6 +541,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "Vulkan1".into(),
                 stable_id: Some("pci:0000:65:00.0".into()),
@@ -662,6 +664,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -730,6 +733,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "CPU".into(),
                 stable_id: None,
@@ -810,6 +814,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "CPU".into(),
                 stable_id: None,
@@ -1033,6 +1038,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -1136,6 +1142,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -1196,6 +1203,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,

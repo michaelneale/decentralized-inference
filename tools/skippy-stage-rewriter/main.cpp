@@ -24,6 +24,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -269,9 +270,11 @@ std::optional<std::string> assignedName(const CallExpr *call,
 
 std::optional<uint64_t> fileOffset(SourceLocation location,
                                    const SourceManager &sm) {
+  if (location.isInvalid() || location.isMacroID()) {
+    return std::nullopt;
+  }
   location = sm.getSpellingLoc(location);
-  if (!location.isValid() || location.isMacroID() ||
-      !sm.isWrittenInMainFile(location)) {
+  if (!location.isValid() || !sm.isWrittenInMainFile(location)) {
     return std::nullopt;
   }
   return sm.getFileOffset(location);
@@ -985,6 +988,16 @@ public:
            assignmentsTo(constructor_body, *carried)) {
         const auto offset = fileOffset(assignment->getBeginLoc(), sm);
         if (offset && *offset >= prelude_begin && *offset < *loop_begin) {
+          const Stmt *statement = directChildContaining(
+              constructor_body, assignment, sm, lang);
+          if (const auto *conditional =
+                  llvm::dyn_cast_or_null<IfStmt>(statement);
+              conditional != nullptr && conditional->getElse() != nullptr) {
+            refuse(report,
+                   "pre-loop activation conditional has an else branch");
+            reports_.push_back(std::move(report));
+            return;
+          }
           preloop_activation_assignments.push_back(assignment);
         }
       }

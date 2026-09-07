@@ -402,6 +402,19 @@ def main() -> int:
         )["builders"][0]
         assert embedding_prelude_second["verdict"] == "already_transformed"
 
+        embedding_prelude_else = run(
+            tool,
+            source_root,
+            Path(temporary) / "embedding-prelude-else.json",
+            source_name="embedding-prelude-else.cpp",
+            apply=False,
+        )["builders"][0]
+        assert embedding_prelude_else["verdict"] == "unsupported_shape"
+        assert embedding_prelude_else["unsupported_reason"] == (
+            "pre-loop activation conditional has an else branch"
+        )
+        assert embedding_prelude_else["edits"] == []
+
     return 0
 
 

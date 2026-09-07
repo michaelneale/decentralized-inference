@@ -69,13 +69,20 @@ pub(crate) fn encode_activation(
     if values.len() != elements {
         return Err(invalid_data("activation value count does not match shape"));
     }
-    validate_finite(values)?;
-
     match codec {
         StageActivationCodec::RawF32V1 => encode_raw_f32(values),
-        StageActivationCodec::F16RneV1 => encode_f16(values),
-        StageActivationCodec::Bf16RneV1 => encode_bf16(values),
-        StageActivationCodec::S8RowF32RneV1 => encode_s8_rows(shape, values),
+        StageActivationCodec::F16RneV1 => {
+            validate_finite(values)?;
+            encode_f16(values)
+        }
+        StageActivationCodec::Bf16RneV1 => {
+            validate_finite(values)?;
+            encode_bf16(values)
+        }
+        StageActivationCodec::S8RowF32RneV1 => {
+            validate_finite(values)?;
+            encode_s8_rows(shape, values)
+        }
     }
 }
 
@@ -167,7 +174,9 @@ fn select_lossless_activation_codec_from_values(
     let mut f16_exact = permitted_codecs.contains(&StageActivationCodec::F16RneV1);
     for value in values {
         if !value.is_finite() {
-            return Err(invalid_data("activation values must be finite"));
+            bf16_exact = false;
+            f16_exact = false;
+            continue;
         }
         bf16_exact &= value.to_bits() & 0xffff == 0;
         f16_exact &= f16_bits_to_f32(f32_to_f16_bits(value)).to_bits() == value.to_bits();
@@ -198,7 +207,6 @@ fn decode_raw_f32(payload: &[u8], elements: usize) -> io::Result<Vec<f32>> {
     for bytes in payload.as_chunks::<4>().0 {
         out.push(f32::from_le_bytes(*bytes));
     }
-    validate_finite(&out)?;
     Ok(out)
 }
 
@@ -587,10 +595,45 @@ mod tests {
     }
 
     #[test]
-    fn codecs_reject_non_finite_values_and_malformed_payloads() {
+    fn raw_f32_preserves_non_finite_bit_patterns() {
+        let shape = ActivationShape::new(1, 0, 3);
+        let values = [
+            f32::from_bits(0x7fc0_1234),
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let payload = encode_activation(StageActivationCodec::RawF32V1, shape, &values).unwrap();
+        let decoded = decode_activation(StageActivationCodec::RawF32V1, shape, &payload).unwrap();
+
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            select_lossless_activation_codec(
+                shape,
+                &values,
+                &[
+                    StageActivationCodec::RawF32V1,
+                    StageActivationCodec::F16RneV1,
+                    StageActivationCodec::Bf16RneV1,
+                ],
+            )
+            .unwrap(),
+            StageActivationCodec::RawF32V1
+        );
+    }
+
+    #[test]
+    fn compressed_codecs_reject_non_finite_values_and_malformed_payloads() {
         let shape = ActivationShape::new(1, 0, 1);
         for codec in [
-            StageActivationCodec::RawF32V1,
             StageActivationCodec::F16RneV1,
             StageActivationCodec::Bf16RneV1,
             StageActivationCodec::S8RowF32RneV1,
@@ -608,11 +651,9 @@ mod tests {
                 "activation payload size mismatch",
             );
         }
-
-        let nan_payload = f32::NAN.to_le_bytes();
         assert_invalid(
-            decode_activation(StageActivationCodec::RawF32V1, shape, &nan_payload),
-            "activation values must be finite",
+            decode_activation(StageActivationCodec::RawF32V1, shape, &[]),
+            "activation payload size mismatch",
         );
         assert_invalid(
             decode_activation(StageActivationCodec::S8RowF32RneV1, shape, &[0, 0, 0, 0, 0]),
@@ -826,13 +867,14 @@ mod tests {
             select_lossless_activation_codec(ActivationShape::new(1, 0, 2), &[1.0], &permitted),
             "activation value count does not match shape",
         );
-        assert_invalid(
+        assert_eq!(
             select_lossless_activation_codec(
                 ActivationShape::new(1, 0, 1),
                 &[f32::NAN],
                 &permitted,
-            ),
-            "activation values must be finite",
+            )
+            .unwrap(),
+            StageActivationCodec::RawF32V1
         );
         assert_eq!(
             select_lossless_activation_codec(ActivationShape::new(0, 0, 4), &[], &permitted,)

@@ -1,7 +1,7 @@
-From 8bb95c6dfe1238293dc4712c881ad328f997e1da Mon Sep 17 00:00:00 2001
+From 4f631a0ea6c370eb94655b580b7f2d690ff04c2a Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:22:34 +1000
-Subject: [PATCH 01/11] skippy: add graph, memory, and model foundations
+Subject: [PATCH] skippy: add graph, memory, and model foundations
 
 ---
  include/llama.h                |    7 +
@@ -20,8 +20,8 @@ Subject: [PATCH 01/11] skippy: add graph, memory, and model foundations
  src/llama-memory-recurrent.cpp |   31 +-
  src/llama-mmap.cpp             |   46 +-
  src/llama-mmap.h               |   10 +
- src/llama-model-loader.cpp     |  262 ++++++++-
- src/llama-model-loader.h       |   16 +
+ src/llama-model-loader.cpp     |  317 +++++++++-
+ src/llama-model-loader.h       |   19 +
  src/llama-model-saver.cpp      |    1 +
  src/llama-model.cpp            |  158 +++--
  src/llama-model.h              |   20 +-
@@ -30,7 +30,7 @@ Subject: [PATCH 01/11] skippy: add graph, memory, and model foundations
  src/llama-vocab.h              |    1 +
  src/llama.cpp                  |   36 +-
  src/skippy-verify-checkpoint.h |   24 +
- 26 files changed, 2838 insertions(+), 333 deletions(-)
+ 26 files changed, 2896 insertions(+), 333 deletions(-)
  create mode 100644 src/skippy-verify-checkpoint.h
 
 diff --git a/include/llama.h b/include/llama.h
@@ -4333,7 +4333,7 @@ index cc28c8a73..625fda8f8 100644
  using llama_mmaps  = std::vector<std::unique_ptr<llama_mmap>>;
  using llama_mlocks = std::vector<std::unique_ptr<llama_mlock>>;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 1b1f852a0..fdf138dd1 100644
+index 1b1f852a0..ce4325bdf 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -9,6 +9,7 @@
@@ -4430,7 +4430,24 @@ index 1b1f852a0..fdf138dd1 100644
              // make sure the main file is loaded first
              uint16_t idx = 0;
              const std::string kv_split_no = llm_kv(LLM_KV_SPLIT_NO);
-@@ -1057,6 +1117,19 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
+@@ -710,6 +770,16 @@ llama_model_loader::llama_model_loader(
+     n_kv      = gguf_get_n_kv(metadata);
+     n_tensors = weights_map.size();
+ 
++    if (g_skippy_filter.enabled && !g_skippy_filter.resident_tensor_names.empty()) {
++        for (const std::string & name : g_skippy_filter.resident_tensor_names) {
++            if (weights_map.find(name) == weights_map.end() && gguf_find_tensor(metadata, name.c_str()) < 0) {
++                throw std::runtime_error(format(
++                        "admitted resident tensor '%s' is absent from model metadata",
++                        name.c_str()));
++            }
++        }
++    }
++
+     fver = (enum llama_fver) gguf_get_version(metadata);
+ 
+     LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
+@@ -1057,6 +1127,19 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
  }
  
  // find the first buffer type in the list that can use the tensor
@@ -4450,7 +4467,7 @@ index 1b1f852a0..fdf138dd1 100644
  static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hparams, ggml_tensor * tensor, ggml_op op, const buft_list_t * buft_list) {
      GGML_ASSERT(!buft_list->empty());
      for (const auto & cur : *buft_list) {
-@@ -1103,14 +1176,117 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1103,14 +1186,148 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          return it->second.get();
      };
  
@@ -4474,6 +4491,37 @@ index 1b1f852a0..fdf138dd1 100644
 +
 +    auto stage_filter_excludes = [&](ggml_tensor * t_meta) -> bool {
 +        if (!g_skippy_filter.enabled) {
++            return false;
++        }
++
++        if (!g_skippy_filter.resident_tensor_names.empty()) {
++            const std::string tensor_name = tn.str();
++            const bool keep = g_skippy_filter.resident_tensor_names.find(tensor_name) !=
++                    g_skippy_filter.resident_tensor_names.end();
++            if (!keep) {
++                if (t_meta) {
++                    const bool requested_tensor_exists =
++                            !(flags & TENSOR_NOT_REQUIRED) || requested_shape_matches(t_meta);
++                    bool first_filtered_request = true;
++                    if (requested_tensor_exists && !(flags & TENSOR_DUPLICATED)) {
++                        first_filtered_request = skippy_counted_filtered_tensors.insert(tensor_name).second;
++                    }
++                    LLAMA_LOG_DEBUG(
++                            "llama_model_loader: exact stage filter skipping tensor %s (size = %zu bytes)\n",
++                            tensor_name.c_str(),
++                            ggml_nbytes(t_meta));
++                    if (requested_tensor_exists && first_filtered_request && !(flags & TENSOR_DUPLICATED)) {
++                        n_created++;
++                    }
++                    g_skippy_last_tensor_filtered = true;
++                } else {
++                    g_skippy_last_tensor_filtered = false;
++                }
++                return true;
++            }
++            if (t_meta != nullptr && !(flags & TENSOR_DUPLICATED)) {
++                skippy_requested_resident_tensors.insert(tensor_name);
++            }
 +            return false;
          }
  
@@ -4573,7 +4621,7 @@ index 1b1f852a0..fdf138dd1 100644
          // some models use the token embedding tensor as the output, but since these are used in different layers and with different ops
          // the tensor is duplicated
          // to handle this, we check if the tensor is duplicated, and if so, we assume that it is being loaded as the output tensor
-@@ -1126,12 +1302,25 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1126,12 +1343,25 @@ struct ggml_tensor * llama_model_loader::create_tensor(
              throw std::runtime_error(format("missing tensor info mapping for %s", tn.str().c_str()));
          }
  
@@ -4600,7 +4648,7 @@ index 1b1f852a0..fdf138dd1 100644
              n_created++;
  
              return nullptr;
-@@ -1245,6 +1434,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1245,6 +1475,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          const int64_t tid = gguf_find_tensor(metadata, tn.str().c_str());
          if (tid != -1) {
              type = gguf_get_tensor_type(metadata, tid);
@@ -4612,7 +4660,7 @@ index 1b1f852a0..fdf138dd1 100644
          }
  
          // for tensors that are not required some of the dimensions can be invalid:
-@@ -1274,7 +1468,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1274,7 +1509,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          ggml_set_name(&t_meta, tn.str().c_str());
  
          ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
@@ -4623,7 +4671,7 @@ index 1b1f852a0..fdf138dd1 100644
          ggml_context * ctx = ctx_for_buft(buft);
          ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
          ggml_set_name(ret, tn.str().c_str());
-@@ -1282,6 +1478,16 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1282,6 +1519,16 @@ struct ggml_tensor * llama_model_loader::create_tensor(
      }
  
      LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
@@ -4640,7 +4688,7 @@ index 1b1f852a0..fdf138dd1 100644
      const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
      if (cur == NULL) {
          return NULL;
-@@ -1330,14 +1536,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1330,14 +1577,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          }
      }
  
@@ -4656,7 +4704,28 @@ index 1b1f852a0..fdf138dd1 100644
          n_created++;
      }
  
-@@ -1395,9 +1597,28 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1345,6 +1588,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+ }
+ 
+ void llama_model_loader::done_getting_tensors(bool partial) const {
++    if (g_skippy_filter.enabled && !g_skippy_filter.resident_tensor_names.empty() &&
++            skippy_requested_resident_tensors != g_skippy_filter.resident_tensor_names) {
++        for (const std::string & name : g_skippy_filter.resident_tensor_names) {
++            if (skippy_requested_resident_tensors.find(name) == skippy_requested_resident_tensors.end()) {
++                throw std::runtime_error(format(
++                        "%s: admitted resident tensor '%s' was not requested by the model builder",
++                        __func__,
++                        name.c_str()));
++            }
++        }
++        throw std::runtime_error(format(
++                "%s: model builder requested a tensor outside the admitted resident closure",
++                __func__));
++    }
+     if (n_created > n_tensors) {
+         throw std::runtime_error(format("%s: too many tensors created; expected %d, got %d", __func__, n_tensors, n_created));
+     }
+@@ -1395,9 +1652,28 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
          }
      }
  
@@ -4688,7 +4757,7 @@ index 1b1f852a0..fdf138dd1 100644
      }
  }
  
-@@ -1458,6 +1679,7 @@ bool llama_model_loader::load_all_data(
+@@ -1458,6 +1734,7 @@ bool llama_model_loader::load_all_data(
          return true;
      }
      GGML_ASSERT(size_data != 0 && "call init_mappings() first");
@@ -4696,7 +4765,7 @@ index 1b1f852a0..fdf138dd1 100644
  
      std::vector<no_init<uint8_t>> read_buf;
      std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
-@@ -1568,7 +1790,10 @@ bool llama_model_loader::load_all_data(
+@@ -1568,7 +1845,10 @@ bool llama_model_loader::load_all_data(
          }
  
          if (progress_callback) {
@@ -4708,7 +4777,7 @@ index 1b1f852a0..fdf138dd1 100644
                  return false;
              }
          }
-@@ -1681,6 +1906,7 @@ bool llama_model_loader::load_all_data(
+@@ -1681,6 +1961,7 @@ bool llama_model_loader::load_all_data(
          }
  
          size_done += n_size;
@@ -4716,7 +4785,7 @@ index 1b1f852a0..fdf138dd1 100644
      }
  
      // free temporary resources used for async uploads
-@@ -1707,7 +1933,7 @@ bool llama_model_loader::load_all_data(
+@@ -1707,7 +1988,7 @@ bool llama_model_loader::load_all_data(
      }
  
      // check if this is the last call and do final cleanup
@@ -4726,12 +4795,14 @@ index 1b1f852a0..fdf138dd1 100644
          if (use_mmap) {
              for (uint32_t idx = 0; idx < mappings.size(); idx++) {
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index 20f744253..392c1e929 100644
+index 20f744253..68b47e1b0 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
-@@ -14,12 +14,26 @@
+@@ -13,13 +13,29 @@
+ #include <cstring>
  #include <map>
  #include <stdexcept>
++#include <string>
  #include <unordered_map>
 +#include <unordered_set>
  
@@ -4746,6 +4817,7 @@ index 20f744253..392c1e929 100644
 +    int32_t layer_end = 0;
 +    bool include_embeddings = false;
 +    bool include_output = false;
++    std::unordered_set<std::string> resident_tensor_names;
 +};
 +
 +void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter);
@@ -4756,15 +4828,16 @@ index 20f744253..392c1e929 100644
  enum llama_fver {
      GGUF_FILE_VERSION_V1 = 1,
      GGUF_FILE_VERSION_V2 = 2,
-@@ -97,6 +111,7 @@ struct llama_model_loader {
+@@ -97,6 +113,8 @@ struct llama_model_loader {
  
      std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
      std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
 +    std::unordered_set<std::string> skippy_counted_filtered_tensors;
++    std::unordered_set<std::string> skippy_requested_resident_tensors;
      const llama_model_tensor_buft_override * tensor_buft_overrides;
  
      gguf_context_ptr metadata_ptr;
-@@ -134,6 +149,7 @@ struct llama_model_loader {
+@@ -134,6 +152,7 @@ struct llama_model_loader {
          void * set_tensor_data_ud,
          const std::string & fname,
          std::vector<std::string> & splits, // optional, only need if the split does not follow naming scheme
@@ -5385,6 +5458,3 @@ index 000000000..8793000c1
 +    checkpoints.erase(it);
 +    return true;
 +}
--- 
-2.54.0 (Apple Git-157)
-
