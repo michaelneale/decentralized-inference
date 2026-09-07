@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ROOT="${SKIPPY_REWRITER_SOURCE_ROOT:-$ROOT/.deps/llama.cpp}"
 LLAMA_BUILD_DIR="${LLAMA_STAGE_BUILD_DIR:-${LLAMA_BUILD_DIR:-$ROOT/.deps/llama-build/build-stage-abi-static-metal}}"
 CHECKED_PATCH_DIR="${SKIPPY_REWRITER_PATCH_DIR:-$ROOT/third_party/llama.cpp/patches/generated}"
+CHECKED_PATCH_SERIES="$CHECKED_PATCH_DIR/series"
 FAMILY_SOURCE_MAP="${SKIPPY_REWRITER_FAMILY_MAP:-$ROOT/ci/llama-canary/generated-family-map.json}"
 FAMILY_MANIFEST="${SKIPPY_REWRITER_FAMILY_MANIFEST:-$ROOT/ci/llama-canary/family-certified.json}"
 ARTIFACT_ROOT="${SKIPPY_REWRITER_ARTIFACT_ROOT:-$ROOT/target/skippy-stage-rewriter-check}"
@@ -27,12 +28,39 @@ if [[ ! -x "$LLAMA_BUILD_DIR/bin/skippy-noalloc-graph-planning" ]]; then
   echo "build with LLAMA_STAGE_BUILD_TESTS=ON before checking the generated patch" >&2
   exit 1
 fi
-if [[ ! -f "$CHECKED_PATCH_DIR/series" || ! -f "$CHECKED_PATCH_DIR/series.json" ]]; then
+if [[ ! -f "$CHECKED_PATCH_SERIES" || ! -f "$CHECKED_PATCH_DIR/series.json" ]]; then
   echo "checked-in generated family patch series not found: $CHECKED_PATCH_DIR" >&2
   exit 1
 fi
 if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=no)" ]]; then
   echo "prepared llama.cpp checkout must be clean before the generated-patch check" >&2
+  exit 1
+fi
+
+# Normal preparation applies the checked-in generated family shards after the
+# core Skippy queue. Generation must never consume those model edits as input:
+# otherwise every builder is classified as already_transformed and inherited
+# mistakes become self-validating. Rewind exactly the generated tail while the
+# checker runs, then restore the prepared checkout for subsequent CI steps.
+ORIGINAL_SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+GENERATED_PATCH_COUNT="$(sed '/^[[:space:]]*$/d' "$CHECKED_PATCH_SERIES" | wc -l | tr -d '[:space:]')"
+if [[ ! "$GENERATED_PATCH_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "generated family patch series must contain at least one patch" >&2
+  exit 1
+fi
+CORE_SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse "$ORIGINAL_SOURCE_HEAD~$GENERATED_PATCH_COUNT")"
+
+cleanup() {
+  git -C "$SOURCE_ROOT" reset --hard >/dev/null
+  git -C "$SOURCE_ROOT" checkout --force --detach "$ORIGINAL_SOURCE_HEAD" >/dev/null
+}
+trap cleanup EXIT
+
+git -C "$SOURCE_ROOT" checkout --force --detach "$CORE_SOURCE_HEAD" >/dev/null
+if marker_matches="$(rg -n '\bstage_filter\b|\bbegin_block[[:space:]]*\(|\bend_block[[:space:]]*\(' "$SOURCE_ROOT/src/models" || true)" &&
+   [[ -n "$marker_matches" ]]; then
+  echo "core-only generator input already contains model-stage transformations:" >&2
+  printf '%s\n' "$marker_matches" >&2
   exit 1
 fi
 
@@ -56,11 +84,6 @@ EXTRA_ARGS=(--extra-arg=-resource-dir --extra-arg="$("$LLVM_PREFIX"/bin/clang -p
 if command -v xcrun >/dev/null 2>&1; then
   EXTRA_ARGS+=(--extra-arg=-isysroot --extra-arg="$(xcrun --show-sdk-path)")
 fi
-
-cleanup() {
-  git -C "$SOURCE_ROOT" reset --hard HEAD >/dev/null
-}
-trap cleanup EXIT
 
 python3 "$ROOT/scripts/generate-skippy-family-patch.py" \
   --source-root "$SOURCE_ROOT" \

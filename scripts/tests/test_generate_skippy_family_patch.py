@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +41,60 @@ class GenerateSkippyFamilyPatchTests(unittest.TestCase):
             path = Path(temporary) / "generated.patch"
             generator.write_utf8(path, "before—after\n")
             self.assertEqual(path.read_bytes(), "before—after\n".encode("utf-8"))
+
+    def test_first_pass_rejects_pretransformed_builder(self) -> None:
+        generator = load_generator()
+        report = {
+            "builders": [
+                {
+                    "file": "src/models/muse-glimmer.cpp",
+                    "verdict": "already_transformed",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                RuntimeError, "first rewriter pass received pre-transformed"
+            ):
+                generator.validate_report(path, idempotence=False)
+
+    def test_second_pass_accepts_pretransformed_builder(self) -> None:
+        generator = load_generator()
+        report = {
+            "builders": [
+                {
+                    "file": "src/models/muse-glimmer.cpp",
+                    "verdict": "already_transformed",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            self.assertEqual(
+                generator.validate_report(path, idempotence=True), report
+            )
+
+    def test_first_pass_rejects_unsupported_builder(self) -> None:
+        generator = load_generator()
+        report = {
+            "builders": [
+                {
+                    "file": "src/models/qwen4exp.cpp",
+                    "verdict": "unsupported_shape",
+                    "unsupported_reason": "unproven hyperconnection prelude",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                RuntimeError, "did not transform every decoder builder"
+            ):
+                generator.validate_report(path, idempotence=False)
 
 
 if __name__ == "__main__":

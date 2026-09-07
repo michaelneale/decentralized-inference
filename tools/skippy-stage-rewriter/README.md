@@ -42,9 +42,10 @@ over the result to prove idempotence: every edited builder must report
 `supported_auxiliary` or `supported_whole_model` retain an empty edit set and
 carry the structural evidence for their execution scope.
 
-The checked-in family shards are produced from a clean llama.cpp tree containing
-the existing PR family behavior. The rewriter adds any newly proven edits, and
-the generator diffs the result against the pinned upstream revision so the
+The checked-in family shards are produced from a clean llama.cpp tree after the
+shared core Skippy patches and before any model-family patch. The first rewriter
+pass must see zero `already_transformed` builders and generates every model edit.
+The generator then diffs the result against the pinned upstream revision so the
 complete model-family delta is grouped by the certified-family source map:
 
 ```sh
@@ -60,13 +61,13 @@ python3 scripts/generate-skippy-family-patch.py \
   --family-manifest ci/llama-canary/family-certified.json
 ```
 
-The wrapper refuses a dirty input tree, applies the Clang-proven edits, checks
-a second pass for zero edits, and writes fixed-header mail-patch shards after
-the core queue. The generated `series` file fixes application order;
+The wrapper refuses a dirty or pre-transformed input tree, applies the
+Clang-proven edits, checks a second pass for zero edits, and writes fixed-header
+mail-patch shards after the core queue. `already_transformed` is valid only on
+that second idempotence pass. The generated `series` file fixes application order;
 `series.json` records each shard's digest, sources, and affected certified
-families. A tree in which every supported builder is already transformed is
-also valid: this lets CI canonicalize the complete prepared model-tree diff and
-compare the generated directory byte-for-byte with the checked-in shards.
+families. A pre-transformed first-pass tree is always rejected, even when every
+builder would otherwise be classified as supported.
 
 After `scripts/build-llama.sh` has produced the compilation database and run the
 native Skippy verifier, CI can run the complete deterministic check with:
