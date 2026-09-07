@@ -1,20 +1,20 @@
-From 9d30c1955f2ad24138a34f170ac010978ba36486 Mon Sep 17 00:00:00 2001
+From e18b65b84418d41ead23ea8d70f28aaa906d258c Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 27 Aug 2026 15:26:27 -0400
-Subject: [PATCH 39/56] skippy: add kv_offload, kv_unified, swa_full,
- op_offload, no_host_buffer, check_tensors, direct_io, main_gpu, and
- split_mode runtime config controls
+Subject: [PATCH 39/56] skippy: add kv_offload, kv_unified, swa_full, op_offload,
+ no_host_buffer, check_tensors, direct_io, main_gpu, and split_mode runtime
+ config controls
 
 ---
  CMakeLists.txt                                |  5 ++
  include/skippy/common.h                       |  2 +-
  include/skippy/runtime.h                      | 34 ++++++++++++
- src/CMakeLists.txt                            | 11 ++++
+ src/CMakeLists.txt                            | 18 +++++++
  src/skippy/model_load_config.cpp              | 24 ++++++++-
  src/skippy/model_load_config_internal.h       |  3 ++
  src/skippy/model_loading.cpp                  | 33 ++++++++----
  .../tests/hardware_application_probe.cpp      | 53 +++++++++++++++++++
- 8 files changed, 154 insertions(+), 11 deletions(-)
+ 8 files changed, 161 insertions(+), 11 deletions(-)
  create mode 100644 src/skippy/tests/hardware_application_probe.cpp
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
@@ -94,14 +94,21 @@ index bfb80e105..ba62f60cf 100644
  LLAMA_API enum skippy_status skippy_model_open(
          const char * path,
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index e3bf733af..3d364d6e5 100644
+index e3bf733af..7019f8760 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -77,6 +77,17 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -77,6 +77,24 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
 +if (LLAMA_STAGE_BUILD_TESTS)
++    add_executable(skippy-tokenization ../tests/test-skippy-tokenization.cpp)
++    target_include_directories(skippy-tokenization PRIVATE .)
++    target_compile_features(skippy-tokenization PRIVATE cxx_std_17)
++    target_link_libraries(skippy-tokenization PRIVATE llama)
++    add_test(NAME skippy_tokenization COMMAND skippy-tokenization
++        "${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-spm.gguf")
++
 +    add_executable(skippy-hardware-application-probe
 +        skippy/tests/hardware_application_probe.cpp)
 +    target_include_directories(skippy-hardware-application-probe PRIVATE .)
@@ -302,5 +309,5 @@ index 000000000..42fae794a
 +    return passed ? 0 : 1;
 +}
 -- 
-2.55.0
+2.50.1 (Apple Git-155)
 

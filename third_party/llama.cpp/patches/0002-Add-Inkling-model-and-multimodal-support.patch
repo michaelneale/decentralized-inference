@@ -1,4 +1,4 @@
-From 6d129638d9d46a6adfa6f494eeb504df88987d4e Mon Sep 17 00:00:00 2001
+From fe86c701805afed8ea0d12009fc99c81291b7c7a Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 16:02:19 +1000
 Subject: [PATCH 02/56] Add Inkling model and multimodal support
@@ -1226,7 +1226,7 @@ index 000000000..95874d23d
 +{#- Unsloth translation to jinja from TML's parser #}
 diff --git a/src/models/inkling.cpp b/src/models/inkling.cpp
 new file mode 100644
-index 000000000..8ee5ed2b7
+index 000000000..f8ce88c03
 --- /dev/null
 +++ b/src/models/inkling.cpp
 @@ -0,0 +1,686 @@
@@ -1299,7 +1299,6 @@ index 000000000..8ee5ed2b7
 +    const int64_t head_dim = hparams.n_embd_head_k();
 +    const int64_t d_rel    = hparams.inkling_d_rel;
 +    const int64_t K        = hparams.n_shortconv_l_cache;
-+    const int64_t n_ff_exp = hparams.n_ff_exp();
 +    const int64_t n_shexp  = hparams.n_expert_shared;
 +
 +    tok_embd    = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD,      "weight"), {n_embd, n_vocab}, mtp_only ? TENSOR_NOT_REQUIRED : 0);
@@ -1309,6 +1308,7 @@ index 000000000..8ee5ed2b7
 +
 +    auto load_block = [&](int i, int flags, bool force_dense) {
 +        auto & layer = layers[i];
++        const int64_t n_ff_exp = hparams.n_ff_exp(i);
 +
 +        const int64_t n_head_kv_i = hparams.n_head_kv(i);
 +        const int64_t kvw         = n_head_kv_i * head_dim;
@@ -2512,5 +2512,5 @@ index 00ecadcf4..c1dfced1b 100644
                      // other models, we only need the total number of tokens
                      image_tokens->nx = n_tokens;
 -- 
-2.55.0
+2.50.1 (Apple Git-155)
 

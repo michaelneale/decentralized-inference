@@ -1,4 +1,4 @@
-From c209d42fab84b34ad9e520efe8d0652e8f8f018c Mon Sep 17 00:00:00 2001
+From 7741f0f3cc2234d8c386cc6ac6335f0cc855bd89 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 29 Aug 2026 01:31:34 -0700
 Subject: [PATCH 47/56] skippy: account retained tensors during staged loads
@@ -12,10 +12,10 @@ Subject: [PATCH 47/56] skippy: account retained tensors during staged loads
  create mode 100644 tests/test-skippy-model-loader-accounting.cpp
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 3d364d6e5..d07bb1a23 100644
+index 7019f8760..7cb061714 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -86,6 +86,52 @@ if (LLAMA_STAGE_BUILD_TESTS)
+@@ -93,6 +93,52 @@ if (LLAMA_STAGE_BUILD_TESTS)
      add_test(
          NAME skippy_hardware_application_probe
          COMMAND skippy-hardware-application-probe)
@@ -182,10 +182,10 @@ index 3b91fbad6..2f4675f13 100644
          if (use_mmap) {
              for (uint32_t idx = 0; idx < mappings.size(); idx++) {
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 47ddeeef1..c8a131e40 100644
+index 752547829..03309c08d 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -217,6 +217,22 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+@@ -219,6 +219,22 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
          FIXTURES_SETUP generate-models
      )
  
@@ -210,7 +210,7 @@ index 47ddeeef1..c8a131e40 100644
          LABEL main
 diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
 new file mode 100644
-index 000000000..c8ad5f1b2
+index 000000000..ac3ce18a6
 --- /dev/null
 +++ b/tests/test-skippy-model-loader-accounting.cpp
 @@ -0,0 +1,260 @@
@@ -341,7 +341,7 @@ index 000000000..c8ad5f1b2
 +    ggml_context * accounting_ctx_raw = accounting_ctx.get();
 +    ggml_context * synthetic_ctx_raw = synthetic_ctx.get();
 +    const auto cpu_buft = ggml_backend_cpu_buffer_type();
-+    loader.ctx_map.emplace(cpu_buft, std::move(accounting_ctx));
++    loader.ctx_map.emplace(llama_model_loader::ctx_key{cpu_buft, false}, std::move(accounting_ctx));
 +    loader.init_mappings(false);
 +
 +    const size_t weight_size = ggml_nbytes(weight);
@@ -475,5 +475,5 @@ index 000000000..c8ad5f1b2
 +    return EXIT_SUCCESS;
 +}
 -- 
-2.55.0
+2.50.1 (Apple Git-155)
 

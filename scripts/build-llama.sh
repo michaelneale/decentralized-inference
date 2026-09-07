@@ -366,6 +366,7 @@ BUILD_TARGETS=(llama llama-common mtmd)
 if [[ "${LLAMA_STAGE_BUILD_TESTS:-OFF}" == "ON" ]]; then
   BUILD_TARGETS+=(
     skippy-hardware-application-probe
+    skippy-tokenization
     skippy-model-fixture-generator
     skippy-model-loader-accounting
   )

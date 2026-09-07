@@ -1,4 +1,4 @@
-From 200cc3d34ffe22f3a5aaf36902f17794b25fa28a Mon Sep 17 00:00:00 2001
+From 29134935cb65738a4f216feeeea97874f6efed3d Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 8 Aug 2026 16:02:20 +1000
 Subject: [PATCH 09/56] Add Skippy tokenization and stage chat
@@ -13,13 +13,16 @@ Subject: [PATCH 09/56] Add Skippy tokenization and stage chat
  common/stage-chat.cpp                 | 296 ++++++++++++++++++++++++++
  include/skippy/common.h               |   2 +-
  include/skippy/tokenization.h         |  69 ++++++
- src/skippy/tokenization.cpp           | 137 ++++++++++++
+ src/skippy/tokenization.cpp           | 141 ++++++++++++
+ tests/CMakeLists.txt                  |   2 +
  tests/test-chat-auto-parser.cpp       |  47 ++++
  tests/test-chat.cpp                   | 285 ++++++++++++++++++++++++-
- 12 files changed, 1128 insertions(+), 36 deletions(-)
+ tests/test-skippy-tokenization.cpp    |  45 ++++
+ 14 files changed, 1179 insertions(+), 36 deletions(-)
  create mode 100644 common/stage-chat.cpp
  create mode 100644 include/skippy/tokenization.h
  create mode 100644 src/skippy/tokenization.cpp
+ create mode 100644 tests/test-skippy-tokenization.cpp
 
 diff --git a/common/chat-auto-parser-generator.cpp b/common/chat-auto-parser-generator.cpp
 index d7e117e4d..4707c524a 100644
@@ -943,10 +946,10 @@ index 000000000..7b8c4dcc4
 +#endif // SKIPPY_TOKENIZATION_H
 diff --git a/src/skippy/tokenization.cpp b/src/skippy/tokenization.cpp
 new file mode 100644
-index 000000000..89d69ff3a
+index 000000000..161049da0
 --- /dev/null
 +++ b/src/skippy/tokenization.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,141 @@
 +#include "skippy/tokenization.h"
 +#include "skippy/errors.h"
 +#include "skippy/runtime_types.h"
@@ -970,6 +973,10 @@ index 000000000..89d69ff3a
 +        struct skippy_error ** out_error) {
 +    if (model == nullptr || model->model == nullptr || text == nullptr || out_token_count == nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "model, text, and out_token_count are required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (output_tokens == nullptr && output_token_capacity > 0) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "output_tokens is required when capacity is non-zero");
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
 +    if (output_token_capacity > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
@@ -1084,6 +1091,19 @@ index 000000000..89d69ff3a
 +
 +
 +} // extern "C"
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index c46377c76..26e97e89b 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -153,6 +153,8 @@ llama_build(test-save-load-state.cpp)
+ 
+ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+     # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)
++    llama_build_and_test(test-skippy-tokenization.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-spm.gguf)
++    target_include_directories(test-skippy-tokenization PRIVATE ${PROJECT_SOURCE_DIR}/src)
+     llama_build_and_test(test-unicode.cpp)
+     llama_build_and_test(test-sampling.cpp)
+     llama_build_and_test(test-reasoning-budget.cpp)
 diff --git a/tests/test-chat-auto-parser.cpp b/tests/test-chat-auto-parser.cpp
 index 5aa948251..78df176dd 100644
 --- a/tests/test-chat-auto-parser.cpp
@@ -1532,6 +1552,57 @@ index 7918f0ffc..635e0d662 100644
          test_template_output_peg_parsers(detailed_debug);
          std::cout << "\n[chat] All template tests passed!" << '\n';
          return 0;
+diff --git a/tests/test-skippy-tokenization.cpp b/tests/test-skippy-tokenization.cpp
+new file mode 100644
+index 000000000..32fc8a997
+--- /dev/null
++++ b/tests/test-skippy-tokenization.cpp
+@@ -0,0 +1,45 @@
++#include "llama.h"
++#include "skippy/tokenization.h"
++#include "skippy/errors.h"
++#include "skippy/runtime_types.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++int main(int argc, char ** argv) {
++    if (argc != 2) {
++        return EXIT_FAILURE;
++    }
++    llama_backend_init();
++    auto params = llama_model_default_params();
++    params.vocab_only = true;
++    llama_model * model = llama_model_load_from_file(argv[1], params);
++    if (model == nullptr) {
++        return EXIT_FAILURE;
++    }
++    skippy_model stage;
++    stage.model = model;
++    skippy_error * error = nullptr;
++    size_t count = 0;
++    bool ok = skippy_tokenize(&stage, "hello", false, nullptr, 1, &count, &error)
++            == SKIPPY_STATUS_INVALID_ARGUMENT;
++    ok = ok && error != nullptr && error->status == SKIPPY_STATUS_INVALID_ARGUMENT;
++    skippy_error_free(error);
++    error = nullptr;
++    ok = ok && skippy_tokenize(&stage, "hello", false, nullptr, 0, &count, &error)
++            == SKIPPY_STATUS_BUFFER_TOO_SMALL && count > 0;
++    skippy_error_free(error);
++    error = nullptr;
++    std::vector<llama_token> tokens(count);
++    const size_t expected = count;
++    ok = ok && skippy_tokenize(&stage, "hello", false, tokens.data(), tokens.size(), &count, &error)
++            == SKIPPY_STATUS_OK && count == expected;
++    skippy_error_free(error);
++    llama_model_free(model);
++    llama_backend_free();
++    if (!ok) {
++        std::fprintf(stderr, "Skippy tokenizer buffer contract failed\n");
++    }
++    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
++}
 -- 
-2.55.0
+2.50.1 (Apple Git-155)
 
