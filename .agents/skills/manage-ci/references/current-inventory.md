@@ -181,6 +181,16 @@ repository secrets. The trusted main entrypoint may pass the optional
 
 ## Prebuilt runner-image containerization
 
+`ci/runner-images.json` records the checked-in image references, semantic job
+bindings, native epochs, compiler-seed identity and the separate SDK Rust
+toolchain identity. `scripts/runner-image-identity.py check` compares those
+values with every literal workflow image binding and the actual planner rows.
+Its focused tests run through the existing `just ci-validate` discovery. This
+catalog adds no planner authority and changes no image pins or cache keys.
+Historical receipt, provenance and workload-coverage fields are explicitly
+unknown. `diagnose` reports the runtime architecture guard mismatch separately;
+matching image identity does not qualify the host seed for native runtime work.
+
 Some CI jobs run inside a `container:` pinned to a digest from the
 `mesh-llm-runner-images` repo instead of installing tooling per-run with
 `actions/setup-*`. There is no separate sister repo: the `public web`

@@ -659,6 +659,16 @@ The warmer's `just ci-sccache-seed-build` recipe covers both the dominant
 `mesh-llm` Clippy graph and the isolated `mesh-llm-cli` test graph used by the
 Rust-test matrix; its `Justfile` and `just/**` inputs are part of the exact
 seed key.
+`ci/runner-images.json` and `scripts/runner-image-identity.py check` make the
+current image, native epoch, compiler-seed and SDK Rust identities auditable
+without changing execution. The existing Python test discovery verifies the
+catalog against workflow bindings and real planner rows. Historical tool
+receipts and source provenance remain unknown until qualified image receipts
+exist. Workload coverage is a separate unknown: the host seed does not build
+the llama.cpp runtime graph, and the current CPU runtime architecture guard
+does not match its `amd64` planner row. A spelling correction alone cannot
+establish useful cache hits. The separate `diagnose` command reports this
+condition; the initial catalog does not enable runtime restoration.
 These four high-fanout job families also disable the per-object GHA backend on
 every provider. Small exact native
 caches have substantially better reuse-to-storage value. Cache hits are always
