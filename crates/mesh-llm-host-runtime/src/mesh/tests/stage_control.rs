@@ -628,6 +628,54 @@ fn empty_stage_control_status_list_response_round_trips_as_empty() {
     assert!(statuses.is_empty());
 }
 
+#[tokio::test]
+async fn locally_executing_status_excludes_peer_snapshots() -> Result<()> {
+    let node = Node::new_for_tests(crate::mesh::NodeRole::Worker).await?;
+    let local_status = test_stage_status(
+        node.id(),
+        "stage-0",
+        0,
+        "127.0.0.1:51234",
+        crate::inference::skippy::StageRuntimeState::Ready,
+    );
+    let peer_id = make_test_endpoint_id(0x44);
+    let peer_status = test_stage_status(
+        peer_id,
+        "stage-1",
+        1,
+        "127.0.0.1:51235",
+        crate::inference::skippy::StageRuntimeState::Ready,
+    );
+    for status in [local_status, peer_status] {
+        let node_id = status.node_id;
+        node.record_stage_status(
+            node_id,
+            crate::mesh::stage_proto::stage_snapshot_from_runtime_status(
+                &status,
+                status.state,
+                status.error.clone(),
+            ),
+        )
+        .await;
+    }
+
+    let statuses = node
+        .locally_executing_stage_statuses(&crate::inference::skippy::StageStatusFilter {
+            topology_id: Some("topology-a".to_string()),
+            run_id: Some("run-a".to_string()),
+            stage_id: None,
+        })
+        .await;
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].stage_id, "stage-0");
+    assert_eq!(
+        statuses[0].state,
+        crate::inference::skippy::StageRuntimeState::Ready
+    );
+    Ok(())
+}
+
 #[test]
 fn stage_status_updates_materialized_topology_endpoint() {
     let node_id = EndpointId::from(SecretKey::from_bytes(&[0x31; 32]).public());
@@ -950,6 +998,32 @@ fn active_stage_missing_from_runtime_marks_cached_stage_failed() {
         status.error.as_deref(),
         Some("stage status missing from runtime")
     );
+}
+
+#[test]
+fn starting_stage_missing_from_runtime_is_retried() {
+    let node_id = EndpointId::from(SecretKey::from_bytes(&[0x43; 32]).public());
+    let mut state = StageTopologyState::default();
+    state.record_status(test_stage_status(
+        node_id,
+        "stage-1",
+        1,
+        "127.0.0.1:51234",
+        crate::inference::skippy::StageRuntimeState::Starting,
+    ));
+    let cached = state.active_statuses().into_iter().next().unwrap();
+
+    state.record_status_refresh_failure(
+        &cached,
+        crate::mesh::stage_transport::StageStatusRefreshFailure::MissingFromRuntime,
+    );
+
+    let status = state.runtime_statuses().into_iter().next().unwrap();
+    assert_eq!(
+        status.state,
+        crate::inference::skippy::StageRuntimeState::Starting
+    );
+    assert_eq!(status.error, None);
 }
 
 #[test]
