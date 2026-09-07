@@ -3699,15 +3699,15 @@
   ],
   "crates/skippy-correctness/tests/parity_models/mod.rs": [
     {
-      "line": 294,
+      "line": 295,
       "macro_name": "eprintln!"
     },
     {
-      "line": 527,
+      "line": 528,
       "macro_name": "eprintln!"
     },
     {
-      "line": 1104,
+      "line": 1105,
       "macro_name": "println!"
     }
   ],
