@@ -1,0 +1,264 @@
+From 3afabd10416a48175b38a5a52889031b7c7c4772 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Tue, 8 Sep 2026 00:47:32 +1000
+Subject: [PATCH] skippy: plan integrated MTP graph dependencies
+
+---
+ src/skippy/graph_identity.cpp         |  7 +++
+ src/skippy/stage_plan.cpp             | 67 ++++++++++++++++++++++++++-
+ src/skippy/stage_slice_plan.cpp       | 48 +++++++++++++++++++
+ src/skippy/stage_slice_plan.h         | 19 ++++++++
+ src/skippy/tests/stage_slice_plan.cpp | 30 ++++++++++++
+ 5 files changed, 170 insertions(+), 1 deletion(-)
+
+diff --git a/src/skippy/graph_identity.cpp b/src/skippy/graph_identity.cpp
+index e9db18dc8..8406655c1 100644
+--- a/src/skippy/graph_identity.cpp
++++ b/src/skippy/graph_identity.cpp
+@@ -997,6 +997,13 @@ bool skippy_build_stage_plan_identity(
+             return false;
+         }
+     }
++    out.u32(static_cast<uint32_t>(plan.auxiliary_profiles.size()));
++    for (const auto & profile : plan.auxiliary_profiles) {
++        if (!out.text(profile.profile_id) || !out.text(profile.graph_identity)) {
++            error = "stage plan auxiliary profile identity is too large";
++            return false;
++        }
++    }
+     out.u32(static_cast<uint32_t>(plan.resident_parameter_identities.size()));
+     for (const auto & parameter : plan.resident_parameter_identities) {
+         if (!out.text(parameter)) {
+diff --git a/src/skippy/stage_plan.cpp b/src/skippy/stage_plan.cpp
+index 365f9f9fc..950c0d075 100644
+--- a/src/skippy/stage_plan.cpp
++++ b/src/skippy/stage_plan.cpp
+@@ -250,6 +250,70 @@ bool build_profile(
+     return true;
+ }
+ 
++bool build_mtp_profile(
++        const skippy_stage_planner & planner,
++        const owned_profile & profile,
++        context_owner & context,
++        skippy_auxiliary_graph_plan & output,
++        std::string & error) {
++    llama_context_params params = llama_context_default_params();
++    params.n_ctx = std::max<uint32_t>(32, profile.n_tokens);
++    params.n_batch = profile.n_tokens;
++    params.n_ubatch = profile.n_tokens;
++    params.n_seq_max = profile.n_sequences;
++    params.n_threads = 1;
++    params.n_threads_batch = 1;
++    params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
++    params.op_offload = false;
++    params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
++    params.embeddings = false;
++    const skippy_graph_build_inputs build_inputs{};
++    context.reset(llama_init_from_model_with_graph_inputs(planner.model.get(), params, build_inputs));
++    if (!context) {
++        error = "stage planner cannot create metadata-only MTP graph context";
++        return false;
++    }
++    llama_memory_context_ptr memory_context;
++    if (llama_memory_t memory = llama_get_memory(context.get())) {
++        memory_context = memory->init_full();
++    }
++    ggml_cgraph * graph = context->graph_reserve(profile.n_tokens, profile.n_sequences,
++            profile.n_outputs, memory_context.get(), true, nullptr, build_inputs);
++    const llm_graph_result * result = context->get_gf_res_reserve();
++    if (graph == nullptr || result == nullptr || result->get_build_inputs().filter.enabled) {
++        error = "stage planner cannot build an unfiltered MTP graph";
++        return false;
++    }
++    return skippy_build_auxiliary_graph_plan(graph, result->get_state_effects(),
++            planner.bindings, result->get_request_input_bindings(), output, error);
++}
++
++bool add_mtp_profiles(
++        const skippy_stage_planner & planner,
++        skippy_stage_plan & plan,
++        std::string & error) {
++    if (plan.guarded.layer_end != plan.guarded.layer_count ||
++            llama_model_n_layer_nextn(planner.model.get()) <= 0) {
++        return true;
++    }
++
++    std::set<std::string> residents(plan.guarded.resident_parameter_identities.begin(),
++            plan.guarded.resident_parameter_identities.end());
++    for (const auto & profile : planner.profiles) {
++        context_owner context(nullptr, llama_free);
++        skippy_auxiliary_graph_plan auxiliary;
++        if (!build_mtp_profile(planner, profile, context, auxiliary, error)) {
++            error = "execution profile " + profile.profile_id + " MTP graph rejected: " + error;
++            return false;
++        }
++        plan.guarded.auxiliary_profiles.push_back({profile.profile_id, auxiliary.graph_identity});
++        residents.insert(auxiliary.parameter_identities.begin(), auxiliary.parameter_identities.end());
++        plan.contexts.push_back(std::move(context));
++    }
++    plan.guarded.resident_parameter_identities.assign(residents.begin(), residents.end());
++    return true;
++}
++
+ const std::vector<skippy_stage_plan_value_desc_v1> * select_values(
+         const profile_output & profile, skippy_stage_plan_value_kind kind) {
+     switch (kind) {
+@@ -408,7 +472,8 @@ skippy_status skippy_stage_planner_realize_v1(
+             plan->contexts.push_back(std::move(context));
+         }
+         if (!skippy_build_guarded_stage_slice_plan(inputs, layer_start, layer_end,
+-                    plan->guarded, error) || !build_descriptors(*plan, error)) {
++                    plan->guarded, error) || !add_mtp_profiles(*planner, *plan, error) ||
++                !build_descriptors(*plan, error)) {
+             return fail(out_error, SKIPPY_STATUS_UNSUPPORTED, error);
+         }
+         *out_plan = plan.release();
+diff --git a/src/skippy/stage_slice_plan.cpp b/src/skippy/stage_slice_plan.cpp
+index 4d103d8a0..cb5071150 100644
+--- a/src/skippy/stage_slice_plan.cpp
++++ b/src/skippy/stage_slice_plan.cpp
+@@ -685,6 +685,54 @@ bool skippy_build_guarded_stage_slice_plan(
+     return true;
+ }
+ 
++bool skippy_build_auxiliary_graph_plan(
++        ggml_cgraph * graph,
++        const std::vector<skippy_state_effect> & state_effects,
++        const std::vector<skippy_parameter_binding> & parameters,
++        const std::vector<skippy_request_input_binding> & request_inputs,
++        skippy_auxiliary_graph_plan & plan,
++        std::string & error) {
++    plan = {};
++    error.clear();
++
++    skippy_graph_semantics semantics;
++    if (!skippy_build_graph_semantics(
++                graph, {}, state_effects, parameters, request_inputs, semantics, error)) {
++        return false;
++    }
++
++    std::unordered_set<const ggml_tensor *> graph_leaves;
++    graph_leaves.reserve(static_cast<size_t>(graph->n_leafs));
++    for (int32_t index = 0; index < graph->n_leafs; ++index) {
++        const ggml_tensor * storage = canonical_storage(graph->leafs[index]);
++        if (storage == nullptr) {
++            error = "auxiliary graph has a cyclic leaf view";
++            return false;
++        }
++        graph_leaves.insert(storage);
++    }
++
++    std::set<std::string> resident_parameters;
++    for (const auto & parameter : parameters) {
++        const ggml_tensor * storage = canonical_storage(parameter.tensor);
++        if (storage == nullptr) {
++            error = "auxiliary graph parameter has a cyclic view";
++            return false;
++        }
++        if (graph_leaves.find(storage) != graph_leaves.end()) {
++            resident_parameters.insert(parameter.identity);
++        }
++    }
++    if (resident_parameters.empty()) {
++        error = "auxiliary graph has no resident parameters";
++        return false;
++    }
++
++    plan.graph_identity = semantics.identity;
++    plan.parameter_identities.assign(resident_parameters.begin(), resident_parameters.end());
++    return true;
++}
++
+ bool skippy_validate_guarded_stage_chain(
+         const std::vector<const skippy_guarded_stage_slice_plan *> & stages,
+         std::string & error) {
+diff --git a/src/skippy/stage_slice_plan.h b/src/skippy/stage_slice_plan.h
+index f5517646a..61c3ee850 100644
+--- a/src/skippy/stage_slice_plan.h
++++ b/src/skippy/stage_slice_plan.h
+@@ -65,14 +65,33 @@ struct skippy_stage_profile_plan {
+     skippy_stage_slice_selection slice;
+ };
+ 
++struct skippy_auxiliary_graph_plan {
++    std::string graph_identity;
++    std::vector<std::string> parameter_identities;
++};
++
++struct skippy_auxiliary_profile_plan {
++    std::string profile_id;
++    std::string graph_identity;
++};
++
+ struct skippy_guarded_stage_slice_plan {
+     int32_t layer_count = 0;
+     int32_t layer_start = 0;
+     int32_t layer_end = 0;
+     std::vector<skippy_stage_profile_plan> profiles;
++    std::vector<skippy_auxiliary_profile_plan> auxiliary_profiles;
+     std::vector<std::string> resident_parameter_identities;
+ };
+ 
++bool skippy_build_auxiliary_graph_plan(
++        ggml_cgraph * graph,
++        const std::vector<skippy_state_effect> & state_effects,
++        const std::vector<skippy_parameter_binding> & parameters,
++        const std::vector<skippy_request_input_binding> & request_inputs,
++        skippy_auxiliary_graph_plan & plan,
++        std::string & error);
++
+ bool skippy_select_stage_slice(
+         ggml_cgraph * graph,
+         const std::vector<skippy_block_boundary> & boundaries,
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 30627b1c5..d4b5d6f2f 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -1069,6 +1069,35 @@ static int check_mtp_stage_layer_count() {
+     return 0;
+ }
+ 
++static int check_auxiliary_graph_parameter_closure() {
++    ggml_init_params params = {
++        ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(32, false), nullptr, true,
++    };
++    ggml_context_ptr ctx(ggml_init(params));
++    ggml_tensor * request = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * used = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_tensor * unused = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, 4);
++    ggml_set_input(request);
++    ggml_tensor * output = ggml_mul(ctx.get(), request, used);
++    ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 32, false);
++    ggml_build_forward_expand(graph, output);
++
++    const std::vector<skippy_parameter_binding> parameters = {
++        {used, "mtp.used"},
++        {unused, "mtp.unused"},
++    };
++    const std::vector<skippy_request_input_binding> requests = {{request, "mtp.input"}};
++    skippy_auxiliary_graph_plan plan;
++    std::string error;
++    if (!skippy_build_auxiliary_graph_plan(graph, {}, parameters, requests, plan, error) ||
++            plan.graph_identity.empty() ||
++            plan.parameter_identities != std::vector<std::string>{"mtp.used"}) {
++        std::fprintf(stderr, "auxiliary graph parameter closure was incorrect: %s\n", error.c_str());
++        return 91;
++    }
++    return 0;
++}
++
+ int main() {
+     int result = check_semantic_identities();
+     if (!result) { result = check_middle_stage_selection(); }
+@@ -1081,6 +1110,7 @@ int main() {
+     if (!result) { result = check_executable_slice(true); }
+     if (!result) { result = check_invalid_executable_slices(); }
+     if (!result) { result = check_mtp_stage_layer_count(); }
++    if (!result) { result = check_auxiliary_graph_parameter_closure(); }
+     if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
+     return result;
+ }
+-- 
+2.54.0 (Apple Git-157)
+
