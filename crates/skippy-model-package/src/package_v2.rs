@@ -149,7 +149,15 @@ fn manifest_from_source(
                 .enumerate()
                 .map(|(index, shard)| Artifact {
                     id: shard.artifact_id.clone(),
-                    path: format!("artifacts/source-{index:05}.gguf"),
+                    // llama.cpp resolves a sharded GGUF set from the primary
+                    // shard's conventional `-00001-of-000NN` filename. Keep
+                    // source names for multi-shard packages so runtime slices
+                    // can open the package artifacts directly.
+                    path: if inventory.shards.len() > 1 {
+                        format!("artifacts/{}", shard.source_file.path)
+                    } else {
+                        format!("artifacts/source-{index:05}.gguf")
+                    },
                     byte_size: shard.source_file.byte_size,
                     sha256: shard.source_file.sha256.clone(),
                 })

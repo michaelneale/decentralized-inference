@@ -95,7 +95,10 @@ fn renamed_complete_shards_bind_every_file_and_tensor_exactly() {
             .iter()
             .map(|artifact| artifact.path.as_str())
             .collect::<Vec<_>>(),
-        ["artifacts/source-00000.gguf", "artifacts/source-00001.gguf"]
+        [
+            "artifacts/model-00001-of-00002.gguf",
+            "artifacts/model-00002-of-00002.gguf"
+        ]
     );
     let metadata_artifact = manifest
         .artifact_catalog
