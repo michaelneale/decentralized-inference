@@ -609,18 +609,21 @@ fn synthetic_gguf_package(_model_id: &str, model_path: &Path) -> Result<SkippyPa
     let tensor_count = gguf_tensor_count(&source_model_path)
         .with_context(|| format!("read GGUF tensor count {}", source_model_path.display()))?;
 
-    anyhow::ensure!(
-        compact.layer_count > 0,
-        "GGUF metadata for {} does not contain a positive layer count",
-        source_model_path.display()
-    );
+    let layer_count = compact.executable_layer_count().with_context(|| {
+        format!(
+            "GGUF metadata for {} does not contain a positive executable layer count (block_count={}, nextn_predict_layers={})",
+            source_model_path.display(),
+            compact.layer_count,
+            compact.nextn_predict_layers
+        )
+    })?;
     anyhow::ensure!(
         compact.embedding_size > 0,
         "GGUF metadata for {} does not contain a positive embedding size",
         source_model_path.display()
     );
     let source_model_bytes = source_files.iter().map(|file| file.bytes).sum();
-    let layer_weight_bytes = direct_gguf_layer_weight_bytes(&source_files, compact.layer_count)
+    let layer_weight_bytes = direct_gguf_layer_weight_bytes(&source_files, layer_count)
         .with_context(|| {
             format!(
                 "inspect GGUF tensor weights {}",
@@ -640,7 +643,7 @@ fn synthetic_gguf_package(_model_id: &str, model_path: &Path) -> Result<SkippyPa
         &source_files,
         &compact.architecture,
         compact.context_length,
-        compact.layer_count,
+        layer_count,
         compact.embedding_size,
         tensor_count,
     )?;
@@ -653,7 +656,7 @@ fn synthetic_gguf_package(_model_id: &str, model_path: &Path) -> Result<SkippyPa
         source_model_bytes,
         source_files,
         layer_weight_bytes,
-        layer_count: compact.layer_count,
+        layer_count,
         activation_width: compact.embedding_size,
         tensor_count,
         generation: None,

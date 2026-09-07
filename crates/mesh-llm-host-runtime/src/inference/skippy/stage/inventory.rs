@@ -128,8 +128,7 @@ fn resolve_direct_gguf_inventory_source(candidate: &Path) -> Option<InventorySou
     };
     let source_path = source_paths.first()?.clone();
     let layer_count = crate::models::gguf::scan_gguf_compact_meta(&source_path)
-        .map(|meta| meta.layer_count)
-        .filter(|layer_count| *layer_count > 0)
+        .and_then(|meta| meta.executable_layer_count())
         .or_else(|| crate::inference::skippy::infer_layer_count(&source_path).ok())?;
     let bytes = source_paths
         .iter()
