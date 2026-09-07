@@ -805,6 +805,7 @@ fn advertised_memory_roundtrips_through_proto_announcement() {
     let memory = crate::mesh::AdvertisedMemory {
         total_bytes: 12_000_000_000,
         reserved_bytes: 500_000_000,
+        platform_reserve_bytes: 0,
         configured_reserve_bytes: 2_000_000_000,
         usable_bytes: 9_500_000_000,
         system_ram_bytes: Some(32_000_000_000),
@@ -835,9 +836,57 @@ fn advertised_memory_roundtrips_through_proto_announcement() {
     assert_eq!(wire.usable_bytes, Some(9_500_000_000));
     assert_eq!(wire.system_ram_bytes, Some(32_000_000_000));
     assert_eq!(wire.ram_offload_bytes, Some(18_000_000_000));
+    assert_eq!(wire.platform_reserve_bytes, Some(0));
 
     let (_, roundtripped) = proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
     assert_eq!(roundtripped.memory, Some(memory));
+}
+
+#[test]
+fn platform_reserve_roundtrips_and_counts_in_the_partition() {
+    // A Tegra-shaped block: 64 GB total, 6.4 GB kept back by the platform,
+    // the rest usable, nothing configured by the owner.
+    let memory = crate::mesh::AdvertisedMemory {
+        total_bytes: 64_000_000_000,
+        reserved_bytes: 0,
+        platform_reserve_bytes: 6_400_000_000,
+        configured_reserve_bytes: 0,
+        usable_bytes: 57_600_000_000,
+        system_ram_bytes: Some(64_000_000_000),
+        ram_offload_bytes: 0,
+    };
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD1; 32]).public());
+    let bare = crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        ..Default::default()
+    };
+    let (_, mut ann) = proto_ann_to_local(&bare).expect("proto_ann_to_local must succeed");
+    ann.memory = Some(memory);
+
+    let proto_pa = local_ann_to_proto_ann(&ann);
+    let wire = proto_pa
+        .hardware
+        .as_ref()
+        .and_then(|hardware| hardware.memory.as_ref())
+        .expect("memory block must be on the wire");
+    assert_eq!(wire.platform_reserve_bytes, Some(6_400_000_000));
+
+    let (_, roundtripped) = proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
+    assert_eq!(roundtripped.memory, Some(memory));
+
+    // The same block without the platform share no longer adds up and is
+    // dropped, so a peer cannot quietly move that share into usable.
+    let mut stripped = proto_pa.clone();
+    if let Some(block) = stripped
+        .hardware
+        .as_mut()
+        .and_then(|hardware| hardware.memory.as_mut())
+    {
+        block.platform_reserve_bytes = None;
+    }
+    let (_, dropped) = proto_ann_to_local(&stripped).expect("proto_ann_to_local must succeed");
+    assert_eq!(dropped.memory, None);
 }
 
 #[test]
@@ -904,6 +953,7 @@ fn malformed_memory_blocks_are_dropped_at_ingest() {
         Some(crate::mesh::AdvertisedMemory {
             total_bytes: 12_000_000_000,
             reserved_bytes: 0,
+            platform_reserve_bytes: 0,
             configured_reserve_bytes: 0,
             usable_bytes: 12_000_000_000,
             system_ram_bytes: None,

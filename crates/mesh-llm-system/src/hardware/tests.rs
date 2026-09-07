@@ -774,7 +774,7 @@ fn test_healthy_gpu_probe_ram_below_vram_saturates_to_bare_vram() {
 }
 
 #[test]
-fn test_healthy_soc_probe_does_not_probe_system_ram() {
+fn test_healthy_soc_probe_records_system_ram_without_crediting_it() {
     let mut survey = HardwareSurvey::default();
     let mut gpu = synthetic_gpu(0, None);
     gpu.vram_bytes = 16_000_000_000;
@@ -784,9 +784,12 @@ fn test_healthy_soc_probe_does_not_probe_system_ram() {
         &mut survey,
         &[Metric::IsSoc, Metric::VramBytes],
         Ok::<Vec<GpuFacts>, ()>(vec![gpu]),
-        || panic!("system RAM must not be probed for a unified-memory survey"),
+        || 32_000_000_000,
     );
     assert!(handled);
+    assert!(survey.is_soc);
+    // Informational only: the budget stays the working set minus the reserve.
+    assert_eq!(survey.system_ram_bytes, Some(32_000_000_000));
     assert_eq!(survey.vram_bytes, 14_000_000_000);
 }
 
@@ -801,10 +804,11 @@ fn test_healthy_soc_probe_without_is_soc_metric_still_skips_ram_offload() {
         &mut survey,
         &[Metric::VramBytes],
         Ok::<Vec<GpuFacts>, ()>(vec![gpu]),
-        || panic!("system RAM must not be probed for unified memory, even without IsSoc"),
+        || 32_000_000_000,
     );
     assert!(handled);
     assert!(!survey.is_soc);
+    assert_eq!(survey.system_ram_bytes, Some(32_000_000_000));
     assert_eq!(survey.vram_bytes, 14_000_000_000);
 }
 

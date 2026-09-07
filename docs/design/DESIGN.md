@@ -446,7 +446,7 @@ backend reports no selectable GPU.
 | `is_soc` | `Option<bool>` | True for Tegra/Jetson (unified memory) |
 | `gpu_vram` | `Option<String>` | Comma-separated per-GPU VRAM in bytes |
 | `gpu_reserved_bytes` | `Option<String>` | Comma-separated per-GPU reserved bytes when the platform reports a true reserved/unavailable metric |
-| `hardware.memory` | `optional MemoryInfo` | Itemized capacity behind `vram_bytes`: total, driver reserve, configured reserve, usable, plus system RAM and the RAM-backed share of the local budget as informational items |
+| `hardware.memory` | `optional MemoryInfo` | Itemized capacity behind `vram_bytes`: total, driver reserve, platform reserve, configured reserve, usable, plus system RAM and the RAM-backed share of the local budget as informational items |
 | `gpu_mem_bandwidth_gbps` | `Option<String>` | Comma-separated per-GPU memory bandwidth measurements or cached benchmark results |
 | `gpu_compute_tflops_fp32` | `Option<String>` | Comma-separated per-GPU FP32 compute-throughput hints |
 | `gpu_compute_tflops_fp16` | `Option<String>` | Comma-separated per-GPU FP16 compute-throughput hints |

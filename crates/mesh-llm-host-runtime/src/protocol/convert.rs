@@ -435,6 +435,7 @@ fn local_memory_to_proto(memory: &crate::mesh::AdvertisedMemory) -> crate::proto
         usable_bytes: Some(memory.usable_bytes),
         system_ram_bytes: memory.system_ram_bytes,
         ram_offload_bytes: Some(memory.ram_offload_bytes),
+        platform_reserve_bytes: Some(memory.platform_reserve_bytes),
     }
 }
 
@@ -448,8 +449,10 @@ fn proto_memory_to_local(
     let total_bytes = memory.total_bytes?;
     let usable_bytes = memory.usable_bytes?;
     let reserved_bytes = memory.reserved_bytes.unwrap_or(0);
+    let platform_reserve_bytes = memory.platform_reserve_bytes.unwrap_or(0);
     let configured_reserve_bytes = memory.configured_reserve_bytes.unwrap_or(0);
     let partition = reserved_bytes
+        .checked_add(platform_reserve_bytes)?
         .checked_add(configured_reserve_bytes)?
         .checked_add(usable_bytes)?;
     if partition != total_bytes {
@@ -458,6 +461,7 @@ fn proto_memory_to_local(
     Some(crate::mesh::AdvertisedMemory {
         total_bytes,
         reserved_bytes,
+        platform_reserve_bytes,
         configured_reserve_bytes,
         usable_bytes,
         system_ram_bytes: memory.system_ram_bytes,

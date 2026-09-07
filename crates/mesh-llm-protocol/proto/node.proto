@@ -216,7 +216,7 @@ message GpuInfo {
 // Itemized capacity behind `PeerAnnouncement.vram_bytes`. Additive and
 // informational: `vram_bytes` stays the placement budget, this block explains
 // how it was derived. Invariant: total_bytes = reserved_bytes +
-// configured_reserve_bytes + usable_bytes.
+// platform_reserve_bytes + configured_reserve_bytes + usable_bytes.
 message MemoryInfo {
   optional uint64 total_bytes = 1;               // Enumerated accelerator memory (sum of device VRAM; the unified working set on SoCs)
   optional uint64 reserved_bytes = 2;            // Driver/runtime reserved or unavailable bytes, when the platform reports a true value
@@ -224,6 +224,7 @@ message MemoryInfo {
   optional uint64 usable_bytes = 4;              // What remains for mesh placement after both reserves
   optional uint64 system_ram_bytes = 5;          // Total system RAM, when the platform reports it
   optional uint64 ram_offload_bytes = 6;         // Portion of the node's local fit budget backed by system RAM; never advertised as accelerator capacity
+  optional uint64 platform_reserve_bytes = 7;    // Withheld by platform policy on unified-memory hosts (for example the 10% of RAM the Tegra collector keeps back); zero for discrete GPUs
 }
 
 message SignedNodeOwnership {

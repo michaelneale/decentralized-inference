@@ -1,9 +1,7 @@
 use crate::system::hardware::HardwareSurvey;
 
 pub(super) fn mesh_capacity_bytes(hw: &HardwareSurvey) -> u64 {
-    let unified_memory_only =
-        hw.is_soc && (hw.gpus.is_empty() || hw.gpus.iter().all(|gpu| gpu.unified_memory));
-    if unified_memory_only {
+    if unified_memory_only(hw) {
         return hw.vram_bytes;
     }
 
@@ -37,6 +35,13 @@ pub(super) fn mesh_capacity_bytes(hw: &HardwareSurvey) -> u64 {
     }
 }
 
+/// A host whose accelerator memory is the system memory: its budget comes
+/// from a platform working set (Metal) or a platform policy (the Tegra
+/// collector), not from device VRAM minus a driver reserve.
+fn unified_memory_only(hw: &HardwareSurvey) -> bool {
+    hw.is_soc && (hw.gpus.is_empty() || hw.gpus.iter().all(|gpu| gpu.unified_memory))
+}
+
 pub(super) fn capped_capacity_bytes(capacity_bytes: u64, max_vram_gb: Option<f64>) -> u64 {
     max_vram_gb
         .map(|cap| capacity_bytes.min((cap * 1e9) as u64))
@@ -53,8 +58,8 @@ pub(super) fn advertised_capacity_bytes(hw: &HardwareSurvey, max_vram_gb: Option
 
 /// Itemized view of the capacity a node advertises. The announcement's
 /// `vram_bytes` stays the placement budget; this block explains how that
-/// number was derived. Invariant:
-/// `total_bytes == reserved_bytes + configured_reserve_bytes + usable_bytes`.
+/// number was derived. Invariant: `total_bytes == reserved_bytes +
+/// platform_reserve_bytes + configured_reserve_bytes + usable_bytes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdvertisedMemory {
     /// Enumerated accelerator memory: the sum of device VRAM, or the unified
@@ -63,6 +68,12 @@ pub struct AdvertisedMemory {
     /// Driver/runtime reserved or unavailable bytes when the platform reports
     /// a true value.
     pub reserved_bytes: u64,
+    /// Withheld by platform policy before the owner configures anything: the
+    /// share of unified memory the platform keeps for the system (the Tegra
+    /// collector budgets 90% of physical RAM). Zero for discrete GPUs, whose
+    /// budget is the device memory minus the driver reserve, and zero on
+    /// Metal while the survey reports the working set as the device memory.
+    pub platform_reserve_bytes: u64,
     /// Withheld by the node owner: the effective safety margin plus whatever
     /// a `max_vram_gb` cap leaves out.
     pub configured_reserve_bytes: u64,
@@ -91,14 +102,27 @@ pub(super) fn advertised_memory(
         device_vram
     };
     let reserved_bytes = driver_reserved.min(total_bytes);
-    // The budget never exceeds the enumerated memory minus the driver reserve;
-    // the clamp only keeps the invariant if a survey ever reports otherwise.
+    // On a unified-memory host the platform's own budget is a policy (Metal's
+    // working set, Tegra's 90% of RAM): whatever it keeps back from the
+    // enumerated memory is a platform reserve, not something the owner set.
+    // Discrete hosts budget the device memory minus the driver reserve, so
+    // nothing lands here.
+    let platform_reserve_bytes = if unified_memory_only(hw) {
+        total_bytes
+            .saturating_sub(reserved_bytes)
+            .saturating_sub(mesh_capacity_bytes(hw))
+    } else {
+        0
+    };
+    let owner_ceiling = total_bytes
+        .saturating_sub(reserved_bytes)
+        .saturating_sub(platform_reserve_bytes);
+    // The budget never exceeds what the platform leaves to the owner; the
+    // clamp only keeps the invariant if a survey ever reports otherwise.
     let usable_bytes = budget
         .saturating_sub(safety_margin_bytes)
-        .min(total_bytes.saturating_sub(reserved_bytes));
-    let configured_reserve_bytes = total_bytes
-        .saturating_sub(reserved_bytes)
-        .saturating_sub(usable_bytes);
+        .min(owner_ceiling);
+    let configured_reserve_bytes = owner_ceiling.saturating_sub(usable_bytes);
     // The survey derives its RAM-backed share from the uncapped budget. A
     // `max_vram_gb` cap shrinks the local budget first, and only what that
     // capped budget still carries beyond the device memory is RAM.
@@ -109,6 +133,7 @@ pub(super) fn advertised_memory(
     AdvertisedMemory {
         total_bytes,
         reserved_bytes,
+        platform_reserve_bytes,
         configured_reserve_bytes,
         usable_bytes,
         system_ram_bytes: hw.system_ram_bytes,
@@ -243,6 +268,7 @@ mod tests {
             AdvertisedMemory {
                 total_bytes: 12_000_000_000,
                 reserved_bytes: 500_000_000,
+                platform_reserve_bytes: 0,
                 configured_reserve_bytes: 2_000_000_000,
                 usable_bytes: 9_500_000_000,
                 system_ram_bytes: Some(32_000_000_000),
@@ -317,9 +343,44 @@ mod tests {
 
         assert_eq!(memory.total_bytes, 96_000_000_000);
         assert_eq!(memory.reserved_bytes, 0);
+        assert_eq!(memory.platform_reserve_bytes, 0);
         assert_eq!(memory.configured_reserve_bytes, 2_000_000_000);
         assert_eq!(memory.usable_bytes, 94_000_000_000);
         assert_eq!(memory.ram_offload_bytes, 0);
+        assert_breakdown_adds_up(&memory);
+    }
+
+    #[test]
+    fn tegra_shaped_survey_reports_the_platform_share_as_platform_reserve() {
+        // The Tegra collector reports physical RAM as the device memory and
+        // budgets 90% of it without a driver reserve: the 10% it keeps back
+        // is platform policy, not an owner setting.
+        let hw = HardwareSurvey {
+            vram_bytes: 57_600_000_000,
+            is_soc: true,
+            gpu_vram: vec![64_000_000_000],
+            gpu_reserved: Vec::new(),
+            system_ram_bytes: Some(64_000_000_000),
+            ..HardwareSurvey::default()
+        };
+
+        let memory = advertised_memory(&hw, None, 0);
+
+        assert_eq!(memory.total_bytes, 64_000_000_000);
+        assert_eq!(memory.reserved_bytes, 0);
+        assert_eq!(memory.platform_reserve_bytes, 6_400_000_000);
+        assert_eq!(memory.configured_reserve_bytes, 0);
+        assert_eq!(memory.usable_bytes, 57_600_000_000);
+        assert_eq!(memory.ram_offload_bytes, 0);
+        assert_breakdown_adds_up(&memory);
+
+        // The owner's margin and cap still land in the configured reserve,
+        // on top of the platform share.
+        let memory = advertised_memory(&hw, Some(32.0), 2_000_000_000);
+
+        assert_eq!(memory.platform_reserve_bytes, 6_400_000_000);
+        assert_eq!(memory.usable_bytes, 30_000_000_000);
+        assert_eq!(memory.configured_reserve_bytes, 27_600_000_000);
         assert_breakdown_adds_up(&memory);
     }
 
@@ -341,6 +402,7 @@ mod tests {
             AdvertisedMemory {
                 total_bytes: 0,
                 reserved_bytes: 0,
+                platform_reserve_bytes: 0,
                 configured_reserve_bytes: 0,
                 usable_bytes: 0,
                 system_ram_bytes: Some(32_000_000_000),
@@ -386,7 +448,10 @@ mod tests {
     fn assert_breakdown_adds_up(memory: &AdvertisedMemory) {
         assert_eq!(
             memory.total_bytes,
-            memory.reserved_bytes + memory.configured_reserve_bytes + memory.usable_bytes
+            memory.reserved_bytes
+                + memory.platform_reserve_bytes
+                + memory.configured_reserve_bytes
+                + memory.usable_bytes
         );
     }
 }

@@ -1843,6 +1843,7 @@ fn transitive_peer_update_refreshes_memory_only_when_advertised() {
     let advertised = crate::mesh::AdvertisedMemory {
         total_bytes: 12_000_000_000,
         reserved_bytes: 0,
+        platform_reserve_bytes: 0,
         configured_reserve_bytes: 2_000_000_000,
         usable_bytes: 10_000_000_000,
         system_ram_bytes: None,
@@ -1874,6 +1875,43 @@ fn transitive_peer_update_refreshes_memory_only_when_advertised() {
 }
 
 #[test]
+fn transitive_peer_update_drops_the_cached_memory_when_the_capacity_moves() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x12; 32]).public());
+    let advertised = crate::mesh::AdvertisedMemory {
+        total_bytes: 12_000_000_000,
+        reserved_bytes: 0,
+        platform_reserve_bytes: 0,
+        configured_reserve_bytes: 2_000_000_000,
+        usable_bytes: 10_000_000_000,
+        system_ram_bytes: None,
+        ram_offload_bytes: 0,
+    };
+    let mut existing = make_test_peer_info(peer_id);
+    existing.vram_bytes = 10_000_000_000;
+    existing.memory = Some(advertised);
+
+    let addr = EndpointAddr {
+        id: peer_id,
+        addrs: Default::default(),
+    };
+    // An older relay strips the block and carries a new cap: the cached block
+    // explained the old budget, so it must not travel with the new one.
+    let mut ann = peer_state_test_announcement(addr.clone());
+    ann.vram_bytes = 8_000_000_000;
+    apply_transitive_ann(&mut existing, &addr, &ann, make_test_endpoint_id(0xee));
+    assert_eq!(existing.vram_bytes, 8_000_000_000);
+    assert_eq!(
+        existing.memory, None,
+        "a stale breakdown must not be paired with a new capacity"
+    );
+
+    // The same relay with the unchanged capacity keeps the block.
+    existing.memory = Some(advertised);
+    apply_transitive_ann(&mut existing, &addr, &ann, make_test_endpoint_id(0xee));
+    assert_eq!(existing.memory, Some(advertised));
+}
+
+#[test]
 fn peer_meaningfully_changed_detects_memory_updates() {
     let peer_id = make_test_endpoint_id(13);
     let mut old_peer = make_test_peer_info(peer_id);
@@ -1882,6 +1920,7 @@ fn peer_meaningfully_changed_detects_memory_updates() {
     let advertised = crate::mesh::AdvertisedMemory {
         total_bytes: 12_000_000_000,
         reserved_bytes: 0,
+        platform_reserve_bytes: 0,
         configured_reserve_bytes: 2_000_000_000,
         usable_bytes: 10_000_000_000,
         system_ram_bytes: None,

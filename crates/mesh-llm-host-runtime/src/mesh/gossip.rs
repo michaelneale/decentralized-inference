@@ -321,6 +321,7 @@ pub(super) fn apply_transitive_ann(
     existing.hosted_models_known = ann.hosted_models.is_some();
     existing.role = ann.role.clone();
     merge_first_joined_mesh_ts(&mut existing.first_joined_mesh_ts, ann.first_joined_mesh_ts);
+    let capacity_changed = existing.vram_bytes != ann.vram_bytes;
     existing.vram_bytes = ann.vram_bytes;
     // Only advance addr if the transitive announcement is at least as path-rich,
     // so a direct peer's richer address is not overwritten by a weaker transitive one.
@@ -345,8 +346,14 @@ pub(super) fn apply_transitive_ann(
     if ann.gpu_reserved_bytes.is_some() {
         existing.gpu_reserved_bytes = ann.gpu_reserved_bytes.clone();
     }
-    if ann.memory.is_some() {
-        existing.memory = ann.memory;
+    match ann.memory {
+        Some(memory) => existing.memory = Some(memory),
+        // A relay that predates the block strips it. The cached block only
+        // explains the capacity it arrived with: keep it while that capacity
+        // is unchanged, drop it once the capacity moved, so a stale breakdown
+        // is never paired with the new budget and rebroadcast as such.
+        None if capacity_changed => existing.memory = None,
+        None => {}
     }
     if ann.gpu_mem_bandwidth_gbps.is_some() {
         existing.gpu_mem_bandwidth_gbps = ann.gpu_mem_bandwidth_gbps.clone();

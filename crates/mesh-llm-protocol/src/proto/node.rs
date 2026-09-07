@@ -231,7 +231,7 @@ pub struct GpuInfo {
 /// Itemized capacity behind `PeerAnnouncement.vram_bytes`. Additive and
 /// informational: `vram_bytes` stays the placement budget, this block explains
 /// how it was derived. Invariant: total_bytes = reserved_bytes +
-/// configured_reserve_bytes + usable_bytes.
+/// platform_reserve_bytes + configured_reserve_bytes + usable_bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MemoryInfo {
     /// Enumerated accelerator memory (sum of device VRAM; the unified working set on SoCs)
@@ -252,6 +252,9 @@ pub struct MemoryInfo {
     /// Portion of the node's local fit budget backed by system RAM; never advertised as accelerator capacity
     #[prost(uint64, optional, tag = "6")]
     pub ram_offload_bytes: ::core::option::Option<u64>,
+    /// Withheld by platform policy on unified-memory hosts (for example the 10% of RAM the Tegra collector keeps back); zero for discrete GPUs
+    #[prost(uint64, optional, tag = "7")]
+    pub platform_reserve_bytes: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignedNodeOwnership {
