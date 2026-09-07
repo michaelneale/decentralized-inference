@@ -1177,11 +1177,26 @@ fn test_ram_offload_bytes_is_the_budget_beyond_device_vram_on_discrete_hosts() {
 }
 
 #[test]
-fn test_ram_offload_bytes_falls_back_to_gpu_facts_when_the_legacy_list_is_empty() {
+fn test_ram_offload_bytes_uses_gpu_facts_when_the_legacy_list_is_empty() {
     let mut gpu = synthetic_gpu(0, None);
     gpu.vram_bytes = 12_000_000_000;
     let survey = HardwareSurvey {
         vram_bytes: 30_000_000_000,
+        gpus: vec![gpu],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 18_000_000_000);
+}
+
+#[test]
+fn test_ram_offload_bytes_prefers_gpu_facts_over_the_legacy_list() {
+    // Both sources populated and disagreeing: the per-device facts win, the
+    // same precedence the host runtime applies when it itemizes capacity.
+    let mut gpu = synthetic_gpu(0, None);
+    gpu.vram_bytes = 12_000_000_000;
+    let survey = HardwareSurvey {
+        vram_bytes: 30_000_000_000,
+        gpu_vram: vec![16_000_000_000],
         gpus: vec![gpu],
         ..HardwareSurvey::default()
     };

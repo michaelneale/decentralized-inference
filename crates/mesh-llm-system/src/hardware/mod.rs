@@ -1268,10 +1268,13 @@ fn ram_offload_bytes(survey: &HardwareSurvey) -> u64 {
     if survey.is_soc {
         return 0;
     }
-    let device_vram: u64 = if survey.gpu_vram.is_empty() {
-        survey.gpus.iter().map(|gpu| gpu.vram_bytes).sum()
-    } else {
+    // Same precedence as the host runtime's capacity accounting: the
+    // per-device facts first, the legacy per-GPU list only when there are
+    // none, so the two never disagree on which source wins.
+    let device_vram: u64 = if survey.gpus.is_empty() {
         survey.gpu_vram.iter().sum()
+    } else {
+        survey.gpus.iter().map(|gpu| gpu.vram_bytes).sum()
     };
     survey.vram_bytes.saturating_sub(device_vram)
 }
