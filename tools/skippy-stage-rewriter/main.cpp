@@ -144,12 +144,15 @@ tokenRange(clang::SourceRange range, const SourceManager &sm,
            const clang::LangOptions &lang);
 
 std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
-                                                   llvm::StringRef variable);
+                                                  llvm::StringRef variable);
 
 struct HyperconnectionPrelude {
   const VarDecl *carried_decl = nullptr;
   const BinaryOperator *repeat_assignment = nullptr;
   const Stmt *repeat_statement = nullptr;
+  const CallExpr *repeat_call = nullptr;
+  bool repeat_is_initializer = false;
+  std::vector<const Stmt *> embedding_prelude_statements;
   std::string width;
   std::string multiplicity;
   std::string tokens;
@@ -377,10 +380,10 @@ private:
 };
 
 int layerLoopScore(const ForStmt *loop, llvm::StringRef activation,
-                   const SourceManager &sm,
-                   const clang::LangOptions &lang) {
+                   const SourceManager &sm, const clang::LangOptions &lang) {
   const auto *body = llvm::dyn_cast<CompoundStmt>(loop->getBody());
-  const auto *condition = llvm::dyn_cast_or_null<BinaryOperator>(loop->getCond());
+  const auto *condition =
+      llvm::dyn_cast_or_null<BinaryOperator>(loop->getCond());
   if (body == nullptr || condition == nullptr) {
     return -1;
   }
@@ -417,10 +420,10 @@ int layerLoopScore(const ForStmt *loop, llvm::StringRef activation,
   score += visitor.has_layer_output ? 16 : 0;
   score += containsName(body, "layers") ? 4 : 0;
   score += assignmentsTo(body, activation).empty() ? 0 : 8;
-  score += sourceText(condition->getRHS()->getSourceRange(), sm, lang) ==
-                   "il_end"
-               ? 2
-               : 0;
+  score +=
+      sourceText(condition->getRHS()->getSourceRange(), sm, lang) == "il_end"
+          ? 2
+          : 0;
   return score;
 }
 
@@ -460,8 +463,7 @@ layerCarriedName(const CompoundStmt *body, llvm::StringRef embedding_activation,
         const auto *label = llvm::dyn_cast<StringLiteral>(
             call->getArg(1)->IgnoreParenImpCasts());
         if (label != nullptr &&
-            (label->getString() == "l_out" ||
-             label->getString() == "l_last")) {
+            (label->getString() == "l_out" || label->getString() == "l_last")) {
           name = referencedName(call->getArg(0));
         }
       }
@@ -606,10 +608,12 @@ std::vector<const BinaryOperator *> assignmentsTo(const Stmt *root,
   return assignments;
 }
 
-std::optional<HyperconnectionPrelude> hyperconnectionPrelude(
-    const CompoundStmt *constructor_body, const ForStmt *loop,
-    llvm::StringRef embedding_activation, llvm::StringRef carried,
-    const SourceManager &sm, const clang::LangOptions &lang) {
+std::optional<HyperconnectionPrelude>
+hyperconnectionPrelude(const CompoundStmt *constructor_body,
+                       const ForStmt *loop, const Stmt *embedding_statement,
+                       llvm::StringRef embedding_activation,
+                       llvm::StringRef carried, const SourceManager &sm,
+                       const clang::LangOptions &lang) {
   if (embedding_activation == carried) {
     return std::nullopt;
   }
@@ -623,7 +627,8 @@ std::optional<HyperconnectionPrelude> hyperconnectionPrelude(
   public:
     DeclVisitor(llvm::StringRef carried, uint64_t loop_offset,
                 const SourceManager &sm, const VarDecl *&result)
-        : carried_(carried), loop_offset_(loop_offset), sm_(sm), result_(result) {}
+        : carried_(carried), loop_offset_(loop_offset), sm_(sm),
+          result_(result) {}
 
     bool TraverseLambdaExpr(clang::LambdaExpr *) { return true; }
 
@@ -653,31 +658,45 @@ std::optional<HyperconnectionPrelude> hyperconnectionPrelude(
 
   const BinaryOperator *repeat_assignment = nullptr;
   const CallExpr *repeat_call = nullptr;
-  for (const BinaryOperator *assignment : assignmentsTo(constructor_body, carried)) {
-    const auto offset = fileOffset(assignment->getBeginLoc(), sm);
-    if (!offset || *offset >= *loop_offset) {
-      continue;
-    }
-    const auto *call = llvm::dyn_cast<CallExpr>(
-        assignment->getRHS()->IgnoreParenImpCasts());
+  bool repeat_is_initializer = false;
+
+  const auto is_repeat_call = [&](const Expr *expression,
+                                  llvm::StringRef input) -> const CallExpr * {
+    const auto *call =
+        llvm::dyn_cast<CallExpr>(expression->IgnoreParenImpCasts());
     const auto *callee = call == nullptr ? nullptr : directCallee(call);
     if (callee == nullptr || callee->getNameAsString() != "ggml_repeat_4d" ||
         call->getNumArgs() != 6 ||
         sourceText(call->getArg(5)->getSourceRange(), sm, lang) != "1" ||
-        !containsName(call->getArg(1), carried)) {
-      return std::nullopt;
+        !containsName(call->getArg(1), input)) {
+      return nullptr;
     }
-    if (repeat_assignment != nullptr) {
+    return call;
+  };
+
+  if (const auto *call =
+          is_repeat_call(carried_decl->getInit(), embedding_activation)) {
+    repeat_call = call;
+    repeat_is_initializer = true;
+  }
+  for (const BinaryOperator *assignment :
+       assignmentsTo(constructor_body, carried)) {
+    const auto offset = fileOffset(assignment->getBeginLoc(), sm);
+    if (!offset || *offset >= *loop_offset) {
+      continue;
+    }
+    const auto *call = is_repeat_call(assignment->getRHS(), carried);
+    if (call == nullptr || repeat_call != nullptr) {
       return std::nullopt;
     }
     repeat_assignment = assignment;
     repeat_call = call;
   }
-  if (repeat_assignment == nullptr || repeat_call == nullptr) {
+  if (repeat_call == nullptr) {
     return std::nullopt;
   }
   const Stmt *repeat_statement =
-      directChildContaining(constructor_body, repeat_assignment, sm, lang);
+      directChildContaining(constructor_body, repeat_call, sm, lang);
   if (repeat_statement == nullptr) {
     return std::nullopt;
   }
@@ -686,11 +705,43 @@ std::optional<HyperconnectionPrelude> hyperconnectionPrelude(
   result.carried_decl = carried_decl;
   result.repeat_assignment = repeat_assignment;
   result.repeat_statement = repeat_statement;
+  result.repeat_call = repeat_call;
+  result.repeat_is_initializer = repeat_is_initializer;
+  const auto embedding_range =
+      tokenRange(embedding_statement->getSourceRange(), sm, lang);
+  const auto repeat_range =
+      tokenRange(repeat_statement->getSourceRange(), sm, lang);
+  if (!embedding_range || !repeat_range) {
+    return std::nullopt;
+  }
+  const uint64_t embedding_end =
+      embedding_range->first + embedding_range->second;
+  for (const Stmt *statement : constructor_body->body()) {
+    const auto statement_range =
+        tokenRange(statement->getSourceRange(), sm, lang);
+    if (!statement_range || statement == repeat_statement ||
+        statement_range->first < embedding_end ||
+        statement_range->first >= repeat_range->first ||
+        !containsName(statement, embedding_activation)) {
+      continue;
+    }
+    const auto carried_init_range =
+        tokenRange(carried_decl->getInit()->getSourceRange(), sm, lang);
+    if (carried_init_range &&
+        statement_range->first <= carried_init_range->first &&
+        statement_range->first + statement_range->second >=
+            carried_init_range->first + carried_init_range->second) {
+      continue;
+    }
+    result.embedding_prelude_statements.push_back(statement);
+  }
   result.width = sourceText(repeat_call->getArg(2)->getSourceRange(), sm, lang);
   result.multiplicity =
       sourceText(repeat_call->getArg(3)->getSourceRange(), sm, lang);
-  result.tokens = sourceText(repeat_call->getArg(4)->getSourceRange(), sm, lang);
-  if (result.width.empty() || result.multiplicity.empty() || result.tokens.empty()) {
+  result.tokens =
+      sourceText(repeat_call->getArg(4)->getSourceRange(), sm, lang);
+  if (result.width.empty() || result.multiplicity.empty() ||
+      result.tokens.empty()) {
     return std::nullopt;
   }
   return result;
@@ -808,8 +859,8 @@ public:
     // graph inputs/results rather than from an architecture or file name.
     const bool typed_mtp_builder =
         llvm::StringRef(qualified).contains("::graph_mtp::graph_mtp");
-    const bool context_sidecar =
-        constructor_body != nullptr && containsName(constructor_body, "ctx_other");
+    const bool context_sidecar = constructor_body != nullptr &&
+                                 containsName(constructor_body, "ctx_other");
     const bool encoder_sidecar =
         facts.calls["build_inp_embd_enc"].size() == 1 &&
         constructor_body != nullptr &&
@@ -904,7 +955,8 @@ public:
               candidate_condition->getRHS()->getSourceRange(), sm, lang));
         }
         std::sort(domains.begin(), domains.end());
-        domains.erase(std::unique(domains.begin(), domains.end()), domains.end());
+        domains.erase(std::unique(domains.begin(), domains.end()),
+                      domains.end());
         if (domains.size() > 1) {
           report.verdict = "supported_whole_model";
           report.proof.execution_scope = "multiple_sequential_layer_domains";
@@ -960,8 +1012,8 @@ public:
     report.proof.activation_out = *carried;
 
     const auto hyperconnection =
-        hyperconnectionPrelude(constructor_body, loop, *activation, *carried,
-                               sm, lang);
+        hyperconnectionPrelude(constructor_body, loop, embedding_statement,
+                               *activation, *carried, sm, lang);
     if (!completing_filter && *activation != *carried && !hyperconnection) {
       refuse(report,
              "layer-carried activation differs from the embedding without a "
@@ -976,20 +1028,22 @@ public:
 
     std::vector<const BinaryOperator *> preloop_activation_assignments;
     if (!completing_filter && !hyperconnection && *activation == *carried) {
-      const auto embedding_end = tokenRange(embedding_statement->getSourceRange(), sm, lang);
+      const auto embedding_end =
+          tokenRange(embedding_statement->getSourceRange(), sm, lang);
       const auto loop_begin = fileOffset(loop->getBeginLoc(), sm);
       if (!embedding_end || !loop_begin) {
         refuse(report, "cannot locate the pre-loop activation region");
         reports_.push_back(std::move(report));
         return;
       }
-      const uint64_t prelude_begin = embedding_end->first + embedding_end->second;
+      const uint64_t prelude_begin =
+          embedding_end->first + embedding_end->second;
       for (const BinaryOperator *assignment :
            assignmentsTo(constructor_body, *carried)) {
         const auto offset = fileOffset(assignment->getBeginLoc(), sm);
         if (offset && *offset >= prelude_begin && *offset < *loop_begin) {
-          const Stmt *statement = directChildContaining(
-              constructor_body, assignment, sm, lang);
+          const Stmt *statement =
+              directChildContaining(constructor_body, assignment, sm, lang);
           if (const auto *conditional =
                   llvm::dyn_cast_or_null<IfStmt>(statement);
               conditional != nullptr && conditional->getElse() != nullptr) {
@@ -1002,8 +1056,7 @@ public:
         }
       }
       if (!preloop_activation_assignments.empty()) {
-        report.proof.scope_evidence.emplace_back(
-            "guarded_embedding_prelude");
+        report.proof.scope_evidence.emplace_back("guarded_embedding_prelude");
       }
     }
 
@@ -1013,9 +1066,8 @@ public:
       reports_.push_back(std::move(report));
       return;
     }
-    const CallExpr *output_call = output_calls.size() == 1
-                                      ? output_calls.front()
-                                      : nullptr;
+    const CallExpr *output_call =
+        output_calls.size() == 1 ? output_calls.front() : nullptr;
     report.proof.output_owner = !output_calls.empty();
 
     std::vector<const IfStmt *> terminal_ifs;
@@ -1067,22 +1119,45 @@ public:
           addInsert(report.edits, "insert_filter_declarations", report.file,
                     embedding_statement->getBeginLoc(), declarations, sm);
       if (hyperconnection) {
-        valid &= addReplace(
-            report.edits, "rewrite_hyperconnection_embedding_owner",
-            report.file, embedding->getSourceRange(),
-            "(!stage_filtered || il_start == 0) ? " + original_embedding +
-                " : nullptr",
-            sm, lang);
+        valid &=
+            addReplace(report.edits, "rewrite_hyperconnection_embedding_owner",
+                       report.file, embedding->getSourceRange(),
+                       "(!stage_filtered || il_start == 0) ? " +
+                           original_embedding + " : nullptr",
+                       sm, lang);
 
-        const Expr *carried_initializer = hyperconnection->carried_decl->getInit();
+        const Expr *carried_initializer =
+            hyperconnection->carried_decl->getInit();
         const std::string original_initializer =
             sourceText(carried_initializer->getSourceRange(), sm, lang);
-        valid &= addReplace(
-            report.edits, "rewrite_hyperconnection_initializer", report.file,
-            carried_initializer->getSourceRange(),
-            "stage_filtered && il_start > 0 ? nullptr : " +
-                original_initializer,
-            sm, lang);
+        valid &= addReplace(report.edits, "rewrite_hyperconnection_initializer",
+                            report.file, carried_initializer->getSourceRange(),
+                            "stage_filtered && il_start > 0 ? nullptr : " +
+                                original_initializer,
+                            sm, lang);
+
+        for (const Stmt *statement :
+             hyperconnection->embedding_prelude_statements) {
+          clang::SourceRange statement_range = statement->getSourceRange();
+          const auto next_token =
+              clang::Lexer::findNextToken(statement->getEndLoc(), sm, lang);
+          if (next_token && next_token->is(clang::tok::semi)) {
+            statement_range.setEnd(next_token->getLocation());
+          } else if (!llvm::isa<CompoundStmt, IfStmt>(statement)) {
+            valid = false;
+            continue;
+          }
+          const std::string statement_indent =
+              indentationAt(statement->getBeginLoc(), sm);
+          const std::string original_statement =
+              sourceText(statement_range, sm, lang);
+          valid &= addReplace(
+              report.edits, "guard_hyperconnection_embedding_prelude",
+              report.file, statement_range,
+              "if (!stage_filtered || il_start == 0) {\n" + statement_indent +
+                  "    " + original_statement + "\n" + statement_indent + "}",
+              sm, lang);
+        }
 
         const std::string repeat_indent =
             indentationAt(hyperconnection->repeat_statement->getBeginLoc(), sm);
@@ -1102,26 +1177,31 @@ public:
             ";\n" + repeat_indent +
             "    res->add_input(std::move(stage_inp));\n" + repeat_indent +
             "}\n" + repeat_indent;
-        valid &= addInsert(report.edits, "insert_hyperconnection_import",
-                           report.file,
-                           hyperconnection->repeat_statement->getBeginLoc(),
-                           import, sm);
+        if (hyperconnection->repeat_is_initializer) {
+          const SourceLocation after_repeat = clang::Lexer::getLocForEndOfToken(
+              hyperconnection->repeat_statement->getEndLoc(), 0, sm, lang);
+          valid &= addInsert(report.edits, "insert_hyperconnection_import",
+                             report.file, after_repeat,
+                             "\n" + repeat_indent + import, sm);
+        } else {
+          valid &= addInsert(
+              report.edits, "insert_hyperconnection_import", report.file,
+              hyperconnection->repeat_statement->getBeginLoc(), import, sm);
 
-        const Expr *repeat_rhs = hyperconnection->repeat_assignment->getRHS();
-        const std::string original_repeat =
-            sourceText(repeat_rhs->getSourceRange(), sm, lang);
-        valid &= addReplace(
-            report.edits, "guard_hyperconnection_repeat", report.file,
-            repeat_rhs->getSourceRange(),
-            "stage_filtered && il_start > 0 ? " + *carried + " : " +
-                original_repeat,
-            sm, lang);
+          const Expr *repeat_rhs = hyperconnection->repeat_assignment->getRHS();
+          const std::string original_repeat =
+              sourceText(repeat_rhs->getSourceRange(), sm, lang);
+          valid &= addReplace(report.edits, "guard_hyperconnection_repeat",
+                              report.file, repeat_rhs->getSourceRange(),
+                              "stage_filtered && il_start > 0 ? " + *carried +
+                                  " : " + original_repeat,
+                              sm, lang);
+        }
       } else if (standard_embedding) {
         const std::string original_argument =
             sourceText(embedding->getArg(0)->getSourceRange(), sm, lang);
         valid &= addReplace(report.edits, "rewrite_embedding_owner",
-                            report.file,
-                            embedding->getArg(0)->getSourceRange(),
+                            report.file, embedding->getArg(0)->getSourceRange(),
                             "stage_filtered && il_start > 0 ? nullptr : " +
                                 original_argument,
                             sm, lang);
@@ -1136,9 +1216,10 @@ public:
 
       std::set<const IfStmt *> guarded_ifs;
       for (const BinaryOperator *assignment : preloop_activation_assignments) {
-        const Stmt *statement = directChildContaining(
-            constructor_body, assignment, sm, lang);
-        if (const auto *conditional = llvm::dyn_cast_or_null<IfStmt>(statement)) {
+        const Stmt *statement =
+            directChildContaining(constructor_body, assignment, sm, lang);
+        if (const auto *conditional =
+                llvm::dyn_cast_or_null<IfStmt>(statement)) {
           if (guarded_ifs.insert(conditional).second) {
             const Expr *condition = conditional->getCond();
             valid &= addReplace(
@@ -1155,12 +1236,12 @@ public:
           continue;
         }
         const Expr *rhs = assignment->getRHS();
-        valid &= addReplace(
-            report.edits, "guard_embedding_prelude", report.file,
-            rhs->getSourceRange(),
-            "stage_filtered && il_start > 0 ? " + *carried + " : " +
-                sourceText(rhs->getSourceRange(), sm, lang),
-            sm, lang);
+        valid &=
+            addReplace(report.edits, "guard_embedding_prelude", report.file,
+                       rhs->getSourceRange(),
+                       "stage_filtered && il_start > 0 ? " + *carried + " : " +
+                           sourceText(rhs->getSourceRange(), sm, lang),
+                       sm, lang);
       }
       valid &= addReplace(report.edits, "rewrite_loop_start", report.file,
                           loop_var->getInit()->getSourceRange(), "il_start", sm,
@@ -1177,8 +1258,7 @@ public:
                   "\n" + inner_indent + "begin_block(" + *carried + ", " +
                       report.proof.loop_var + ");\n",
                   sm);
-    const std::string loop_indent =
-        indentationAt(loop_body->getRBracLoc(), sm);
+    const std::string loop_indent = indentationAt(loop_body->getRBracLoc(), sm);
     const std::string end_block_indent =
         llvm::StringRef(inner_indent).starts_with(loop_indent)
             ? llvm::StringRef(inner_indent).drop_front(loop_indent.size()).str()
@@ -1196,8 +1276,7 @@ public:
         valid &= addInsert(report.edits, "insert_end_block_before_continue",
                            report.file, statement->getBeginLoc(),
                            "end_block(" + *carried + ", " +
-                               report.proof.loop_var + ");\n" +
-                               continue_indent,
+                               report.proof.loop_var + ");\n" + continue_indent,
                            sm);
         continue;
       }
@@ -1206,8 +1285,8 @@ public:
       // make the continue unconditional. Replace the complete continue
       // statement with a compound statement so it remains owned by the same
       // if/else arm.
-      const auto next_token = clang::Lexer::findNextToken(
-          statement->getEndLoc(), sm, lang);
+      const auto next_token =
+          clang::Lexer::findNextToken(statement->getEndLoc(), sm, lang);
       if (!next_token || !next_token->is(clang::tok::semi)) {
         valid = false;
         continue;
@@ -1220,7 +1299,8 @@ public:
       }
       valid &= addReplace(
           report.edits, "wrap_end_block_before_continue", report.file,
-          clang::SourceRange(statement->getBeginLoc(), next_token->getLocation()),
+          clang::SourceRange(statement->getBeginLoc(),
+                             next_token->getLocation()),
           "{\n" + block_indent + "    end_block(" + *carried + ", " +
               report.proof.loop_var + ");\n" + block_indent +
               "    continue;\n" + block_indent + "}",
@@ -1423,7 +1503,8 @@ private:
                                       {"var", report.proof.loop_var}}},
           {"nonlocal_exits", std::move(exits)},
           {"execution_scope", report.proof.execution_scope},
-          {"scope_evidence", [&report]() {
+          {"scope_evidence",
+           [&report]() {
              llvm::json::Array evidence;
              for (const auto &item : report.proof.scope_evidence) {
                evidence.push_back(item);
@@ -1455,21 +1536,21 @@ private:
       return 1;
     }
     output << llvm::formatv(
-        "{0:2}\n",
-        llvm::json::Value(llvm::json::Object{
-            {"builders", std::move(builders)},
-            {"generator_version", "0.2.0"},
-            {"llama_cpp_commit", LlamaCommit},
-            {"schema_version", 1},
-            {"source_root", SourceRoot},
-            {"summary",
-             llvm::json::Object{{"already_transformed", already_transformed},
-                                {"error", errors},
-                                {"supported_auxiliary", supported_auxiliary},
-                                {"supported_whole_model", supported_whole_model},
-                                {"transformable", transformable},
-                                {"unsupported_shape", unsupported_shape}}},
-        }));
+        "{0:2}\n", llvm::json::Value(llvm::json::Object{
+                       {"builders", std::move(builders)},
+                       {"generator_version", "0.2.0"},
+                       {"llama_cpp_commit", LlamaCommit},
+                       {"schema_version", 1},
+                       {"source_root", SourceRoot},
+                       {"summary",
+                        llvm::json::Object{
+                            {"already_transformed", already_transformed},
+                            {"error", errors},
+                            {"supported_auxiliary", supported_auxiliary},
+                            {"supported_whole_model", supported_whole_model},
+                            {"transformable", transformable},
+                            {"unsupported_shape", unsupported_shape}}},
+                   }));
     return 0;
   }
 
