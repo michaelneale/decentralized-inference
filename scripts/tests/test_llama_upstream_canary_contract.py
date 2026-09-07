@@ -373,6 +373,12 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("generate-skippy-family-patch.py", generated_patch_check_text)
         self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
         self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
+        self.assertIn("ORIGINAL_SOURCE_HEAD", generated_patch_check_text)
+        self.assertIn("GENERATED_PATCH_COUNT", generated_patch_check_text)
+        self.assertIn("core-only generator input already contains", generated_patch_check_text)
+        self.assertIn("stage_filter", generated_patch_check_text)
+        self.assertIn("begin_block", generated_patch_check_text)
+        self.assertIn("end_block", generated_patch_check_text)
         self.assertIn("-R '^skippy_'", generated_patch_check_text)
         generator_index = generated_patch_check_text.index(
             'python3 "$ROOT/scripts/generate-skippy-family-patch.py"'

@@ -92,6 +92,35 @@ def validate_report(report_path: Path, *, idempotence: bool) -> dict:
                 "second rewriter pass still has edits for: "
                 + ", ".join(remaining[:10])
             )
+    else:
+        inherited = [
+            builder.get("file", "<unknown>")
+            for builder in builders
+            if builder.get("verdict") == "already_transformed"
+        ]
+        if inherited:
+            raise RuntimeError(
+                "first rewriter pass received pre-transformed model builders; "
+                "generation must start after core patches and before every "
+                "generated family patch: "
+                + ", ".join(inherited[:10])
+            )
+        refused = [
+            (
+                builder.get("file", "<unknown>"),
+                builder.get("unsupported_reason", builder.get("verdict", "unknown")),
+            )
+            for builder in builders
+            if builder.get("verdict") in {"unsupported_shape", "error"}
+        ]
+        if refused:
+            details = ", ".join(
+                f"{file}: {reason}" for file, reason in refused[:10]
+            )
+            raise RuntimeError(
+                "first rewriter pass did not transform every decoder builder: "
+                + details
+            )
     return report
 
 
