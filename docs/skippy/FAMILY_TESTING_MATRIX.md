@@ -8,13 +8,15 @@ customer support from prior certification evidence, and a family included here
 has no support claim until it certifies through
 `docs/skippy/NEW_MODEL_ONBOARDING.md`.
 
-Decision authority: James approved the Tier 1 removal on 2026-09-07 (see
-skippy channel, "lets drop all tier 1 from testing and from the download
-script"). The corpus was derived from the verified one-GGUF-per-architecture
-manifest embedded in the download script.
+Decision authority: James approved the Tier 1 removal and the Tier 3 removal
+on 2026-09-07 (see skippy channel: "lets drop all tier 1 from testing and from
+the download script"; "tier 3 - remove them. we will do them in
+https://github.com/Mesh-LLM/mesh-llm/issues/1677"). The corpus was derived
+from the verified one-GGUF-per-architecture manifest embedded in the download
+script.
 
-Corpus state after the Tier 1 removal: **113 architectures, 145 files,
-710 GB**, which fits the 837 GB external scratch volume in one pass.
+Corpus state after both removals: **85 architectures, 99 files, 592 GB**,
+which fits the 837 GB external scratch volume in one pass.
 
 Download tool: `~/bin/download-all-families.py` (one verified GGUF per arch,
 `general.architecture` confirmed via the HF parsed metadata API, resumable,
@@ -32,9 +34,12 @@ included family covers. Age alone does not exclude a family; redundancy does.
   same state machinery) and the old artifact adds no unique coverage.
 - Families whose only distinguishing feature is vintage but which carry a
   unique graph path stay (see the keep list below).
-- Non-text-generation modalities (encoders, TTS, vision projectors, diffusion
-  LMs) are pending a scope decision: include them only if the stage planner
-  needs that modality's graph profile (see Open Questions).
+- Non-text-generation modalities (encoders/embeddings, TTS, vision/OCR,
+  diffusion LMs, standalone speculators) are out of the corpus: the staged
+  runtime and its OpenAI-compatible frontend are scoped to autoregressive
+  text generation. Support for those classes is tracked in
+  <https://github.com/Mesh-LLM/mesh-llm/issues/1677>; the download script
+  header lists the exact removed archs.
 
 ## Removed — Tier 1: old and graph-superseded (2026-09-07)
 
@@ -74,6 +79,31 @@ download script. Each maps to a retained family covering the same graph path.
 
 Corpus effect: 141 -> 113 archs, ~966 -> 710 GB.
 
+## Removed — Tier 3: non-text modalities (2026-09-07, deferred to #1677)
+
+Removed the same day, per the same decision thread. The staged runtime's scope
+is autoregressive text generation, so these 28 architectures left the corpus
+until issue #1677 lands embedding, OCR, TTS, and encoder-only support:
+
+- Encoders / embeddings: bert, modern-bert, neo-bert, nomic-bert,
+  nomic-bert-moe, jina-bert-v2, jina-bert-v3, eurobert, gemma-embedding,
+  llama-embed, t5, t5encoder.
+- Audio / TTS: pockettts, qwen3tts, wavtokenizer-dec.
+- Vision / OCR: cogvlm, qwen2vl, qwen3vl, qwen3vlmoe, deepseek2-ocr,
+  hunyuan_vl, paddleocr.
+- Diffusion LMs: llada, llada-moe, dream, rnd1.
+- Draft/speculative-only: eagle3, dflash.
+
+Kept despite the modality question because their profiles are planner targets:
+step35 and qwen4exp (MTP/speculative).
+
+Corpus effect: 113 -> 85 archs, 710 -> 592 GB.
+
+Note: qwen2vl and qwen3vl are currently *Supported* (split multimodal) in
+`docs/skippy/FAMILY_STATUS.md`. Their removal here stops active
+re-certification only; the existing support claims stand until #1677 changes
+the picture.
+
 Note: historical certification evidence for these families in
 `docs/skippy/FAMILY_STATUS.md` (Bloom, GPT2, ChatGLM, CodeShell, Deci, XVerse,
 StableLM, OpenELM, OLMo, MiniCPM3, InternLM2, Refact, Falcon, and others) is
@@ -94,32 +124,11 @@ Kept despite age because nothing newer covers their path:
 - **deepseek2** — MLA baseline; deepseek4 is a rewrite, so the baseline stays.
 - **grok** — its own arch with a single public sample.
 
-## Pending decision — non-text modalities (Tier 3)
-
-Not an age question. In scope only if the stage planner needs the modality's
-graph profile. Current candidates for exclusion if the answer is "text
-generation only":
-
-- Encoders / embeddings: bert, modern-bert, neo-bert, nomic-bert,
-  nomic-bert-moe, jina-bert-v2, jina-bert-v3, eurobert, gemma-embedding,
-  llama-embed, t5, t5encoder.
-- Audio / TTS: pockettts, qwen3tts, wavtokenizer-dec.
-- Vision / OCR: cogvlm, qwen2vl, qwen3vl, qwen3vlmoe, deepseek2-ocr,
-  hunyuan_vl, paddleocr (note: qwen2vl/qwen3vl are currently *supported* in
-  FAMILY_STATUS for split multimodal; exclusion here would stop re-certifying
-  that path).
-- Diffusion LMs: llada, llada-moe, dream, rnd1.
-- Draft/speculative-only: eagle3, dflash (speculator weights, not runnable
-  standalone). step35 and qwen4exp should stay if MTP/speculative profiles
-  remain planner targets.
-
 ## Open Questions
 
 1. Keep qwen2 in the corpus after all? It was removed under Tier 1, but it
    remains the largest real-world deployment architecture.
-2. Approve the Tier 3 exclusions, or keep multimodal lanes (qwen2vl/qwen3vl)
-   given their live support claims?
-3. The 7 architectures with no public GGUF anywhere on Hugging Face
+2. The 7 architectures with no public GGUF anywhere on Hugging Face
    (arctic, bailingmoe, bailingmoe2, deepseek, exaone-moe, minimax-01,
    pangu-embedded) need upstream conversion before they can enter the matrix
    at all; conversion work is not currently scheduled.
