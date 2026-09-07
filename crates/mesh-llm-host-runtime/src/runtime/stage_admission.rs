@@ -1549,8 +1549,12 @@ mod tests {
         discovered.layer_end = 100;
         discovered.sidecars.clear();
 
-        let planned =
-            planned_admission_from_discovery(&m, (2, 7), std::slice::from_ref(&sidecar), &discovered);
+        let planned = planned_admission_from_discovery(
+            &m,
+            (2, 7),
+            std::slice::from_ref(&sidecar),
+            &discovered,
+        );
 
         assert_eq!(planned.package_id, m.package_id);
         assert_eq!((planned.layer_start, planned.layer_end), (2, 7));

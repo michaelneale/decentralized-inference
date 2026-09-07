@@ -711,6 +711,7 @@ struct StagePath {
     path: PathBuf,
     load_mode: RuntimeLoadMode,
     filter_tensors_on_load: bool,
+    resident_tensor_names: Vec<String>,
 }
 
 impl ResolvedCase {
@@ -1659,7 +1660,7 @@ fn open_stage_model(path: &StagePath, shape: StageShape, n_gpu_layers: i32) -> R
             include_output: shape.include_output,
             mtp_source: MtpSource::Disabled,
             filter_tensors_on_load: path.filter_tensors_on_load,
-            resident_tensor_names: Vec::new(),
+            resident_tensor_names: path.resident_tensor_names.clone(),
             checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
