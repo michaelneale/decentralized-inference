@@ -39,6 +39,7 @@ struct model_embedding_prelude {
 
 model_embedding_prelude::graph::graph(const model_type &model) {
   ggml_tensor *inpL = ggml_get_rows(ctx0, model.tok_embd, tokens);
+  inpL = scale(inpL);
   if (scale_embeddings) {
     inpL = scale(inpL);
   }
