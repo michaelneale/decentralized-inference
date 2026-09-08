@@ -377,10 +377,7 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
     require(f"run: just {seed['recipe']}\n" in publisher_job, "compiler seed recipe drift")
     recipe = (root / "just/ci.just").read_text(encoding="utf-8")
     require(bool(re.search(r"^" + re.escape(seed["recipe"]) + r":\s*$", recipe, re.MULTILINE)), "compiler seed recipe is missing")
-    seed_image = images[seed["image_id"]]
-    for field, expected in (("container_image", seed_image["reference"]), ("toolchain_epoch", seed_image["native_toolchain_epoch"])):
-        matches = re.findall(r"matrix\.runtime\." + field + r" == '([^']+)'", runtime_job)
-        require(matches == [expected], f"runtime seed guard {field} drift")
+    require(one_field(runtime_job, "allow_trusted_seed", "runtime consumer") == "false", "runtime seed restore is deliberately disabled")
 
     sdk = catalog["sdk_rust"]
     sdk_binding = roles[sdk["role"]]["bindings"][0]
@@ -402,13 +399,10 @@ def diagnose(catalog: dict[str, Any], root: Path) -> list[str]:
     """Report eligibility concerns separately; a matching image is not coverage."""
     runtime = catalog["compiler_seed"]["runtime_consumer"]
     job = workflow_jobs(root / ".github/workflows" / runtime["workflow"], runtime["job"])[runtime["job"]]
-    guard_architectures = re.findall(r"matrix\.runtime\.architecture == '([^']+)'", job)
+    require(one_field(job, "allow_trusted_seed", "runtime consumer") == "false", "runtime seed restore is deliberately disabled")
     matches = [row for row in planner_rows(root) if row["id"] == runtime["row_id"]]
     require(len(matches) == 1, f"planner has no unique row {runtime['row_id']}")
-    actual = matches[0]["architecture"]
-    messages = []
-    if guard_architectures != [actual]:
-        messages.append(f"runtime seed architecture guard {guard_architectures!r} differs from planner {actual!r}; eligibility requires a separate workload coverage decision")
+    messages = ["runtime seed restore is deliberately disabled: run 34272984200/1 observed zero reuse in all three verified warm samples"]
     if catalog["compiler_seed"]["workload_coverage"] is None:
         messages.append("compiler seed workload coverage is unqualified; image identity alone does not establish warm-cache coverage")
     return messages

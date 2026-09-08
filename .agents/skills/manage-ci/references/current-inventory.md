@@ -188,7 +188,7 @@ values with every literal workflow image binding and the actual planner rows.
 Its focused tests run through the existing `just ci-validate` discovery. This
 catalog adds no planner authority and changes no cache keys.
 Historical receipt, provenance and workload-coverage fields are explicitly
-unknown. `diagnose` reports the runtime architecture guard mismatch separately;
+unknown. `diagnose` reports deliberate runtime seed exclusion;
 matching image identity does not qualify the host seed for native runtime work.
 
 Some CI jobs run inside a `container:` pinned to a digest from the
@@ -514,7 +514,7 @@ fail-open policy.
 - `configure-sccache-gha`: event/provider-derived compiler-cache setup.
 - `restore-sccache-seed`: exact-key restore of the trusted 2 GiB Linux seed;
   central runner policy permits it only for GitHub-hosted selections, and
-  runtime rows must match the seed's container image and toolchain epoch.
+  native runtime restore is explicitly disabled after zero-reuse qualification.
 - `capture-sccache-stats`: machine-readable cache evidence. Warm consumers with
   a positive floor fail when no cache requests are observable; the zero-floor
   SafeTensors observation remains non-failing and emits a wiring warning.
@@ -545,14 +545,14 @@ trusted-main caches. Same-repository PRs normally use GitHub's ref-scoped cache;
 eligible PR jobs may temporarily use Depot's shared cross-branch
 namespace under `ci/DEPOT_PR_RISK_EXCEPTION.md`. That namespace is treated as
 untrusted input, not an authority or correctness boundary. Linux Clippy,
-Rust-test, host, and runtime jobs restore one bounded trusted sccache seed
+Rust-test and host jobs restore one bounded trusted sccache seed
 instead of per-row Cargo target archives. The protected warmer's
 `just ci-sccache-seed-build` recipe covers the dominant `mesh-llm` Clippy graph
 and the isolated `mesh-llm-cli` test graph used by the Rust-test matrix. Depot
 selections cannot restore that
 seed through their cross-trust cache proxy. Its exact key fingerprints the
-warmer image and toolchain epoch, so mismatched native-runtime rows are cold and
-do not restore it. These four high-fanout families disable per-object GHA
+warmer image and toolchain epoch. Native-runtime rows explicitly remain cold
+after three verified warm samples observed zero reuse. These four high-fanout families disable per-object GHA
 publication on every provider. Exact Linux static ABI, Swift ABI, macOS Metal unit ABI,
 and Windows native ABI caches may publish into GitHub's isolated PR merge-ref
 scope for same-PR reruns. UI installs (`ui_quality`, `ui_e2e`, `ui_artifact`) point pnpm at the runner
@@ -726,5 +726,11 @@ scope and the required candidate-branch lane execution before merge.
 pairs on fresh GitHub-hosted CPU jobs. It restores only the admitted main seed,
 never saves caches or changes production eligibility, and retains negative or
 inconclusive results. The catalog tracks this qualification restore separately
-from the five production seed consumers. See [CI topology](../../../../ci/ci.md#existing-seed-cpu-runtime-canary)
-for identity, measurements and qualification limits. Live execution is pending.
+from the five production restore-action bindings, including the explicitly
+disabled runtime binding. See [CI topology](../../../../ci/ci.md#existing-seed-cpu-runtime-canary)
+for identity, measurements and the completed qualification limits.
+
+Runtime exclusion evidence: run `34272984200/1`, source
+`1f4545616e98db715e37c57e1196cbdc975a010e`, observed zero reuse in all three
+verified warm samples. Full-cohort timing remains inconclusive because pairs 1/2
+had different CPUs. See [retained evidence](../../../../ci/runtime-seed-evidence/34272984200-1/README.md).

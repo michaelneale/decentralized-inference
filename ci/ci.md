@@ -653,8 +653,9 @@ successful Main Quality. Central runner policy denies that seed to every Depot
 selection because Depot's Actions-cache proxy crosses trust scopes. Seeded
 jobs enforce measured hit-rate floors only after an exact warm restore; a
 missing seed is explicitly cold and does not fail. The seed key fingerprints
-the warmer container image and toolchain epoch; runtime rows whose image or
-epoch differs from the warmer are explicitly cold and skip seed restoration.
+the warmer container image and toolchain epoch. Production runtime rows
+explicitly skip seed restoration after three verified CPU warm samples observed
+zero reuse in run `34272984200/1`.
 The warmer's `just ci-sccache-seed-build` recipe covers both the dominant
 `mesh-llm` Clippy graph and the isolated `mesh-llm-cli` test graph used by the
 Rust-test matrix; its `Justfile` and `just/**` inputs are part of the exact
@@ -664,11 +665,10 @@ current image, native epoch, compiler-seed and SDK Rust identities auditable
 without changing execution. The existing Python test discovery verifies the
 catalog against workflow bindings and real planner rows. Historical tool
 receipts and source provenance remain unknown until qualified image receipts
-exist. Workload coverage is a separate unknown: the host seed does not build
-the llama.cpp runtime graph, and the current CPU runtime architecture guard
-does not match its `amd64` planner row. A spelling correction alone cannot
-establish useful cache hits. The separate `diagnose` command reports this
-condition; the initial catalog does not enable runtime restoration.
+exist. Other consumer workload coverage remains unknown. The measured CPU
+runtime workload had zero seed hits in all three warm samples; the separate
+`diagnose` command reports deliberate runtime exclusion. The checker rejects
+re-enablement independently of architecture spelling.
 These four high-fanout job families also disable the per-object GHA backend on
 every provider. Small exact native
 caches have substantially better reuse-to-storage value. Cache hits are always
@@ -827,4 +827,17 @@ against each cold partner separately from assembler and Rust packaging hits.
 Restore-step elapsed, unchanged action elapsed and total measured path are primary
 timings. Optional native-preparation/packaging splits may be derived from timestamped
 job logs at `built patched llama.cpp`; missing markers leave that split unavailable.
-No automatic result grants eligibility. Live paired execution is still pending.
+No automatic result grants eligibility. The completed qualification below
+retains its negative coverage result and inconclusive full-cohort timing.
+
+The existing CPU seed is deliberately excluded from production runtime restore.
+[Run 34272984200/1](https://github.com/Mesh-LLM/mesh-llm/actions/runs/34272984200),
+source `1f4545616e98db715e37c57e1196cbdc975a010e`, completed all six real
+build/package verifications. Every warm sample restored the exact main seed and
+had zero hits across 603 C/C++, 139 assembler and 304 Rust cacheable requests.
+All warm samples failed the required 1% floor. The summary remains inconclusive
+for timing because pairs 1 and 2 had different CPUs; no timing improvement or
+exact cause of misses is claimed. Whole-action C/C++ counts also include package
+tool dependencies. Global workload coverage stays unknown for other consumers.
+[Original retained evidence and hashes](runtime-seed-evidence/34272984200-1/README.md)
+preserve the basis beyond remote artifact expiry.

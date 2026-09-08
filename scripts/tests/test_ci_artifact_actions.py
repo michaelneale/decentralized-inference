@@ -2888,7 +2888,13 @@ class CiArtifactActionTests(unittest.TestCase):
                     block = step_block(workflow, marker)
                     with self.subTest(consumer=marker):
                         if "restore-sccache-seed" in marker:
-                            self.assertIn("allow_trusted_sccache_seed", block)
+                            if filename == "ci-linux-runtime-slice.yml":
+                                self.assertEqual(
+                                    re.findall(r'^\s*allow_trusted_seed:\s*(.+)$', block, re.MULTILINE),
+                                    ['"false"'],
+                                )
+                            else:
+                                self.assertIn("allow_trusted_sccache_seed", block)
                         else:
                             self.assertIn("allow_native_github_cache", block)
 

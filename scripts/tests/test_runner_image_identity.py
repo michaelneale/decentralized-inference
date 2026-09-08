@@ -214,16 +214,22 @@ class RunnerImageIdentityTests(unittest.TestCase):
         self.replace(".github/workflows/ci-linux-host-slice.yml", "uses: ./.github/actions/restore-sccache-seed", "uses: ./.github/actions/another-action")
         self.assert_drift("restore action census drift")
 
-    def test_runtime_seed_guard_image_drift_fails(self) -> None:
-        self.replace(".github/workflows/ci-linux-runtime-slice.yml", self.image("public-cpu"), self.image("public-web"))
-        self.assert_drift("runtime seed guard container_image drift")
+    def test_runtime_seed_reenablement_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", 'allow_trusted_seed: "false"', 'allow_trusted_seed: "true"')
+        self.assert_drift("runtime seed restore is deliberately disabled")
 
-    def test_architecture_diagnostics_do_not_claim_workload_coverage(self) -> None:
-        path = self.root / ".github/workflows/ci-linux-runtime-slice.yml"
-        import re
-        path.write_text(re.sub(r"matrix\.runtime\.architecture == '[^']+'", "matrix.runtime.architecture == 'fixture-mismatch'", path.read_text()))
+    def test_runtime_seed_expression_reenablement_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", 'allow_trusted_seed: "false"', "allow_trusted_seed: ${{ needs.runner_policy.outputs.allow_trusted_sccache_seed }}")
+        self.assert_drift("runtime seed restore is deliberately disabled")
+
+    def test_runtime_seed_missing_allow_field_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", '          allow_trusted_seed: "false"\n', '')
+        with self.assertRaises(IDENTITY.IdentityError):
+            IDENTITY.check(self.catalog, self.root)
+
+    def test_runtime_seed_diagnostics_report_deliberate_exclusion(self) -> None:
         messages = IDENTITY.diagnose(self.catalog, self.root)
-        self.assertTrue(any("fixture-mismatch" in message and "separate workload coverage decision" in message for message in messages))
+        self.assertTrue(any("deliberately disabled" in message for message in messages))
         self.assertTrue(any("workload coverage is unqualified" in message for message in messages))
 
     def test_sdk_rust_epoch_stays_separate_from_native_epoch(self) -> None:
