@@ -1,0 +1,644 @@
+From 39da9386b2e4d75fe88fe3f392c3f8162dd0e4cc Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 02:00:59 -0400
+Subject: [PATCH] skippy: add process-global runtime event reporter (bit 31)
+
+Bumps SKIPPY_ABI_VERSION_PATCH to 53 (the one bump for this atomically
+landed capability series; sibling family patches do not bump again) and
+adds SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER (bit 31).
+
+Adds skippy_set_runtime_event_reporter / skippy_clear_runtime_event_reporter
+installing one process-global reporter; replacing a reporter and clear()
+both block until every in-flight callback from the previous reporter has
+returned, so no callback into that reporter occurs after either operation
+returns. Extends skippy_runtime_event_v1 with four append-only
+numeric_summary fields after detail_len, under the unchanged
+SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION.
+
+Adds a private src/skippy/events_internal.h dispatch() seam shared by
+every family emit entrypoint added by sibling patches, plus a new
+skippy-runtime-events-test executable exercising the reporter mechanism
+itself (install/dispatch/clear/quiescence/struct-size) via that seam and
+the pre-existing MODEL_OPEN category, with no dependency on any one
+family's own emit entrypoint.
+
+Rebased onto main's graph-derived package-v2 queue as patches 0020-0029.
+Feature bits 31-36 are unchanged.
+
+---
+ include/skippy/common.h             |  12 +-
+ include/skippy/events.h             |  37 +++++
+ src/CMakeLists.txt                  |  21 +++
+ src/skippy/abi.cpp                  |   3 +-
+ src/skippy/events.cpp               | 172 ++++++++++++++++++++
+ src/skippy/events_internal.h        |  35 ++++
+ src/skippy/tests/runtime_events.cpp | 238 ++++++++++++++++++++++++++++
+ 7 files changed, 516 insertions(+), 2 deletions(-)
+ create mode 100644 src/skippy/events.cpp
+ create mode 100644 src/skippy/events_internal.h
+ create mode 100644 src/skippy/tests/runtime_events.cpp
+
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index b156cb5eb..98d69de67 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -46,7 +46,7 @@ extern "C" {
+ 
+ #define SKIPPY_ABI_VERSION_MAJOR 0
+ #define SKIPPY_ABI_VERSION_MINOR 1
+-#define SKIPPY_ABI_VERSION_PATCH 52
++#define SKIPPY_ABI_VERSION_PATCH 53
+ 
+ #if defined(_MSC_VER)
+ #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
+@@ -90,6 +90,16 @@ enum skippy_feature {
+     SKIPPY_FEATURE_MODEL_SOURCE            = 1 << 30,
+ };
+ 
++// Feature bit 31 is declared as a `uint64_t` constant, not an `enum
++// skippy_feature` member: later bits in this same numbering space (32-36,
++// added by sibling capability patches) exceed the range a C11 `enum`'s
++// underlying type is portably guaranteed to hold (ISO C11 6.7.2.2p4 only
++// requires the type to represent `int`-range values). Bit 31 is kept
++// consistent with those siblings rather than split across two declaration
++// styles. `skippy_abi_features()` already returns `uint64_t`, so callers
++// combine these with the enum bits identically either way.
++#define SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER ((uint64_t)1 << 31)
++
+ enum skippy_status {
+     SKIPPY_STATUS_OK                      = 0,
+     SKIPPY_STATUS_ERROR                   = 1,
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+index 9fee2715f..97d451269 100644
+--- a/include/skippy/events.h
++++ b/include/skippy/events.h
+@@ -84,6 +84,14 @@ struct skippy_runtime_event_v1 {
+     uint32_t reserved1;
+     const char * detail_ptr;
+     uint64_t detail_len;
++
++    // Append-only extension fields. Advertised by `struct_size` under the
++    // unchanged SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION; a caller only reads a
++    // field when `struct_size` covers its offset.
++    uint64_t numeric_summary_0;
++    uint64_t numeric_summary_1;
++    uint64_t numeric_summary_2;
++    uint64_t numeric_summary_3;
+ };
+ 
+ /** @brief Callback type used by a runtime event reporter. */
+@@ -99,6 +107,35 @@ struct skippy_runtime_event_reporter_v1 {
+     void * user_data;
+ };
+ 
++/**
++ * @brief Installs one process-global runtime-scoped event reporter.
++ *
++ * Requires SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER. Replaces any previously
++ * installed global reporter. The per-call model-open reporter passed to a
++ * `*_with_events` entrypoint still takes precedence for
++ * SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN events during that call; the
++ * global reporter receives events published through it by any capability
++ * module (backend/device/KV/diagnostic/unload/model-load-v2, added by
++ * sibling patches) via the shared internal dispatch path.
++ *
++ * Returns SKIPPY_STATUS_INVALID_ARGUMENT if `reporter` is null or its
++ * `struct_size` is smaller than `sizeof(struct
++ * skippy_runtime_event_reporter_v1)`.
++ * When replacing an existing reporter, waits until every in-flight callback
++ * using the previous reporter has returned before installing the replacement.
++ */
++LLAMA_API enum skippy_status skippy_set_runtime_event_reporter(
++        const struct skippy_runtime_event_reporter_v1 * reporter);
++
++/**
++ * @brief Removes the process-global runtime-scoped event reporter.
++ *
++ * Returns only after every in-flight callback invocation of the previously
++ * installed reporter has returned, so no callback occurs after this call
++ * returns. Idempotent: clearing when no reporter is installed is a no-op.
++ */
++LLAMA_API void skippy_clear_runtime_event_reporter(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 320b5419e..1066937b5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -65,6 +65,7 @@ add_library(llama
+             skippy/state_effects.cpp
+             skippy/speculative_decoding.cpp
+             skippy/tokenization.cpp
++            skippy/events.cpp
+             llama-vocab.cpp
+             unicode-data.cpp
+             unicode.cpp
+@@ -101,6 +102,26 @@ if (LLAMA_STAGE_BUILD_TESTS)
+         NAME skippy_hardware_application_probe
+         COMMAND skippy-hardware-application-probe)
+ 
++    target_compile_definitions(llama PRIVATE SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++
++    add_executable(skippy-runtime-events-test
++        skippy/tests/runtime_events.cpp)
++    target_include_directories(skippy-runtime-events-test PRIVATE .)
++    target_compile_features(skippy-runtime-events-test PRIVATE cxx_std_17)
++    target_compile_definitions(skippy-runtime-events-test PRIVATE SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++    target_link_libraries(skippy-runtime-events-test PRIVATE llama)
++    foreach(SKIPPY_EVENT_TEST_CASE
++            register_and_dispatch
++            malformed_reporter_rejected
++            replacement_waits_for_previous_callback
++            clear_is_quiescent
++            struct_size_extension
++            concurrent_dispatch)
++        add_test(
++            NAME skippy_runtime_event_${SKIPPY_EVENT_TEST_CASE}
++            COMMAND skippy-runtime-events-test ${SKIPPY_EVENT_TEST_CASE})
++    endforeach()
++
+     set(SKIPPY_MODEL_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/skippy/test-models")
+     file(MAKE_DIRECTORY "${SKIPPY_MODEL_FIXTURE_DIR}")
+ 
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+index ec2b47444..21dcbecb9 100644
+--- a/src/skippy/abi.cpp
++++ b/src/skippy/abi.cpp
+@@ -39,7 +39,8 @@ uint64_t skippy_abi_features(void) {
+            SKIPPY_FEATURE_INKLING_MTP_MM |
+            SKIPPY_FEATURE_ITERATION_BATCH |
+            SKIPPY_FEATURE_ACTIVATION_BOUNDARY |
+-           SKIPPY_FEATURE_MODEL_SOURCE;
++           SKIPPY_FEATURE_MODEL_SOURCE |
++           SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER;
+ }
+ 
+ void skippy_error_free(struct skippy_error * error) {
+diff --git a/src/skippy/events.cpp b/src/skippy/events.cpp
+new file mode 100644
+index 000000000..fdb633a16
+--- /dev/null
++++ b/src/skippy/events.cpp
+@@ -0,0 +1,172 @@
++#include "skippy/events.h"
++
++#include "events_internal.h"
++
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++
++namespace {
++
++struct global_reporter_state {
++    // Lifecycle operations are serialized independently from dispatch. A
++    // setter/clearer may wait for callbacks to drain, while a callback only
++    // needs dispatch_mutex to snapshot its current target and retire its
++    // in-flight count.
++    std::mutex lifecycle_mutex;
++    std::mutex dispatch_mutex;
++    std::condition_variable drained;
++    std::atomic<uint64_t> in_flight{0};
++    skippy_runtime_event_callback callback = nullptr;
++    void * user_data = nullptr;
++    std::atomic<uint64_t> next_sequence{1};
++};
++
++global_reporter_state & state() {
++    static global_reporter_state s;
++    return s;
++}
++
++#if defined(SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++using test_lifecycle_hook_fn = void (*)(void *);
++std::atomic<test_lifecycle_hook_fn> test_lifecycle_hook{nullptr};
++std::atomic<void *> test_lifecycle_hook_user_data{nullptr};
++#endif
++
++uint64_t now_mono_ns() {
++    return static_cast<uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch())
++            .count());
++}
++
++void disable_dispatch(global_reporter_state & s) {
++    // Disable admission before draining. Do not hold dispatch_mutex while
++    // waiting: an in-flight callback must be able to finish and reacquire it
++    // to retire its count.
++    std::lock_guard<std::mutex> lock(s.dispatch_mutex);
++    s.callback = nullptr;
++    s.user_data = nullptr;
++}
++
++void quiesce(global_reporter_state & s) {
++    disable_dispatch(s);
++    std::unique_lock<std::mutex> lock(s.dispatch_mutex);
++    s.drained.wait(lock, [&s] {
++        return s.in_flight.load(std::memory_order_acquire) == 0;
++    });
++}
++
++void callback_finished(global_reporter_state & s) {
++    std::lock_guard<std::mutex> lock(s.dispatch_mutex);
++    s.in_flight.fetch_sub(1, std::memory_order_acq_rel);
++    if (s.in_flight.load(std::memory_order_acquire) == 0) {
++        s.drained.notify_all();
++    }
++}
++
++#if defined(SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++void notify_lifecycle_admission_hook() {
++    const auto hook = test_lifecycle_hook.load(std::memory_order_acquire);
++    if (hook != nullptr) {
++        hook(test_lifecycle_hook_user_data.load(std::memory_order_acquire));
++    }
++}
++#endif
++} // namespace
++
++namespace skippy::events {
++
++#if defined(SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++void set_lifecycle_admission_hook(lifecycle_admission_hook hook, void * user_data) {
++    test_lifecycle_hook_user_data.store(user_data, std::memory_order_release);
++    test_lifecycle_hook.store(hook, std::memory_order_release);
++}
++#endif
++
++void dispatch(
++        skippy_runtime_event_category category,
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t stage_id,
++        uint64_t session_id,
++        skippy_runtime_event_failure_code failure_code,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1,
++        uint64_t numeric_summary_2,
++        uint64_t numeric_summary_3,
++        const char * detail_ptr,
++        uint64_t detail_len) {
++    auto & s = state();
++
++    // Snapshot the callback and admit the invocation atomically with respect
++    // to lifecycle quiescence. The callback itself runs with both locks
++    // released so it can complete while set/clear waits for its retirement.
++    skippy_runtime_event_callback callback;
++    void * user_data;
++    {
++        std::lock_guard<std::mutex> lock(s.dispatch_mutex);
++        callback = s.callback;
++        user_data = s.user_data;
++        if (callback == nullptr) {
++            return;
++        }
++        s.in_flight.fetch_add(1, std::memory_order_acq_rel);
++    }
++
++    skippy_runtime_event_v1 event{};
++    event.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    event.struct_size = static_cast<uint32_t>(sizeof(skippy_runtime_event_v1));
++    event.category = category;
++    event.kind = kind;
++    event.emitter = SKIPPY_RUNTIME_EVENT_EMITTER_WORKER_THREAD;
++    event.sequence = s.next_sequence.fetch_add(1, std::memory_order_relaxed);
++    event.timestamp_mono_ns = now_mono_ns();
++    event.model_id = model_id;
++    event.stage_id = stage_id;
++    event.session_id = session_id;
++    event.failure_code = failure_code;
++    event.numeric_summary_0 = numeric_summary_0;
++    event.numeric_summary_1 = numeric_summary_1;
++    event.numeric_summary_2 = numeric_summary_2;
++    event.numeric_summary_3 = numeric_summary_3;
++    event.detail_ptr = detail_ptr;
++    event.detail_len = detail_len;
++
++    callback(&event, user_data);
++
++    callback_finished(s);
++}
++
++} // namespace skippy::events
++
++enum skippy_status skippy_set_runtime_event_reporter(
++        const struct skippy_runtime_event_reporter_v1 * reporter) {
++    if (reporter == nullptr ||
++        reporter->struct_size < sizeof(struct skippy_runtime_event_reporter_v1)) {
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
++    auto & s = state();
++    std::lock_guard<std::mutex> lifecycle_lock(s.lifecycle_mutex);
++#if defined(SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++    notify_lifecycle_admission_hook();
++#endif
++    // A replacement has the same lifetime guarantee as clear: no callback
++    // using the previous user_data can remain when this function returns.
++    quiesce(s);
++    {
++        std::lock_guard<std::mutex> dispatch_lock(s.dispatch_mutex);
++        s.callback = reporter->callback;
++        s.user_data = reporter->user_data;
++    }
++    return SKIPPY_STATUS_OK;
++}
++
++void skippy_clear_runtime_event_reporter(void) {
++    auto & s = state();
++    std::lock_guard<std::mutex> lifecycle_lock(s.lifecycle_mutex);
++    quiesce(s);
++}
+diff --git a/src/skippy/events_internal.h b/src/skippy/events_internal.h
+new file mode 100644
+index 000000000..040f89e1e
+--- /dev/null
++++ b/src/skippy/events_internal.h
+@@ -0,0 +1,35 @@
++#ifndef SKIPPY_EVENTS_INTERNAL_H
++#define SKIPPY_EVENTS_INTERNAL_H
++
++#include "skippy/events.h"
++
++// Private capability-internal dispatch path shared by every
++// `skippy_emit_*_event` family entrypoint (added by sibling patches). Not
++// part of the installed public ABI: declared under src/skippy/, matching
++// this codebase's private-header convention. Also used directly by the
++// native runtime-event test binary (which shares this include path) so the
++// reporter's own mechanism (install/clear/quiescence/struct-size extension)
++// is testable without depending on any one family's emit entrypoint.
++namespace skippy::events {
++
++#if defined(SKIPPY_RUNTIME_EVENTS_TEST_HOOKS)
++using lifecycle_admission_hook = void (*)(void *);
++void set_lifecycle_admission_hook(lifecycle_admission_hook hook, void * user_data);
++#endif
++void dispatch(
++        skippy_runtime_event_category category,
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t stage_id,
++        uint64_t session_id,
++        skippy_runtime_event_failure_code failure_code,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1,
++        uint64_t numeric_summary_2,
++        uint64_t numeric_summary_3,
++        const char * detail_ptr,
++        uint64_t detail_len);
++
++} // namespace skippy::events
++
++#endif // SKIPPY_EVENTS_INTERNAL_H
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+new file mode 100644
+index 000000000..666a5a52c
+--- /dev/null
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -0,0 +1,238 @@
++#include "skippy/events.h"
++
++#include "../events_internal.h"
++
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <chrono>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++
++#define CHECK(cond)                                                          \
++    do {                                                                     \
++        if (!(cond)) {                                                       \
++            std::fprintf(stderr, "CHECK failed: %s (%s:%d)\n", #cond,        \
++                          __FILE__, __LINE__);                               \
++            std::exit(1);                                                    \
++        }                                                                    \
++    } while (0)
++
++struct capture {
++    std::atomic<int> count{0};
++    std::atomic<uint32_t> last_category{0};
++    std::atomic<uint32_t> last_kind{0};
++    std::atomic<uint64_t> last_numeric_summary_0{0};
++};
++
++struct replacement_capture {
++    std::atomic<bool> callback_entered{false};
++    std::atomic<bool> release_callback{false};
++    std::atomic<bool> replacement_ready{false};
++    std::atomic<bool> allow_replacement{false};
++    std::atomic<bool> replacement_admitted{false};
++    std::atomic<bool> replacement_finished{false};
++    std::atomic<bool> replacement_succeeded{false};
++    std::atomic<int> old_callback_count{0};
++    std::atomic<int> replacement_callback_count{0};
++};
++
++void capture_callback(const struct skippy_runtime_event_v1 * event, void * user_data) {
++    auto * c = static_cast<capture *>(user_data);
++    c->last_category.store(event->category);
++    c->last_kind.store(event->kind);
++    c->last_numeric_summary_0.store(event->numeric_summary_0);
++    c->count.fetch_add(1);
++}
++
++void blocking_callback(const struct skippy_runtime_event_v1 *, void * user_data) {
++    auto * c = static_cast<replacement_capture *>(user_data);
++    c->old_callback_count.fetch_add(1);
++    c->callback_entered.store(true, std::memory_order_release);
++    while (!c->release_callback.load(std::memory_order_acquire)) {
++        std::this_thread::yield();
++    }
++}
++
++void replacement_callback(const struct skippy_runtime_event_v1 *, void * user_data) {
++    auto * c = static_cast<replacement_capture *>(user_data);
++    c->replacement_callback_count.fetch_add(1);
++}
++
++void mark_lifecycle_admitted(void * user_data) {
++    auto * c = static_cast<replacement_capture *>(user_data);
++    c->replacement_admitted.store(true, std::memory_order_release);
++}
++
++void install(capture & c) {
++    struct skippy_runtime_event_reporter_v1 reporter{};
++    reporter.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    reporter.struct_size = sizeof(reporter);
++    reporter.callback = capture_callback;
++    reporter.user_data = &c;
++    CHECK(skippy_set_runtime_event_reporter(&reporter) == SKIPPY_STATUS_OK);
++}
++
++// Exercises the reporter mechanism (install/dispatch/clear/quiescence) via
++// the shared internal dispatch() seam directly, using the pre-existing
++// MODEL_OPEN category/kind. No sibling-patch family emit entrypoint is
++// required for this patch's own tests.
++void emit_probe(uint64_t numeric_summary_0 = 0) {
++    skippy::events::dispatch(
++        SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN,
++        SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_STARTED,
++        0, 0, 0, SKIPPY_RUNTIME_EVENT_FAILURE_NONE,
++        numeric_summary_0, 0, 0, 0, nullptr, 0);
++}
++
++int test_register_and_dispatch() {
++    capture c;
++    install(c);
++    emit_probe(7);
++    CHECK(c.count.load() == 1);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN);
++    CHECK(c.last_kind.load() == SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_STARTED);
++    CHECK(c.last_numeric_summary_0.load() == 7);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
++int test_malformed_reporter_rejected() {
++    struct skippy_runtime_event_reporter_v1 reporter{};
++    reporter.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    reporter.struct_size = 1; // smaller than the real struct
++    reporter.callback = capture_callback;
++    CHECK(skippy_set_runtime_event_reporter(&reporter) == SKIPPY_STATUS_INVALID_ARGUMENT);
++    CHECK(skippy_set_runtime_event_reporter(nullptr) == SKIPPY_STATUS_INVALID_ARGUMENT);
++    return 0;
++}
++
++int test_clear_is_quiescent() {
++    capture c;
++    install(c);
++    skippy_clear_runtime_event_reporter();
++    // No callback should fire after clear returns.
++    emit_probe();
++    CHECK(c.count.load() == 0);
++    return 0;
++}
++
++int test_struct_size_extension() {
++    struct skippy_runtime_event_v1 seen{};
++    struct skippy_runtime_event_reporter_v1 reporter{};
++    reporter.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    reporter.struct_size = sizeof(reporter);
++    reporter.user_data = &seen;
++    reporter.callback = [](const struct skippy_runtime_event_v1 * event, void * user_data) {
++        std::memcpy(user_data, event, sizeof(*event));
++    };
++    CHECK(skippy_set_runtime_event_reporter(&reporter) == SKIPPY_STATUS_OK);
++
++    emit_probe();
++    CHECK(seen.struct_size == sizeof(struct skippy_runtime_event_v1));
++    CHECK(seen.abi_version == SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION);
++
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
++int test_replacement_waits_for_previous_callback() {
++    replacement_capture c;
++    struct skippy_runtime_event_reporter_v1 previous{};
++    previous.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    previous.struct_size = sizeof(previous);
++    previous.callback = blocking_callback;
++    previous.user_data = &c;
++    CHECK(skippy_set_runtime_event_reporter(&previous) == SKIPPY_STATUS_OK);
++
++    std::thread callback_thread([] { emit_probe(); });
++    while (!c.callback_entered.load(std::memory_order_acquire)) {
++        std::this_thread::yield();
++    }
++
++    struct skippy_runtime_event_reporter_v1 replacement{};
++    replacement.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    replacement.struct_size = sizeof(replacement);
++    replacement.callback = replacement_callback;
++    replacement.user_data = &c;
++    skippy::events::set_lifecycle_admission_hook(mark_lifecycle_admitted, &c);
++    std::thread replacement_thread([&] {
++        c.replacement_ready.store(true, std::memory_order_release);
++        while (!c.allow_replacement.load(std::memory_order_acquire)) {
++            std::this_thread::yield();
++        }
++        c.replacement_succeeded.store(
++            skippy_set_runtime_event_reporter(&replacement) == SKIPPY_STATUS_OK,
++            std::memory_order_release);
++        c.replacement_finished.store(true, std::memory_order_release);
++    });
++    while (!c.replacement_ready.load(std::memory_order_acquire)) {
++        std::this_thread::yield();
++    }
++    c.allow_replacement.store(true, std::memory_order_release);
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
++    while (!c.replacement_admitted.load(std::memory_order_acquire) &&
++           std::chrono::steady_clock::now() < deadline) {
++        std::this_thread::yield();
++    }
++    const bool setter_admitted = c.replacement_admitted.load(std::memory_order_acquire);
++    const bool replacement_blocked =
++        setter_admitted && !c.replacement_finished.load(std::memory_order_acquire);
++
++    c.release_callback.store(true, std::memory_order_release);
++    callback_thread.join();
++    replacement_thread.join();
++    skippy::events::set_lifecycle_admission_hook(nullptr, nullptr);
++    CHECK(setter_admitted);
++    CHECK(replacement_blocked);
++    CHECK(c.replacement_succeeded.load(std::memory_order_acquire));
++    emit_probe();
++    CHECK(c.old_callback_count.load() == 1);
++    CHECK(c.replacement_callback_count.load() == 1);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
++int test_concurrent_dispatch() {
++    capture c;
++    install(c);
++
++    constexpr int n_threads = 8;
++    constexpr int per_thread = 200;
++    std::vector<std::thread> threads;
++    for (int t = 0; t < n_threads; ++t) {
++        threads.emplace_back([] {
++            for (int i = 0; i < per_thread; ++i) {
++                emit_probe();
++            }
++        });
++    }
++    for (auto & th : threads) {
++        th.join();
++    }
++    CHECK(c.count.load() == n_threads * per_thread);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
++} // namespace
++
++int main(int argc, char ** argv) {
++    if (argc != 2) {
++        std::fprintf(stderr, "usage: %s <test-name>\n", argv[0]);
++        return 2;
++    }
++    const std::string name = argv[1];
++    if (name == "register_and_dispatch") return test_register_and_dispatch();
++    if (name == "malformed_reporter_rejected") return test_malformed_reporter_rejected();
++    if (name == "replacement_waits_for_previous_callback") return test_replacement_waits_for_previous_callback();
++    if (name == "clear_is_quiescent") return test_clear_is_quiescent();
++    if (name == "struct_size_extension") return test_struct_size_extension();
++    if (name == "concurrent_dispatch") return test_concurrent_dispatch();
++    std::fprintf(stderr, "unknown test: %s\n", name.c_str());
++    return 2;
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1148,6 +1148,7 @@ pub(crate) fn mesh_config_to_proto(
         plugins,
         config_toml: crate::plugin::config_to_toml(config).ok(),
         mesh_requirements,
+        lifecycle_log_parser: Some(config.runtime.lifecycle_log_parser.as_str().to_string()),
     }
 }
 
@@ -1247,7 +1248,7 @@ fn legacy_proto_config_to_mesh(
         .and_then(|proto| crate::MeshRequirements::from_proto(proto).ok())
         .map(|requirements| crate::plugin::mesh_requirements_config_from_runtime(&requirements))
         .unwrap_or_default();
-    MeshConfig {
+    let mut config = MeshConfig {
         version: Some(snapshot.version),
         gpu: GpuConfig {
             assignment,
@@ -1262,7 +1263,16 @@ fn legacy_proto_config_to_mesh(
         plugins,
         logging: Default::default(),
         extra: Default::default(),
+    };
+    if let Some(mode) = snapshot
+        .lifecycle_log_parser
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+    {
+        config.runtime.lifecycle_log_parser = mode;
+        config.runtime.lifecycle_log_parser_source = mesh_llm_config::ConfigValueSource::Config;
     }
+    config
 }
 
 pub(crate) fn canonical_config_hash(snapshot: &crate::proto::node::NodeConfigSnapshot) -> [u8; 32] {

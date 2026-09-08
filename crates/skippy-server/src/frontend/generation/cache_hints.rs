@@ -44,6 +44,13 @@ pub(in crate::frontend) struct OpenAiGenerationIds {
     pub(in crate::frontend) agent_session_id: Option<Box<str>>,
     pub(in crate::frontend) agent_session_trusted: bool,
     pub(in crate::frontend) cache: OpenAiCacheHints,
+    /// Raw UUID bytes of the OpenAI frontend's `x-request-id`, when this
+    /// generation was admitted through the OpenAI HTTP boundary. `None` for
+    /// non-frontend callers (tests, direct embedding without a frontend
+    /// request). Carried onto `GenerationStart`/`GenerationReceipt` so the
+    /// runtime-event adapter can correlate a generation under the same
+    /// request root Task 11's OpenAI observer reserves.
+    pub(in crate::frontend) frontend_request_id: Option<[u8; 16]>,
 }
 
 impl OpenAiGenerationIds {
@@ -51,6 +58,7 @@ impl OpenAiGenerationIds {
         cache: OpenAiCacheHints,
         agent_session_id: Option<&str>,
         agent_session_trusted: bool,
+        frontend_request_id: Option<[u8; 16]>,
     ) -> Self {
         let request_started_at = Instant::now();
         let sequence = OPENAI_GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -78,6 +86,7 @@ impl OpenAiGenerationIds {
             agent_session_id: agent_session_id.map(Into::into),
             agent_session_trusted: agent_session_trusted && agent_session_id.is_some(),
             cache,
+            frontend_request_id,
         }
     }
 
@@ -114,11 +123,13 @@ mod tests {
             OpenAiCacheHints::default(),
             Some("agent-42"),
             true,
+            None,
         );
         let second = OpenAiGenerationIds::new_with_trust(
             OpenAiCacheHints::default(),
             Some("agent-42"),
             true,
+            None,
         );
 
         assert!(first.session_label.starts_with("openai-agent-session-"));
@@ -130,8 +141,10 @@ mod tests {
 
     #[test]
     fn requests_without_agent_session_get_fresh_native_sessions() {
-        let first = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false);
-        let second = OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false);
+        let first =
+            OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false, None);
+        let second =
+            OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), None, false, None);
 
         assert!(first.session_label.contains(process_nonce()));
         assert_ne!(first.session_id, second.session_id);
@@ -144,11 +157,13 @@ mod tests {
             OpenAiCacheHints::default(),
             Some("conversation-7"),
             false,
+            None,
         );
         let second = OpenAiGenerationIds::new_with_trust(
             OpenAiCacheHints::default(),
             Some("conversation-7"),
             false,
+            None,
         );
 
         assert_eq!(first.agent_session_id.as_deref(), Some("conversation-7"));

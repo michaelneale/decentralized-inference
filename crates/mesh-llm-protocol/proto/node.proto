@@ -415,6 +415,7 @@ message NodeConfigSnapshot {
   // Older nodes ignore this field. Owner-control config get/apply must
   // round-trip this so [mesh_requirements] is not silently dropped.
   MeshRequirements mesh_requirements = 6;
+  optional string lifecycle_log_parser = 7;
 }
 
 enum GpuAssignment {

@@ -40,7 +40,7 @@ fn test_telemetry() -> crate::telemetry::Telemetry {
 }
 
 fn trusted_ids(session_id: &str) -> OpenAiGenerationIds {
-    OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), Some(session_id), true)
+    OpenAiGenerationIds::new_with_trust(OpenAiCacheHints::default(), Some(session_id), true, None)
 }
 
 fn trusted_session_key(session_id: &str) -> String {
@@ -915,6 +915,7 @@ fn untrusted_conversation_affinity_bypasses_session_registry() {
         OpenAiCacheHints::default(),
         Some("conversation-7"),
         false,
+        None,
     );
     assert!(trusted_generation_session_key(&untrusted).is_none());
     assert!(registry.lock().expect("session registry lock").is_empty());
@@ -1240,6 +1241,7 @@ fn hooks_test_backend(hook_policy: Option<Arc<dyn OpenAiHookPolicy>>) -> StageOp
         generation_token_budget: Arc::new(GenerationTokenBudget::new(128)),
         hook_policy,
         generation_receipt: None,
+        generation_lifecycle: None,
         linear_proposal_ingress: None,
         kv: None,
         iteration_scheduler,
@@ -1567,4 +1569,23 @@ async fn stage_backend_stream_denied_never_dispatches_and_fires_terminal_exactly
         HookTerminalRecord::Denied { status: 400, reason }
             if reason.contains("denied by policy")
     ));
+}
+
+#[test]
+fn generation_ids_carries_the_frontend_request_id_byte_equal_to_the_context() {
+    let request_id = openai_frontend::parse_request_id("c0a801ef-2a39-4f52-99f5-bdc849127cde")
+        .expect("test UUID should parse");
+    let context = OpenAiRequestContext::with_request_id(request_id);
+    let ids = generation_ids(OpenAiCacheHints::default(), None, &context);
+    assert_eq!(
+        ids.frontend_request_id,
+        Some(request_id.as_uuid().into_bytes())
+    );
+}
+
+#[test]
+fn generation_ids_leaves_frontend_request_id_absent_for_a_non_frontend_context() {
+    let context = OpenAiRequestContext::new();
+    let ids = generation_ids(OpenAiCacheHints::default(), None, &context);
+    assert_eq!(ids.frontend_request_id, None);
 }

@@ -1,0 +1,327 @@
+From d501f1e4dcd92a95fbb5e0319ffe753b1c7f2184 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 14:26:42 -0400
+Subject: [PATCH] skippy: wire model-load and diagnostic production events
+
+---
+ src/CMakeLists.txt                  |   7 ++
+ src/skippy/model_loading.cpp        | 107 +++++++++++++++++++++++++++-
+ src/skippy/tests/runtime_events.cpp |  98 ++++++++++++++++++++++++-
+ 3 files changed, 208 insertions(+), 4 deletions(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 1284d117d..44e88d18a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -142,6 +142,13 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     target_compile_features(skippy-model-loader-accounting PRIVATE cxx_std_17)
+     target_link_libraries(skippy-model-loader-accounting PRIVATE llama-common)
+ 
++    add_test(
++        NAME skippy_runtime_event_native_model_load_production
++        COMMAND skippy-runtime-events-test native_model_load_production
++            "${SKIPPY_MODEL_FIXTURE_DIR}/gemma-dense.gguf")
++    set_tests_properties(skippy_runtime_event_native_model_load_production PROPERTIES
++        FIXTURES_REQUIRED skippy-model-loader-fixtures)
++
+     add_executable(skippy-noalloc-graph-planning
+         skippy/tests/noalloc_graph_planning.cpp)
+     target_include_directories(skippy-noalloc-graph-planning PRIVATE .)
+diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
+index 13dc3d8ee..874ca8842 100644
+--- a/src/skippy/model_loading.cpp
++++ b/src/skippy/model_loading.cpp
+@@ -270,6 +270,36 @@ struct skippy_runtime_event_scope {
+                 0);
+     }
+ 
++    void emit_model_load_v2(
++            uint32_t kind,
++            uint64_t numeric_summary_0,
++            uint64_t numeric_summary_1,
++            const char * detail_ptr,
++            uint64_t detail_len) {
++        skippy_runtime_event_delivery delivery;
++        {
++            std::lock_guard<std::mutex> lock(state_mutex);
++            if (!is_enabled_locked()) {
++                return;
++            }
++            build_event_locked(
++                    delivery,
++                    SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN,
++                    kind,
++                    SKIPPY_RUNTIME_EVENT_EMITTER_WORKER_THREAD,
++                    0,
++                    0,
++                    SKIPPY_RUNTIME_EVENT_PROGRESS_UNIT_NONE,
++                    SKIPPY_RUNTIME_EVENT_FAILURE_NONE,
++                    SKIPPY_STATUS_OK,
++                    detail_ptr,
++                    detail_len);
++            delivery.event.numeric_summary_0 = numeric_summary_0;
++            delivery.event.numeric_summary_1 = numeric_summary_1;
++        }
++        delivery.dispatch();
++    }
++
+     void emit_failure(enum skippy_status status, const char * detail_ptr) {
+         emit(
+                 SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN,
+@@ -282,6 +312,24 @@ struct skippy_runtime_event_scope {
+                 status,
+                 detail_ptr,
+                 detail_ptr != nullptr ? static_cast<uint64_t>(std::strlen(detail_ptr)) : 0);
++        const auto diagnostic_kind =
++                status == SKIPPY_STATUS_RUNTIME_ERROR || status == SKIPPY_STATUS_ERROR
++                ? SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_FATAL_FAILURE
++                : status == SKIPPY_STATUS_MODEL_ERROR || status == SKIPPY_STATUS_IO_ERROR
++                ? SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_RECOVERABLE_FAILURE
++                : SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_WARNING_RAISED;
++        const char * diagnostic_detail =
++                diagnostic_kind == SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_FATAL_FAILURE
++                ? "model load runtime failure"
++                : diagnostic_kind == SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_RECOVERABLE_FAILURE
++                ? "model load failed"
++                : "model load request rejected";
++        skippy_emit_diagnostic_event(
++                diagnostic_kind,
++                static_cast<skippy_runtime_event_failure_code>(
++                        skippy_runtime_event_failure_code_from_status(status)),
++                diagnostic_detail,
++                static_cast<uint64_t>(std::strlen(diagnostic_detail)));
+     }
+ 
+ private:
+@@ -322,12 +370,34 @@ private:
+             0,
+             detail_ptr,
+             detail_len,
++            0,
++            0,
++            0,
++            0,
+         };
+         delivery.callback = reporter.callback;
+         delivery.user_data = reporter.user_data;
+     }
+ };
+ 
++static void skippy_emit_model_load_observation(
++        skippy_runtime_event_scope * event_scope,
++        uint32_t kind,
++        uint64_t model_id,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1,
++        const char * detail_ptr,
++        uint64_t detail_len) {
++    if (event_scope != nullptr && event_scope->is_enabled()) {
++        event_scope->set_model_id(model_id);
++        event_scope->emit_model_load_v2(
++                kind, numeric_summary_0, numeric_summary_1, detail_ptr, detail_len);
++        return;
++    }
++    skippy_emit_model_load_event_v2(
++            kind, model_id, numeric_summary_0, numeric_summary_1, detail_ptr, detail_len);
++}
++
+ static enum skippy_status skippy_validate_runtime_event_reporter(
+         const struct skippy_runtime_event_reporter_v1 * reporter,
+         struct skippy_error ** out_error) {
+@@ -719,9 +789,44 @@ enum skippy_status skippy_finish_model_open(
+     stage_model->lane_in_use.assign(stage_model->lane_count, false);
+     stage_model->lane_resident_prefix_tokens.resize(stage_model->lane_count);
+ 
++    const uint64_t native_model_id = reinterpret_cast<uint64_t>(stage_model);
+     if (event_scope != nullptr) {
+-        event_scope->set_model_id(reinterpret_cast<uint64_t>(stage_model));
++        event_scope->set_model_id(native_model_id);
+         skippy_emit_observable_backend_device(event_scope, config, model);
++    }
++
++    // These are the concrete boundaries that are known after context
++    // creation. They are sent to the operation reporter when one is active;
++    // otherwise the process reporter receives the same observation. Do not
++    // synthesize tensor/offload events here: llama.cpp does not expose a
++    // stable count for those transitions at this boundary.
++    skippy_emit_model_load_observation(
++            event_scope,
++            SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED,
++            native_model_id,
++            static_cast<uint64_t>(skippy_stage_layer_count(model)),
++            0,
++            "execution context ready",
++            sizeof("execution context ready") - 1);
++    skippy_emit_model_load_observation(
++            event_scope,
++            SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_TOKENIZER_READY,
++            native_model_id,
++            static_cast<uint64_t>(llama_vocab_n_tokens(&model->vocab)),
++            0,
++            "tokenizer ready",
++            sizeof("tokenizer ready") - 1);
++    if (stage_model->mtp_ctx != nullptr) {
++        skippy_emit_model_load_observation(
++                event_scope,
++                SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_AUX_COMPONENT_READY,
++                native_model_id,
++                1,
++                0,
++                "mtp component ready",
++                sizeof("mtp component ready") - 1);
++    }
++    if (event_scope != nullptr) {
+         event_scope->emit_finished();
+     }
+ 
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index dd051d67d..6b9e52bf0 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -1,4 +1,4 @@
+-#include "skippy/events.h"
++#include "skippy.h"
+ 
+ #include "../events_internal.h"
+ 
+@@ -29,6 +29,12 @@ struct capture {
+     std::atomic<uint64_t> last_numeric_summary_0{0};
+ };
+ 
++struct production_capture {
++    std::atomic<int> model_load_events{0};
++    std::atomic<int> diagnostic_events{0};
++    std::atomic<int> last_kind{0};
++};
++
+ struct replacement_capture {
+     std::atomic<bool> callback_entered{false};
+     std::atomic<bool> release_callback{false};
+@@ -49,6 +55,18 @@ void capture_callback(const struct skippy_runtime_event_v1 * event, void * user_
+     c->count.fetch_add(1);
+ }
+ 
++void production_callback(const struct skippy_runtime_event_v1 * event, void * user_data) {
++    auto * c = static_cast<production_capture *>(user_data);
++    c->last_kind.store(static_cast<int>(event->kind));
++    if (event->category == SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN &&
++        event->kind >= SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED) {
++        c->model_load_events.fetch_add(1);
++    }
++    if (event->category == SKIPPY_RUNTIME_EVENT_CATEGORY_DIAGNOSTIC) {
++        c->diagnostic_events.fetch_add(1);
++    }
++}
++
+ void blocking_callback(const struct skippy_runtime_event_v1 *, void * user_data) {
+     auto * c = static_cast<replacement_capture *>(user_data);
+     c->old_callback_count.fetch_add(1);
+@@ -77,6 +95,15 @@ void install(capture & c) {
+     CHECK(skippy_set_runtime_event_reporter(&reporter) == SKIPPY_STATUS_OK);
+ }
+ 
++void install(production_capture & c) {
++    struct skippy_runtime_event_reporter_v1 reporter{};
++    reporter.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    reporter.struct_size = sizeof(reporter);
++    reporter.callback = production_callback;
++    reporter.user_data = &c;
++    CHECK(skippy_set_runtime_event_reporter(&reporter) == SKIPPY_STATUS_OK);
++}
++
+ // Exercises the reporter mechanism (install/dispatch/clear/quiescence) via
+ // the shared internal dispatch() seam directly, using the pre-existing
+ // MODEL_OPEN category/kind. No sibling-patch family emit entrypoint is
+@@ -232,6 +259,69 @@ int test_model_load_events_v2_dispatch() {
+     return 0;
+ }
+ 
++int test_native_model_load_production(const char * fixture_path) {
++    CHECK(fixture_path != nullptr && fixture_path[0] != '\0');
++
++    // A legacy entrypoint with only the process reporter receives concrete
++    // model-load observations from the production completion boundary.
++    production_capture global;
++    install(global);
++    skippy_runtime_config config = skippy_runtime_config_default();
++    config.selected_backend_device = "CPU";
++    skippy_model * model = nullptr;
++    skippy_error * error = nullptr;
++    CHECK(skippy_model_open(fixture_path, &config, &model, &error) == SKIPPY_STATUS_OK);
++    CHECK(model != nullptr);
++    CHECK(global.model_load_events.load() >= 2);
++    CHECK(skippy_model_free(model, &error) == SKIPPY_STATUS_OK);
++    if (error != nullptr) {
++        skippy_error_free(error);
++        error = nullptr;
++    }
++    skippy_clear_runtime_event_reporter();
++
++    // The operation-scoped reporter owns model-load-v2 observations. The
++    // process reporter must not receive a duplicate copy of that family.
++    production_capture process;
++    production_capture operation;
++    install(process);
++    skippy_runtime_event_reporter_v1 reporter{};
++    reporter.abi_version = SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION;
++    reporter.struct_size = sizeof(reporter);
++    reporter.callback = production_callback;
++    reporter.user_data = &operation;
++    model = nullptr;
++    CHECK(skippy_model_open_with_events(
++                  fixture_path, &config, &reporter, &model, &error) == SKIPPY_STATUS_OK);
++    CHECK(model != nullptr);
++    CHECK(operation.model_load_events.load() >= 2);
++    CHECK(process.model_load_events.load() == 0);
++    CHECK(skippy_model_free(model, &error) == SKIPPY_STATUS_OK);
++    if (error != nullptr) {
++        skippy_error_free(error);
++        error = nullptr;
++    }
++    skippy_clear_runtime_event_reporter();
++
++    // A deliberately failed production open emits a structured diagnostic;
++    // this is a real failure path, not a callable-symbol coverage marker.
++    production_capture failure;
++    install(failure);
++    model = nullptr;
++    CHECK(skippy_model_open(
++                  "/definitely/not/a/real/skippy-model.gguf",
++                  &config,
++                  &model,
++                  &error) != SKIPPY_STATUS_OK);
++    CHECK(model == nullptr);
++    CHECK(failure.diagnostic_events.load() > 0);
++    if (error != nullptr) {
++        skippy_error_free(error);
++    }
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
+ int test_kv_events_dispatch() {
+     capture c;
+     install(c);
+@@ -312,8 +402,9 @@ int test_families_independent() {
+ } // namespace
+ 
+ int main(int argc, char ** argv) {
+-    if (argc != 2) {
+-        std::fprintf(stderr, "usage: %s <test-name>\n", argv[0]);
++    if (argc < 2 || (std::strcmp(argv[1], "native_model_load_production") == 0 && argc != 3) ||
++        (std::strcmp(argv[1], "native_model_load_production") != 0 && argc != 2)) {
++        std::fprintf(stderr, "usage: %s <test-name> [fixture-path]\n", argv[0]);
+         return 2;
+     }
+     const std::string name = argv[1];
+@@ -324,6 +415,7 @@ int main(int argc, char ** argv) {
+     if (name == "struct_size_extension") return test_struct_size_extension();
+     if (name == "concurrent_dispatch") return test_concurrent_dispatch();
+     if (name == "model_load_events_v2_dispatch") return test_model_load_events_v2_dispatch();
++    if (name == "native_model_load_production") return test_native_model_load_production(argv[2]);
+     if (name == "kv_events_dispatch") return test_kv_events_dispatch();
+     if (name == "device_events_dispatch") return test_device_events_dispatch();
+     if (name == "diagnostic_events_dispatch") return test_diagnostic_events_dispatch();
+-- 
+2.50.1 (Apple Git-155)
+

@@ -9,7 +9,7 @@ description: Generated reference for the capability-oriented Skippy C ABI.
 
 This reference is generated from the patched llama.cpp public headers. It documents the native C ABI used by Skippy's Rust FFI layer and staged runtime. The ABI is experimental and versioned for lockstep native/Rust builds.
 
-Current generated surface: **15 headers** and **91 exported functions**.
+Current generated surface: **15 headers** and **98 exported functions**.
 
 ## Quick navigation
 
@@ -39,6 +39,18 @@ Current generated surface: **15 headers** and **91 exported functions**.
       <div class="skippy-api-index__functions">
         <a href="#skippy-fn-skippy-backend-device-count"><code>skippy_backend_device_count</code></a>
         <a href="#skippy-fn-skippy-backend-device-at"><code>skippy_backend_device_at</code></a>
+      </div>
+    </section>
+    <section class="skippy-api-index__group">
+      <a class="skippy-api-index__group-title" href="#skippy-header-events-h"><code>events.h</code><span>7 functions</span></a>
+      <div class="skippy-api-index__functions">
+        <a href="#skippy-fn-skippy-set-runtime-event-reporter"><code>skippy_set_runtime_event_reporter</code></a>
+        <a href="#skippy-fn-skippy-clear-runtime-event-reporter"><code>skippy_clear_runtime_event_reporter</code></a>
+        <a href="#skippy-fn-skippy-emit-model-load-event-v2"><code>skippy_emit_model_load_event_v2</code></a>
+        <a href="#skippy-fn-skippy-emit-kv-event"><code>skippy_emit_kv_event</code></a>
+        <a href="#skippy-fn-skippy-emit-device-event"><code>skippy_emit_device_event</code></a>
+        <a href="#skippy-fn-skippy-emit-diagnostic-event"><code>skippy_emit_diagnostic_event</code></a>
+        <a href="#skippy-fn-skippy-emit-unload-event"><code>skippy_emit_unload_event</code></a>
       </div>
     </section>
     <section class="skippy-api-index__group">
@@ -275,6 +287,97 @@ LLAMA_API enum skippy_status skippy_backend_device_at(
          size_t index,
         struct skippy_backend_device * out_device,
         struct skippy_error ** out_error);
+```
+
+<a class="skippy-api-backlink" href="#skippy-function-index">↩ Back to function index</a>
+
+<a id="skippy-header-events-h"></a>
+### `events.h`
+
+<a id="skippy-fn-skippy-set-runtime-event-reporter"></a>
+#### `skippy_set_runtime_event_reporter`
+
+Installs one process-global runtime-scoped event reporter. Requires SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER. Replaces any previously installed global reporter. The per-call model-open reporter passed to a `*_with_events` entrypoint still takes precedence for SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN events during that call; the global reporter receives events published through it by any capability module (backend/device/KV/diagnostic/unload/model-load-v2, added by sibling patches) via the shared internal dispatch path. Returns SKIPPY_STATUS_INVALID_ARGUMENT if `reporter` is null or its `struct_size` is smaller than `sizeof(struct skippy_runtime_event_reporter_v1)`. When replacing an existing reporter, waits until every in-flight callback using the previous reporter has returned before installing the replacement.
+
+```cpp
+LLAMA_API enum skippy_status skippy_set_runtime_event_reporter(
+         const struct skippy_runtime_event_reporter_v1 * reporter);
+```
+
+<a id="skippy-fn-skippy-clear-runtime-event-reporter"></a>
+#### `skippy_clear_runtime_event_reporter`
+
+Removes the process-global runtime-scoped event reporter. Returns only after every in-flight callback invocation of the previously installed reporter has returned, so no callback occurs after this call returns. Idempotent: clearing when no reporter is installed is a no-op.
+
+```cpp
+LLAMA_API void skippy_clear_runtime_event_reporter(
+        void);
+```
+
+<a id="skippy-fn-skippy-emit-model-load-event-v2"></a>
+#### `skippy_emit_model_load_event_v2`
+
+Emits SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 category MODEL_OPEN events through the global reporter. No-op if no reporter is installed.
+
+```cpp
+LLAMA_API void skippy_emit_model_load_event_v2(
+         skippy_runtime_event_kind kind,
+        uint64_t model_id,
+        uint64_t numeric_summary_0,
+        uint64_t numeric_summary_1,
+        const char * detail_ptr,
+        uint64_t detail_len);
+```
+
+<a id="skippy-fn-skippy-emit-kv-event"></a>
+#### `skippy_emit_kv_event`
+
+Emits SKIPPY_FEATURE_KV_EVENTS category KV events.
+
+```cpp
+LLAMA_API void skippy_emit_kv_event(
+         skippy_runtime_event_kind kind,
+        uint64_t session_id,
+        uint64_t numeric_summary_0,
+        uint64_t numeric_summary_1);
+```
+
+<a id="skippy-fn-skippy-emit-device-event"></a>
+#### `skippy_emit_device_event`
+
+Emits SKIPPY_FEATURE_DEVICE_EVENTS category DEVICE events.
+
+```cpp
+LLAMA_API void skippy_emit_device_event(
+         skippy_runtime_event_kind kind,
+        uint64_t numeric_summary_0,
+        const char * detail_ptr,
+        uint64_t detail_len);
+```
+
+<a id="skippy-fn-skippy-emit-diagnostic-event"></a>
+#### `skippy_emit_diagnostic_event`
+
+Emits SKIPPY_FEATURE_DIAGNOSTIC_EVENTS category DIAGNOSTIC events.
+
+```cpp
+LLAMA_API void skippy_emit_diagnostic_event(
+         skippy_runtime_event_kind kind,
+        skippy_runtime_event_failure_code failure_code,
+        const char * detail_ptr,
+        uint64_t detail_len);
+```
+
+<a id="skippy-fn-skippy-emit-unload-event"></a>
+#### `skippy_emit_unload_event`
+
+Emits SKIPPY_FEATURE_UNLOAD_EVENTS category UNLOAD events.
+
+```cpp
+LLAMA_API void skippy_emit_unload_event(
+         skippy_runtime_event_kind kind,
+        uint64_t model_id,
+        uint64_t numeric_summary_0);
 ```
 
 <a class="skippy-api-backlink" href="#skippy-function-index">↩ Back to function index</a>
@@ -1557,7 +1660,7 @@ SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
 The headers also define the following enums, structs, opaque handles, and ABI constants:
 
 - `activation.h`: `skippy_activation_dtype`, `skippy_activation_layout`, `skippy_activation_boundary_desc`, `skippy_activation_desc`, `SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION = 1`, `SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP = (UINT64_C(1) << 1)`, `SKIPPY_ACTIVATION_FLAG_INKLING_MTP_EMBD = (UINT64_C(1) << 2)`, `SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K = (UINT64_C(1) << 3)`
-- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 52`
+- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 53`, `SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER = ((uint64_t)1 << 31)`, `SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 = ((uint64_t)1 << 32)`, `SKIPPY_FEATURE_KV_EVENTS = ((uint64_t)1 << 33)`, `SKIPPY_FEATURE_DEVICE_EVENTS = ((uint64_t)1 << 34)`, `SKIPPY_FEATURE_DIAGNOSTIC_EVENTS = ((uint64_t)1 << 35)`, `SKIPPY_FEATURE_UNLOAD_EVENTS = ((uint64_t)1 << 36)`
 - `devices.h`: `skippy_backend_device_type`, `skippy_backend_device_cap`, `skippy_backend_device`
 - `events.h`: `skippy_runtime_event_v1`, `skippy_runtime_event_reporter_v1`, `SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION = 1`
 - `execution.h`: `skippy_iteration_request`

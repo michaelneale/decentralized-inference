@@ -1,0 +1,33 @@
+{
+  "$schema_note": "Frozen frame order per connection shape for /api/runtime/events/v1, shared by Rust and TypeScript recovery-order tests.",
+  "connection_shapes": [
+    {
+      "shape": "no_cursor",
+      "trigger": "no Last-Event-ID header and no ?cursor= query parameter",
+      "frame_order": ["runtime_state", "runtime_health"],
+      "then": "live"
+    },
+    {
+      "shape": "in_window",
+      "trigger": "a canonical cursor for the current process instance, not ahead of the highest known sequence, with no evicted gap between it and the retained replay window",
+      "frame_order": ["runtime_event*", "runtime_health"],
+      "frame_order_note": "runtime_event* is zero or more retained frames strictly after the cursor's sequence, in ascending sequence order",
+      "then": "live"
+    },
+    {
+      "shape": "gap",
+      "trigger": "a cursor whose process instance does not match the current one (stale_instance), or a cursor for the current instance where at least one frame after it was evicted (evicted)",
+      "frame_order": ["runtime_replay_gap", "runtime_state", "runtime_health"],
+      "then": "live"
+    },
+    {
+      "shape": "rejected",
+      "trigger": "malformed/noncanonical cursor grammar in either transport, or a sequence ahead of the highest known sequence for the current process instance",
+      "response": "HTTP 400 before any header is written"
+    }
+  ],
+  "replay_gap_reasons": {
+    "stale_instance": "the cursor's process-instance UUID does not match the engine's current process instance",
+    "evicted": "the cursor is for the current instance but at least one frame after it is no longer retained"
+  }
+}

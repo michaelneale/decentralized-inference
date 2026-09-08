@@ -10,6 +10,21 @@ fn mesh_config_proto_roundtrip() {
     assert_proto_config_roundtrip_matches(&roundtripped, &snapshot);
 }
 
+#[test]
+fn lifecycle_log_parser_proto_roundtrip_preserves_mode() {
+    let mut config = crate::plugin::MeshConfig::default();
+    config.runtime.lifecycle_log_parser = mesh_llm_config::LifecycleLogParserMode::Disabled;
+
+    let snapshot = mesh_config_to_proto(&config);
+    let restored = proto_config_to_mesh(&snapshot);
+
+    assert_eq!(snapshot.lifecycle_log_parser.as_deref(), Some("disabled"));
+    assert_eq!(
+        restored.runtime.lifecycle_log_parser,
+        mesh_llm_config::LifecycleLogParserMode::Disabled
+    );
+}
+
 fn assert_mesh_config_from_proto(config: &crate::plugin::MeshConfig) {
     assert_eq!(config.version, Some(1));
     assert_eq!(config.gpu.assignment, crate::plugin::GpuAssignment::Pinned);
@@ -133,6 +148,24 @@ fn mesh_config_proto_strict_legacy_payload_still_restores_fields() {
 }
 
 #[test]
+fn mesh_config_proto_legacy_payload_preserves_disabled_parser_source() {
+    let mut snapshot = make_config_snapshot();
+    snapshot.config_toml = None;
+    snapshot.lifecycle_log_parser = Some("disabled".to_string());
+
+    let restored = proto_config_to_mesh_strict(&snapshot).unwrap();
+
+    assert_eq!(
+        restored.runtime.lifecycle_log_parser,
+        mesh_llm_config::LifecycleLogParserMode::Disabled
+    );
+    assert_eq!(
+        restored.runtime.lifecycle_log_parser_source,
+        mesh_llm_config::ConfigValueSource::Config
+    );
+}
+
+#[test]
 fn config_sync_prefers_structured_model_refs() {
     let snapshot = NodeConfigSnapshot {
         version: 1,
@@ -158,6 +191,7 @@ fn config_sync_prefers_structured_model_refs() {
         plugins: vec![],
         config_toml: None,
         mesh_requirements: None,
+        lifecycle_log_parser: None,
     };
 
     let restored = proto_config_to_mesh(&snapshot);
@@ -195,6 +229,7 @@ fn config_sync_empty_structured_refs_fall_back_to_legacy_strings() {
         plugins: vec![],
         config_toml: None,
         mesh_requirements: None,
+        lifecycle_log_parser: None,
     };
 
     let restored = proto_config_to_mesh(&snapshot);
@@ -576,6 +611,7 @@ fn pinned_gpu_proto_missing_gpu_id_decodes_as_none() {
         plugins: vec![],
         config_toml: None,
         mesh_requirements: None,
+        lifecycle_log_parser: None,
     };
 
     let encoded = snapshot.encode_to_vec();

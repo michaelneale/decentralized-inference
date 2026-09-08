@@ -8,9 +8,9 @@ use mesh_llm_native_runtime::{
 };
 use mesh_llm_runtime_install::{
     CURRENT_MESH_VERSION, NativeRuntimeBundleInstallPolicy, NativeRuntimeDownloadProgressCallback,
-    NativeRuntimeInstallOptions, NativeRuntimeManifestOptions, discover_local_native_runtimes,
-    discover_native_runtime_bundle_dirs, host_runtime_profile, install_native_runtime,
-    load_release_manifest_with_sources, native_runtime_cache,
+    NativeRuntimeInstallOptions, NativeRuntimeManifestOptions, current_skippy_abi_version,
+    discover_local_native_runtimes, discover_native_runtime_bundle_dirs, host_runtime_profile,
+    install_native_runtime, load_release_manifest_with_sources, native_runtime_cache,
 };
 use mesh_llm_tui::terminal_progress::{
     ratio_complete_u64, render_inline_gauge_with_reserved_width,
@@ -77,12 +77,14 @@ pub async fn run_native_runtime_list(
             .await?;
         let profile = host_runtime_profile();
         let cache = native_runtime_cache(cache_dir)?;
-        let mut resolver =
+        let resolver =
             NativeRuntimeResolver::new(mesh_version, profile.clone(), manifest.clone(), cache)
-                .with_bundle_dirs(sources.bundle_dirs.clone());
-        if let Some(skippy_abi_version) = configured.skippy_abi_version {
-            resolver = resolver.with_skippy_abi_version(skippy_abi_version);
-        }
+                .with_bundle_dirs(sources.bundle_dirs.clone())
+                .with_skippy_abi_version(listing_skippy_abi_version(
+                    configured,
+                    mesh_version,
+                    &manifest,
+                ));
         let evaluated = resolver.evaluate(&selection)?;
         let rows = available_runtime_rows(&manifest, &evaluated);
         return formatter.render_available(&rows, &sources);
@@ -90,6 +92,23 @@ pub async fn run_native_runtime_list(
 
     let installed = discover_local_native_runtimes(bundle_dirs, &cache)?;
     formatter.render_installed(&installed, cache.root())
+}
+
+fn listing_skippy_abi_version(
+    configured: NativeRuntimeConfigSelection<'_>,
+    mesh_version: &str,
+    manifest: &NativeRuntimeReleaseManifest,
+) -> String {
+    configured
+        .skippy_abi_version
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if mesh_version == CURRENT_MESH_VERSION {
+                current_skippy_abi_version()
+            } else {
+                manifest.skippy_abi.clone()
+            }
+        })
 }
 
 fn available_runtime_rows(
@@ -490,6 +509,114 @@ mod tests {
         }
         .write_to_dir(path)
         .unwrap();
+    }
+
+    fn test_artifact(
+        runtime_id: &str,
+        mesh_version: &str,
+        skippy_abi: &str,
+    ) -> NativeRuntimeArtifact {
+        NativeRuntimeArtifact {
+            id: runtime_id.to_string(),
+            mesh_version: Some(mesh_version.to_string()),
+            skippy_abi: skippy_abi.to_string(),
+            platform: NativeRuntimePlatform {
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                target: None,
+            },
+            backend: NativeRuntimeBackend::cpu(),
+            rank: 0,
+            libraries: vec!["lib/libllama.so".to_string()],
+            files: Default::default(),
+            tools: Default::default(),
+            url: None,
+            sha256: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn current_listing_defaults_to_the_build_skippy_abi() {
+        let manifest = NativeRuntimeReleaseManifest {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            skippy_abi: "0.1.44".to_string(),
+            artifacts: Vec::new(),
+        };
+
+        assert_eq!(
+            listing_skippy_abi_version(
+                NativeRuntimeConfigSelection::default(),
+                CURRENT_MESH_VERSION,
+                &manifest,
+            ),
+            current_skippy_abi_version()
+        );
+    }
+
+    #[test]
+    fn explicitly_selected_other_mesh_version_keeps_manifest_abi_default() {
+        let manifest = NativeRuntimeReleaseManifest {
+            mesh_version: "0.75.0".to_string(),
+            skippy_abi: "0.1.44".to_string(),
+            artifacts: Vec::new(),
+        };
+
+        assert_eq!(
+            listing_skippy_abi_version(
+                NativeRuntimeConfigSelection {
+                    mesh_version: Some("0.75.0"),
+                    ..Default::default()
+                },
+                "0.75.0",
+                &manifest,
+            ),
+            "0.1.44"
+        );
+    }
+
+    #[test]
+    fn available_rows_match_same_id_by_mesh_version_and_skippy_abi() {
+        let current_abi = current_skippy_abi_version();
+        let stale_abi = "0.1.44";
+        let runtime_id = "meshllm-runtime-macos-arm64-cpu";
+        let current = test_artifact(runtime_id, CURRENT_MESH_VERSION, &current_abi);
+        let stale = test_artifact(runtime_id, CURRENT_MESH_VERSION, stale_abi);
+        let manifest = NativeRuntimeReleaseManifest {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            skippy_abi: stale_abi.to_string(),
+            artifacts: vec![stale.clone(), current.clone()],
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let evaluated = NativeRuntimeResolver::new(
+            CURRENT_MESH_VERSION,
+            host_runtime_profile(),
+            manifest.clone(),
+            NativeRuntimeCache::new(cache.path()),
+        )
+        .with_skippy_abi_version(current_abi.clone())
+        .evaluate(&RuntimeSelection::Recommended)
+        .unwrap();
+
+        let rows = available_runtime_rows(&manifest, &evaluated);
+        assert_eq!(rows.len(), 2);
+        let current_row = rows
+            .iter()
+            .find(|row| row.skippy_abi == current_abi)
+            .expect("current ABI row should be listed");
+        assert!(current_row.supported);
+        assert!(current_row.rejection_reasons.is_empty());
+
+        let stale_row = rows
+            .iter()
+            .find(|row| row.skippy_abi == stale_abi)
+            .expect("stale ABI row should be listed");
+        assert!(!stale_row.supported);
+        assert!(stale_row.rejection_reasons.iter().any(|reason| matches!(
+            reason,
+            mesh_llm_native_runtime::CandidateRejection::SkippyAbiMismatch { expected, actual }
+                if expected == &current_abi && actual == stale_abi
+        )));
     }
 
     #[test]

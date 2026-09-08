@@ -35,12 +35,20 @@ pub(crate) fn run_trial_with_progress(
 fn log_trial_result(index: usize, total: usize, trial: &TuneBenchmarkTrial) {
     match trial.status {
         TuneBenchmarkTrialStatus::Succeeded => eprintln!(
-            "benchmark tune: trial {}/{} ok {} decode_tok_s={}{}",
+            "benchmark tune: trial {}/{} ok {} decode_tok_s={} ttft_ms={} decode_only_tok_s={}{}",
             index + 1,
             total,
             render_benchmark_candidate(&trial.candidate),
             trial
                 .decode_tok_s
+                .map(|rate| format!("{rate:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            trial
+                .ttft_ms
+                .map(|value| format!("{value:.0}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            trial
+                .decode_only_tok_s
                 .map(|rate| format!("{rate:.2}"))
                 .unwrap_or_else(|| "n/a".to_string()),
             render_progress_timing(trial.timings.as_ref()),

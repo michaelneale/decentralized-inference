@@ -1,0 +1,186 @@
+From a78359bf72832648e7c270c99cf60df0fc5452da Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 02:03:40 -0400
+Subject: [PATCH] skippy: add unload-events family (bit 36)
+
+Adds SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD and
+SKIPPY_FEATURE_UNLOAD_EVENTS (bit 36): unload started/completed/failed/
+forced, session draining, published through skippy_emit_unload_event via
+the reporter patch's shared dispatch() seam. No further ABI bump.
+
+Adds ctest cases skippy_runtime_event_unload_events_dispatch and
+skippy_runtime_event_families_independent (the final patch in the series,
+proving all five emit_* entrypoints dispatch to distinct categories).
+
+Renumbered from 0048 (bit 34) to 0061 (bit 36), then again to 0062
+(bit 36, unchanged); see 0057 for why.
+---
+ include/skippy/common.h             |  1 +
+ include/skippy/events.h             | 14 ++++++++++
+ src/CMakeLists.txt                  |  4 ++-
+ src/skippy/abi.cpp                  |  3 +-
+ src/skippy/events.cpp               |  9 ++++++
+ src/skippy/tests/runtime_events.cpp | 43 +++++++++++++++++++++++++++++
+ 6 files changed, 72 insertions(+), 2 deletions(-)
+
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index f3bd0ac2f..b4681b1d7 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -103,6 +103,7 @@ enum skippy_feature {
+ #define SKIPPY_FEATURE_KV_EVENTS              ((uint64_t)1 << 33)
+ #define SKIPPY_FEATURE_DEVICE_EVENTS          ((uint64_t)1 << 34)
+ #define SKIPPY_FEATURE_DIAGNOSTIC_EVENTS      ((uint64_t)1 << 35)
++#define SKIPPY_FEATURE_UNLOAD_EVENTS          ((uint64_t)1 << 36)
+ 
+ enum skippy_status {
+     SKIPPY_STATUS_OK                      = 0,
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+index 745b40513..a99d7307a 100644
+--- a/include/skippy/events.h
++++ b/include/skippy/events.h
+@@ -26,6 +26,7 @@ enum {
+     SKIPPY_RUNTIME_EVENT_CATEGORY_WARNING    = 5,
+     SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE     = 6,
+     SKIPPY_RUNTIME_EVENT_CATEGORY_DIAGNOSTIC = 7,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD     = 8,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_kind;
+@@ -69,6 +70,13 @@ enum {
+     SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_RECOVERABLE_FAILURE = 402,
+     SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_FATAL_FAILURE       = 403,
+     SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_INVARIANT_VIOLATION = 404,
++
++    // SKIPPY_FEATURE_UNLOAD_EVENTS (category UNLOAD).
++    SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_STARTED          = 500,
++    SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED        = 501,
++    SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_FAILED           = 502,
++    SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_FORCED           = 503,
++    SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_SESSION_DRAINING = 504,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_emitter_kind;
+@@ -205,6 +213,12 @@ LLAMA_API void skippy_emit_diagnostic_event(
+         const char * detail_ptr,
+         uint64_t detail_len);
+ 
++/** @brief Emits SKIPPY_FEATURE_UNLOAD_EVENTS category UNLOAD events. */
++LLAMA_API void skippy_emit_unload_event(
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t numeric_summary_0);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d2501f9d7..1284d117d 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -120,7 +120,9 @@ if (LLAMA_STAGE_BUILD_TESTS)
+             model_load_events_v2_dispatch
+             kv_events_dispatch
+             device_events_dispatch
+-            diagnostic_events_dispatch)
++            diagnostic_events_dispatch
++            unload_events_dispatch
++            families_independent)
+         add_test(
+             NAME skippy_runtime_event_${SKIPPY_EVENT_TEST_CASE}
+             COMMAND skippy-runtime-events-test ${SKIPPY_EVENT_TEST_CASE})
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+index 9158b5a71..7227dfc48 100644
+--- a/src/skippy/abi.cpp
++++ b/src/skippy/abi.cpp
+@@ -44,7 +44,8 @@ uint64_t skippy_abi_features(void) {
+            SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 |
+            SKIPPY_FEATURE_KV_EVENTS |
+            SKIPPY_FEATURE_DEVICE_EVENTS |
+-           SKIPPY_FEATURE_DIAGNOSTIC_EVENTS;
++           SKIPPY_FEATURE_DIAGNOSTIC_EVENTS |
++           SKIPPY_FEATURE_UNLOAD_EVENTS;
+ }
+ 
+ void skippy_error_free(struct skippy_error * error) {
+diff --git a/src/skippy/events.cpp b/src/skippy/events.cpp
+index fd8982c9c..517e94e54 100644
+--- a/src/skippy/events.cpp
++++ b/src/skippy/events.cpp
+@@ -215,3 +215,12 @@ void skippy_emit_diagnostic_event(
+         SKIPPY_RUNTIME_EVENT_CATEGORY_DIAGNOSTIC, kind, 0, 0, 0,
+         failure_code, 0, 0, 0, 0, detail_ptr, detail_len);
+ }
++
++void skippy_emit_unload_event(
++        skippy_runtime_event_kind kind,
++        uint64_t model_id,
++        uint64_t numeric_summary_0) {
++    skippy::events::dispatch(
++        SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD, kind, model_id, 0, 0,
++        SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, 0, 0, 0, nullptr, 0);
++}
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index 732e6ee67..dd051d67d 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -268,6 +268,47 @@ int test_diagnostic_events_dispatch() {
+     return 0;
+ }
+ 
++int test_unload_events_dispatch() {
++    capture c;
++    install(c);
++    skippy_emit_unload_event(SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED, 42, 0);
++    CHECK(c.count.load() == 1);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD);
++    CHECK(c.last_kind.load() == SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
++// Cross-family check: now that all five families exist (this is the final
++// patch in the series), prove each emit_* entrypoint dispatches its own
++// distinct category rather than sharing one.
++int test_families_independent() {
++    capture c;
++    install(c);
++
++    skippy_emit_kv_event(SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CROSSED, 5, 9, 0);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_KV);
++
++    skippy_emit_device_event(SKIPPY_RUNTIME_EVENT_KIND_DEVICE_READY, 1, "gpu0", 4);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE);
++
++    skippy_emit_diagnostic_event(
++        SKIPPY_RUNTIME_EVENT_KIND_DIAGNOSTIC_WARNING_RAISED,
++        SKIPPY_RUNTIME_EVENT_FAILURE_RUNTIME_ERROR, "oom risk", 8);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_DIAGNOSTIC);
++
++    skippy_emit_unload_event(SKIPPY_RUNTIME_EVENT_KIND_UNLOAD_COMPLETED, 42, 0);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_UNLOAD);
++
++    skippy_emit_model_load_event_v2(
++        SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_PHASE_CHANGED, 1, 0, 0, nullptr, 0);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_MODEL_OPEN);
++
++    CHECK(c.count.load() == 5);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char ** argv) {
+@@ -286,6 +327,8 @@ int main(int argc, char ** argv) {
+     if (name == "kv_events_dispatch") return test_kv_events_dispatch();
+     if (name == "device_events_dispatch") return test_device_events_dispatch();
+     if (name == "diagnostic_events_dispatch") return test_diagnostic_events_dispatch();
++    if (name == "unload_events_dispatch") return test_unload_events_dispatch();
++    if (name == "families_independent") return test_families_independent();
+     std::fprintf(stderr, "unknown test: %s\n", name.c_str());
+     return 2;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

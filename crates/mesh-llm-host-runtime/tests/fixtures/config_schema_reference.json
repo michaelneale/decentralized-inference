@@ -853,6 +853,43 @@
       }
     },
     {
+      "canonical_path": "runtime.lifecycle_log_parser",
+      "owner": "built_in",
+      "source": {
+        "kind": "built_in"
+      },
+      "value_schema": {
+        "kind": "enum",
+        "values": [
+          "auto",
+          "enabled",
+          "disabled"
+        ]
+      },
+      "support": "supported",
+      "control_surfaces": [
+        "config_file",
+        "api"
+      ],
+      "apply_mode": "static_on_load",
+      "restart_scope": "process_restart",
+      "visibility": "user",
+      "description": "Use parsed native log summaries only when the loaded runtime lacks the matching structured event family. Enabled forces compatibility output; disabled proves structured coverage.",
+      "presentation": {
+        "label": "Lifecycle log parser",
+        "help": "Use parsed native log summaries only when the loaded runtime lacks the matching structured event family. Enabled forces compatibility output; disabled proves structured coverage.",
+        "category_id": "runtime-policy",
+        "category_label": "Runtime Policy",
+        "category_summary": "Runtime reconciliation behavior applied by the local process",
+        "category_order": 10,
+        "setting_order": 5,
+        "control_hint": "select"
+      },
+      "control_behavior": {
+        "options_source": "static"
+      }
+    },
+    {
       "canonical_path": "runtime.listen_all",
       "owner": "built_in",
       "source": {

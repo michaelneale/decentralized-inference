@@ -663,6 +663,7 @@ pub(super) fn skippy_telemetry_options(options: &RuntimeOptions) -> skippy::Skip
 pub(super) fn configure_run_auto_process_state(
     options: &RuntimeOptions,
     runtime: Option<&std::sync::Arc<crate::runtime::instance::InstanceRuntime>>,
+    config: &plugin::MeshConfig,
 ) {
     // SAFETY: UNSAFE CONTRACT — callers must invoke this before concurrent
     // runtime work can access the process environment. The current runtime
@@ -692,10 +693,33 @@ pub(super) fn configure_run_auto_process_state(
     }
 
     let native_log_rx = skippy_runtime::register_filtered_native_logs();
-    skippy_runtime::set_filtered_native_logs_enabled(true);
+    let parser_mode = native_log_parser_mode(config.runtime.lifecycle_log_parser);
+    let capabilities = skippy_runtime::probe_capabilities();
+    skippy_runtime::configure_native_log_parser(skippy_runtime::NativeLogParserPolicy::new(
+        parser_mode,
+        &capabilities,
+    ));
+    tracing::info!(
+        source = config.runtime.lifecycle_log_parser_source.as_str(),
+        "configured lifecycle native-log parser"
+    );
     bridge_skippy_native_logs(native_log_rx);
     skippy::configure_materialized_stage_cache();
     configure_skippy_native_logging(runtime.as_ref().map(|runtime| runtime.dir()));
+}
+
+pub(super) fn native_log_parser_mode(
+    mode: mesh_llm_config::LifecycleLogParserMode,
+) -> skippy_runtime::NativeLogParserMode {
+    match mode {
+        mesh_llm_config::LifecycleLogParserMode::Auto => skippy_runtime::NativeLogParserMode::Auto,
+        mesh_llm_config::LifecycleLogParserMode::Enabled => {
+            skippy_runtime::NativeLogParserMode::Enabled
+        }
+        mesh_llm_config::LifecycleLogParserMode::Disabled => {
+            skippy_runtime::NativeLogParserMode::Disabled
+        }
+    }
 }
 
 pub(super) fn spawn_node_benchmark_task(node: &mesh::Node, bin_dir: &Path) {
@@ -1456,11 +1480,124 @@ pub(super) struct RunAutoContext {
         Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 }
 
+/// Installs the mesh-serve path's runtime-event stack -- engine,
+/// drain-loop driver, OTLP telemetry consumer, and presentation subscriber
+/// -- as one unit. The fallible trial selector is resolved before the global
+/// engine is installed, so a rejected startup option cannot replace an
+/// existing embedded runtime's engine.
+///
+/// The stack retains the engine and owns both task handles while startup is
+/// fallible. `run_auto` transfers those optional handles to the established
+/// lifecycle shutdown only after all fallible setup has completed; early
+/// errors therefore stop and await both tasks before the process-global
+/// engine is cleared. Runtime-event telemetry deliberately has no retained
+/// task handle: its workers use the telemetry module's weak-engine lifetime
+/// contract and are independent of this startup stack.
+struct RunAutoRuntimeEventStack {
+    engine: Arc<crate::runtime_events::engine::RuntimeEventEngine>,
+    driver: Option<crate::runtime_events::driver::EngineDriverHandle>,
+    presentation_subscriber: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RunAutoRuntimeEventStack {
+    fn drop(&mut self) {
+        // `EngineDriverHandle::drop` aborts its task. A raw presentation
+        // JoinHandle detaches on drop, so request cancellation explicitly for
+        // cancellation/panic paths that cannot reach async cleanup.
+        if let Some(handle) = self.presentation_subscriber.as_ref() {
+            handle.abort();
+        }
+    }
+}
+
+fn install_run_auto_runtime_event_stack(
+    config: &plugin::MeshConfig,
+) -> Result<RunAutoRuntimeEventStack> {
+    install_run_auto_runtime_event_stack_with_selector(
+        config,
+        mesh_llm_config::event_system_progress_diagnostic_bypass_enabled,
+    )
+}
+
+fn install_run_auto_runtime_event_stack_with_selector(
+    config: &plugin::MeshConfig,
+    resolve_progress_diagnostic_class_bypass: impl FnOnce() -> Result<bool>,
+) -> Result<RunAutoRuntimeEventStack> {
+    // Task 9: the runtime-event engine is installed here too (not only for
+    // `--local-model-only`) so `LoadOperation`/`UnloadOperation` in
+    // `runtime/model_lifecycle/{load,unload}.rs` are live on the mesh path.
+    // Task 14: the presentation subscriber attaches from this call, the
+    // full mesh-serve/TUI path -- deliberately NOT on the
+    // `--local-model-only` path, which keeps its own documented "zero
+    // management subscribers" invariant (see `run_local_model_only`). A
+    // capacity-exhausted attach degrades to no presentation rather than
+    // failing startup.
+    // Task 19: the hidden, TEST-ONLY `event-disabled` A/B certification
+    // selector. `event_system_progress_diagnostic_bypass_enabled()` is
+    // `false` unless BOTH `MESH_LLM_BENCHMARK_TUNE_TRIAL=1` and
+    // `MESH_LLM_EVENT_SYSTEM_TRIAL_MODE=event-disabled` are set, so this is
+    // a no-op on every normal startup; an invalid selector value is a hard
+    // startup error rather than a silent fallback (see
+    // `mesh_llm_config::env_overrides`).
+    let progress_diagnostic_class_bypass = resolve_progress_diagnostic_class_bypass()?;
+    let engine = crate::runtime_events::engine::RuntimeEventEngine::new();
+    engine.set_progress_diagnostic_class_bypass(progress_diagnostic_class_bypass);
+    crate::runtime_events::install_runtime_event_engine(engine.clone());
+    // Task 3: the engine-owned driver is the process's one production
+    // drain loop (defect D3 -- previously nothing but the presentation
+    // subscriber's own tick ever drained anything, and that tick is now a
+    // pure consumer; see `runtime_events::driver`'s module doc). Spawned
+    // immediately after install, same as the presentation subscriber below.
+    let driver = crate::runtime_events::driver::spawn_engine_driver(engine.clone());
+    // Task 16: the OTLP-specific runtime-event telemetry consumer. Reuses
+    // `[telemetry]` config the same way `survey::SurveyTelemetry::start`
+    // does; a disabled or failed exporter degrades to a no-op instance and
+    // never affects startup. Installs its sample queue onto `engine`
+    // itself, so every real producer's `try_submit` (which already funnels
+    // through that engine) feeds the ingress-latency and class-outcome
+    // instruments -- see `survey/runtime_events.rs`'s doc.
+    let _telemetry = survey::runtime_events::RuntimeEventTelemetry::start(config, &engine);
+    let presentation_subscriber =
+        crate::runtime_events::presentation::spawn_presentation_subscriber(&engine)
+            .inspect_err(|_| {
+                tracing::warn!(
+                    "presentation subscriber attach failed: engine subscriber capacity exhausted"
+                );
+            })
+            .ok();
+    Ok(RunAutoRuntimeEventStack {
+        engine,
+        driver: Some(driver),
+        presentation_subscriber,
+    })
+}
+
+async fn cleanup_run_auto_runtime_event_stack(stack: &mut RunAutoRuntimeEventStack) {
+    if let Some(driver) = stack.driver.take() {
+        driver.stop_and_wait().await;
+    }
+    if let Some(presentation_subscriber) = stack.presentation_subscriber.take() {
+        presentation_subscriber.abort();
+        let _ = presentation_subscriber.await;
+    }
+    crate::runtime_events::clear_runtime_event_engine_if_owned(&stack.engine);
+}
+
+pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
+    let mut runtime_event_stack = install_run_auto_runtime_event_stack(&ctx.config)?;
+    let result = run_auto_inner(ctx, &mut runtime_event_stack).await;
+    cleanup_run_auto_runtime_event_stack(&mut runtime_event_stack).await;
+    result
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "run_auto is the top-level runtime orchestration path and preserves startup/shutdown ordering"
 )]
-pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
+async fn run_auto_inner(
+    ctx: RunAutoContext,
+    runtime_event_stack: &mut RunAutoRuntimeEventStack,
+) -> Result<()> {
     let RunAutoContext {
         mut options,
         config,
@@ -1472,6 +1609,7 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         auto_join_candidates,
         mut embedded_control_rx,
     } = ctx;
+    super::node_lifecycle_events::emit_node_starting();
     // Stage-control starts accepting before eager model resolution. Register
     // every spelling that can become the model's runtime identity now so a
     // legacy/profile-unaware request cannot bypass local-required policy in
@@ -1484,7 +1622,7 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         "loaded creation-time mesh requirements into runtime startup state"
     );
     let api_port = options.port;
-    configure_run_auto_process_state(&options, runtime.as_ref());
+    configure_run_auto_process_state(&options, runtime.as_ref(), &config);
     let _native_log_forwarding = SkippyNativeLogForwardingGuard;
     // Embedded native logs are process-global and are redirected to the runtime log
     // file before model load. We also forward the filtered, aggregated model-loading
@@ -1566,14 +1704,13 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
     let mut model_intent_rx = install_run_auto_model_intent_channel(node.clone()).await;
 
     let model_name_for_console = String::new();
-    let model_path_for_console = PathBuf::new();
     let runtime_owner_key_path = resolve_runtime_owner_key_path(&options)?;
     let console_state = setup_run_auto_console_state(RunAutoConsoleStateContext {
         options: &options,
         node: &node,
         console_enabled: console_port.is_some(),
         model_name: &model_name_for_console,
-        model_path: &model_path_for_console,
+        model_path: &PathBuf::new(),
         api_port,
         plugin_manager: &plugin_manager,
         affinity_router: &affinity_router,
@@ -1654,6 +1791,15 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         spawn_run_auto_discovery_publisher(&options, &node, console_state.as_ref()).await;
 
     let runtime_data_producer = runtime_data_producer_for_console(console_state.as_ref()).await;
+    // All fallible startup work is complete. Transfer the task handles to the
+    // established lifecycle shutdown, which preserves node_stopped-before-
+    // driver-finalization ordering. The outer `run_auto` retains the engine
+    // Arc and clears the process-global slot after this lifecycle returns.
+    let presentation_subscriber = runtime_event_stack.presentation_subscriber.take();
+    let runtime_event_driver = runtime_event_stack
+        .driver
+        .take()
+        .expect("runtime-event driver must remain owned until lifecycle handoff");
     run_auto_runtime_loop_and_shutdown(RunAutoRuntimeLifecycleContext {
         options: &options,
         config: &config,
@@ -1674,6 +1820,8 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         api_proxy_handle,
         console_server_handle,
         discovery_publisher,
+        presentation_subscriber,
+        runtime_event_driver,
         startup_specs: &startup_specs,
         tunnel_mgr: &tunnel_mgr,
         skippy_telemetry: &skippy_telemetry,
@@ -1688,4 +1836,116 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         anyhow::bail!("{summary}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::{
+        RunAutoContext, cleanup_run_auto_runtime_event_stack,
+        install_run_auto_runtime_event_stack_with_selector, run_auto,
+    };
+    use crate::plugin::{BLOBSTORE_PLUGIN_ID, MeshConfig, PluginConfigEntry};
+    use crate::runtime::RuntimeOptions;
+    use crate::runtime_events::engine::RuntimeEventEngine;
+    use crate::runtime_events::{
+        clear_runtime_event_engine, install_runtime_event_engine, runtime_event_engine,
+    };
+
+    #[test]
+    #[serial_test::serial(runtime_event_engine_state)]
+    fn invalid_selector_does_not_replace_existing_engine() {
+        clear_runtime_event_engine();
+        let existing = RuntimeEventEngine::new();
+        install_runtime_event_engine(existing.clone());
+
+        let result =
+            install_run_auto_runtime_event_stack_with_selector(&MeshConfig::default(), || {
+                Err(anyhow::anyhow!("invalid selector"))
+            });
+
+        assert!(result.is_err(), "invalid selector must fail startup");
+        let installed = runtime_event_engine().expect("existing engine remains installed");
+        assert!(Arc::ptr_eq(&installed, &existing));
+        clear_runtime_event_engine();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(runtime_event_engine_state)]
+    async fn cleanup_of_retained_stack_releases_both_owned_tasks() {
+        clear_runtime_event_engine();
+        let mut stack =
+            install_run_auto_runtime_event_stack_with_selector(&MeshConfig::default(), || {
+                Ok(false)
+            })
+            .expect("representative startup stack");
+        let weak_engine = Arc::downgrade(&stack.engine);
+
+        cleanup_run_auto_runtime_event_stack(&mut stack).await;
+
+        assert!(stack.driver.is_none(), "driver ownership must be consumed");
+        assert!(
+            stack.presentation_subscriber.is_none(),
+            "presentation ownership must be consumed"
+        );
+        assert!(
+            runtime_event_engine().is_none(),
+            "early startup cleanup must clear the installed engine"
+        );
+
+        drop(stack);
+        assert!(
+            weak_engine.upgrade().is_none(),
+            "awaited startup task cleanup must release both task engine references"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(runtime_event_engine_state)]
+    async fn run_auto_error_path_clears_engine_after_stack_installation() {
+        clear_runtime_event_engine();
+        let config = MeshConfig {
+            plugins: vec![PluginConfigEntry {
+                name: BLOBSTORE_PLUGIN_ID.to_owned(),
+                enabled: Some(true),
+                web_ui_enabled: None,
+                command: Some("invalid-blobstore-command".to_owned()),
+                args: Vec::new(),
+                url: None,
+                settings: Default::default(),
+                startup: Default::default(),
+            }],
+            ..MeshConfig::default()
+        };
+        let startup_mesh_creation_state = super::resolve_startup_mesh_creation_state(
+            &RuntimeOptions::default(),
+            &MeshConfig::default(),
+        )
+        .expect("default mesh requirements are valid");
+
+        let result = run_auto(RunAutoContext {
+            options: RuntimeOptions::default(),
+            config,
+            startup_mesh_creation_state,
+            startup_specs: Vec::new(),
+            requested_model_names: Vec::new(),
+            bin_dir: PathBuf::new(),
+            runtime: None,
+            auto_join_candidates: Vec::new(),
+            embedded_control_rx: None,
+        })
+        .await;
+
+        let error = result.expect_err("invalid plugin config must fail before node setup");
+        assert!(
+            format!("{error:#}").contains("only `enabled` may be set"),
+            "startup must report the representative early config error: {error:#}"
+        );
+        assert!(
+            runtime_event_engine().is_none(),
+            "run_auto early errors must clear the installed engine"
+        );
+    }
 }

@@ -14,9 +14,12 @@ use skippy_ffi::{
 };
 
 use super::{
-    RuntimeEvent, RuntimeEventCategory, RuntimeEventEmitterKind, RuntimeEventFailureCode,
-    RuntimeEventKind, RuntimeEventProgressUnit, Status, collect_model_open_events, run_model_open,
+    OperationId, RuntimeEvent, RuntimeEventCategory, RuntimeEventEmitterKind,
+    RuntimeEventFailureCode, RuntimeEventKind, RuntimeEventProgressUnit, Status,
+    collect_model_open_events, run_model_open,
 };
+
+const TEST_OPERATION_ID: OperationId = OperationId(1);
 
 fn make_raw_runtime_event(
     kind: RawRuntimeEventKind,
@@ -60,6 +63,10 @@ fn make_raw_runtime_event(
         reserved1: 0,
         detail_ptr: detail.as_ptr().cast(),
         detail_len: detail.len() as u64,
+        numeric_summary_0: 0,
+        numeric_summary_1: 0,
+        numeric_summary_2: 0,
+        numeric_summary_3: 0,
     }
 }
 
@@ -79,7 +86,8 @@ where
     ) -> Status,
 {
     let mut events = Vec::new();
-    let (raw, status, error) = collect_model_open_events(open_fn, |event| events.push(event));
+    let (raw, status, error) =
+        collect_model_open_events(TEST_OPERATION_ID, open_fn, |event| events.push(event));
     (raw, status, error, events)
 }
 
@@ -106,6 +114,10 @@ fn runtime_event_from_raw_ptr_converts_unknown_values_and_copies_detail() {
         reserved1: 0,
         detail_ptr: detail.as_ptr().cast(),
         detail_len: detail.len() as u64,
+        numeric_summary_0: 100,
+        numeric_summary_1: 101,
+        numeric_summary_2: 102,
+        numeric_summary_3: 103,
     };
 
     let event = RuntimeEvent::from_raw_ptr(&raw).expect("raw event should convert");
@@ -126,6 +138,59 @@ fn runtime_event_from_raw_ptr_converts_unknown_values_and_copies_detail() {
     assert_eq!(event.failure_code, RuntimeEventFailureCode::Unknown(66));
     assert_eq!(event.status, Status::Unsupported);
     assert_eq!(event.detail_bytes, b"backend-selected");
+    assert_eq!(event.numeric_summary_0, Some(100));
+    assert_eq!(event.numeric_summary_1, Some(101));
+    assert_eq!(event.numeric_summary_2, Some(102));
+    assert_eq!(event.numeric_summary_3, Some(103));
+}
+
+#[test]
+fn runtime_event_from_raw_ptr_omits_extension_fields_for_a_short_prefix_struct_size() {
+    // struct_size covers only the original 19-field layout (before the
+    // append-only numeric_summary_* extension), matching a native runtime
+    // built against an older ABI/without SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER.
+    let detail = b"short".to_vec();
+    let raw = RawRuntimeEvent {
+        abi_version: 7,
+        // The byte offset of the first appended field IS the original
+        // (pre-extension) struct size: the extension is purely additive at
+        // the end, so a struct_size stopping exactly there models a native
+        // allocation from before the extension existed.
+        struct_size: std::mem::offset_of!(RawRuntimeEvent, numeric_summary_0) as u32,
+        category: RawRuntimeEventCategory::MODEL_OPEN,
+        kind: RawRuntimeEventKind::MODEL_OPEN_STARTED,
+        emitter: RawRuntimeEventEmitterKind::OPEN_THREAD,
+        reserved0: 0,
+        sequence: 1,
+        timestamp_mono_ns: 2,
+        model_id: 3,
+        stage_id: 0,
+        session_id: 0,
+        progress_current: 0,
+        progress_total: 0,
+        progress_unit: RawRuntimeEventProgressUnit::NONE,
+        failure_code: RawRuntimeEventFailureCode::NONE,
+        status: Status::Ok,
+        reserved1: 0,
+        detail_ptr: detail.as_ptr().cast(),
+        detail_len: detail.len() as u64,
+        // These bytes exist in the Rust struct (it always has the full
+        // layout) but a real short-prefix native allocation would NOT have
+        // this memory -- struct_size is what governs whether from_raw_ptr
+        // is allowed to read them, not whether the Rust type has the field.
+        numeric_summary_0: 999,
+        numeric_summary_1: 999,
+        numeric_summary_2: 999,
+        numeric_summary_3: 999,
+    };
+
+    let event = RuntimeEvent::from_raw_ptr(&raw).expect("short-prefix event should still convert");
+
+    assert_eq!(event.detail_bytes, b"short");
+    assert_eq!(event.numeric_summary_0, None);
+    assert_eq!(event.numeric_summary_1, None);
+    assert_eq!(event.numeric_summary_2, None);
+    assert_eq!(event.numeric_summary_3, None);
 }
 
 pub(crate) fn assert_model_open_events_success() {
@@ -146,7 +211,14 @@ pub(crate) fn assert_model_open_events_success() {
                 Status::Ok,
                 b"ignored",
             );
-            too_small.struct_size -= 1;
+            // Must be short of the BASE (pre-extension) layout to be
+            // genuinely rejected: a struct_size that covers the base 19
+            // fields but not the appended numeric_summary_* extension is
+            // now a valid short-prefix event (see
+            // runtime_event_from_raw_ptr_omits_extension_fields_for_a_short_prefix_struct_size),
+            // not a malformed one.
+            too_small.struct_size =
+                std::mem::offset_of!(RawRuntimeEvent, numeric_summary_0) as u32 - 1;
             unsafe {
                 callback(&too_small, (*reporter).user_data);
             }
@@ -339,6 +411,7 @@ pub(crate) fn assert_model_open_events_forwarded_before_open_returns() {
     let sink_sequences = Arc::clone(&forwarded_sequences);
     let open_sequences = Arc::clone(&forwarded_sequences);
     let (raw, status, error) = collect_model_open_events(
+        TEST_OPERATION_ID,
         |reporter, out_model, _out_error| {
             let callback = unsafe { (*reporter).callback.expect("callback") };
             let started = make_raw_runtime_event(
@@ -395,6 +468,7 @@ pub(crate) fn assert_model_open_events_feature_missing_falls_back() {
     let mut bridged_events = Vec::new();
     let mut bridged_event_sink = |event| bridged_events.push(event);
     let (raw, status, error) = run_model_open(
+        TEST_OPERATION_ID,
         {
             let legacy_calls = Arc::clone(&legacy_calls);
             move |out_model, _out_error| {
@@ -424,6 +498,7 @@ pub(crate) fn assert_model_open_events_feature_missing_falls_back() {
     assert!(bridged_events.is_empty());
 
     let (raw, status, error) = run_model_open(
+        TEST_OPERATION_ID,
         {
             let legacy_calls = Arc::clone(&legacy_calls);
             move |out_model, _out_error| {

@@ -199,6 +199,76 @@ to an OTLP record.
 | `llama_stage.linear_proposal.source_callback_us` | Skippy linear proposal source | Plugin callback duration in microseconds; contains no request, session, token, or plugin identity. |
 | `llama_stage.linear_proposal.source_outcome` | Skippy linear proposal source | Bounded outcome enum: `ready`, `abstained`, `host_deadline_exceeded`, `queue_full`, `deadline_exceeded_before_dispatch`, `deadline_exceeded_in_plugin`, `candidate_returned_too_late`, or `source_error`. Ready/abstained events use token-debug sampling; deadline, pressure, late-candidate, and source-error outcomes are emitted unconditionally. |
 
+## Runtime Event System Telemetry (v1)
+
+The structured runtime-event system (`.omo/specs/event-system.md`) has its
+own opt-in OTLP metrics consumer, separate from the request/route/lifecycle
+instruments above: `crates/mesh-llm-host-runtime/src/runtime_events/telemetry.rs`
+(engine-side bridge: bounded sample queue, an ingress-latency-observing
+`RuntimeEventIngress` decorator, and periodic engine-health/occupancy
+sampling) plus `crates/mesh-llm-host-runtime/src/runtime/survey/runtime_events.rs`
+(the OTLP-specific consumer: instruments, recording, the attribute
+allowlist). It shares the same `[telemetry]` endpoint/interval
+configuration and the same disabled/failed-exporter-never-fails-startup
+contract as every instrument above.
+
+**v1 scope decision (plan-owner privacy call, not a spec mandate):**
+runtime-event telemetry is metrics-only and ID-free. It exports no
+request/session/operation IDs, no prompt/completion content, and no
+arbitrary labels; it never feeds the reducer or readiness decisions. This is
+narrower than spec §12.3, which is the plan's intentional v1 restriction.
+
+**Existing Skippy telemetry stays out of scope.** This pipeline never
+touches `crates/skippy-server/src/telemetry.rs` or the attribute vocabulary
+in `crates/skippy-metrics`. Converting that existing Skippy telemetry into a
+consumer of the runtime-event pipeline is recorded in the plan's deferred
+follow-on register, triggered when these instruments have one release of
+certification evidence -- it is not part of this pipeline today.
+
+Counters:
+
+- `mesh_llm_runtime_events_class_outcome_total` (`mesh_llm.runtime_events.delivery_class`, `mesh_llm.runtime_events.outcome`)
+- `mesh_llm_runtime_events_reservation_exhausted_total`
+- `mesh_llm_runtime_events_reducer_error_total`
+- `mesh_llm_runtime_events_subscriber_lag_total`
+- `mesh_llm_runtime_events_telemetry_samples_dropped_total`
+
+Gauges:
+
+- `mesh_llm_runtime_events_reservation_occupied`
+
+Histograms:
+
+- `mesh_llm_runtime_events_ingress_duration_us` (`mesh_llm.runtime_events.delivery_class`, `mesh_llm.runtime_events.outcome`) -- the certification ingress p99 instrument (spec's frozen 100µs budget).
+
+| Attribute | Used by | Privacy handling |
+|---|---|---|
+| `mesh_llm.runtime_events.delivery_class` | class outcome, ingress duration | Bounded enum: `terminal`, `state_transition`, `progress`, or `diagnostic`. |
+| `mesh_llm.runtime_events.outcome` | class outcome, ingress duration | Bounded enum: `accepted`, `coalesced`, `dropped_progress`, `dropped_diagnostic`, `rejected_shutting_down`, or `terminal_delivery_failed`. |
+
+This allowlist is enforced in **every build profile**, not only debug --
+`assert_runtime_event_attrs_allowlisted` in `runtime/survey/runtime_events.rs`
+has no `cfg(debug_assertions)` gate, unlike the broader
+`TELEMETRY_ATTRIBUTE_ALLOWLIST` above. The reservation-exhausted,
+reducer-error, subscriber-lag, and telemetry-samples-dropped counters, and
+the reservation-occupied gauge, carry no attributes at all: they are
+coalesced deltas of the engine's own `EngineHealth` counters and reservation
+occupancy, sampled at most once per second (the same cadence
+`EngineHealth::publish_at` already enforces), never per-event.
+
+The ingress-latency/class-outcome instruments are fed live in production:
+`RuntimeEventTelemetry::start` installs its sample queue directly onto the
+process's `RuntimeEventEngine` (`RuntimeEventEngine::install_telemetry_queue`).
+Every producer's `try_submit` call -- via `ScopedIngress` or
+`UnreservedIngress`, minted by `reserve_root`/`reserve_child`/
+`unreserved_ingress` -- already funnels through that engine's `submit`
+dispatch, so installing the queue there observes real traffic from every
+task 9-12 producer without any producer file needing to change. A producer
+that wants a locally-scoped decorator instead can still opt in with
+`crate::runtime_events::telemetry::ObservingIngress`, which shares the same
+`record_class_outcome` recording path; nothing in-tree uses that decorator
+directly, since the engine-level hook already covers every real call site.
+
 ## Review Checklist
 
 Before adding, renaming, or removing OTLP metrics or attributes:

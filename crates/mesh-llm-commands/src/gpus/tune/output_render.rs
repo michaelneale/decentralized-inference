@@ -187,15 +187,21 @@ fn write_benchmark_section(rendered: &mut String, benchmarks: &[TuneBenchmarkTar
     let _ = writeln!(rendered, "Benchmark results:");
     for benchmark in benchmarks {
         let _ = writeln!(rendered, "  Target: {}", benchmark.requested);
+        let _ = writeln!(
+            rendered,
+            "    Metrics schema: {}",
+            render_metrics_schema(benchmark.metrics_schema),
+        );
         match &benchmark.best {
             Some(best) => {
                 let _ = writeln!(
                     rendered,
-                    "    Recommended: {} decode_tok_s={}{}",
+                    "    Recommended: {} decode_tok_s={}{}{}",
                     render_benchmark_candidate(&best.candidate),
                     best.decode_tok_s
                         .map(|value| format!("{value:.2}"))
                         .unwrap_or_else(|| "n/a".to_string()),
+                    render_new_metrics(best),
                     render_timing_summary(best.timings.as_ref()),
                 );
                 if let Some(reason) = &benchmark.selection_reason {
@@ -209,12 +215,13 @@ fn write_benchmark_section(rendered: &mut String, benchmarks: &[TuneBenchmarkTar
         if let Some(raw_best) = &benchmark.raw_best {
             let _ = writeln!(
                 rendered,
-                "    Raw best: {} decode_tok_s={}{}",
+                "    Raw best: {} decode_tok_s={}{}{}",
                 render_benchmark_candidate(&raw_best.candidate),
                 raw_best
                     .decode_tok_s
                     .map(|value| format!("{value:.2}"))
                     .unwrap_or_else(|| "n/a".to_string()),
+                render_new_metrics(raw_best),
                 render_timing_summary(raw_best.timings.as_ref()),
             );
         }
@@ -223,12 +230,13 @@ fn write_benchmark_section(rendered: &mut String, benchmarks: &[TuneBenchmarkTar
             for trial in &benchmark.pareto_frontier {
                 let _ = writeln!(
                     rendered,
-                    "      - {} decode_tok_s={}{}",
+                    "      - {} decode_tok_s={}{}{}",
                     render_benchmark_candidate(&trial.candidate),
                     trial
                         .decode_tok_s
                         .map(|value| format!("{value:.2}"))
                         .unwrap_or_else(|| "n/a".to_string()),
+                    render_new_metrics(trial),
                     render_timing_summary(trial.timings.as_ref()),
                 );
             }
@@ -251,6 +259,7 @@ fn write_benchmark_section(rendered: &mut String, benchmarks: &[TuneBenchmarkTar
             if let Some(rate) = trial.decode_tok_s {
                 let _ = write!(rendered, " decode_tok_s={rate:.2}");
             }
+            let _ = write!(rendered, "{}", render_new_metrics(trial));
             if let Some(timings) = &trial.timings {
                 write_timing_fields(rendered, timings);
             }
@@ -263,6 +272,26 @@ fn write_benchmark_section(rendered: &mut String, benchmarks: &[TuneBenchmarkTar
             let _ = writeln!(rendered);
         }
     }
+}
+
+fn render_metrics_schema(schema: TuneBenchmarkMetricsSchema) -> &'static str {
+    match schema {
+        TuneBenchmarkMetricsSchema::NonStreamingHistorical => {
+            "non_streaming_historical (ttft/decode-only not comparable)"
+        }
+        TuneBenchmarkMetricsSchema::StreamingV1 => "streaming_v1",
+    }
+}
+
+fn render_new_metrics(trial: &TuneBenchmarkTrial) -> String {
+    let mut rendered = String::new();
+    if let Some(ttft_ms) = trial.ttft_ms {
+        let _ = write!(&mut rendered, " ttft_ms={ttft_ms:.0}");
+    }
+    if let Some(rate) = trial.decode_only_tok_s {
+        let _ = write!(&mut rendered, " decode_only_tok_s={rate:.2}");
+    }
+    rendered
 }
 
 fn render_timing_summary(timings: Option<&TuneBenchmarkTimingStats>) -> String {

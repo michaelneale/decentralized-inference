@@ -1,0 +1,829 @@
+{
+  "schema_version": 1,
+  "source": ".omo/specs/event-system.md",
+  "bullet_count": 137,
+  "bullets": [
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 1,
+      "text": "runtime resolution started;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 2,
+      "text": "runtime resolution completed or failed;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 3,
+      "text": "native library loaded, rejected, or unavailable;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 4,
+      "text": "ABI and feature compatibility established or failed;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 5,
+      "text": "runtime initialized;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 6,
+      "text": "runtime stopping;"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 7,
+      "text": "runtime stopped; and"
+    },
+    {
+      "section": "8.1",
+      "family": "Native runtime lifecycle",
+      "ordinal": 8,
+      "text": "runtime crashed."
+    },
+    {
+      "section": "8.2",
+      "family": "Model acquisition and preparation",
+      "ordinal": 1,
+      "text": "model queued;"
+    },
+    {
+      "section": "8.2",
+      "family": "Model acquisition and preparation",
+      "ordinal": 2,
+      "text": "model resolution started/completed/failed;"
+    },
+    {
+      "section": "8.2",
+      "family": "Model acquisition and preparation",
+      "ordinal": 3,
+      "text": "model download started/progress/completed/failed/cancelled;"
+    },
+    {
+      "section": "8.2",
+      "family": "Model acquisition and preparation",
+      "ordinal": 4,
+      "text": "model materialization or package preparation started/progress/completed/failed/cancelled; and"
+    },
+    {
+      "section": "8.2",
+      "family": "Model acquisition and preparation",
+      "ordinal": 5,
+      "text": "model preparation completed."
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 1,
+      "text": "model load requested;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 2,
+      "text": "model load started;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 3,
+      "text": "model load phase changed;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 4,
+      "text": "model load progress;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 5,
+      "text": "backend or device selected;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 6,
+      "text": "model memory allocation summary or pressure;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 7,
+      "text": "native model load completed;"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 8,
+      "text": "model load failed; and"
+    },
+    {
+      "section": "8.3",
+      "family": "Model loading",
+      "ordinal": 9,
+      "text": "model load cancelled."
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 1,
+      "text": "native model loaded;"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 2,
+      "text": "Rust backend initialization started;"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 3,
+      "text": "model available;"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 4,
+      "text": "model degraded;"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 5,
+      "text": "model unavailable;"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 6,
+      "text": "model recovery started/completed/failed; and"
+    },
+    {
+      "section": "8.4",
+      "family": "Model availability and readiness",
+      "ordinal": 7,
+      "text": "model capacity changed."
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 1,
+      "text": "unload requested;"
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 2,
+      "text": "unload started;"
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 3,
+      "text": "session draining started/completed;"
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 4,
+      "text": "unload completed;"
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 5,
+      "text": "unload failed; and"
+    },
+    {
+      "section": "8.5",
+      "family": "Model unloading",
+      "ordinal": 6,
+      "text": "forced unload."
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 1,
+      "text": "stage starting;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 2,
+      "text": "stage loading;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 3,
+      "text": "stage ready;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 4,
+      "text": "stage degraded;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 5,
+      "text": "stage unavailable;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 6,
+      "text": "stage stopping;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 7,
+      "text": "stage stopped;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 8,
+      "text": "stage failed;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 9,
+      "text": "topology assembling;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 10,
+      "text": "topology ready;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 11,
+      "text": "topology degraded;"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 12,
+      "text": "topology unavailable; and"
+    },
+    {
+      "section": "8.6",
+      "family": "Stage and topology lifecycle",
+      "ordinal": 13,
+      "text": "upstream or downstream stage connection established/lost/recovered."
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 1,
+      "text": "session requested;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 2,
+      "text": "session created;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 3,
+      "text": "session active;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 4,
+      "text": "session idle or reusable;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 5,
+      "text": "session reset;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 6,
+      "text": "session trimmed;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 7,
+      "text": "session restored from prefix cache or checkpoint;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 8,
+      "text": "session draining;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 9,
+      "text": "session closed;"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 10,
+      "text": "session failed; and"
+    },
+    {
+      "section": "8.7",
+      "family": "Session lifecycle",
+      "ordinal": 11,
+      "text": "session abandoned or reclaimed."
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 1,
+      "text": "request received;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 2,
+      "text": "request queued;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 3,
+      "text": "request admitted;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 4,
+      "text": "request rejected;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 5,
+      "text": "request execution started;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 6,
+      "text": "request completed;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 7,
+      "text": "request cancelled;"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 8,
+      "text": "request timed out; and"
+    },
+    {
+      "section": "8.8",
+      "family": "Request and admission lifecycle",
+      "ordinal": 9,
+      "text": "request failed."
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 1,
+      "text": "prompt processing started;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 2,
+      "text": "tokenization completed or failed;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 3,
+      "text": "prefill started;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 4,
+      "text": "prefill progress;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 5,
+      "text": "prefill completed;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 6,
+      "text": "prefill cancelled;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 7,
+      "text": "prefill failed;"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 8,
+      "text": "media prefill started/completed/failed when applicable; and"
+    },
+    {
+      "section": "8.9",
+      "family": "Prompt processing and prefill",
+      "ordinal": 9,
+      "text": "prompt-cache restore hit/miss/partial/error."
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 1,
+      "text": "generation started;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 2,
+      "text": "first token produced;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 3,
+      "text": "generation progress;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 4,
+      "text": "generation completed;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 5,
+      "text": "generation cancelled;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 6,
+      "text": "generation timed out;"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 7,
+      "text": "generation failed; and"
+    },
+    {
+      "section": "8.10",
+      "family": "Decode and generation",
+      "ordinal": 8,
+      "text": "stop condition reached."
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 1,
+      "text": "KV/cache initialization started/completed/failed;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 2,
+      "text": "cache lookup hit/miss/partial/error;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 3,
+      "text": "prefix or checkpoint restored;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 4,
+      "text": "cache record completed/failed;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 5,
+      "text": "cache trim or eviction;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 6,
+      "text": "cache reset;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 7,
+      "text": "cache pressure crossed/cleared;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 8,
+      "text": "context capacity approaching limit;"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 9,
+      "text": "context exhausted; and"
+    },
+    {
+      "section": "8.11",
+      "family": "KV and runtime-state lifecycle",
+      "ordinal": 10,
+      "text": "runtime state import/export completed/failed."
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 1,
+      "text": "backend initialization started/completed/failed;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 2,
+      "text": "device selected;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 3,
+      "text": "device ready;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 4,
+      "text": "device degraded;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 5,
+      "text": "device unavailable;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 6,
+      "text": "device recovered;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 7,
+      "text": "resource allocation completed/failed;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 8,
+      "text": "memory pressure crossed/cleared;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 9,
+      "text": "out-of-memory condition;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 10,
+      "text": "backend fallback activated;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 11,
+      "text": "CPU fallback activated;"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 12,
+      "text": "compute failure; and"
+    },
+    {
+      "section": "8.12",
+      "family": "Backend, device, and resource health",
+      "ordinal": 13,
+      "text": "device lost or reset."
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 1,
+      "text": "warning raised;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 2,
+      "text": "warning cleared;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 3,
+      "text": "recoverable native failure;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 4,
+      "text": "fallback applied;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 5,
+      "text": "degraded operation entered;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 6,
+      "text": "degraded operation exited;"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 7,
+      "text": "fatal native failure; and"
+    },
+    {
+      "section": "8.13",
+      "family": "Warnings, recoveries, and errors",
+      "ordinal": 8,
+      "text": "invariant or protocol violation."
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 1,
+      "text": "node starting;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 2,
+      "text": "node accepting requests;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 3,
+      "text": "node degraded;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 4,
+      "text": "node unavailable;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 5,
+      "text": "node draining;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 6,
+      "text": "node stopped;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 7,
+      "text": "available model set changed;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 8,
+      "text": "available stage set changed;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 9,
+      "text": "request capacity changed;"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 10,
+      "text": "lane or session capacity changed; and"
+    },
+    {
+      "section": "8.14",
+      "family": "Node serving availability",
+      "ordinal": 11,
+      "text": "resource pressure changed."
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 1,
+      "text": "ingress queue pressure;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 2,
+      "text": "events coalesced;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 3,
+      "text": "events sampled;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 4,
+      "text": "events dropped by event class;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 5,
+      "text": "subscriber lagging;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 6,
+      "text": "subscriber disconnected;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 7,
+      "text": "reducer error;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 8,
+      "text": "telemetry exporter degraded/recovered;"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 9,
+      "text": "event schema incompatibility; and"
+    },
+    {
+      "section": "8.15",
+      "family": "Event-system health",
+      "ordinal": 10,
+      "text": "unknown native event received."
+    }
+  ]
+}

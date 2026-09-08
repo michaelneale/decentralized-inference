@@ -1,0 +1,161 @@
+From fe0e6ca95f8fa45fc15c8d67a965db1520c3689b Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 02:02:27 -0400
+Subject: [PATCH] skippy: add device-events family (bit 34)
+
+Adds SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE and
+SKIPPY_FEATURE_DEVICE_EVENTS (bit 34): backend init, device
+ready/degraded/unavailable/recovered/lost, resource allocation,
+out-of-memory, fallback activated, published through
+skippy_emit_device_event via the reporter patch's shared dispatch() seam.
+No further ABI bump.
+
+Adds ctest case skippy_runtime_event_device_events_dispatch.
+
+Renumbered from 0046 (bit 32) to 0059 (bit 34), then again to 0060
+(bit 34, unchanged); see 0057 for why.
+---
+ include/skippy/common.h             |  1 +
+ include/skippy/events.h             | 19 +++++++++++++++++++
+ src/CMakeLists.txt                  |  3 ++-
+ src/skippy/abi.cpp                  |  3 ++-
+ src/skippy/events.cpp               | 11 +++++++++++
+ src/skippy/tests/runtime_events.cpp | 12 ++++++++++++
+ 6 files changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index f710a1289..18a259398 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -101,6 +101,7 @@ enum skippy_feature {
+ #define SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER ((uint64_t)1 << 31)
+ #define SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2   ((uint64_t)1 << 32)
+ #define SKIPPY_FEATURE_KV_EVENTS              ((uint64_t)1 << 33)
++#define SKIPPY_FEATURE_DEVICE_EVENTS          ((uint64_t)1 << 34)
+ 
+ enum skippy_status {
+     SKIPPY_STATUS_OK                      = 0,
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+index bc6ee6647..7d3256d39 100644
+--- a/include/skippy/events.h
++++ b/include/skippy/events.h
+@@ -24,6 +24,7 @@ enum {
+     SKIPPY_RUNTIME_EVENT_CATEGORY_SESSION    = 3,
+     SKIPPY_RUNTIME_EVENT_CATEGORY_KV         = 4,
+     SKIPPY_RUNTIME_EVENT_CATEGORY_WARNING    = 5,
++    SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE     = 6,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_kind;
+@@ -49,6 +50,17 @@ enum {
+     SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CLEARED             = 202,
+     SKIPPY_RUNTIME_EVENT_KIND_KV_CONTEXT_APPROACHING_CAPACITY = 203,
+     SKIPPY_RUNTIME_EVENT_KIND_KV_CONTEXT_CAPACITY_EXHAUSTED   = 204,
++
++    // SKIPPY_FEATURE_DEVICE_EVENTS (category DEVICE).
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_BACKEND_INITIALIZED = 300,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_READY               = 301,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_DEGRADED            = 302,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_UNAVAILABLE         = 303,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_RECOVERED           = 304,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_LOST                = 305,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_RESOURCE_ALLOCATED  = 306,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_OUT_OF_MEMORY       = 307,
++    SKIPPY_RUNTIME_EVENT_KIND_DEVICE_FALLBACK_ACTIVATED  = 308,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_emitter_kind;
+@@ -171,6 +183,13 @@ LLAMA_API void skippy_emit_kv_event(
+         uint64_t numeric_summary_0,
+         uint64_t numeric_summary_1);
+ 
++/** @brief Emits SKIPPY_FEATURE_DEVICE_EVENTS category DEVICE events. */
++LLAMA_API void skippy_emit_device_event(
++        skippy_runtime_event_kind kind,
++        uint64_t numeric_summary_0,
++        const char * detail_ptr,
++        uint64_t detail_len);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 9ef935595..df11ae6b3 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -118,7 +118,8 @@ if (LLAMA_STAGE_BUILD_TESTS)
+             struct_size_extension
+             concurrent_dispatch
+             model_load_events_v2_dispatch
+-            kv_events_dispatch)
++            kv_events_dispatch
++            device_events_dispatch)
+         add_test(
+             NAME skippy_runtime_event_${SKIPPY_EVENT_TEST_CASE}
+             COMMAND skippy-runtime-events-test ${SKIPPY_EVENT_TEST_CASE})
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+index 311e75847..a95167742 100644
+--- a/src/skippy/abi.cpp
++++ b/src/skippy/abi.cpp
+@@ -42,7 +42,8 @@ uint64_t skippy_abi_features(void) {
+            SKIPPY_FEATURE_MODEL_SOURCE |
+            SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER |
+            SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 |
+-           SKIPPY_FEATURE_KV_EVENTS;
++           SKIPPY_FEATURE_KV_EVENTS |
++           SKIPPY_FEATURE_DEVICE_EVENTS;
+ }
+ 
+ void skippy_error_free(struct skippy_error * error) {
+diff --git a/src/skippy/events.cpp b/src/skippy/events.cpp
+index d9a67e185..e5f674832 100644
+--- a/src/skippy/events.cpp
++++ b/src/skippy/events.cpp
+@@ -194,3 +194,14 @@ void skippy_emit_kv_event(
+         SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, numeric_summary_1, 0, 0,
+         nullptr, 0);
+ }
++
++void skippy_emit_device_event(
++        skippy_runtime_event_kind kind,
++        uint64_t numeric_summary_0,
++        const char * detail_ptr,
++        uint64_t detail_len) {
++    skippy::events::dispatch(
++        SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE, kind, 0, 0, 0,
++        SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, 0, 0, 0,
++        detail_ptr, detail_len);
++}
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index b717daa74..323c02cbe 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -244,6 +244,17 @@ int test_kv_events_dispatch() {
+     return 0;
+ }
+ 
++int test_device_events_dispatch() {
++    capture c;
++    install(c);
++    skippy_emit_device_event(SKIPPY_RUNTIME_EVENT_KIND_DEVICE_READY, 1, "gpu0", 4);
++    CHECK(c.count.load() == 1);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_DEVICE);
++    CHECK(c.last_kind.load() == SKIPPY_RUNTIME_EVENT_KIND_DEVICE_READY);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char ** argv) {
+@@ -260,6 +271,7 @@ int main(int argc, char ** argv) {
+     if (name == "concurrent_dispatch") return test_concurrent_dispatch();
+     if (name == "model_load_events_v2_dispatch") return test_model_load_events_v2_dispatch();
+     if (name == "kv_events_dispatch") return test_kv_events_dispatch();
++    if (name == "device_events_dispatch") return test_device_events_dispatch();
+     std::fprintf(stderr, "unknown test: %s\n", name.c_str());
+     return 2;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

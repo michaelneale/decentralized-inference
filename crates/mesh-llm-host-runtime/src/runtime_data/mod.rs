@@ -5,6 +5,7 @@
 
 mod api_views;
 mod collector;
+mod event_cutover;
 mod inventory;
 mod metrics;
 #[cfg(test)]

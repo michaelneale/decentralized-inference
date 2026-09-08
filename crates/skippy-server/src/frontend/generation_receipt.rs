@@ -68,6 +68,51 @@ pub struct GenerationReceipt {
     pub request_to_token_emission_us: Box<[u64]>,
     /// Optional digest of the target runtime's full exported state.
     pub full_state: Option<GenerationStateDigest>,
+    /// See [`GenerationStart::frontend_request_id`].
+    pub frontend_request_id: Option<[u8; 16]>,
+}
+
+impl GenerationReceipt {
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_fixture(
+        request_id: u64,
+        session_id: u64,
+        termination: GenerationTermination,
+    ) -> Self {
+        Self {
+            request_id,
+            session_id,
+            agent_session_id: None,
+            prompt_token_count: 1,
+            prompt_token_digest: [0; 32],
+            prompt_token_ids: Arc::from([1]),
+            generated_token_ids: vec![1].into_boxed_slice(),
+            final_session_position: 1,
+            termination,
+            model_generation_elapsed_us: 1,
+            request_to_first_token_us: Some(1),
+            request_to_token_emission_us: vec![1].into_boxed_slice(),
+            full_state: None,
+            frontend_request_id: None,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_fixture_with_full_state(
+        request_id: u64,
+        session_id: u64,
+        termination: GenerationTermination,
+        byte_length: u64,
+    ) -> Self {
+        let mut receipt = Self::test_fixture(request_id, session_id, termination);
+        receipt.full_state = Some(GenerationStateDigest {
+            byte_length,
+            blake3_digest: [0; 32],
+        });
+        receipt
+    }
 }
 
 /// Target-authoritative beginning of one local generation lifecycle.
@@ -78,6 +123,11 @@ pub struct GenerationStart {
     /// Stable caller-supplied agent session admitted at the OpenAI boundary.
     pub agent_session_id: Option<Box<str>>,
     pub prompt_token_ids: Arc<[i32]>,
+    /// Byte-equal to the OpenAI request root `OperationId`
+    /// (`OpenAiLifecycleContext.request_id`'s raw UUID bytes) when this
+    /// generation was admitted through the OpenAI boundary. `None` for
+    /// non-frontend callers. Never projected across the native plugin ABI.
+    pub frontend_request_id: Option<[u8; 16]>,
 }
 
 /// Target-authoritative termination of a generation that produced no final
@@ -102,6 +152,46 @@ pub struct GenerationCommit {
     /// Total generated canonical tokens after applying `token_ids`.
     pub generated_token_count: usize,
     pub token_ids: Box<[i32]>,
+}
+
+/// Lightweight terminal summary for lifecycle-only integrations.
+///
+/// This deliberately contains no canonical session position, token digest, or
+/// exported runtime state. Those fields belong to [`GenerationReceipt`], which
+/// is available only for local single-stage execution. A lifecycle-only
+/// consumer can still observe the complete started/progress/finished-or-aborted
+/// sequence without being given evidence that a split stage cannot authoritatively
+/// produce.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GenerationCompletion {
+    pub request_id: u64,
+    pub session_id: u64,
+    pub prompt_token_count: usize,
+    pub generated_token_count: usize,
+    pub termination: GenerationTermination,
+    pub request_to_first_token_us: Option<u64>,
+}
+
+impl GenerationCompletion {
+    #[must_use]
+    pub fn new(
+        request_id: u64,
+        session_id: u64,
+        prompt_token_count: usize,
+        generated_token_count: usize,
+        termination: GenerationTermination,
+        request_to_first_token_us: Option<u64>,
+    ) -> Self {
+        Self {
+            request_id,
+            session_id,
+            prompt_token_count,
+            generated_token_count,
+            termination,
+            request_to_first_token_us,
+        }
+    }
 }
 
 /// Receives the complete local-generation lifecycle before runtime teardown.
@@ -138,6 +228,7 @@ pub enum GenerationLifecycleObservation {
     Started(GenerationStart),
     Committed(GenerationCommit),
     Aborted(GenerationAbort),
+    Finished(GenerationCompletion),
     Completed(GenerationReceipt),
 }
 
@@ -147,6 +238,12 @@ impl GenerationLifecycleObservation {
             Self::Started(start) => sink.begin(&start),
             Self::Committed(commit) => sink.committed(&commit),
             Self::Aborted(abort) => sink.abort(&abort),
+            // The queued compatibility path is exact-receipt delivery. A
+            // lifecycle-only completion must use GenerationLifecycleConfig and
+            // must never be silently turned into a fabricated receipt.
+            Self::Finished(_) => Err(anyhow::anyhow!(
+                "lifecycle-only completion cannot be delivered to an exact receipt sink"
+            )),
             Self::Completed(receipt) => sink.record(&receipt),
         }
     }
@@ -165,6 +262,112 @@ pub trait GenerationLifecycleIngress: Send + Sync {
     /// Asynchronous delivery failures observed after a successful submission.
     fn delivery_failures(&self) -> u64 {
         0
+    }
+
+    /// Reports that a generation completed but its receipt could not be
+    /// built: a `canonical_session_position` or `export_full_state`
+    /// bookkeeping failure inside receipt construction. This is deliberately
+    /// distinct from [`Self::try_submit`]'s `Completed`/`Aborted`
+    /// observations -- there is no receipt and no caller-initiated abort to
+    /// hand a consumer, only the fact that a terminal receipt could not be
+    /// produced for this generation.
+    ///
+    /// Health-only, exactly like every other method on this trait: an
+    /// implementation must count it toward [`Self::delivery_failures`], must
+    /// never block, and must never fail. The default no-op is correct for an
+    /// implementation with no additional health/terminal bookkeeping to
+    /// perform.
+    fn receipt_unavailable(&self, unavailable: &GenerationAbort) {
+        let _ = unavailable;
+    }
+}
+
+/// Fans one generation-lifecycle observation out to every installed sink for
+/// the exact-receipt path. One sink failing to accept an observation never
+/// prevents delivery to the other sinks.
+pub struct CompositeGenerationLifecycleIngress {
+    sinks: Vec<Arc<dyn GenerationLifecycleIngress>>,
+}
+
+impl CompositeGenerationLifecycleIngress {
+    #[must_use]
+    pub fn new(sinks: Vec<Arc<dyn GenerationLifecycleIngress>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl GenerationLifecycleIngress for CompositeGenerationLifecycleIngress {
+    fn try_submit(&self, observation: GenerationLifecycleObservation) -> Result<()> {
+        let mut first_error = None;
+        for sink in &self.sinks {
+            if let Err(error) = sink.try_submit(observation.clone()) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn delivery_failures(&self) -> u64 {
+        self.sinks.iter().map(|sink| sink.delivery_failures()).sum()
+    }
+
+    fn receipt_unavailable(&self, unavailable: &GenerationAbort) {
+        for sink in &self.sinks {
+            sink.receipt_unavailable(unavailable);
+        }
+    }
+}
+
+/// Lifecycle-only generation observation delivery.
+///
+/// This is separate from [`GenerationReceiptConfig`]: it emits the same
+/// started/progress/abort boundaries but finishes with [`GenerationCompletion`]
+/// instead of constructing an exact [`GenerationReceipt`]. Split execution can
+/// therefore feed runtime-event consumers without enabling local-only receipt
+/// validation or inventing canonical session state.
+#[derive(Clone)]
+pub struct GenerationLifecycleConfig {
+    ingress: Arc<dyn GenerationLifecycleIngress>,
+    submission_failures: Arc<AtomicU64>,
+}
+
+impl GenerationLifecycleConfig {
+    /// Uses an existing bounded, nonblocking lifecycle ingress.
+    pub fn from_ingress(ingress: Arc<dyn GenerationLifecycleIngress>) -> Self {
+        Self {
+            ingress,
+            submission_failures: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Number of observations rejected synchronously by the ingress, plus
+    /// asynchronous downstream delivery failures reported by it.
+    pub fn delivery_failures(&self) -> u64 {
+        self.submission_failures
+            .load(Ordering::Relaxed)
+            .saturating_add(self.ingress.delivery_failures())
+    }
+
+    pub(crate) fn begin(&self, start: GenerationStart) {
+        self.enqueue(GenerationLifecycleObservation::Started(start));
+    }
+
+    pub(crate) fn committed(&self, commit: GenerationCommit) {
+        self.enqueue(GenerationLifecycleObservation::Committed(commit));
+    }
+
+    pub(crate) fn finished(&self, completion: GenerationCompletion) {
+        self.enqueue(GenerationLifecycleObservation::Finished(completion));
+    }
+
+    pub(crate) fn abort(&self, abort: GenerationAbort) {
+        self.enqueue(GenerationLifecycleObservation::Aborted(abort));
+    }
+
+    fn enqueue(&self, observation: GenerationLifecycleObservation) {
+        if self.ingress.try_submit(observation).is_err() {
+            self.submission_failures.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -210,6 +413,18 @@ impl GenerationLifecycleIngress for QueuedGenerationReceiptSink {
 
     fn delivery_failures(&self) -> u64 {
         self.delivery_failures.load(Ordering::Relaxed)
+    }
+
+    /// Forwards to the wrapped sink's existing `abort` handler: a
+    /// [`GenerationReceiptSink`] has no separate concept of "receipt could
+    /// not be built" from "generation produced no final receipt", and
+    /// `GenerationAbort`'s own contract already covers exactly that case.
+    fn receipt_unavailable(&self, unavailable: &GenerationAbort) {
+        // The receipt-build failure is itself a delivery failure even when
+        // the health-only abort reaches the worker. A worker sink failure is
+        // counted separately by the worker loop.
+        self.delivery_failures.fetch_add(1, Ordering::Relaxed);
+        let _ = self.try_submit(GenerationLifecycleObservation::Aborted(*unavailable));
     }
 }
 
@@ -273,6 +488,20 @@ impl GenerationReceiptConfig {
         self.recording_failures.load(Ordering::Relaxed)
     }
 
+    /// Reports a receipt-build failure to the underlying ingress. Health-only
+    /// like every other delivery path on this type: never returns an error,
+    /// never affects the request that produced the generation. Counted
+    /// through the ingress's own [`GenerationLifecycleIngress::delivery_failures`]
+    /// rather than `Self::submission_failures`, which tracks admission
+    /// failures for an observation that was actually built -- this failure
+    /// never reaches that far.
+    pub(crate) fn receipt_unavailable(&self, request_id: u64, session_id: u64) {
+        self.ingress.receipt_unavailable(&GenerationAbort {
+            request_id,
+            session_id,
+        });
+    }
+
     pub(crate) fn observation(&self, max_tokens: usize) -> GenerationReceiptObservation {
         GenerationReceiptObservation::new(max_tokens, Arc::clone(&self.recording_failures))
     }
@@ -334,6 +563,117 @@ pub(crate) struct LocalGenerationReceiptDelivery<'a> {
     pub(crate) agent_session_id: Option<&'a str>,
     pub(crate) prompt_token_ids: Arc<[i32]>,
     pub(crate) observation: GenerationReceiptObservation,
+    pub(crate) frontend_request_id: Option<[u8; 16]>,
+}
+
+/// Tracks lifecycle-only observations while a generation executes.
+///
+/// The exact receipt path has its own recorder and finalization because it
+/// must read canonical runtime position and optionally export full state. This
+/// tracker intentionally records only bounded lifecycle fields, so it is valid
+/// for both local and distributed execution.
+pub(crate) struct GenerationLifecycleState {
+    config: Option<GenerationLifecycleConfig>,
+    request_id: u64,
+    session_id: u64,
+    prompt_token_count: usize,
+    generated_token_count: usize,
+    request_to_first_token_us: Option<u64>,
+    termination: Option<GenerationTermination>,
+}
+
+impl GenerationLifecycleState {
+    pub(crate) fn new(
+        config: Option<&GenerationLifecycleConfig>,
+        request_id: u64,
+        session_id: u64,
+        agent_session_id: Option<Box<str>>,
+        frontend_request_id: Option<[u8; 16]>,
+        prompt_token_ids: &[i32],
+    ) -> Self {
+        let prompt_token_count = prompt_token_ids.len();
+        let prompt_token_ids = config.map(|_| Arc::<[i32]>::from(prompt_token_ids));
+        let state = Self {
+            config: config.cloned(),
+            request_id,
+            session_id,
+            prompt_token_count,
+            generated_token_count: 0,
+            request_to_first_token_us: None,
+            termination: None,
+        };
+        if let Some(config) = config {
+            config.begin(GenerationStart {
+                request_id,
+                session_id,
+                agent_session_id,
+                prompt_token_ids: prompt_token_ids
+                    .expect("lifecycle prompt token IDs exist when configured"),
+                frontend_request_id,
+            });
+        }
+        state
+    }
+
+    pub(crate) fn commit(&mut self, token_id: i32, request_elapsed: Duration) {
+        let Some(config) = self.config.as_ref() else {
+            return;
+        };
+        self.generated_token_count = self.generated_token_count.saturating_add(1);
+        self.request_to_first_token_us
+            .get_or_insert_with(|| u64::try_from(request_elapsed.as_micros()).unwrap_or(u64::MAX));
+        config.committed(GenerationCommit {
+            request_id: self.request_id,
+            session_id: self.session_id,
+            generated_token_count: self.generated_token_count,
+            token_ids: vec![token_id].into_boxed_slice(),
+        });
+    }
+
+    pub(crate) fn mark_callback_stop(&mut self) {
+        if self.config.is_some() {
+            self.termination = Some(GenerationTermination::CallbackStop);
+        }
+    }
+
+    pub(crate) fn mark_cancelled(&mut self) {
+        if self.config.is_some() && self.termination.is_none() {
+            self.termination = Some(GenerationTermination::Cancelled);
+        }
+    }
+
+    pub(crate) fn finish(mut self, generation_succeeded: bool) {
+        let Some(config) = self.config.take() else {
+            return;
+        };
+        if generation_succeeded {
+            config.finished(GenerationCompletion::new(
+                self.request_id,
+                self.session_id,
+                self.prompt_token_count,
+                self.generated_token_count,
+                self.termination.unwrap_or(GenerationTermination::MaxTokens),
+                self.request_to_first_token_us,
+            ));
+        } else {
+            config.abort(GenerationAbort {
+                request_id: self.request_id,
+                session_id: self.session_id,
+            });
+        }
+    }
+}
+
+impl Drop for GenerationLifecycleState {
+    fn drop(&mut self) {
+        let Some(config) = self.config.take() else {
+            return;
+        };
+        config.abort(GenerationAbort {
+            request_id: self.request_id,
+            session_id: self.session_id,
+        });
+    }
 }
 
 trait GenerationReceiptRuntime {
@@ -441,14 +781,38 @@ impl StageOpenAiBackend {
         delivery: LocalGenerationReceiptDelivery<'_>,
     ) -> OpenAiResult<()> {
         let config = delivery.config;
+        let request_id = delivery.request_id;
+        let session_id = delivery.session_id;
         let receipt = {
             let mut runtime = self
                 .runtime
                 .lock()
                 .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
-            build_generation_receipt(&mut *runtime, delivery)?
+            build_generation_receipt(&mut *runtime, delivery)
         };
-        record_generation_receipt(config, receipt)
+        deliver_generation_receipt_outcome(config, request_id, session_id, receipt)
+    }
+}
+
+/// Resolves a built (or failed-to-build) receipt into the request's return
+/// value. A `build_generation_receipt` failure -- `canonical_session_position`
+/// or `export_full_state` bookkeeping failing after a real, successful
+/// generation -- is health-only observability: it is reported through
+/// [`GenerationReceiptConfig::receipt_unavailable`] and the original
+/// generation's success is returned unchanged. The receipt is never on the
+/// request's error path (review defect D1).
+pub(crate) fn deliver_generation_receipt_outcome(
+    config: &GenerationReceiptConfig,
+    request_id: u64,
+    session_id: u64,
+    receipt: OpenAiResult<GenerationReceipt>,
+) -> OpenAiResult<()> {
+    match receipt {
+        Ok(receipt) => record_generation_receipt(config, receipt),
+        Err(_build_failure) => {
+            config.receipt_unavailable(request_id, session_id);
+            Ok(())
+        }
     }
 }
 
@@ -482,6 +846,7 @@ fn build_generation_receipt(
         request_to_first_token_us: observation.request_to_first_token_us,
         request_to_token_emission_us: observation.request_to_token_emission_us,
         full_state,
+        frontend_request_id: delivery.frontend_request_id,
     })
 }
 
@@ -524,7 +889,9 @@ fn duration_us(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
     use std::sync::Mutex;
+    use std::sync::mpsc::sync_channel;
     use std::thread;
 
     use super::*;
@@ -588,6 +955,31 @@ mod tests {
         }
     }
 
+    struct BlockingReceiptSink {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl GenerationReceiptSink for BlockingReceiptSink {
+        fn begin(&self, _start: &GenerationStart) -> Result<()> {
+            self.entered.wait();
+            self.release.wait();
+            Ok(())
+        }
+
+        fn committed(&self, _commit: &GenerationCommit) -> Result<()> {
+            Ok(())
+        }
+
+        fn abort(&self, _abort: &GenerationAbort) -> Result<()> {
+            Ok(())
+        }
+
+        fn record(&self, _receipt: &GenerationReceipt) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn wait_for_receipts(sink: &RecordingSink, expected: usize) {
         for _ in 0..100 {
             if sink.receipts.lock().unwrap().len() >= expected {
@@ -621,6 +1013,7 @@ mod tests {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3, 4]),
+            frontend_request_id: None,
         });
         config.committed(GenerationCommit {
             request_id: 1,
@@ -660,6 +1053,119 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_only_config_finishes_without_constructing_a_receipt() {
+        let ingress = Arc::new(RecordingIngress::default());
+        let config = GenerationLifecycleConfig::from_ingress(ingress.clone());
+        let mut state = GenerationLifecycleState::new(Some(&config), 1, 2, None, None, &[3, 4]);
+        state.commit(5, Duration::from_micros(7));
+        state.finish(true);
+
+        let observations = ingress.observations.lock().unwrap();
+        assert!(matches!(
+            observations.as_slice(),
+            [
+                GenerationLifecycleObservation::Started(_),
+                GenerationLifecycleObservation::Committed(_),
+                GenerationLifecycleObservation::Finished(_)
+            ]
+        ));
+        let GenerationLifecycleObservation::Finished(completion) = &observations[2] else {
+            unreachable!("lifecycle state must finish with a summary");
+        };
+        assert_eq!(completion.prompt_token_count, 2);
+        assert_eq!(completion.generated_token_count, 1);
+        assert_eq!(completion.request_to_first_token_us, Some(7));
+        assert_eq!(completion.termination, GenerationTermination::MaxTokens);
+        assert_eq!(config.delivery_failures(), 0);
+    }
+
+    #[test]
+    fn dropping_an_unfinished_lifecycle_aborts_exactly_once() {
+        let ingress = Arc::new(RecordingIngress::default());
+        let config = GenerationLifecycleConfig::from_ingress(ingress.clone());
+        {
+            let _state = GenerationLifecycleState::new(Some(&config), 7, 8, None, None, &[9]);
+        }
+
+        let observations = ingress.observations.lock().unwrap();
+        assert!(matches!(
+            observations.as_slice(),
+            [
+                GenerationLifecycleObservation::Started(_),
+                GenerationLifecycleObservation::Aborted(GenerationAbort {
+                    request_id: 7,
+                    session_id: 8,
+                })
+            ]
+        ));
+    }
+
+    #[test]
+    fn queued_receipt_unavailable_counts_a_full_queue() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let sink = Arc::new(BlockingReceiptSink {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let ingress = QueuedGenerationReceiptSink::new(sink);
+        ingress
+            .try_submit(GenerationLifecycleObservation::Started(GenerationStart {
+                request_id: 1,
+                session_id: 2,
+                agent_session_id: None,
+                prompt_token_ids: Arc::from([]),
+                frontend_request_id: None,
+            }))
+            .unwrap();
+        entered.wait();
+        for request_id in 0..GENERATION_RECEIPT_QUEUE_CAPACITY {
+            ingress
+                .try_submit(GenerationLifecycleObservation::Aborted(GenerationAbort {
+                    request_id: request_id as u64,
+                    session_id: 2,
+                }))
+                .unwrap();
+        }
+
+        ingress.receipt_unavailable(&GenerationAbort {
+            request_id: 99,
+            session_id: 2,
+        });
+        assert_eq!(ingress.delivery_failures(), 1);
+        release.wait();
+    }
+
+    #[test]
+    fn queued_receipt_unavailable_counts_when_abort_reaches_the_worker() {
+        let sink = Arc::new(RecordingSink::default());
+        let ingress = QueuedGenerationReceiptSink::new(sink);
+
+        ingress.receipt_unavailable(&GenerationAbort {
+            request_id: 9,
+            session_id: 10,
+        });
+
+        assert_eq!(ingress.delivery_failures(), 1);
+    }
+
+    #[test]
+    fn queued_receipt_unavailable_counts_a_disconnected_queue() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut ingress = QueuedGenerationReceiptSink::new(sink);
+        let (replacement, receiver) = sync_channel(1);
+        let sender = std::mem::replace(&mut ingress.sender, replacement);
+        drop(sender);
+        drop(receiver);
+
+        ingress.receipt_unavailable(&GenerationAbort {
+            request_id: 7,
+            session_id: 8,
+        });
+        assert_eq!(ingress.delivery_failures(), 1);
+    }
+
+    #[test]
     fn receipt_prompt_evidence_preserves_exact_signed_token_ids() {
         let prompt = [-1, 0, 7, i32::MAX];
         let receipt = GenerationReceipt {
@@ -676,6 +1182,7 @@ mod tests {
             request_to_first_token_us: Some(1),
             request_to_token_emission_us: vec![1].into_boxed_slice(),
             full_state: None,
+            frontend_request_id: None,
         };
         assert_eq!(receipt.prompt_token_ids.as_ref(), prompt);
         assert_eq!(receipt.prompt_token_count, receipt.prompt_token_ids.len());
@@ -781,6 +1288,7 @@ mod tests {
                 agent_session_id: Some("agent-session"),
                 prompt_token_ids: Arc::from([4, 5, 6]),
                 observation,
+                frontend_request_id: None,
             },
         )
         .unwrap();
@@ -817,6 +1325,7 @@ mod tests {
                     observation.set_model_generation_elapsed(Duration::ZERO);
                     observation
                 },
+                frontend_request_id: None,
             },
         )
         .unwrap_err();
@@ -839,6 +1348,7 @@ mod tests {
                 agent_session_id: None,
                 prompt_token_ids: Arc::from([]),
                 observation,
+                frontend_request_id: None,
             },
         )
         .unwrap();
@@ -850,6 +1360,66 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(failing_config.delivery_failures(), 1);
+    }
+
+    #[test]
+    fn receipt_build_failure_never_fails_the_request_and_counts_as_a_delivery_failure() {
+        #[derive(Default)]
+        struct ReceiptUnavailableCountingIngress {
+            receipt_unavailable_calls: Mutex<Vec<GenerationAbort>>,
+        }
+
+        impl GenerationLifecycleIngress for ReceiptUnavailableCountingIngress {
+            fn try_submit(&self, _observation: GenerationLifecycleObservation) -> Result<()> {
+                Ok(())
+            }
+
+            fn delivery_failures(&self) -> u64 {
+                self.receipt_unavailable_calls.lock().unwrap().len() as u64
+            }
+
+            fn receipt_unavailable(&self, unavailable: &GenerationAbort) {
+                self.receipt_unavailable_calls
+                    .lock()
+                    .unwrap()
+                    .push(*unavailable);
+            }
+        }
+
+        let ingress = Arc::new(ReceiptUnavailableCountingIngress::default());
+        let config = GenerationReceiptConfig::from_lifecycle_ingress(ingress.clone());
+        let mut runtime = FakeRuntime {
+            position: Err("session session-x has no tracked position"),
+            full_state: Ok(Vec::new()),
+        };
+        let mut observation = test_observation(0);
+        observation.set_model_generation_elapsed(Duration::ZERO);
+        let receipt = build_generation_receipt(
+            &mut runtime,
+            LocalGenerationReceiptDelivery {
+                config: &config,
+                session_label: "session-x",
+                request_id: 7,
+                session_id: 8,
+                agent_session_id: None,
+                prompt_token_ids: Arc::from([]),
+                observation,
+                frontend_request_id: None,
+            },
+        );
+        assert!(receipt.is_err());
+        assert_eq!(config.delivery_failures(), 0);
+
+        let outcome = deliver_generation_receipt_outcome(&config, 7, 8, receipt);
+        assert!(outcome.is_ok());
+        assert_eq!(config.delivery_failures(), 1);
+        assert_eq!(
+            ingress.receipt_unavailable_calls.lock().unwrap().as_slice(),
+            [GenerationAbort {
+                request_id: 7,
+                session_id: 8,
+            }]
+        );
     }
 
     #[test]
@@ -892,6 +1462,7 @@ mod tests {
                     GenerationLifecycleObservation::Started(_) => "started",
                     GenerationLifecycleObservation::Committed(_) => "committed",
                     GenerationLifecycleObservation::Aborted(_) => "aborted",
+                    GenerationLifecycleObservation::Finished(_) => "finished",
                     GenerationLifecycleObservation::Completed(_) => "completed",
                 };
                 self.0.lock().unwrap().push(label);
@@ -908,6 +1479,7 @@ mod tests {
             session_id: 2,
             agent_session_id: None,
             prompt_token_ids: Arc::from([3]),
+            frontend_request_id: None,
         });
         config.committed(GenerationCommit {
             request_id: 1,

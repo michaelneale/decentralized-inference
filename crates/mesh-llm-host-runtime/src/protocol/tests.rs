@@ -54,6 +54,7 @@ fn make_config_snapshot() -> NodeConfigSnapshot {
         }],
         config_toml: None,
         mesh_requirements: None,
+        lifecycle_log_parser: None,
     }
 }
 

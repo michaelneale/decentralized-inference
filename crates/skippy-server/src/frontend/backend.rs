@@ -764,10 +764,14 @@ fn generation_ids(
     agent_session_id: Option<&str>,
     context: &OpenAiRequestContext,
 ) -> OpenAiGenerationIds {
+    let frontend_request_id = context
+        .request_id()
+        .map(|request_id| request_id.as_uuid().into_bytes());
     OpenAiGenerationIds::new_with_trust(
         cache,
         agent_session_id,
         context.has_trusted_agent_session(),
+        frontend_request_id,
     )
 }
 

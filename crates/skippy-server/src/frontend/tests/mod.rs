@@ -10,7 +10,9 @@ pub(super) use super::{
 };
 pub(super) use crate::binary_transport::WireCondition;
 pub(super) use crate::kv_integration::PrefillKvIdentity;
-pub(super) use crate::kv_integration::{KvStageIntegration, proactive_eviction_attrs};
+pub(super) use crate::kv_integration::{
+    KvLifecycleEvent, KvLifecycleObserver, KvStageIntegration, proactive_eviction_attrs,
+};
 pub(super) use crate::runtime_state::load_runtime;
 pub(super) use crate::telemetry::Telemetry;
 pub(super) use anyhow::{Context as _, Result, anyhow, bail};
@@ -54,6 +56,7 @@ mod guardrails;
 mod multimodal;
 mod prefill;
 mod prefix_cache;
+mod prefix_cache_lifecycle;
 mod prompting;
 mod request;
 mod support;

@@ -1,116 +1,6 @@
 use super::*;
 
-trait RestoreRollback {
-    fn drop_dirty_session(&mut self, session_id: &str) -> Result<()>;
-    fn reacquire_clean_session(&mut self, session_id: &str) -> Result<()>;
-    fn restored_native_position(&mut self, session_id: &str) -> Result<u64>;
-    fn restored_token_count(&self, session_id: &str) -> u64;
-    fn discard_dirty_session(&mut self, session_id: &str);
-}
-
-fn rollback_restore_failure(
-    runtime: &mut impl RestoreRollback,
-    session_id: &str,
-    restore_error: anyhow::Error,
-) -> anyhow::Error {
-    if let Err(cleanup_error) = runtime.drop_dirty_session(session_id) {
-        runtime.discard_dirty_session(session_id);
-        return anyhow::anyhow!(
-            "cache restore failed ({restore_error:#}); could not clean native session {session_id}: {cleanup_error:#}"
-        );
-    }
-
-    if let Err(reacquire_error) = runtime.reacquire_clean_session(session_id) {
-        runtime.discard_dirty_session(session_id);
-        return anyhow::anyhow!(
-            "cache restore failed ({restore_error:#}); could not reacquire a clean native session {session_id}: {reacquire_error:#}"
-        );
-    }
-
-    let native_position = match runtime.restored_native_position(session_id) {
-        Ok(position) => position,
-        Err(position_error) => {
-            runtime.discard_dirty_session(session_id);
-            return anyhow::anyhow!(
-                "cache restore failed ({restore_error:#}); could not verify clean native session {session_id}: {position_error:#}"
-            );
-        }
-    };
-    if native_position != 0 || runtime.restored_token_count(session_id) != 0 {
-        runtime.discard_dirty_session(session_id);
-        return anyhow::anyhow!(
-            "cache restore failed ({restore_error:#}); rollback left native session {session_id} at position {native_position}"
-        );
-    }
-
-    restore_error.context(format!(
-        "cache restore transaction rolled back for session {session_id}"
-    ))
-}
-
-impl RestoreRollback for RuntimeState {
-    fn drop_dirty_session(&mut self, session_id: &str) -> Result<()> {
-        self.drop_session_timed(session_id).map(|_| ())
-    }
-
-    fn reacquire_clean_session(&mut self, session_id: &str) -> Result<()> {
-        self.ensure_session_active(session_id)
-    }
-
-    fn restored_native_position(&mut self, session_id: &str) -> Result<u64> {
-        self.active_session(session_id)
-            .and_then(|session| session.native_position())
-    }
-
-    fn restored_token_count(&self, session_id: &str) -> u64 {
-        self.session_token_count(session_id).unwrap_or_default()
-    }
-
-    fn discard_dirty_session(&mut self, session_id: &str) {
-        self.force_discard_session(session_id);
-    }
-}
-
 impl RuntimeState {
-    /// Run a cache restore as a transaction over the native session.
-    ///
-    /// State imports are not guaranteed to be atomic at the C ABI boundary:
-    /// an import can populate one component and then fail while validating a
-    /// later component or its position.  The caller must therefore never
-    /// continue a cache-off prefill on the same session after an error.  Drop
-    /// the affected lane, reacquire a fresh/reset lane, and verify both the
-    /// Rust bookkeeping and native position before returning the original
-    /// error.  If any part of that rollback cannot be proven, return an error
-    /// that explicitly tells the caller not to continue on this lane.
-    pub fn restore_transaction<T>(
-        &mut self,
-        session_id: &str,
-        restore: impl FnOnce(&mut Self) -> Result<T>,
-    ) -> Result<T> {
-        let result = restore(self);
-        let Err(restore_error) = result else {
-            return result;
-        };
-
-        Err(rollback_restore_failure(self, session_id, restore_error))
-    }
-
-    /// Remove a session even when the normal reset path itself failed.  The
-    /// StageSession destructor is the native ABI's authoritative sequence
-    /// release, so dropping the lane is safer than allowing a dirty session to
-    /// be reused by a cache-off fallback.
-    fn force_discard_session(&mut self, session_id: &str) {
-        if let Some(lane_session) = self.sessions.remove(session_id) {
-            let lane_index = lane_session.index;
-            drop(lane_session);
-            if !self.free_lane_indices.contains(&lane_index) {
-                self.free_lane_indices.push(lane_index);
-            }
-        }
-        self.session_token_counts.remove(session_id);
-        self.session_resident_prefixes.remove(session_id);
-    }
-
     pub fn prewarm_idle_sessions(
         &mut self,
         target_idle_sessions: usize,
@@ -223,9 +113,27 @@ impl RuntimeState {
         self.session_token_counts.remove(session_id);
         self.session_resident_prefixes.remove(session_id);
 
+        let reset_ms = reset_started.elapsed().as_secs_f64() * 1000.0;
+        // The real decision this function already made: a reset() failure
+        // discards the lane (its capacity is reclaimed via
+        // `free_lane_indices` rather than returned to the idle pool) --
+        // that IS the "session abandoned/reclaimed" transition. A clean
+        // reset (with or without also hitting a full idle pool) is the
+        // "session reset" transition. Only one of the two ever applies per
+        // call, matching the mutually exclusive branches above.
+        if lane_discarded {
+            self.notify_session_lifecycle(
+                super::lifecycle::SessionLifecycleEvent::SessionReclaimed,
+            );
+        } else if reset_session {
+            self.notify_session_lifecycle(super::lifecycle::SessionLifecycleEvent::SessionReset {
+                reset_ms,
+            });
+        }
+
         Ok(RuntimeSessionDropStats {
             reset_session,
-            reset_ms: reset_started.elapsed().as_secs_f64() * 1000.0,
+            reset_ms,
             preserved_resident_prefix,
             lane_discarded,
             lane_discard_reason,
@@ -397,90 +305,6 @@ impl RuntimeState {
         Ok(())
     }
 
-    pub fn export_state(&mut self, session_id: &str) -> Result<Vec<u8>> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.export_state(layer_start, layer_end)
-    }
-
-    pub fn import_state(&mut self, session_id: &str, bytes: &[u8]) -> Result<()> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.import_state(layer_start, layer_end, bytes)
-    }
-
-    pub fn import_state_for_token_count(
-        &mut self,
-        session_id: &str,
-        bytes: &[u8],
-        token_count: u64,
-    ) -> Result<()> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.import_state_for_token_count(layer_start, layer_end, bytes, token_count)?;
-        record_restored_session_token_count(
-            &mut self.session_token_counts,
-            session_id,
-            token_count,
-        );
-        Ok(())
-    }
-
-    pub fn export_full_state(&mut self, session_id: &str) -> Result<Vec<u8>> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.export_full_state(layer_start, layer_end)
-    }
-
-    pub fn import_full_state(&mut self, session_id: &str, bytes: &[u8]) -> Result<()> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.import_full_state(layer_start, layer_end, bytes)
-    }
-
-    pub fn import_full_state_for_token_count(
-        &mut self,
-        session_id: &str,
-        bytes: &[u8],
-        token_count: u64,
-    ) -> Result<()> {
-        let layer_start = i32::try_from(self.model_layer_start())?;
-        let layer_end = i32::try_from(self.model_layer_end())?;
-        let session = self.session(session_id)?;
-        session.import_full_state_for_token_count(layer_start, layer_end, bytes, token_count)?;
-        record_restored_session_token_count(
-            &mut self.session_token_counts,
-            session_id,
-            token_count,
-        );
-        Ok(())
-    }
-
-    pub fn export_recurrent_state(&mut self, session_id: &str) -> Result<Vec<u8>> {
-        self.session(session_id)?.export_recurrent_state()
-    }
-
-    pub fn import_recurrent_state_for_token_count(
-        &mut self,
-        session_id: &str,
-        bytes: &[u8],
-        token_count: u64,
-    ) -> Result<()> {
-        self.session(session_id)?
-            .import_recurrent_state_for_token_count(bytes, token_count)?;
-        record_restored_session_token_count(
-            &mut self.session_token_counts,
-            session_id,
-            token_count,
-        );
-        Ok(())
-    }
-
     pub fn save_resident_prefix(
         &mut self,
         session_id: &str,
@@ -572,11 +396,11 @@ impl RuntimeState {
         Ok(())
     }
 
-    fn model_layer_start(&self) -> u32 {
+    pub(super) fn model_layer_start(&self) -> u32 {
         self.layer_start
     }
 
-    fn model_layer_end(&self) -> u32 {
+    pub(super) fn model_layer_end(&self) -> u32 {
         self.layer_end
     }
 
@@ -607,18 +431,6 @@ pub(super) fn capped_target_idle_sessions(
         Some(max) => target_idle_sessions.min(max),
         None => target_idle_sessions,
     }
-}
-
-fn record_restored_session_token_count(
-    session_token_counts: &mut BTreeMap<String, u64>,
-    session_id: &str,
-    token_count: u64,
-) {
-    // A prefix restore can move an existing lane backwards to a shorter
-    // common prefix. The tracked position must follow the imported native
-    // state exactly; retaining the previous high-water mark submits the next
-    // divergent token at the wrong position and makes llama_decode fail.
-    session_token_counts.insert(session_id.to_string(), token_count);
 }
 
 /// Allocate the next lane slot.
@@ -660,246 +472,5 @@ fn create_indexed_lane_resource<T>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::{Result, bail};
-
-    #[derive(Default)]
-    struct FakeRestoreRollback {
-        cleanup_error: Option<&'static str>,
-        reacquire_error: Option<&'static str>,
-        position_error: Option<&'static str>,
-        native_position: u64,
-        token_count: u64,
-        discarded: bool,
-    }
-
-    impl RestoreRollback for FakeRestoreRollback {
-        fn drop_dirty_session(&mut self, _session_id: &str) -> Result<()> {
-            match self.cleanup_error {
-                Some(message) => bail!(message),
-                None => Ok(()),
-            }
-        }
-
-        fn reacquire_clean_session(&mut self, _session_id: &str) -> Result<()> {
-            match self.reacquire_error {
-                Some(message) => bail!(message),
-                None => Ok(()),
-            }
-        }
-
-        fn restored_native_position(&mut self, _session_id: &str) -> Result<u64> {
-            match self.position_error {
-                Some(message) => bail!(message),
-                None => Ok(self.native_position),
-            }
-        }
-
-        fn restored_token_count(&self, _session_id: &str) -> u64 {
-            self.token_count
-        }
-
-        fn discard_dirty_session(&mut self, _session_id: &str) {
-            self.discarded = true;
-        }
-    }
-
-    #[test]
-    fn restore_rollback_returns_original_error_after_proving_a_clean_lane() {
-        let mut runtime = FakeRestoreRollback::default();
-
-        let error = rollback_restore_failure(
-            &mut runtime,
-            "lane-a",
-            anyhow::anyhow!("injected import failure"),
-        );
-
-        assert_eq!(
-            error.to_string(),
-            "cache restore transaction rolled back for session lane-a"
-        );
-        assert!(format!("{error:#}").contains("injected import failure"));
-        assert!(!runtime.discarded);
-    }
-
-    #[test]
-    fn restore_rollback_discards_when_cleanup_or_reacquire_fails() {
-        for mut runtime in [
-            FakeRestoreRollback {
-                cleanup_error: Some("cleanup failed"),
-                ..FakeRestoreRollback::default()
-            },
-            FakeRestoreRollback {
-                reacquire_error: Some("reacquire failed"),
-                ..FakeRestoreRollback::default()
-            },
-        ] {
-            let error =
-                rollback_restore_failure(&mut runtime, "lane-a", anyhow::anyhow!("restore failed"));
-            assert!(format!("{error:#}").contains("restore failed"));
-            assert!(runtime.discarded);
-        }
-    }
-
-    #[test]
-    fn restore_rollback_discards_unverifiable_or_dirty_lanes() {
-        for mut runtime in [
-            FakeRestoreRollback {
-                position_error: Some("position unavailable"),
-                ..FakeRestoreRollback::default()
-            },
-            FakeRestoreRollback {
-                native_position: 1,
-                ..FakeRestoreRollback::default()
-            },
-            FakeRestoreRollback {
-                token_count: 1,
-                ..FakeRestoreRollback::default()
-            },
-        ] {
-            let error =
-                rollback_restore_failure(&mut runtime, "lane-a", anyhow::anyhow!("restore failed"));
-            assert!(format!("{error:#}").contains("restore failed"));
-            assert!(runtime.discarded);
-        }
-    }
-
-    #[test]
-    fn prefix_restore_moves_tracked_position_backwards() {
-        let mut token_counts = std::collections::BTreeMap::from([("lane-a".to_string(), 3_535)]);
-
-        record_restored_session_token_count(&mut token_counts, "lane-a", 3_530);
-
-        assert_eq!(token_counts.get("lane-a"), Some(&3_530));
-    }
-
-    #[test]
-    fn create_indexed_lane_resource_keeps_index_available_when_creation_fails() {
-        let mut next_lane_index = 0;
-        let mut free_lane_indices: Vec<usize> = Vec::new();
-
-        let error = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            2,
-            || -> Result<()> { bail!("transient session creation failure") },
-        )
-        .expect_err("failed creation should propagate the original error");
-
-        assert_eq!(error.to_string(), "transient session creation failure");
-        assert_eq!(next_lane_index, 0);
-        assert!(free_lane_indices.is_empty());
-
-        let (index, resource) =
-            create_indexed_lane_resource(&mut next_lane_index, &mut free_lane_indices, 2, || {
-                Ok("lane")
-            })
-            .expect("successful retry should reuse the unconsumed lane index");
-
-        assert_eq!(index, 0);
-        assert_eq!(resource, "lane");
-        assert_eq!(next_lane_index, 1);
-    }
-
-    #[test]
-    fn create_indexed_lane_resource_reuses_freed_indices_before_growing() {
-        // Simulate the wedge scenario: all lanes allocated, one lane
-        // freed via the discard path, next allocation must reuse the
-        // freed index rather than bailing with "all execution lanes
-        // are busy".
-        let mut next_lane_index = 0;
-        let mut free_lane_indices: Vec<usize> = Vec::new();
-        let lane_count = 2;
-
-        // Allocate both lanes.
-        let (a_idx, _) = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            lane_count,
-            || Ok("a"),
-        )
-        .expect("first allocation should succeed");
-        let (b_idx, _) = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            lane_count,
-            || Ok("b"),
-        )
-        .expect("second allocation should succeed");
-        assert_eq!(a_idx, 0);
-        assert_eq!(b_idx, 1);
-        assert_eq!(next_lane_index, 2);
-
-        // Pool is full at the high-water mark. A third allocation must
-        // fail.
-        let error = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            lane_count,
-            || Ok("c"),
-        )
-        .expect_err("allocating past lane_count should fail when no slots are free");
-        assert!(error.to_string().contains("all execution lanes are busy"));
-
-        // Discard one lane: the caller pushes its freed index onto the
-        // free list (this is what drop_session_timed does on the
-        // discard branch).
-        free_lane_indices.push(a_idx);
-
-        // The next allocation MUST reuse the freed index instead of
-        // bailing. This is the wedge regression: previously
-        // next_lane_index stayed at lane_count and every allocation
-        // failed forever.
-        let (reused_idx, _) = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            lane_count,
-            || Ok("c"),
-        )
-        .expect("allocation must reuse a freed index, not stay wedged");
-        assert_eq!(reused_idx, 0);
-        assert_eq!(next_lane_index, 2);
-        assert!(free_lane_indices.is_empty());
-    }
-
-    #[test]
-    fn create_indexed_lane_resource_returns_freed_index_on_create_failure() {
-        // If create() fails while consuming a freed index, the index
-        // must go back onto the free list so a retry can use it.
-        let mut next_lane_index = 1;
-        let mut free_lane_indices: Vec<usize> = vec![0];
-
-        let error = create_indexed_lane_resource(
-            &mut next_lane_index,
-            &mut free_lane_indices,
-            2,
-            || -> Result<()> { bail!("create failed mid-reuse") },
-        )
-        .expect_err("failed creation should propagate");
-        assert_eq!(error.to_string(), "create failed mid-reuse");
-        assert_eq!(next_lane_index, 1);
-        assert_eq!(free_lane_indices, vec![0]);
-
-        // A retry should now succeed using the same freed index.
-        let (idx, _) =
-            create_indexed_lane_resource(&mut next_lane_index, &mut free_lane_indices, 2, || {
-                Ok("retry")
-            })
-            .expect("retry should succeed");
-        assert_eq!(idx, 0);
-        assert_eq!(next_lane_index, 1);
-        assert!(free_lane_indices.is_empty());
-    }
-
-    #[test]
-    fn capped_target_idle_sessions_clamps_to_the_configured_bound() {
-        assert_eq!(capped_target_idle_sessions(10, Some(2)), 2);
-        assert_eq!(capped_target_idle_sessions(1, Some(2)), 1);
-    }
-
-    #[test]
-    fn capped_target_idle_sessions_is_unbounded_when_unset() {
-        assert_eq!(capped_target_idle_sessions(10, None), 10);
-    }
-}
+#[path = "lane_lifecycle/tests.rs"]
+mod tests;

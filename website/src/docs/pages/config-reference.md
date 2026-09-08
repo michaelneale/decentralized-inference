@@ -30,6 +30,7 @@ built-in runtime default.
 | Variable | Effect |
 |---|---|
 | `MESH_LLM_CONFIG` | Full path to the config file, instead of `~/.mesh-llm/config.toml` |
+| `MESH_LLM_LIFECYCLE_LOG_PARSER` | Overrides `runtime.lifecycle_log_parser`; accepts `auto`, `enabled`, or `disabled` |
 
 ## Managing config via CLI
 
@@ -104,6 +105,7 @@ produces a clear startup error rather than a partial start.
 | `runtime.listen_all` | boolean | `false` | node-level | process restart | wired | none |
 | `runtime.mode` | enum | `serve` (default), `on_demand`, `client` | node-level | process restart | wired | none |
 | `runtime.startup_failure_policy` | enum | `best_effort` (default), `fail_fast` | node-level | process restart | wired | none |
+| `runtime.lifecycle_log_parser` | enum | `auto` (default), `enabled`, `disabled`; `auto` keeps only parser categories without equivalent native lifecycle events | node-level | process restart | wired | none |
 | `runtime.drain_timeout_secs` | integer | `30`; 1–3600, must not exceed the max | node-level | process restart | wired | none |
 | `runtime.drain_timeout_max_secs` | integer | `300`; 1–3600 | node-level | process restart | wired | none |
 | `runtime.activity.enabled` | boolean | `false` | node-level | process restart | wired | none |

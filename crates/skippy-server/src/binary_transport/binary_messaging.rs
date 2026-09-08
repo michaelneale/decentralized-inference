@@ -295,6 +295,7 @@ fn run_binary_stage(
             mtp_source,
             ..RuntimeLaunchOverrides::default()
         },
+        None,
     )?
     .context("binary stage server requires model_path")?;
     let (input_boundary, output_boundary) = {
@@ -345,9 +346,12 @@ fn run_binary_stage(
         telemetry.clone(),
     )
     .map_err(|error| anyhow!("create binary iteration scheduler: {error}"))?;
-    let kv =
-        KvStageIntegration::from_loaded_model(&config, loaded_model_state_kind(Some(&runtime)))?
-            .map(Arc::new);
+    let kv = KvStageIntegration::from_loaded_model(
+        &config,
+        loaded_model_state_kind(Some(&runtime)),
+        None,
+    )?
+    .map(Arc::new);
     let prediction_returns = Arc::new(PredictionReturnHub::default());
     let prediction_return_sinks = Arc::new(PredictionReturnSinks::default());
     let session_ownership = Arc::new(ConnectionSessionOwnership::default());
@@ -406,7 +410,9 @@ fn run_binary_stage(
                         telemetry: openai_telemetry,
                         hook_policy: None,
                         generation_receipt: None,
+                        generation_lifecycle: None,
                         linear_proposal_ingress: None,
+                        kv_lifecycle_observer: None,
                         openai_guardrails: Some(
                             frontend::OpenAiGuardrailsConfig::disabled_for_skippy(),
                         ),

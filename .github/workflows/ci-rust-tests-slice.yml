@@ -290,12 +290,19 @@ jobs:
           test_binary="$(
             cargo test --locked -p mesh-llm-host-runtime --no-default-features \
               --lib --no-run --message-format=json |
-              jq -r 'select(
-                .reason == "compiler-artifact" and
-                .target.name == "mesh_llm_host_runtime" and
-                .profile.test == true and
-                .executable != null
-              ) | .executable' |
+              jq -r '
+                if .reason == "compiler-message" then
+                  (.message.rendered // empty) | stderr | empty
+                elif .reason == "compiler-artifact" and
+                  .target.name == "mesh_llm_host_runtime" and
+                  .profile.test == true and
+                  .executable != null
+                then
+                  .executable
+                else
+                  empty
+                end
+              ' |
               tail -n 1
           )"
           if [[ -z "$test_binary" || ! -x "$test_binary" ]]; then

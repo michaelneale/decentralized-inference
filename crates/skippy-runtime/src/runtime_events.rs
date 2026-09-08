@@ -1,19 +1,62 @@
 use std::ffi::{c_char, c_void};
 use std::mem;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use skippy_ffi::{
-    Error as RawError, Model as RawModel, SkippyRuntimeEventCategory as RawRuntimeEventCategory,
-    SkippyRuntimeEventEmitterKind as RawRuntimeEventEmitterKind,
-    SkippyRuntimeEventFailureCode as RawRuntimeEventFailureCode,
-    SkippyRuntimeEventKind as RawRuntimeEventKind,
-    SkippyRuntimeEventProgressUnit as RawRuntimeEventProgressUnit,
-    SkippyRuntimeEventReporterV1 as RawRuntimeEventReporter,
+    Error as RawError, Model as RawModel, SkippyRuntimeEventReporterV1 as RawRuntimeEventReporter,
     SkippyRuntimeEventV1 as RawRuntimeEvent, Status,
 };
 
-const RUNTIME_EVENT_V1_ABI_VERSION: u32 = 1;
+mod wire_types;
+pub use wire_types::{
+    RuntimeEvent, RuntimeEventCategory, RuntimeEventEmitterKind, RuntimeEventFailureCode,
+    RuntimeEventKind, RuntimeEventProgressUnit,
+};
+
+pub(crate) const RUNTIME_EVENT_V1_ABI_VERSION: u32 = 1;
+
+/// Correlates every runtime event emitted during one native model-open call.
+/// Callers of `open_with_events`/`open_from_parts_with_events` now supply
+/// this explicitly (task 9): the boundary's shape did not change, only the
+/// source moved from an internal mint to the call site, so a future
+/// host-assigned identity (e.g. from `mesh-llm-host-runtime`'s runtime-event
+/// engine) can be threaded in without another change here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OperationId(pub u64);
+
+/// Default generator for callers with no host-assigned identity of their
+/// own yet. Exposed so a caller's own id source can be swapped in later
+/// without touching this crate again.
+pub fn next_operation_id() -> OperationId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    OperationId(NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Sound ingress boundary for native callback threads: `Send + Sync` so a
+/// shared handle can be called concurrently from more than one native worker
+/// thread without any unsynchronized aliasing.
+pub trait ModelOpenEventIngress: Send + Sync {
+    fn submit(&self, operation_id: OperationId, event: RuntimeEvent);
+}
+
+/// Adapts an owned `FnMut` sink into a `Send + Sync` ingress by serializing
+/// concurrent callback-thread access behind a mutex.
+struct MutexIngress<F>(Mutex<F>);
+
+impl<F> ModelOpenEventIngress for MutexIngress<F>
+where
+    F: FnMut(RuntimeEvent) + Send,
+{
+    fn submit(&self, _operation_id: OperationId, event: RuntimeEvent) {
+        // A sink panic poisons this mutex while the FFI trampoline catches the
+        // unwind. Recover the guard so one bad callback does not silently
+        // disable every later event for the lifetime of this ingress.
+        let mut sink = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        (sink)(event);
+    }
+}
 
 pub(crate) type RawModelOpenWithEventsFn = unsafe extern "C" fn(
     path: *const c_char,
@@ -32,180 +75,13 @@ pub(crate) type RawModelOpenFromPartsWithEventsFn = unsafe extern "C" fn(
     out_error: *mut *mut RawError,
 ) -> Status;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeEventCategory {
-    ModelOpen,
-    Backend,
-    Session,
-    Kv,
-    Warning,
-    Unknown(u32),
-}
-
-impl From<RawRuntimeEventCategory> for RuntimeEventCategory {
-    fn from(value: RawRuntimeEventCategory) -> Self {
-        match value {
-            RawRuntimeEventCategory::MODEL_OPEN => Self::ModelOpen,
-            RawRuntimeEventCategory::BACKEND => Self::Backend,
-            RawRuntimeEventCategory::SESSION => Self::Session,
-            RawRuntimeEventCategory::KV => Self::Kv,
-            RawRuntimeEventCategory::WARNING => Self::Warning,
-            RawRuntimeEventCategory(raw) => Self::Unknown(raw),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeEventKind {
-    ModelOpenStarted,
-    ModelOpenProgress,
-    BackendDeviceSelected,
-    ModelOpenFinished,
-    ModelOpenFailedHandled,
-    Unknown(u32),
-}
-
-impl From<RawRuntimeEventKind> for RuntimeEventKind {
-    fn from(value: RawRuntimeEventKind) -> Self {
-        match value {
-            RawRuntimeEventKind::MODEL_OPEN_STARTED => Self::ModelOpenStarted,
-            RawRuntimeEventKind::MODEL_OPEN_PROGRESS => Self::ModelOpenProgress,
-            RawRuntimeEventKind::BACKEND_DEVICE_SELECTED => Self::BackendDeviceSelected,
-            RawRuntimeEventKind::MODEL_OPEN_FINISHED => Self::ModelOpenFinished,
-            RawRuntimeEventKind::MODEL_OPEN_FAILED_HANDLED => Self::ModelOpenFailedHandled,
-            RawRuntimeEventKind(raw) => Self::Unknown(raw),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeEventEmitterKind {
-    Unknown,
-    OpenThread,
-    WorkerThread,
-    Other(u32),
-}
-
-impl From<RawRuntimeEventEmitterKind> for RuntimeEventEmitterKind {
-    fn from(value: RawRuntimeEventEmitterKind) -> Self {
-        match value {
-            RawRuntimeEventEmitterKind::UNKNOWN => Self::Unknown,
-            RawRuntimeEventEmitterKind::OPEN_THREAD => Self::OpenThread,
-            RawRuntimeEventEmitterKind::WORKER_THREAD => Self::WorkerThread,
-            RawRuntimeEventEmitterKind(raw) => Self::Other(raw),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeEventProgressUnit {
-    None,
-    Bytes,
-    Items,
-    Tensors,
-    Steps,
-    Unknown(u32),
-}
-
-impl From<RawRuntimeEventProgressUnit> for RuntimeEventProgressUnit {
-    fn from(value: RawRuntimeEventProgressUnit) -> Self {
-        match value {
-            RawRuntimeEventProgressUnit::NONE => Self::None,
-            RawRuntimeEventProgressUnit::BYTES => Self::Bytes,
-            RawRuntimeEventProgressUnit::ITEMS => Self::Items,
-            RawRuntimeEventProgressUnit::TENSORS => Self::Tensors,
-            RawRuntimeEventProgressUnit::STEPS => Self::Steps,
-            RawRuntimeEventProgressUnit(raw) => Self::Unknown(raw),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeEventFailureCode {
-    None,
-    InvalidArgument,
-    IoError,
-    ModelError,
-    RuntimeError,
-    BackendError,
-    Cancelled,
-    InternalError,
-    Unknown(u32),
-}
-
-impl From<RawRuntimeEventFailureCode> for RuntimeEventFailureCode {
-    fn from(value: RawRuntimeEventFailureCode) -> Self {
-        match value {
-            RawRuntimeEventFailureCode::NONE => Self::None,
-            RawRuntimeEventFailureCode::INVALID_ARGUMENT => Self::InvalidArgument,
-            RawRuntimeEventFailureCode::IO_ERROR => Self::IoError,
-            RawRuntimeEventFailureCode::MODEL_ERROR => Self::ModelError,
-            RawRuntimeEventFailureCode::RUNTIME_ERROR => Self::RuntimeError,
-            RawRuntimeEventFailureCode::BACKEND_ERROR => Self::BackendError,
-            RawRuntimeEventFailureCode::CANCELLED => Self::Cancelled,
-            RawRuntimeEventFailureCode::INTERNAL_ERROR => Self::InternalError,
-            RawRuntimeEventFailureCode(raw) => Self::Unknown(raw),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeEvent {
-    pub abi_version: u32,
-    pub category: RuntimeEventCategory,
-    pub kind: RuntimeEventKind,
-    pub emitter: RuntimeEventEmitterKind,
-    pub sequence: u64,
-    pub timestamp_mono_ns: u64,
-    pub model_id: u64,
-    pub stage_id: u64,
-    pub session_id: u64,
-    pub progress_current: u64,
-    pub progress_total: u64,
-    pub progress_unit: RuntimeEventProgressUnit,
-    pub failure_code: RuntimeEventFailureCode,
-    pub status: Status,
-    pub detail_bytes: Vec<u8>,
-}
-
-impl RuntimeEvent {
-    pub(crate) fn from_raw_ptr(event: *const RawRuntimeEvent) -> Option<Self> {
-        if event.is_null() {
-            return None;
-        }
-        let event = unsafe { &*event };
-        if event.struct_size < mem::size_of::<RawRuntimeEvent>() as u32 {
-            return None;
-        }
-        let detail_len = usize::try_from(event.detail_len).ok()?;
-        let detail_bytes = if detail_len == 0 || event.detail_ptr.is_null() {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(event.detail_ptr.cast::<u8>(), detail_len) }
-                .to_vec()
-        };
-        Some(Self {
-            abi_version: event.abi_version,
-            category: event.category.into(),
-            kind: event.kind.into(),
-            emitter: event.emitter.into(),
-            sequence: event.sequence,
-            timestamp_mono_ns: event.timestamp_mono_ns,
-            model_id: event.model_id,
-            stage_id: event.stage_id,
-            session_id: event.session_id,
-            progress_current: event.progress_current,
-            progress_total: event.progress_total,
-            progress_unit: event.progress_unit.into(),
-            failure_code: event.failure_code.into(),
-            status: event.status,
-            detail_bytes,
-        })
-    }
-}
-
+/// Data reachable from the native trampoline through an opaque `user_data`
+/// pointer. Holds only `Copy`/`Arc` data so shared, immutable access from
+/// concurrent native callback threads is sound; all mutation happens inside
+/// the `Send + Sync` ingress behind its own synchronization.
 struct ModelOpenEventBridge<'a> {
-    event_reporter: &'a mut dyn FnMut(RuntimeEvent),
+    operation_id: OperationId,
+    ingress: Arc<dyn ModelOpenEventIngress + 'a>,
 }
 
 struct ModelOpenEventReporterRegistration<'a> {
@@ -214,8 +90,14 @@ struct ModelOpenEventReporterRegistration<'a> {
 }
 
 impl<'a> ModelOpenEventReporterRegistration<'a> {
-    fn new(event_reporter: &'a mut dyn FnMut(RuntimeEvent)) -> Self {
-        let mut bridge = Box::new(ModelOpenEventBridge { event_reporter });
+    fn new<F>(operation_id: OperationId, event_reporter: F) -> Self
+    where
+        F: FnMut(RuntimeEvent) + Send + 'a,
+    {
+        let mut bridge = Box::new(ModelOpenEventBridge {
+            operation_id,
+            ingress: Arc::new(MutexIngress(Mutex::new(event_reporter))),
+        });
         let reporter = RawRuntimeEventReporter {
             abi_version: RUNTIME_EVENT_V1_ABI_VERSION,
             struct_size: mem::size_of::<RawRuntimeEventReporter>() as u32,
@@ -233,6 +115,8 @@ impl<'a> ModelOpenEventReporterRegistration<'a> {
     }
 }
 
+/// Correlate-and-submit only: no formatting, logging, I/O, blocking, or
+/// direct subscriber fan-out runs on this native callback thread.
 unsafe extern "C" fn model_open_event_trampoline(
     event: *const RawRuntimeEvent,
     user_data: *mut c_void,
@@ -244,31 +128,41 @@ unsafe extern "C" fn model_open_event_trampoline(
         let Some(event) = RuntimeEvent::from_raw_ptr(event) else {
             return;
         };
-        let bridge = unsafe { &mut *(user_data as *mut ModelOpenEventBridge<'_>) };
-        (bridge.event_reporter)(event);
+        // SAFETY: user_data was set by `ModelOpenEventReporterRegistration`
+        // to a live `Box<ModelOpenEventBridge>` for the duration of the
+        // registration; only a shared reference is taken, so concurrent
+        // native worker-thread callbacks race only inside the ingress's own
+        // synchronization, never on this pointer.
+        let bridge = unsafe { &*(user_data as *const ModelOpenEventBridge<'_>) };
+        bridge.ingress.submit(bridge.operation_id, event);
     }));
 }
 
 fn collect_model_open_events<OpenFn, EventFn>(
+    operation_id: OperationId,
     open_fn: OpenFn,
-    mut event_reporter: EventFn,
+    event_reporter: EventFn,
 ) -> (*mut RawModel, Status, *mut RawError)
 where
     OpenFn:
         FnOnce(*const RawRuntimeEventReporter, *mut *mut RawModel, *mut *mut RawError) -> Status,
-    EventFn: FnMut(RuntimeEvent),
+    EventFn: FnMut(RuntimeEvent) + Send,
 {
-    let registration = ModelOpenEventReporterRegistration::new(&mut event_reporter);
+    let registration = ModelOpenEventReporterRegistration::new(operation_id, event_reporter);
     let mut raw = ptr::null_mut();
     let mut error = ptr::null_mut();
     let status = open_fn(registration.reporter_ptr(), &mut raw, &mut error);
     (raw, status, error)
 }
 
+/// `operation_id` correlates every event this call emits. Task 9: the
+/// caller now supplies it (see [`OperationId`]'s doc) instead of it being
+/// minted inside this function.
 pub(crate) fn run_model_open<OpenFn, OpenWithEventsFn>(
+    operation_id: OperationId,
     open_fn: OpenFn,
     open_with_events_fn: OpenWithEventsFn,
-    event_reporter: Option<&mut dyn FnMut(RuntimeEvent)>,
+    event_reporter: Option<&mut (dyn FnMut(RuntimeEvent) + Send)>,
     use_event_reporter: bool,
 ) -> (*mut RawModel, Status, *mut RawError)
 where
@@ -278,7 +172,7 @@ where
 {
     match (event_reporter, use_event_reporter) {
         (Some(event_reporter), true) => {
-            collect_model_open_events(open_with_events_fn, event_reporter)
+            collect_model_open_events(operation_id, open_with_events_fn, event_reporter)
         }
         _ => {
             let mut raw = ptr::null_mut();
@@ -337,18 +231,19 @@ pub(crate) fn model_open_from_parts_with_events_symbol() -> Option<RawModelOpenF
     })
 }
 
+// Gates purely on runtime-observable capability (native library loaded,
+// feature bit advertised, `_with_events` symbols resolved) rather than a
+// hardcoded ABI patch window. Exact-compatible loader probing is added by a
+// later task; this function is the seam it extends.
 pub(crate) fn model_open_events_supported() -> bool {
-    skippy_ffi::ABI_VERSION_MAJOR == 0
-        && skippy_ffi::ABI_VERSION_MINOR == 1
-        && skippy_ffi::ABI_VERSION_PATCH >= 26
-        && skippy_ffi::native_runtime_loaded()
+    skippy_ffi::native_runtime_loaded()
         && abi_features_bitmask()
             .is_some_and(|features| (features & skippy_ffi::FEATURE_RUNTIME_EVENTS) != 0)
         && model_open_with_events_symbol().is_some()
         && model_open_from_parts_with_events_symbol().is_some()
 }
 
-fn abi_features_bitmask() -> Option<u64> {
+pub(crate) fn abi_features_bitmask() -> Option<u64> {
     #[cfg(feature = "dynamic-native-runtime")]
     {
         skippy_ffi::skippy_abi_features_optional().map(|features| unsafe { features() })
@@ -361,3 +256,5 @@ fn abi_features_bitmask() -> Option<u64> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests_hardening;

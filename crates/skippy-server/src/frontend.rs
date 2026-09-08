@@ -45,7 +45,8 @@ pub(crate) use self::generation::{
     serve_embedded_openai_with_scheduler,
 };
 pub use self::generation_receipt::{
-    GenerationAbort, GenerationCommit, GenerationLifecycleIngress, GenerationLifecycleObservation,
+    CompositeGenerationLifecycleIngress, GenerationAbort, GenerationCommit, GenerationCompletion,
+    GenerationLifecycleConfig, GenerationLifecycleIngress, GenerationLifecycleObservation,
     GenerationReceipt, GenerationReceiptConfig, GenerationReceiptSink, GenerationStart,
     GenerationStateDigest, GenerationTermination, generation_token_id_digest,
 };

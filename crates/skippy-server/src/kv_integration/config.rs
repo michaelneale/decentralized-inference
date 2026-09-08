@@ -13,8 +13,9 @@ use skippy_protocol::{StageConfig, StageKvCacheConfig, StageKvCacheMode, StageKv
 use skippy_runtime::ModelStateKind;
 
 use super::{
-    EXACT_STATE_RECORD_CAPACITY, ExactStateByteLimits, KvStageIntegration, PendingExactStateRecord,
-    RadixExactEntry, ResidentSequencePool, StageKvMode, StagePrefixCachePayload,
+    EXACT_STATE_RECORD_CAPACITY, ExactStateByteLimits, KvLifecycleEvent, KvLifecycleObserver,
+    KvStageIntegration, PendingExactStateRecord, RadixExactEntry, ResidentSequencePool,
+    StageKvMode, StagePrefixCachePayload,
     model_capability::{ModelKvCapability, loaded_model_kv_capability},
     output_tokens::OutputTokenCache,
 };
@@ -45,9 +46,25 @@ const EXACT_STATE_HARD_CAP_MULTIPLE: u64 = 8;
 const EXACT_STATE_MAX_BYTES_ENV: &str = "SKIPPY_KV_CACHE_EXACT_MAX_BYTES";
 
 impl KvStageIntegration {
+    /// Opens KV integration for an ALREADY-LOADED model runtime.
+    /// `model_state_kind` is the authoritative loaded-runtime state kind
+    /// (Dense/Recurrent/Hybrid/Diffusion) -- never a file-path or
+    /// tensor-name heuristic, since llama.cpp has already resolved the
+    /// actual architecture by the time a model is loaded (see
+    /// `model_capability::loaded_model_kv_capability`).
+    ///
+    /// `observer` accepts the lifecycle observer at CONSTRUCTION time --
+    /// before any real initialization work happens -- so
+    /// `KvInitStarted`/`KvInitCompleted`/`KvInitFailed` can be observed.
+    /// Every disabled/unsupported/not-applicable early `Ok(None)` return
+    /// above the real-initialization point never calls the observer at
+    /// all: those are deliberate non-attempts, not failures, and this
+    /// function does not misreport them as either. Pass `None` when no
+    /// observer is available at the call site.
     pub fn from_loaded_model(
         config: &StageConfig,
         model_state_kind: Option<ModelStateKind>,
+        observer: Option<Arc<dyn KvLifecycleObserver>>,
     ) -> Result<Option<Self>> {
         let Some(mut cache_config) = effective_cache_config(config) else {
             return Ok(None);
@@ -97,6 +114,12 @@ impl KvStageIntegration {
         if resident_config.max_entries == 0 {
             return Ok(None);
         }
+        // Past this point every remaining early return is a genuine failure,
+        // never a disabled/unsupported non-attempt -- this is where real
+        // initialization (radix cache, blob store, worker thread) begins.
+        if let Some(observer) = observer.as_ref() {
+            observer.observe(KvLifecycleEvent::KvInitStarted);
+        }
         // Activation checkpoints still use their own sparse policy; serving KV
         // contributes one full token path to the radix tree.
         checkpoint_policy.max_resident_tokens_hint = resident_config.max_resident_tokens;
@@ -122,16 +145,20 @@ impl KvStageIntegration {
         let worker_exact_state_record_worker_healthy = exact_state_record_worker_healthy.clone();
         let exact_state_record_worker_panics = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let worker_exact_state_record_worker_panics = exact_state_record_worker_panics.clone();
-        std::thread::Builder::new()
+        let worker_observer = observer.clone();
+        let spawned = std::thread::Builder::new()
             .name(format!("skippy-exact-cache-{}", config.stage_id))
             .spawn(move || {
                 while let Ok(pending) = exact_state_record_rx.recv() {
                     super::run_exact_state_record_job(
-                        &worker_inflight_records,
-                        &worker_exact_state_records_dropped,
-                        &worker_exact_state_records_pending,
-                        &worker_exact_state_record_worker_healthy,
-                        &worker_exact_state_record_worker_panics,
+                        super::ExactStateWorkerHandles {
+                            inflight_records: &worker_inflight_records,
+                            dropped: &worker_exact_state_records_dropped,
+                            pending_count: &worker_exact_state_records_pending,
+                            worker_healthy: &worker_exact_state_record_worker_healthy,
+                            worker_panics: &worker_exact_state_record_worker_panics,
+                        },
+                        worker_observer.as_ref(),
                         pending,
                         |pending| {
                             store_exact_radix_record(
@@ -144,7 +171,16 @@ impl KvStageIntegration {
                         },
                     );
                 }
-            })?;
+            });
+        if spawned.is_err()
+            && let Some(observer) = observer.as_ref()
+        {
+            observer.observe(KvLifecycleEvent::KvInitFailed);
+        }
+        spawned?;
+        if let Some(observer) = observer.as_ref() {
+            observer.observe(KvLifecycleEvent::KvInitCompleted);
+        }
         Ok(Some(Self {
             mode,
             payload,
@@ -171,6 +207,7 @@ impl KvStageIntegration {
             cache_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             output_tokens: Arc::new(Mutex::new(OutputTokenCache::new(exact_max_entries))),
             split_prefill_tokens: Arc::new(Mutex::new(BTreeMap::new())),
+            kv_lifecycle_observer: observer,
         }))
     }
 
@@ -179,7 +216,7 @@ impl KvStageIntegration {
         config: &StageConfig,
         model_state_kind: ModelStateKind,
     ) -> Result<Option<Self>> {
-        Self::from_loaded_model(config, Some(model_state_kind))
+        Self::from_loaded_model(config, Some(model_state_kind), None)
     }
 }
 
@@ -694,7 +731,7 @@ mod tests {
     fn loaded_hybrid_state_overrides_a_misleading_dense_model_name() {
         let config = enabled_auto_config("nvidia/Nemotron-3-Super-120B-A12B-NVFP4-MTPv2");
 
-        let kv = KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Hybrid))
+        let kv = KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Hybrid), None)
             .unwrap()
             .expect("hybrid loaded model should enable the recurrent cache");
 
@@ -705,7 +742,7 @@ mod tests {
     fn loaded_dense_state_selects_resident_kv_independent_of_model_name() {
         let config = enabled_auto_config("future/unknown-architecture-name");
 
-        let kv = KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Dense))
+        let kv = KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Dense), None)
             .unwrap()
             .expect("dense loaded model should enable resident KV");
 
@@ -716,7 +753,7 @@ mod tests {
     fn missing_loaded_descriptor_disables_cache() {
         let config = enabled_auto_config("Qwen/Qwen3-8B");
         assert!(
-            KvStageIntegration::from_loaded_model(&config, None)
+            KvStageIntegration::from_loaded_model(&config, None, None)
                 .unwrap()
                 .is_none()
         );
@@ -728,7 +765,7 @@ mod tests {
         config.kv_cache.as_mut().unwrap().payload = StageKvCachePayload::ResidentKv;
 
         assert!(
-            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Hybrid))
+            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Hybrid), None)
                 .unwrap()
                 .is_none()
         );
@@ -740,7 +777,7 @@ mod tests {
         config.kv_cache.as_mut().unwrap().payload = StageKvCachePayload::KvRecurrent;
 
         assert!(
-            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Dense))
+            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Dense), None)
                 .unwrap()
                 .is_none()
         );
@@ -752,7 +789,7 @@ mod tests {
         config.kv_cache.as_mut().unwrap().payload = StageKvCachePayload::FullState;
 
         for state_kind in [ModelStateKind::Dense, ModelStateKind::Recurrent] {
-            let kv = KvStageIntegration::from_loaded_model(&config, Some(state_kind))
+            let kv = KvStageIntegration::from_loaded_model(&config, Some(state_kind), None)
                 .unwrap()
                 .expect("full-state caching should support every loaded model state kind");
             assert_eq!(kv.payload, StagePrefixCachePayload::FullState);
@@ -763,9 +800,10 @@ mod tests {
     fn recurrent_cache_cardinality_is_capped_after_load() {
         let mut config = enabled_auto_config("future/model");
         config.ctx_size = 65_536;
-        let kv = KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Recurrent))
-            .unwrap()
-            .expect("recurrent loaded model should enable exact-state caching");
+        let kv =
+            KvStageIntegration::from_loaded_model(&config, Some(ModelStateKind::Recurrent), None)
+                .unwrap()
+                .expect("recurrent loaded model should enable exact-state caching");
 
         assert_eq!(kv.payload, StagePrefixCachePayload::KvRecurrent);
         assert_eq!(kv.exact_max_entries, RECURRENT_CACHE_MAX_ENTRIES);

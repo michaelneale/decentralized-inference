@@ -1,0 +1,20 @@
+[package]
+name = "mesh-llm-runtime-event-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dependency-leaf producer contracts for mesh-llm runtime events"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
+
+[lints]
+workspace = true
+
+[dependencies]
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = "0.9"

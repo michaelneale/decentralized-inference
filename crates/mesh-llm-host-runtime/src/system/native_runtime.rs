@@ -1,5 +1,7 @@
 #[cfg(feature = "dynamic-native-runtime")]
 mod dynamic {
+    use crate::runtime_events::runtime_event_engine;
+    use crate::system::native_runtime_events::{native_family_fact, submit_native_family_fact};
     use crate::system::native_runtime_install::{
         NativeRuntimeInstallOptions, NativeRuntimeInstallOutcome,
     };
@@ -8,6 +10,7 @@ mod dynamic {
         HostRuntimeProfile, InstalledNativeRuntime, NativeRuntimeArtifact, NativeRuntimeCache,
         NativeRuntimeLoadPlan, NativeRuntimeReleaseManifest, RuntimeSelection,
     };
+    use skippy_runtime::RuntimeEvent;
     use std::{future::Future, path::PathBuf};
 
     #[derive(Clone, Debug)]
@@ -69,6 +72,13 @@ mod dynamic {
         if skippy_runtime::native_runtime_loaded() {
             return Ok(None);
         }
+        // Reserved before any discovery/load work begins. A `?` failure
+        // below drops the guard unresolved, which synthesizes
+        // `RuntimeResolutionFailed`/`terminal_not_delivered` through the
+        // engine's own Drop mechanism -- acceptable here since the actual
+        // failure reason is already captured by the returned `anyhow::Error`
+        // and the tracing/audit surfaces this function's callers already use.
+        let resolution = crate::system::native_runtime_events::NativeRuntimeResolution::begin();
         let cache = default_native_runtime_cache()?;
         let local_runtimes =
             crate::system::native_runtime_install::discover_local_native_runtimes(&[], &cache)?;
@@ -81,6 +91,12 @@ mod dynamic {
             &RuntimeSelection::Recommended,
         )?
         else {
+            // No compatible plan found at all -- a real
+            // `NativeLibraryUnavailable`/`RuntimeResolutionFailed`, not a
+            // no-op (the earlier `native_runtime_loaded()` check above is
+            // the ONLY genuine "not needed" case in this function, and it
+            // returns before `resolution` is even constructed).
+            resolution.unavailable(mesh_llm_runtime_event_contracts::ReasonCode::MissingArtifact);
             return Ok(None);
         };
         unsafe { skippy_runtime::load_native_runtime_libraries(&plan.libraries) }
@@ -92,6 +108,10 @@ mod dynamic {
                     plan.root.display()
                 )
             })?;
+        resolution.library_loaded();
+        install_runtime_scoped_event_reporter();
+        resolution.initialized();
+        resolution.completed();
         Ok(Some(LoadedNativeRuntime {
             native_runtime_id: plan.native_runtime_id,
             libraries: plan.libraries,
@@ -101,7 +121,8 @@ mod dynamic {
     pub(crate) async fn try_load_installed_native_runtime(
         startup_selection: NativeRuntimeStartupSelection,
     ) -> Result<Option<LoadedNativeRuntime>> {
-        try_load_installed_native_runtime_with(
+        let resolution = crate::system::native_runtime_events::NativeRuntimeResolution::begin();
+        let outcome = try_load_installed_native_runtime_with(
             skippy_runtime::native_runtime_loaded,
             default_native_runtime_cache,
             host_runtime_profile,
@@ -109,11 +130,58 @@ mod dynamic {
             default_install_executor,
             startup_selection,
             |libraries| {
-                unsafe { skippy_runtime::load_native_runtime_libraries(libraries) }
-                    .map_err(anyhow::Error::from)
+                let result = unsafe { skippy_runtime::load_native_runtime_libraries(libraries) }
+                    .map_err(anyhow::Error::from);
+                if result.is_ok() {
+                    install_runtime_scoped_event_reporter();
+                }
+                result
             },
         )
-        .await
+        .await;
+        match &outcome {
+            Ok(Some(_)) => {
+                resolution.initialized();
+                resolution.completed();
+            }
+            Ok(None) => resolution.not_needed(),
+            Err(_) => {
+                resolution.failed(mesh_llm_runtime_event_contracts::ReasonCode::ArtifactIoFailure)
+            }
+        }
+        outcome
+    }
+
+    /// Installs the process-global runtime-scoped event reporter right after
+    /// a native runtime library loads. A no-op on a runtime that doesn't
+    /// advertise the `runtime_event_reporter` family (probed by
+    /// `skippy_runtime::probe_capabilities` internally) — older or
+    /// differently-composed runtimes simply keep operating without this
+    /// reporter, matching the model-open feature-probe fallback contract.
+    fn install_runtime_scoped_event_reporter() {
+        skippy_runtime::install_runtime_event_reporter(runtime_scoped_native_event_sink);
+    }
+
+    /// The installed callback (D7, `.omo/plans/event-system-fixes.md` task
+    /// 10). Runs on the native worker thread that raised the event: maps it
+    /// to a `RuntimeFact` (`native_family_fact`, a pure function -- no
+    /// I/O, no logging, every byte it allocates becomes part of the
+    /// returned fact) and submits it (`submit_native_family_fact`). Kind
+    /// values 1-5 (`SKIPPY_RUNTIME_EVENT_KIND_MODEL_OPEN_*`) belong to the
+    /// separate per-call model-open reporter and structurally never reach
+    /// this process-global one (`events_internal.h`'s `dispatch()` seam is
+    /// only called by `skippy_emit_{kv,device,diagnostic,unload}_event`/
+    /// `skippy_emit_model_load_event_v2`); `native_family_fact` still
+    /// returns `None` for them defensively rather than assuming that holds
+    /// forever.
+    fn runtime_scoped_native_event_sink(event: RuntimeEvent) {
+        let Some(fact) = native_family_fact(&event) else {
+            return;
+        };
+        let Some(engine) = runtime_event_engine() else {
+            return;
+        };
+        submit_native_family_fact(&engine, fact);
     }
 
     async fn try_load_installed_native_runtime_with<
@@ -1014,6 +1082,26 @@ mod dynamic {
             assert_eq!(
                 startup_install_message(false),
                 "Discovered native runtime bundles take precedence over installed runtimes; attempting one-shot startup install"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod native_runtime_event_sink_tests {
+        use super::*;
+
+        #[test]
+        fn install_never_panics_without_a_confirmed_native_family() {
+            install_runtime_scoped_event_reporter();
+        }
+
+        #[test]
+        fn the_removed_native_log_note_call_is_not_reachable_from_this_file() {
+            let source = include_str!("native_runtime.rs");
+            let removed_call = ["write_native", "_log_note("].concat();
+            assert!(
+                !source.contains(removed_call.as_str()),
+                "system::native_runtime must not call the D7-era log-note symbol"
             );
         }
     }

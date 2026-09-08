@@ -23,6 +23,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-protocol"
   "mesh-llm-release-footer"
   "mesh-llm-routing"
+  "mesh-llm-runtime-event-contracts"
   "mesh-llm-runtime-install"
   "mesh-llm-sdk"
   "mesh-llm-guardrails"

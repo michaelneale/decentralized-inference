@@ -70,7 +70,31 @@ pub struct RuntimeCapabilityFlags {
     pub accepting_local: bool,
     /// Accepting inference from remote mesh peers.
     pub accepting_remote: bool,
+    /// Additive API capability (not a routing role, unlike the booleans
+    /// above): advertises `GET /api/runtime/events/v1` when present. A UI
+    /// or client must treat its absence, a 404/403, or an unsupported
+    /// mandatory frame as "fall back to the legacy stream" rather than an
+    /// error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_events: Option<RuntimeEventsCapability>,
 }
+
+/// The frozen `capabilities.runtime_events` object on both `GET /api/runtime`
+/// and `GET /api/status`. `cursor` names the wire cursor grammar prefix
+/// (`rt1:<process-instance-uuid>:<sequence>`), not a live cursor value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeEventsCapability {
+    pub version: u8,
+    pub endpoint: &'static str,
+    pub cursor: &'static str,
+}
+
+/// The one frozen value ever advertised for this capability in v1.
+pub const RUNTIME_EVENTS_CAPABILITY: RuntimeEventsCapability = RuntimeEventsCapability {
+    version: 1,
+    endpoint: "/api/runtime/events/v1",
+    cursor: "rt1",
+};
 
 // ─── Lifecycle Instance Payloads ──────────────────────────────────────────────
 

@@ -278,10 +278,20 @@ async fn artifact_transfer_stream_uses_mesh_subprotocol_and_rejects_dedicated_al
     dedicated_send
         .write_all(&[skippy_protocol::STAGE_STREAM_ARTIFACT_TRANSFER])
         .await?;
-    write_len_prefixed(&mut dedicated_send, &request.encode_to_vec()).await?;
-    dedicated_send.finish()?;
+    let stop_code =
+        tokio::time::timeout(std::time::Duration::from_secs(5), dedicated_send.stopped()).await??;
+    assert_eq!(
+        stop_code.map(|code| code.into_inner()),
+        Some(0),
+        "dedicated stage ALPN rejection must stop sending with QUIC error code 0"
+    );
+    let rejection = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_len_prefixed(&mut dedicated_recv),
+    )
+    .await?;
     assert!(
-        read_len_prefixed(&mut dedicated_recv).await.is_err(),
+        rejection.is_err(),
         "dedicated stage ALPN must reject artifact transfer"
     );
     assert!(package_dir.join("model-package.json").is_file());

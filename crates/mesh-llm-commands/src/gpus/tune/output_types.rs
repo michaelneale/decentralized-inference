@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::*;
 
@@ -86,7 +86,7 @@ pub(crate) struct TuneTargetReport {
     pub launch: Option<TuneLaunchPreview>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct TuneBenchmarkCandidate {
     pub ctx_size: u32,
     pub batch: u32,
@@ -100,7 +100,7 @@ pub(crate) struct TuneBenchmarkCandidate {
     pub flash_attention: Option<TuneFlashAttentionValue>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub(crate) enum TuneBenchmarkSpeculativeCandidate {
     Disabled,
@@ -130,7 +130,7 @@ pub(crate) enum TuneBenchmarkSpeculativeCandidate {
     },
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct TuneBenchmarkTrial {
     pub candidate: TuneBenchmarkCandidate,
     pub status: TuneBenchmarkTrialStatus,
@@ -140,6 +140,18 @@ pub(crate) struct TuneBenchmarkTrial {
     pub elapsed_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_tok_s: Option<f64>,
+    // Time to first non-empty streamed content delta, in milliseconds.
+    // Null (never zero) on trial failure, on a timeout/disconnect/malformed
+    // stream before any content arrived, or on any pre-streaming
+    // (`TuneBenchmarkMetricsSchema::NonStreamingHistorical`) trial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    // `completion_tokens / max(total_request_elapsed - ttft, epsilon)`.
+    // Null (never zero) whenever `ttft_ms` is null or the decode interval is
+    // zero/negative -- see `streaming::decode_only_tok_s`, the single
+    // function that computes this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_only_tok_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timings: Option<TuneBenchmarkTimingStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +160,7 @@ pub(crate) struct TuneBenchmarkTrial {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct TuneBenchmarkTimingStats {
     pub total_ms: f64,
     pub setup_ms: f64,
@@ -160,14 +172,48 @@ pub(crate) struct TuneBenchmarkTimingStats {
     pub readiness_attempts: u32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TuneBenchmarkTrialStatus {
     Succeeded,
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+// Schema/comparability marker for `ttft_ms` / `decode_only_tok_s`. Recorded
+// on every benchmark target report; `#[serde(default)]` makes a pre-task-18
+// JSON report (missing this field entirely) deserialize as
+// `NonStreamingHistorical` instead of silently reading as comparable
+// streaming data. `decode_tok_s` itself is unaffected: its definition never
+// changed and stays comparable across both schema versions.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TuneBenchmarkMetricsSchema {
+    #[default]
+    NonStreamingHistorical,
+    StreamingV1,
+}
+
+// Frozen definition of what one benchmark "trial" and one "pair" mean,
+// recorded for auditability by downstream comparison/certification tooling.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TuneBenchmarkTrialUnit {
+    pub trial: String,
+    pub pair: String,
+}
+
+pub(crate) fn benchmark_trial_unit_definition() -> TuneBenchmarkTrialUnit {
+    TuneBenchmarkTrialUnit {
+        trial: "One trial is one fresh process launch, one readiness wait, \
+                one warmup request excluded from metrics, one measured \
+                streaming request, and one shutdown."
+            .to_string(),
+        pair: "A pair is two trials, one per side, with the same prompt \
+               and seed, side order randomized per pair."
+            .to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct TuneBenchmarkTargetReport {
     pub requested: String,
     pub throughput_tolerance_pct: f64,
@@ -181,6 +227,10 @@ pub(crate) struct TuneBenchmarkTargetReport {
     pub selection_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trials: Vec<TuneBenchmarkTrial>,
+    #[serde(default)]
+    pub metrics_schema: TuneBenchmarkMetricsSchema,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_unit: Option<TuneBenchmarkTrialUnit>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]

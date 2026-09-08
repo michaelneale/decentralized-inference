@@ -10,9 +10,8 @@ use crate::frontend::generation::OpenAiGenerationIds;
 use crate::frontend::generation::PhaseTimer;
 use crate::frontend::generation::StageOpenAiBackend;
 use crate::frontend::generation::TokenControl;
-use crate::frontend::generation_receipt::{
-    GenerationCommit, GenerationStart, complete_generation_before_cleanup,
-};
+use crate::frontend::generation_receipt::GenerationLifecycleState;
+use crate::frontend::generation_receipt::complete_generation_before_cleanup;
 use crate::frontend::iteration_scheduler::CacheRuntimeContext;
 use crate::frontend::iteration_scheduler::DirectIterationChannel;
 use crate::frontend::iteration_scheduler::ScheduledGenerationRequest;
@@ -38,6 +37,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::receipt_lifecycle::{begin_generation_receipt, commit_local_generation_token};
 use super::{LocalGenerationReceiptFinalization, prompt_fits_single_prefill_sample};
 
 mod exact_state_recording;
@@ -60,25 +60,6 @@ pub(in crate::frontend) fn resident_capacity_admission_error(
         ),
     )
     .with_retry_after_secs(GENERATION_RETRY_AFTER_SECS)
-}
-
-pub(super) fn commit_local_generation_token(
-    config: Option<&crate::frontend::GenerationReceiptConfig>,
-    request_id: u64,
-    session_id: u64,
-    generated_token_count: &mut usize,
-    token_id: i32,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    *generated_token_count = generated_token_count.saturating_add(1);
-    config.committed(GenerationCommit {
-        request_id,
-        session_id,
-        generated_token_count: *generated_token_count,
-        token_ids: vec![token_id].into_boxed_slice(),
-    });
 }
 
 struct PromptPrefillResult {
@@ -378,22 +359,19 @@ impl StageOpenAiBackend {
         let session_id = request.ids.session_label.clone();
         let receipt_request_id = request.ids.request_id;
         let receipt_session_id = request.ids.session_id;
-        let receipt_prompt_token_ids = self
-            .generation_receipt
-            .as_ref()
-            .map(|_| Arc::<[i32]>::from(request.prompt_token_ids));
-        if let Some(config) = self.generation_receipt.as_ref() {
-            config.begin(GenerationStart {
-                request_id: receipt_request_id,
-                session_id: receipt_session_id,
-                agent_session_id: request.ids.agent_session_id.clone(),
-                prompt_token_ids: Arc::clone(
-                    receipt_prompt_token_ids
-                        .as_ref()
-                        .expect("receipt prompt exists when receipt config exists"),
-                ),
-            });
-        }
+        let receipt_prompt_token_ids = begin_generation_receipt(
+            self.generation_receipt.as_ref(),
+            request.ids,
+            request.prompt_token_ids,
+        );
+        let mut lifecycle = GenerationLifecycleState::new(
+            self.generation_lifecycle.as_ref(),
+            request.ids.request_id,
+            request.ids.session_id,
+            request.ids.agent_session_id.clone(),
+            request.ids.frontend_request_id,
+            request.prompt_token_ids,
+        );
         let receipt_observation = self.generation_receipt.as_ref().map(|config| {
             RefCell::new(Some(
                 config.observation(
@@ -419,12 +397,16 @@ impl StageOpenAiBackend {
                 &mut lifecycle_committed_token_count,
                 token_id,
             );
+            lifecycle.commit(token_id, request.ids.request_started_at.elapsed());
             let control = on_token(token_id)?;
             if control == TokenControl::Stop
                 && let Some(observation) = receipt_observation.as_ref()
                 && let Some(observation) = observation.borrow_mut().as_mut()
             {
                 observation.mark_callback_stop();
+            }
+            if control == TokenControl::Stop {
+                lifecycle.mark_callback_stop();
             }
             Ok(control)
         };
@@ -466,10 +448,13 @@ impl StageOpenAiBackend {
             .as_ref()
             .and_then(|observation| observation.borrow_mut().take());
         let generation_succeeded = result.is_ok();
+        if receipt_cancelled {
+            lifecycle.mark_cancelled();
+        }
         complete_generation_before_cleanup(
             result,
             || {
-                self.finalize_generation_receipt(
+                let receipt_result = self.finalize_generation_receipt(
                     LocalGenerationReceiptFinalization {
                         session_label: &session_id,
                         request_id: receipt_request_id,
@@ -479,9 +464,12 @@ impl StageOpenAiBackend {
                         observation: receipt_observation,
                         cancelled: receipt_cancelled,
                         model_generation_elapsed: receipt_model_generation_elapsed,
+                        frontend_request_id: request.ids.frontend_request_id,
                     },
                     generation_succeeded,
-                )
+                );
+                lifecycle.finish(generation_succeeded);
+                receipt_result
             },
             || self.cleanup_local_generation_session(&session_id, request.ids),
         )?;

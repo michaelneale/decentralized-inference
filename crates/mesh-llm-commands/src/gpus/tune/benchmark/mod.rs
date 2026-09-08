@@ -2,6 +2,7 @@
 // Split from benchmark.rs to improve maintainability.
 
 mod candidates;
+mod streaming;
 #[cfg(test)]
 mod tests;
 mod trial;
@@ -22,9 +23,9 @@ pub(crate) use trial_config::trial_config;
 // output_types.rs and benchmark_selection.rs are flat-included in the tune
 // parent, so we reference them via crate::gpus::tune::*.
 pub(crate) use crate::gpus::tune::{
-    TuneBenchmarkCandidate, TuneBenchmarkSpeculativeCandidate, TuneBenchmarkTargetReport,
-    TuneBenchmarkTimingStats, TuneBenchmarkTrial, TuneBenchmarkTrialStatus,
-    select_benchmark_trials,
+    TuneBenchmarkCandidate, TuneBenchmarkMetricsSchema, TuneBenchmarkSpeculativeCandidate,
+    TuneBenchmarkTargetReport, TuneBenchmarkTimingStats, TuneBenchmarkTrial,
+    TuneBenchmarkTrialStatus, benchmark_trial_unit_definition, select_benchmark_trials,
 };
 
 /// Request structure for running benchmark plans.
@@ -112,6 +113,8 @@ fn run_target_benchmarks(
         pareto_frontier: selection.pareto_frontier,
         selection_reason: selection.reason,
         trials,
+        metrics_schema: TuneBenchmarkMetricsSchema::StreamingV1,
+        trial_unit: Some(benchmark_trial_unit_definition()),
     })
 }
 

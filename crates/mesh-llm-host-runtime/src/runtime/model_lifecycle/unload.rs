@@ -65,14 +65,17 @@ pub(crate) async fn run_auto_unload_runtime_model(
         runtime_model_audit_context(Some(&unload.model_name), &unload.instance_id)
             .outcome("started"),
     );
+    // Reservation acquired before any unload work begins, per plan task 9.
+    let unload_op = UnloadOperation::begin(&unload.model_name);
     let drain_delay = if options.force {
+        unload_op.forced(&unload.model_name);
         Duration::ZERO
     } else {
         options.drain_timeout
     };
     match unload.owner {
         RuntimeUnloadOwner::Runtime => {
-            run_auto_unload_runtime_entry(ctx, unload, drain_delay, unload_started).await
+            run_auto_unload_runtime_entry(ctx, unload, drain_delay, unload_started, unload_op).await
         }
         RuntimeUnloadOwner::Managed => {
             let Some(controller) = ctx.managed_models.remove(&unload.instance_id) else {
@@ -85,6 +88,7 @@ pub(crate) async fn run_auto_unload_runtime_model(
                             u64::try_from(unload_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         ),
                 );
+                unload_op.failed(&unload.model_name);
                 anyhow::bail!(
                     "model or runtime instance '{}' is not loaded",
                     unload.instance_id
@@ -117,10 +121,13 @@ pub(crate) async fn run_auto_unload_runtime_model(
                     }
                 };
                 if draining {
+                    unload_op.session_draining_started(&model);
                     let result = DrainCoordinator::default()
                         .wait_for_unload_ready(&lifecycle)
                         .await;
+                    unload_op.session_draining_completed(&model);
                     if result == DrainResult::ForceCancelled {
+                        unload_op.forced(&model);
                         tracing::warn!(
                             model,
                             instance_id = unload.instance_id,
@@ -140,8 +147,9 @@ pub(crate) async fn run_auto_unload_runtime_model(
             let _ = stop_tx.send(true);
             await_managed_model_stop(task, drain_delay, options.force, &model).await;
             ctx.node.unregister_runtime_instance_lifecycle(active_port);
-            {
+            let process_already_crashed = {
                 let mut record = lifecycle.lock().await;
+                let crashed = record.state() == InstanceLifecycleState::Failed;
                 if record.state() == InstanceLifecycleState::Unloading
                     && let Err(error) = record.transition_to(InstanceLifecycleState::Stopped)
                 {
@@ -152,7 +160,8 @@ pub(crate) async fn run_auto_unload_runtime_model(
                         "managed instance stopped with a stale lifecycle state"
                     );
                 }
-            }
+                crashed
+            };
             if !runtime_registry_has_model(ctx.runtime_instance_registry, &model).await {
                 publish_runtime_llama_unavailable(
                     ctx.runtime_data_producer,
@@ -180,6 +189,7 @@ pub(crate) async fn run_auto_unload_runtime_model(
                         u64::try_from(unload_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     ),
             );
+            unload_op.reconcile(&model, process_already_crashed);
             Ok(api::RuntimeUnloadResponse {
                 model,
                 instance_id: unload.instance_id,
@@ -228,6 +238,7 @@ pub(crate) async fn run_auto_unload_runtime_entry(
     unload: RuntimeUnloadCandidate,
     drain_delay: Duration,
     unload_started: Instant,
+    unload_op: UnloadOperation,
 ) -> Result<api::RuntimeUnloadResponse> {
     let Some(entry) = ctx.runtime_models.remove(&unload.instance_id) else {
         record_runtime_operational_event_with_context(
@@ -239,6 +250,7 @@ pub(crate) async fn run_auto_unload_runtime_entry(
                     u64::try_from(unload_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ),
         );
+        unload_op.failed(&unload.model_name);
         anyhow::bail!(
             "model or runtime instance '{}' is not loaded",
             unload.instance_id
@@ -306,10 +318,13 @@ pub(crate) async fn run_auto_unload_runtime_entry(
         .await;
     }
     if draining {
+        unload_op.session_draining_started(&model);
         let result = DrainCoordinator::default()
             .wait_for_unload_ready(&lifecycle)
             .await;
+        unload_op.session_draining_completed(&model);
         if result == DrainResult::ForceCancelled {
+            unload_op.forced(&model);
             tracing::warn!(
                 model,
                 instance_id = unload.instance_id,
@@ -328,8 +343,14 @@ pub(crate) async fn run_auto_unload_runtime_entry(
     ctx.node.unregister_runtime_instance_lifecycle(port);
     remove_dashboard_context_usage(ctx.dashboard_context_usage, &model, &handle).await;
     handle.shutdown().await;
-    {
+    // Native/process-supervision reconciliation: a racing exit-watcher event
+    // may have already marked this instance Failed before this orderly
+    // unload reached here. Read the state BEFORE the Stopped transition
+    // below so the reservation resolves through the observed crash, not a
+    // false "unload completed".
+    let process_already_crashed = {
         let mut record = lifecycle.lock().await;
+        let crashed = record.state() == InstanceLifecycleState::Failed;
         if record.state() == InstanceLifecycleState::Unloading
             && let Err(error) = record.transition_to(InstanceLifecycleState::Stopped)
         {
@@ -340,7 +361,8 @@ pub(crate) async fn run_auto_unload_runtime_entry(
                 "runtime instance stopped with a stale lifecycle state"
             );
         }
-    }
+        crashed
+    };
     drop(capacity_reservation);
     remove_dashboard_process(ctx.dashboard_processes, &unload.instance_id).await;
     if let Some(cs) = ctx.console_state {
@@ -357,6 +379,7 @@ pub(crate) async fn run_auto_unload_runtime_entry(
             .outcome("completed")
             .duration_ms(u64::try_from(unload_started.elapsed().as_millis()).unwrap_or(u64::MAX)),
     );
+    unload_op.reconcile(&model, process_already_crashed);
     Ok(api::RuntimeUnloadResponse {
         model,
         instance_id: unload.instance_id,
@@ -379,6 +402,10 @@ pub(crate) async fn run_auto_handle_runtime_exit(
     if !matches {
         return;
     }
+    // Process supervision observed a crash with no orderly unload sequence
+    // in flight; reconcile with a synthesized terminal through the frozen
+    // `ProcessCrash` reason rather than leaving the operation unresolved.
+    reconcile_process_crash(&model);
     if let Some(entry) = ctx.runtime_models.remove(&instance_id) {
         let RuntimeModelHandleEntry {
             handle,

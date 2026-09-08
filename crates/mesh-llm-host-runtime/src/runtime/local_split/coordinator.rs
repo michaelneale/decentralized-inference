@@ -136,6 +136,11 @@ pub(super) struct SplitTopologyCoordinator {
     /// First observation of a withdraw-only stage loss. Cleared whenever the
     /// split is healthy or has a viable replacement or fallback path.
     pub(super) stage_loss_first_seen: Option<Instant>,
+    /// The `unavailable_stage_nodes` set observed on the previous
+    /// `evaluate_replan` tick (runtime-events flap/recovery classification
+    /// only, `topology_events::classify_connection_changes`; carries no
+    /// routing/election authority of its own).
+    pub(super) previously_unavailable_stage_nodes: Vec<iroh::EndpointId>,
     /// A locked topology may be withdrawn after stage loss, but never replaced
     /// or collapsed to a local fallback.
     pub(super) topology_locked: bool,
@@ -332,6 +337,12 @@ impl SplitTopologyCoordinator {
         unavailable_stage_nodes: &[iroh::EndpointId],
         candidate: Option<&SplitTopologyGeneration>,
     ) -> Option<bool> {
+        // Computed unconditionally (cheap VRAM-vs-model-size arithmetic, no
+        // I/O): the local-fallback-capacity boolean is the existing
+        // §8.14 `resource_pressure_changed` input regardless of whether the
+        // locked/unlocked branch below happens to consume it for a
+        // decision this tick.
+        let local_capacity_available = self.local_model_fits();
         let decision = if self.topology_locked {
             split_locked_loss_recovery_decision(
                 &self.active,
@@ -344,12 +355,21 @@ impl SplitTopologyCoordinator {
                 connected_node_ids,
                 unavailable_stage_nodes,
                 candidate,
-                self.local_model_fits(),
+                local_capacity_available,
             )
         };
         if !matches!(decision, SplitLossRecoveryDecision::Withdraw) {
             self.stage_loss_first_seen = None;
         }
+        super::topology_events::report_recovery_decision(
+            &self.active.topology_id,
+            matches!(decision, SplitLossRecoveryDecision::NoActiveStageLoss),
+            matches!(decision, SplitLossRecoveryDecision::Withdraw),
+            &self.previously_unavailable_stage_nodes,
+            unavailable_stage_nodes,
+            local_capacity_available,
+        );
+        self.previously_unavailable_stage_nodes = unavailable_stage_nodes.to_vec();
         match decision {
             SplitLossRecoveryDecision::NoActiveStageLoss => None,
             SplitLossRecoveryDecision::ReplacementSplit => {
@@ -601,6 +621,8 @@ impl SplitTopologyCoordinator {
         reason: &'static str,
         unavailable_stage_nodes: Vec<iroh::EndpointId>,
     ) -> bool {
+        let topology_op =
+            super::topology_events::TopologyWithdrawalOperation::begin(&self.active.topology_id);
         match self
             .withdraw_active_generation(reason, unavailable_stage_nodes)
             .await
@@ -614,7 +636,10 @@ impl SplitTopologyCoordinator {
                 );
                 true
             }
-            _ => false,
+            _ => {
+                topology_op.withdrawn();
+                false
+            }
         }
     }
 

@@ -872,6 +872,8 @@ fn succeeded_trial_with_memory(
         completion_tokens: Some(128),
         elapsed_ms: Some(request_ms),
         decode_tok_s: Some(decode_tok_s),
+        ttft_ms: None,
+        decode_only_tok_s: None,
         timings: Some(TuneBenchmarkTimingStats {
             total_ms: request_ms + 1000.0,
             setup_ms: 10.0,
@@ -906,4 +908,117 @@ fn trial_startup_failure_scans_plain_serve_logs() {
 
     let error = trial_startup_failure_from_log_line(line).expect("startup error");
     assert_eq!(error, line);
+}
+
+#[test]
+fn metrics_schema_default_is_non_streaming_historical() {
+    assert_eq!(
+        TuneBenchmarkMetricsSchema::default(),
+        TuneBenchmarkMetricsSchema::NonStreamingHistorical
+    );
+}
+
+#[test]
+fn benchmark_trial_unit_definition_describes_trial_and_pair() {
+    let definition = benchmark_trial_unit_definition();
+    assert!(
+        definition
+            .trial
+            .contains("warmup request excluded from metrics")
+    );
+    assert!(definition.pair.contains("randomized per pair"));
+}
+
+#[test]
+fn null_streaming_metrics_are_omitted_from_json_not_serialized_as_null_or_zero() {
+    let trial = succeeded_trial(4096, 18.65, 2000.0);
+    assert_eq!(trial.ttft_ms, None);
+    assert_eq!(trial.decode_only_tok_s, None);
+
+    let value = serde_json::to_value(&trial).expect("trial serializes");
+    let object = value.as_object().expect("trial serializes as an object");
+    assert!(
+        !object.contains_key("ttft_ms"),
+        "a null ttft_ms must be omitted, not written as `null`"
+    );
+    assert!(
+        !object.contains_key("decode_only_tok_s"),
+        "a null decode_only_tok_s must be omitted, not written as `null` or `0`"
+    );
+}
+
+#[test]
+fn old_schema_json_without_streaming_fields_deserializes_as_non_streaming_historical() {
+    let old_style = serde_json::json!({
+        "requested": "model",
+        "throughput_tolerance_pct": 10.0,
+        "best": {
+            "candidate": {
+                "ctx_size": 4096,
+                "batch": 2048,
+                "ubatch": 1024,
+                "cache_type_k": "q8_0",
+                "cache_type_v": "q8_0",
+                "mmap": "disabled",
+                "mlock": false,
+                "speculative": {"type": "disabled"}
+            },
+            "status": "succeeded",
+            "completion_tokens": 128,
+            "elapsed_ms": 2000.0,
+            "decode_tok_s": 18.65,
+            "timings": {
+                "total_ms": 2100.0,
+                "setup_ms": 10.0,
+                "readiness_ms": 90.0,
+                "request_ms": 2000.0,
+                "shutdown_ms": 10.0,
+                "readiness_attempts": 3
+            },
+            "log_path": "/tmp/log"
+        },
+        "trials": []
+    });
+
+    let report: TuneBenchmarkTargetReport = serde_json::from_value(old_style)
+        .expect("a pre-streaming report (missing every task-18 field) must still deserialize");
+
+    assert_eq!(
+        report.metrics_schema,
+        TuneBenchmarkMetricsSchema::NonStreamingHistorical,
+        "a report with no metrics_schema key must be marked non-comparable, not treated as streaming"
+    );
+    assert!(report.trial_unit.is_none());
+    let best = report.best.expect("best trial present");
+    assert_eq!(
+        best.decode_tok_s,
+        Some(18.65),
+        "historical decode_tok_s must round-trip unchanged"
+    );
+    assert_eq!(best.ttft_ms, None);
+    assert_eq!(best.decode_only_tok_s, None);
+}
+
+#[test]
+fn new_streaming_report_marks_streaming_v1_and_records_trial_unit() {
+    let report = TuneBenchmarkTargetReport {
+        requested: "model".to_string(),
+        throughput_tolerance_pct: 10.0,
+        best: None,
+        raw_best: None,
+        pareto_frontier: Vec::new(),
+        selection_reason: None,
+        trials: Vec::new(),
+        metrics_schema: TuneBenchmarkMetricsSchema::StreamingV1,
+        trial_unit: Some(benchmark_trial_unit_definition()),
+    };
+
+    let value = serde_json::to_value(&report).expect("report serializes");
+    assert_eq!(value["metrics_schema"], "streaming_v1");
+    assert!(
+        value["trial_unit"]["trial"]
+            .as_str()
+            .unwrap()
+            .contains("warmup")
+    );
 }

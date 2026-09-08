@@ -48,10 +48,16 @@ pub(super) fn runtime_model_audit_context(
     }
 }
 
+mod events;
 mod load;
 pub(crate) mod reconciliation;
 mod unload;
 
+#[cfg(feature = "dynamic-native-runtime")]
+pub(super) use events::native_load_observation;
+#[cfg(not(feature = "dynamic-native-runtime"))]
+pub(super) use events::submit_load_progress;
+pub(super) use events::{LoadOperation, UnloadOperation, reconcile_process_crash};
 pub(crate) use load::{normalize_runtime_model_request_for_config, run_auto_load_runtime_model};
 pub(crate) use unload::{run_auto_handle_runtime_exit, run_auto_unload_runtime_model};
 
@@ -73,6 +79,8 @@ pub(super) struct RunAutoShutdownContext<'a> {
     pub(super) api_proxy_handle: tokio::task::JoinHandle<()>,
     pub(super) console_server_handle: Option<tokio::task::JoinHandle<()>>,
     pub(super) discovery_publisher: Option<tokio::task::JoinHandle<()>>,
+    pub(super) presentation_subscriber: Option<tokio::task::JoinHandle<()>>,
+    pub(super) runtime_event_driver: crate::runtime_events::driver::EngineDriverHandle,
     pub(super) lan_bootstrap_tasks: LanBootstrapTasks,
     pub(super) runtime_models: &'a mut HashMap<String, RuntimeModelHandleEntry>,
     pub(super) runtime_survey_models: &'a mut HashMap<String, survey::SurveyLoadedModel>,
@@ -107,6 +115,8 @@ pub(super) struct RunAutoRuntimeLifecycleContext<'a> {
     pub(super) api_proxy_handle: tokio::task::JoinHandle<()>,
     pub(super) console_server_handle: Option<tokio::task::JoinHandle<()>>,
     pub(super) discovery_publisher: Option<tokio::task::JoinHandle<()>>,
+    pub(super) presentation_subscriber: Option<tokio::task::JoinHandle<()>>,
+    pub(super) runtime_event_driver: crate::runtime_events::driver::EngineDriverHandle,
     pub(super) startup_specs: &'a [StartupModelSpec],
     pub(super) tunnel_mgr: &'a crate::network::tunnel::Manager,
     pub(super) skippy_telemetry: &'a crate::inference::skippy::SkippyTelemetryOptions,

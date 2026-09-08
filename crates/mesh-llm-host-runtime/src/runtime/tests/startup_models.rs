@@ -1,6 +1,25 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[test]
+fn parser_mode_runtime_events_maps_every_config_mode() {
+    use mesh_llm_config::LifecycleLogParserMode;
+    use skippy_runtime::NativeLogParserMode;
+
+    assert_eq!(
+        native_log_parser_mode(LifecycleLogParserMode::Auto),
+        NativeLogParserMode::Auto
+    );
+    assert_eq!(
+        native_log_parser_mode(LifecycleLogParserMode::Enabled),
+        NativeLogParserMode::Enabled
+    );
+    assert_eq!(
+        native_log_parser_mode(LifecycleLogParserMode::Disabled),
+        NativeLogParserMode::Disabled
+    );
+}
+
 #[tokio::test]
 async fn advisory_startup_task_does_not_block_runtime_startup() {
     let started = std::sync::Arc::new(tokio::sync::Notify::new());

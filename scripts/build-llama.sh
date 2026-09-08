@@ -385,6 +385,7 @@ if [[ "$LLAMA_STAGE_BUILD_TESTS" == "ON" ]]; then
     skippy-hardware-application-probe
     skippy-model-fixture-generator
     skippy-model-loader-accounting
+    skippy-runtime-events-test
     skippy-noalloc-graph-planning
     skippy-renamed-multishard-planning
     skippy-stage-slice-plan

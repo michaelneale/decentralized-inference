@@ -1,0 +1,149 @@
+From f3b2b6a0f4cd4bee514b8d0d67f62662e263fd5b Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Sat, 5 Sep 2026 02:01:58 -0400
+Subject: [PATCH] skippy: add kv-events family (bit 33)
+
+Adds SKIPPY_FEATURE_KV_EVENTS (bit 33): KV/cache init, pressure
+crossed/cleared, context-capacity approaching/exhausted, published
+through skippy_emit_kv_event under the existing
+SKIPPY_RUNTIME_EVENT_CATEGORY_KV via the reporter patch's shared
+dispatch() seam. No further ABI bump.
+
+Adds ctest case skippy_runtime_event_kv_events_dispatch.
+
+Renumbered from 0045 (bit 31) to 0058 (bit 33), then again to 0059
+(bit 33, unchanged); see 0057 for why.
+---
+ include/skippy/common.h             |  1 +
+ include/skippy/events.h             | 14 ++++++++++++++
+ src/CMakeLists.txt                  |  3 ++-
+ src/skippy/abi.cpp                  |  3 ++-
+ src/skippy/events.cpp               | 11 +++++++++++
+ src/skippy/tests/runtime_events.cpp | 13 +++++++++++++
+ 6 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index e9eed11a7..f710a1289 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -100,6 +100,7 @@ enum skippy_feature {
+ // combine these with the enum bits identically either way.
+ #define SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER ((uint64_t)1 << 31)
+ #define SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2   ((uint64_t)1 << 32)
++#define SKIPPY_FEATURE_KV_EVENTS              ((uint64_t)1 << 33)
+ 
+ enum skippy_status {
+     SKIPPY_STATUS_OK                      = 0,
+diff --git a/include/skippy/events.h b/include/skippy/events.h
+index 69e2f04b2..bc6ee6647 100644
+--- a/include/skippy/events.h
++++ b/include/skippy/events.h
+@@ -42,6 +42,13 @@ enum {
+     SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_TENSORS_OFFLOADED   = 102,
+     SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_TOKENIZER_READY     = 103,
+     SKIPPY_RUNTIME_EVENT_KIND_MODEL_LOAD_AUX_COMPONENT_READY = 104,
++
++    // SKIPPY_FEATURE_KV_EVENTS (category KV).
++    SKIPPY_RUNTIME_EVENT_KIND_KV_INITIALIZED                  = 200,
++    SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CROSSED             = 201,
++    SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CLEARED             = 202,
++    SKIPPY_RUNTIME_EVENT_KIND_KV_CONTEXT_APPROACHING_CAPACITY = 203,
++    SKIPPY_RUNTIME_EVENT_KIND_KV_CONTEXT_CAPACITY_EXHAUSTED   = 204,
+ };
+ 
+ typedef uint32_t skippy_runtime_event_emitter_kind;
+@@ -157,6 +164,13 @@ LLAMA_API void skippy_emit_model_load_event_v2(
+         const char * detail_ptr,
+         uint64_t detail_len);
+ 
++/** @brief Emits SKIPPY_FEATURE_KV_EVENTS category KV events. */
++LLAMA_API void skippy_emit_kv_event(
++        skippy_runtime_event_kind kind,
++        uint64_t session_id,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2ab35e564..9ef935595 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -117,7 +117,8 @@ if (LLAMA_STAGE_BUILD_TESTS)
+             clear_is_quiescent
+             struct_size_extension
+             concurrent_dispatch
+-            model_load_events_v2_dispatch)
++            model_load_events_v2_dispatch
++            kv_events_dispatch)
+         add_test(
+             NAME skippy_runtime_event_${SKIPPY_EVENT_TEST_CASE}
+             COMMAND skippy-runtime-events-test ${SKIPPY_EVENT_TEST_CASE})
+diff --git a/src/skippy/abi.cpp b/src/skippy/abi.cpp
+index 456126ad1..311e75847 100644
+--- a/src/skippy/abi.cpp
++++ b/src/skippy/abi.cpp
+@@ -41,7 +41,8 @@ uint64_t skippy_abi_features(void) {
+            SKIPPY_FEATURE_ACTIVATION_BOUNDARY |
+            SKIPPY_FEATURE_MODEL_SOURCE |
+            SKIPPY_FEATURE_RUNTIME_EVENT_REPORTER |
+-           SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2;
++           SKIPPY_FEATURE_MODEL_LOAD_EVENTS_V2 |
++           SKIPPY_FEATURE_KV_EVENTS;
+ }
+ 
+ void skippy_error_free(struct skippy_error * error) {
+diff --git a/src/skippy/events.cpp b/src/skippy/events.cpp
+index 2999e0ea5..d9a67e185 100644
+--- a/src/skippy/events.cpp
++++ b/src/skippy/events.cpp
+@@ -183,3 +183,14 @@ void skippy_emit_model_load_event_v2(
+         SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, numeric_summary_1, 0, 0,
+         detail_ptr, detail_len);
+ }
++
++void skippy_emit_kv_event(
++        skippy_runtime_event_kind kind,
++        uint64_t session_id,
++        uint64_t numeric_summary_0,
++        uint64_t numeric_summary_1) {
++    skippy::events::dispatch(
++        SKIPPY_RUNTIME_EVENT_CATEGORY_KV, kind, 0, 0, session_id,
++        SKIPPY_RUNTIME_EVENT_FAILURE_NONE, numeric_summary_0, numeric_summary_1, 0, 0,
++        nullptr, 0);
++}
+diff --git a/src/skippy/tests/runtime_events.cpp b/src/skippy/tests/runtime_events.cpp
+index 039615df3..b717daa74 100644
+--- a/src/skippy/tests/runtime_events.cpp
++++ b/src/skippy/tests/runtime_events.cpp
+@@ -232,6 +232,18 @@ int test_model_load_events_v2_dispatch() {
+     return 0;
+ }
+ 
++int test_kv_events_dispatch() {
++    capture c;
++    install(c);
++    skippy_emit_kv_event(SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CROSSED, 5, 9, 0);
++    CHECK(c.count.load() == 1);
++    CHECK(c.last_category.load() == SKIPPY_RUNTIME_EVENT_CATEGORY_KV);
++    CHECK(c.last_kind.load() == SKIPPY_RUNTIME_EVENT_KIND_KV_PRESSURE_CROSSED);
++    CHECK(c.last_numeric_summary_0.load() == 9);
++    skippy_clear_runtime_event_reporter();
++    return 0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char ** argv) {
+@@ -247,6 +259,7 @@ int main(int argc, char ** argv) {
+     if (name == "struct_size_extension") return test_struct_size_extension();
+     if (name == "concurrent_dispatch") return test_concurrent_dispatch();
+     if (name == "model_load_events_v2_dispatch") return test_model_load_events_v2_dispatch();
++    if (name == "kv_events_dispatch") return test_kv_events_dispatch();
+     std::fprintf(stderr, "unknown test: %s\n", name.c_str());
+     return 2;
+ }
+-- 
+2.50.1 (Apple Git-155)
+

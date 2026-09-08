@@ -61,6 +61,7 @@ fn test_snapshot(
             plugins: vec![],
             config_toml: None,
             mesh_requirements: None,
+            lifecycle_log_parser: None,
         }),
         hostname: Some("control.test".to_string()),
     }
@@ -524,6 +525,7 @@ async fn control_plane_client_apply_config_get_watch_refresh_and_close() {
                 plugins: vec![],
                 config_toml: None,
                 mesh_requirements: None,
+                lifecycle_log_parser: None,
             },
         )
         .await
