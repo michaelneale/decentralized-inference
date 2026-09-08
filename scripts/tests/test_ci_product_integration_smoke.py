@@ -93,8 +93,9 @@ esac
         # behind the suite manifest's independently recorded device.
         consumer = (ROOT / "scripts" / path.name).read_text()
         device_setup = consumer[:consumer.index("MESH_LLM=")]
+        # Fail explicitly: errexit can be disabled by the shell invocation.
         path.write_text(
-            device_setup + '\n[[ "$SMOKE_DEVICE" == "$STUB_EXPECTED_DEVICE" ]]\n' +
+            device_setup + '\n[[ "$SMOKE_DEVICE" == "$STUB_EXPECTED_DEVICE" ]] || exit 97\n' +
             """
 set -euo pipefail
 phase="${MESH_PRODUCT_INTEGRATION_PHASE:?missing phase}"
@@ -123,6 +124,7 @@ fi
         recurrent_artifact_id: str = RECURRENT_ARTIFACT_ID,
         recurrent_sha256: str | None = None,
         split_evidence_mode: str = "valid",
+        script_mutation: tuple[str, str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -139,6 +141,13 @@ fi
                 "ci-two-node-split-smoke.sh",
             ):
                 self.write_stub(scripts / name)
+
+            if script_mutation is not None:
+                name, original, replacement = script_mutation
+                script = scripts / name
+                source = script.read_text()
+                self.assertIn(original, source, f"mutation target missing in {name}")
+                script.write_text(source.replace(original, replacement, 1))
 
             binary = root / "mesh-llm"
             binary.touch(mode=0o755)
@@ -283,6 +292,50 @@ fi
                 self.assertEqual(result.returncode, 0, result.stderr)
                 assert manifest is not None
                 self.assertEqual(manifest["provenance"]["device"], expected_device)
+
+    def test_device_drift_mutations_fail_the_owning_phase(self) -> None:
+        # Mutate only disposable scripts, retaining the real caller and device
+        # guards. Exact status/phase assertions exclude unrelated shell failures.
+        cases = (
+            (
+                "standalone caller override",
+                (PRODUCT_SCRIPT.name, 'MESH_CI_DEVICE="$DEVICE"', 'MESH_CI_DEVICE="CPU"'),
+                "dense-standalone",
+            ),
+            (
+                "compatibility caller override",
+                (PRODUCT_SCRIPT.name, 'MESH_COMPAT_DEVICE="$DEVICE"', 'MESH_COMPAT_DEVICE="CPU"'),
+                "dense-openai-sdk",
+            ),
+            (
+                "compatibility selector precedence",
+                (
+                    "ci-compat-smoke.sh",
+                    'SMOKE_DEVICE="${MESH_COMPAT_DEVICE:-${MESH_CI_DEVICE:-CPU}}"',
+                    'SMOKE_DEVICE="${MESH_CI_DEVICE:-CPU}"',
+                ),
+                "dense-openai-sdk",
+            ),
+        )
+        for platform, backend in (
+            ("linux", "cuda"), ("linux", "vulkan"),
+            ("linux", "rocm"), ("macos", "metal"),
+        ):
+            for name, mutation, failure_phase in cases:
+                with self.subTest(backend=backend, mutation=name):
+                    result, manifest = self.run_suite(
+                        platform=platform, backend=backend, script_mutation=mutation,
+                    )
+                    self.assertEqual(result.returncode, 97, result.stderr)
+                    self.assertIsNotNone(manifest)
+                    assert manifest is not None
+                    self.assertEqual(manifest["suite_status"], "failed")
+                    self.assertEqual(manifest["reconciliation"]["status"], "failed")
+                    self.assertEqual(
+                        manifest["reconciliation"]["failure_phase"], failure_phase,
+                    )
+                    self.assertEqual(manifest["phases"][-1]["phase"], failure_phase)
+                    self.assertEqual(manifest["phases"][-1]["exit_code"], 97)
 
     def test_failed_phase_is_recorded_and_reconciliation_fails_closed(self) -> None:
         result, manifest = self.run_suite("dense-openai-sdk")
