@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: "23 14 * * *" # after the Linux competitive run settles
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ci/agentic-replay-nightly/**"
+      - "scripts/agentic-replay-*"
+      - ".github/workflows/agentic-replay-nightly.yml"
+      - "evals/agentic-replay.py"
 
 # Scheduled runs execute the default-branch definition only; manual dispatch is
 # accepted only from main so caller-selected content never reaches micstudio.
@@ -19,10 +26,11 @@ jobs:
   replay:
     if: >-
       github.repository == 'Mesh-LLM/mesh-llm' &&
-      github.ref == 'refs/heads/main' &&
       (
-        github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'schedule' && vars.MESH_AGENTIC_REPLAY_NIGHTLY_ENABLED == '1')
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'Mesh-LLM/mesh-llm') ||
+        (github.ref == 'refs/heads/main' &&
+         (github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'schedule' && vars.MESH_AGENTIC_REPLAY_NIGHTLY_ENABLED == '1')))
       )
     runs-on: [self-hosted, macOS, arm64]
     timeout-minutes: 720
@@ -49,7 +57,11 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: main # trusted pinned checkout; never PR content
+          # Nightly/dispatch runs always check out trusted main. A pull_request
+          # validation run (same-repo branches only) checks out the PR head so
+          # the workflow change itself is what gets exercised; the fail-closed
+          # runner-name check still applies.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'main' }}
           persist-credentials: false
 
       - name: Verify runner toolchain
@@ -105,7 +117,7 @@ jobs:
                 $LEVEL_ARGS \
                 --passes 2 \
                 --warmup-turns 4 \
-                --dataset-file "$MESH_AGENTIC_REPLAY_DATASET_FILE" \
+                --dataset-file "${MESH_AGENTIC_REPLAY_DATASET_FILE:-$HF_CACHE/datasets--thoughtworks--agentic-coding-trajectories/snapshots/*/sessions.parquet}" \
                 --output "$OUTPUT_DIR/$family"; then
               FAILED=1
             fi
@@ -139,7 +151,7 @@ jobs:
           if [[ -d "$HISTORY_LOCAL/data/runs" ]]; then
             args+=(--baseline "$HISTORY_LOCAL/data/runs")
           fi
-          if [[ "${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}" == "1" ]]; then
+          if [[ "${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}" == "1" && github.event_name != 'pull_request' ]]; then
             args+=(--gate)
           fi
           python3 scripts/agentic-replay-history.py "${args[@]}"
@@ -163,7 +175,7 @@ jobs:
             --commit-message "card refresh $RUN_DATE"
 
       - name: Open repair PR on regression (opencode loop)
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         env:
           # Same token as the llama canary repair loop, per James 2026-09-08.
           GH_TOKEN: ${{ secrets.CANARY_REPAIR_TOKEN }}
