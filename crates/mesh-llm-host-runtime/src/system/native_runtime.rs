@@ -915,6 +915,7 @@ mod dynamic {
                                         .runtime,
                                     evaluated: Vec::new(),
                                 },
+                                sources: Default::default(),
                             })
                         }
                     }

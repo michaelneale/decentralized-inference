@@ -523,8 +523,7 @@ fn prediction_return_open_message(request_id: u64, session_id: u64) -> StageWire
 mod tests {
     use super::*;
     use skippy_protocol::binary::{
-        MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES, recv_ready, recv_reply,
-        send_reply_predicted_with_stats, state_flags,
+        recv_ready, recv_reply, send_reply_predicted_with_stats, state_flags,
     };
     use std::io::Write;
 
@@ -568,35 +567,12 @@ mod tests {
 
         recv_ready(&mut client).unwrap();
 
-        let kind = WireMessageKind::PredictionReturnOpen;
-        let mut state = StageStateHeader::new(kind);
-        state.flags |= state_flags::CHAT_SAMPLING_METADATA;
         let mut header = Vec::new();
-        for value in [
-            kind as i32,
-            0,
-            0,
-            0,
-            0,
-            state.version,
-            state.seq_id,
-            state.phase,
-            state.flags,
-            state.checkpoint_generation,
-            state.prompt_token_count,
-            state.decode_step,
-            state.current_token,
-            state.source_stage_index,
-        ] {
-            header.extend_from_slice(&value.to_le_bytes());
-        }
-        header.extend_from_slice(&1_u64.to_le_bytes());
-        header.extend_from_slice(&2_u64.to_le_bytes());
-        header.extend_from_slice(
-            &u32::try_from(MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES)
-                .unwrap()
-                .to_le_bytes(),
-        );
+        write_stage_message(&mut header, &prediction_return_open_message(1, 2)).unwrap();
+        assert_eq!(header.len(), STAGE_WIRE_FIXED_HEADER_BYTES);
+        let state_flags_offset = 5 * 4 + 3 * 4;
+        header[state_flags_offset..state_flags_offset + 4]
+            .copy_from_slice(&state_flags::CHAT_SAMPLING_METADATA.to_le_bytes());
         client.write_all(&header).unwrap();
         client.flush().unwrap();
 

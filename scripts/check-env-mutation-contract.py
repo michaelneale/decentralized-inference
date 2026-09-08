@@ -69,7 +69,7 @@ KNOWN_UNAUDITED_MUTATION_COUNTS = {
     "crates/mesh-llm-host-runtime/src/runtime/tests/auto_join.rs": 1,
     "crates/mesh-llm-host-runtime/src/runtime/tests/mod.rs": 2,
     "crates/mesh-llm-host-runtime/src/runtime/tests/startup_models.rs": 2,
-    "crates/mesh-llm-runtime-install/src/lib.rs": 15,
+    "crates/mesh-llm-runtime-install/src/lib.rs": 16,
     "crates/mesh-llm/src/commands/plugin_cli.rs": 3,
     "crates/model-hf/src/cache_paths.rs": 2,
 }

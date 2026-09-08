@@ -15,12 +15,12 @@ mesh/openai-frontend; diagnostic and benchmark clients may connect directly to
 the first stage.
 
 The full request/reply path is tip-to-tip: token IDs enter at the driver-facing
-tip, and activations flow through the stage chain. Stage protocol generation 7
-is a compatibility-breaking contract: prediction-bearing replies return
-directly from the final/readout tip to the driver-facing stage instead of being
-relayed back through intermediate stages. Middle-out is the prefill optimization
-inside that path, where internal boundary activations are handed downstream
-while local compute advances.
+tip, and activations flow through the stage chain. Generation 7 introduced
+direct prediction return from the final/readout tip to the driver-facing stage.
+Generation 8 retains that path and adds mandatory canonical stage-admission
+descriptors with exact participant echo before topology publication. Middle-out
+is the prefill optimization inside that path, where internal boundary
+activations are handed downstream while local compute advances.
 
 ```mermaid
 flowchart LR
@@ -126,13 +126,11 @@ deadline handling.
 ## Notes
 
 - `serve-binary` is the tuned binary stage-to-stage path.
-- `serve-binary` participates in the breaking generation-7 stage protocol.
-  Stage compatibility requires the complete `stage-generation-7` control,
-  status-list, and strict-content-identity bundle; direct prediction return and
-  exact verify-checkpoint retirement are part of that generation's contract, so
-  older peers are rejected during split planning instead of being mixed into a
-  generation-7 topology. Generation 6 is historical and is not accepted by the
-  current serve binary.
+- `serve-binary` participates in the breaking generation-8 stage protocol.
+  Stage compatibility requires the complete `stage-generation-8` control,
+  status-list, strict-content-identity, and stage-admission bundle. Older peers,
+  including generation 7 peers, are rejected during split planning rather than
+  being mixed into a generation-8 topology.
 - `serve-binary` accepts upstream protocol connections concurrently. Model
   execution remains serialized by the per-process runtime lock, but readiness,
   abandoned, or broken connections do not monopolize the listener and block the

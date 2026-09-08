@@ -168,6 +168,19 @@ pub(super) fn register_content_addressed_identity(
     }
 }
 
+pub(crate) fn into_content_addressed_identity(
+    mut identity: SkippyPackageIdentity,
+) -> Result<SkippyPackageIdentity> {
+    identity.package_ref = content_addressed_package_ref(&identity.source_model_sha256)?;
+    let fingerprint = verified_file_fingerprint(&identity);
+    anyhow::ensure!(
+        fingerprint.is_some(),
+        "content-addressed package source contains an unsupported file or symlink"
+    );
+    register_content_addressed_identity(&identity, fingerprint);
+    Ok(identity)
+}
+
 #[cfg(test)]
 pub(super) fn register_content_addressed_source(package_ref: &str, path: &Path) {
     if !is_content_addressed_gguf_ref(package_ref) {

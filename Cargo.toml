@@ -53,6 +53,7 @@ members = [
     "crates/skippy-server",
     "crates/metrics-server",
     "crates/skippy-model-package",
+    "crates/skippy-package-format",
     "crates/skippy-model",
     "crates/skippy-quantize",
     "crates/model-package",

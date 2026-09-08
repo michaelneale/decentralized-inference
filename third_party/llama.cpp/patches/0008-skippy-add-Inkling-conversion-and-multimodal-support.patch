@@ -1,0 +1,1332 @@
+From 760f3b5e5c74db4514f260c18393f84021d1ad13 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:29 +1000
+Subject: [PATCH] skippy: add Inkling conversion and multimodal support
+
+---
+ conversion/__init__.py         |   2 +
+ conversion/base.py             |  31 +++
+ conversion/inkling.py          | 422 +++++++++++++++++++++++++++++++++
+ gguf-py/gguf/constants.py      |  50 ++++
+ gguf-py/gguf/tensor_mapping.py |  49 ++++
+ tools/mtmd/clip-impl.h         |   9 +
+ tools/mtmd/clip-model.h        |  12 +
+ tools/mtmd/clip.cpp            |  62 ++++-
+ tools/mtmd/models/inkling.cpp  | 106 +++++++++
+ tools/mtmd/models/models.h     |  11 +
+ tools/mtmd/mtmd-audio.cpp      |  71 ++++++
+ tools/mtmd/mtmd-audio.h        |  10 +
+ tools/mtmd/mtmd-image.cpp      |  72 ++++++
+ tools/mtmd/mtmd-image.h        |  20 ++
+ tools/mtmd/mtmd.cpp            |  37 ++-
+ 15 files changed, 957 insertions(+), 7 deletions(-)
+ create mode 100644 conversion/inkling.py
+ create mode 100644 tools/mtmd/models/inkling.cpp
+
+diff --git a/conversion/__init__.py b/conversion/__init__.py
+index a5632fcc4..ea521a580 100644
+--- a/conversion/__init__.py
++++ b/conversion/__init__.py
+@@ -125,6 +125,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
+     "HunYuanVLForConditionalGeneration": "hunyuan",
+     "HYV3ForCausalLM": "hunyuan",
+     "IQuestCoderForCausalLM": "llama",
++    "InklingForConditionalGeneration": "inkling",
+     "InternLM2ForCausalLM": "internlm",
+     "InternLM3ForCausalLM": "internlm",
+     "JAISLMHeadModel": "jais",
+@@ -304,6 +305,7 @@ MMPROJ_MODEL_MAP: dict[str, str] = {
+     "GraniteSpeechPlusForConditionalGeneration": "granite",
+     "HunYuanVLForConditionalGeneration": "hunyuan",
+     "Idefics3ForConditionalGeneration": "smolvlm",
++    "InklingForConditionalGeneration": "inkling",
+     "InternVisionModel": "internvl",
+     "JanusForConditionalGeneration": "januspro",
+     "KimiK25ForConditionalGeneration": "kimivl",
+diff --git a/conversion/base.py b/conversion/base.py
+index daae28e92..d0257c2b7 100644
+--- a/conversion/base.py
++++ b/conversion/base.py
+@@ -274,8 +274,17 @@ class ModelBase:
+                             data_gen = lambda data=data_torch: LazyTorchTensor.from_eager(data)  # noqa: E731
+                         else:
+                             data_gen = lambda data=data_torch: data  # noqa: E731
++                    # the index maps each tensor to one shard; a duplicate would silently overwrite it
++                    if weight_map and name in weight_map and weight_map[name] != part_name:
++                        raise ValueError(
++                            f"tensor '{name}' found in '{part_name}' but the index assigns "
++                            f"it to '{weight_map[name]}'; refusing to load a wrong-shard copy")
+                     if titem := self.filter_tensors((name, data_gen)):
+                         tname, tgen = titem
++                        if tname in tensors:
++                            raise ValueError(
++                                f"duplicate tensor '{tname}' found in multiple model parts; "
++                                f"refusing to silently overwrite")
+                         tensors[tname] = tgen
+ 
+         # verify tensor name presence and identify potentially missing files
+@@ -543,6 +552,20 @@ class ModelBase:
+                 else:
+                     raise NotImplementedError(f"Quant format {quant_format!r} for method {quant_method!r} is not yet supported")
+             elif quant_method == "modelopt":
++                # Stacked-expert NVFP4 checkpoints (e.g. Inkling-NVFP4) store experts as
++                # w13_weight/w2_weight with .scale/.scale2/.input_amax/.original_shape
++                # auxiliaries; the main tensors do not end in .weight, so the NVFP4 path
++                # below would silently skip them. Reject them with a clear error.
++                stacked_expert_aux = [
++                    n for n in self.model_tensors
++                    if n.endswith((".scale2", ".input_amax", ".original_shape"))
++                ]
++                if stacked_expert_aux:
++                    raise NotImplementedError(
++                        "This checkpoint stores quantized experts in the stacked ModelOpt NVFP4 layout "
++                        f"({len(stacked_expert_aux)} auxiliary tensors like {stacked_expert_aux[0]!r}), "
++                        "which is not supported yet. Convert from the unquantized (BF16) checkpoint instead."
++                    )
+                 # Mixed-precision ModelOpt models: NVFP4 tensors are handled by
+                 # _generate_nvfp4_tensors; FP8 tensors have 1D weight_scale and
+                 # are dequantized here. k/v scale tensors are unused.
+@@ -1070,6 +1093,14 @@ class ModelBase:
+ 
+     def write(self):
+         self.prepare_tensors()
++        # zero tensors means the shards were never discovered, yet a metadata-only GGUF logs success
++        n_written = sum(len(shard) for shard in self.gguf_writer.tensors)
++        if n_written == 0:
++            raise ValueError(
++                "no tensors were written: the model shards could not be found. "
++                "Check that the safetensors filenames are discoverable (they must "
++                "start with 'model') or that model.safetensors exists."
++            )
+         self.prepare_metadata(vocab_only=False)
+         self.gguf_writer.write_header_to_file(path=self.fname_out)
+         self.gguf_writer.write_kv_data_to_file()
+diff --git a/conversion/inkling.py b/conversion/inkling.py
+new file mode 100644
+index 000000000..079842903
+--- /dev/null
++++ b/conversion/inkling.py
+@@ -0,0 +1,422 @@
++from __future__ import annotations
++
++import re
++
++from typing import Callable, Iterable, TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from torch import Tensor
++
++from .base import MmprojModel, ModelBase, TextModel, gguf, logger
++
++
++@ModelBase.register("InklingForConditionalGeneration")
++class InklingModel(TextModel):
++    model_arch = gguf.MODEL_ARCH.INKLING
++    undo_permute = False
++    supports_mtp_export = True
++
++    _SKIP_PREFIXES = ("model.visual.", "model.audio.")
++    _MTP_SHARED_NAMES = {
++        "model.llm.embed.weight",
++        "model.llm.embed_norm.weight",
++        "model.llm.norm.weight",
++        "model.llm.unembed.weight",
++    }
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        # explicit raises (not assert, stripped by python -O) guard the single supported variant
++        hp = self.hparams
++
++        # normalize keys renamed by HF-port re-saved configs back to checkpoint names
++        if "dense_intermediate_size" not in hp and "moe_intermediate_size" in hp:
++            hp["dense_intermediate_size"] = hp["intermediate_size"]
++            hp["intermediate_size"] = hp["moe_intermediate_size"]
++        if "sconv_kernel_size" not in hp and "conv_kernel_size" in hp:
++            hp["sconv_kernel_size"] = hp["conv_kernel_size"]
++        if "dense_mlp_idx" not in hp and hp.get("mlp_layer_types"):
++            types = hp["mlp_layer_types"]
++            hp["dense_mlp_idx"] = next((i for i, t in enumerate(types) if t != "dense"), len(types))
++
++        if hp.get("gate_activation", "sigmoid") != "sigmoid":
++            raise NotImplementedError(
++                f"unsupported gate_activation {hp.get('gate_activation')!r}; only 'sigmoid' is implemented"
++            )
++        for flag, want in (
++            ("norm_after_topk", True),
++            ("shared_expert_sink", True),
++            ("use_sconv", True),
++            ("use_embed_norm", True),
++            ("use_gate_bias", True),
++            ("use_global_scale", True),
++        ):
++            if hp.get(flag, want) is not want:
++                raise NotImplementedError(f"unsupported {flag}={hp.get(flag)!r}; only {want} is implemented")
++        if hp.get("q_bias", False) is not False or hp.get("o_bias", False) is not False:
++            raise NotImplementedError("attention q_bias / o_bias are not supported")
++        if hp.get("final_logit_softcapping") not in (None, 0, 0.0):
++            raise NotImplementedError(
++                f"final_logit_softcapping={hp.get('final_logit_softcapping')!r} is not supported"
++            )
++        if hp["swa_head_dim"] != hp["head_dim"]:
++            raise ValueError(f"swa_head_dim {hp['swa_head_dim']} must equal head_dim {hp['head_dim']}")
++        if hp["swa_num_attention_heads"] != hp["num_attention_heads"]:
++            raise ValueError(
++                f"swa_num_attention_heads {hp['swa_num_attention_heads']} must equal "
++                f"num_attention_heads {hp['num_attention_heads']}"
++            )
++
++        # context length comes from model_max_length per the design contract
++        if (mml := hp.get("model_max_length")) is not None:
++            self.hparams["max_position_embeddings"] = mml
++
++        # checked by the base find_hparam list before the MoE "intermediate_size"
++        self.hparams["prefix_dense_intermediate_size"] = hp["dense_intermediate_size"]
++
++        self._local_layer_flags = self._get_local_layer_flags()
++        mtp = hp.get("mtp_config") or {}
++        self._n_nextn = int(
++            mtp.get("num_nextn_predict_layers", hp.get("num_mtp_layers", 0)) or 0
++        )
++        if mtp.get("chain_hidden_post_norm", hp.get("chain_hidden_post_norm", False)):
++            raise NotImplementedError("Inkling MTP chain_hidden_post_norm=true is not supported")
++        mtp_local_ids = set(mtp.get("local_layer_ids", hp.get("mtp_local_layer_ids", [])) or [])
++        self._mtp_local_layer_flags = [i in mtp_local_ids for i in range(self._n_nextn)]
++
++        if self.no_mtp:
++            self._n_nextn = 0
++            self._mtp_local_layer_flags = []
++        self.block_count = hp["num_hidden_layers"] + self._n_nextn
++        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
++
++        all_local_layer_flags = self._local_layer_flags + self._mtp_local_layer_flags
++        self.hparams["num_key_value_heads"] = [
++            hp["swa_num_key_value_heads"] if is_local else hp["num_key_value_heads"]
++            for is_local in all_local_layer_flags
++        ]
++
++    def _get_local_layer_flags(self) -> list[bool]:
++        # local_layer_ids is authoritative; a round-tripped layer_types may be stale and must not override it
++        n_layer = self.hparams["num_hidden_layers"]
++        local_ids = self.hparams.get("local_layer_ids")
++        if local_ids is None:
++            # default: global at id % 6 == 5; omitted/null must not collapse to all-global (explicit [] does)
++            local_ids = [i for i in range(n_layer) if i % 6 != 5]
++        local_ids = set(local_ids)
++        return [i in local_ids for i in range(n_layer)]
++
++    def get_vocab_base(self) -> tuple[list[str], list[int], str]:
++        tokens, toktypes, tokpre = super().get_vocab_base()
++        # dedicated pre-type: o200k-family regex that keeps combining marks attached to base letters
++        tokpre = "inkling"
++        import gguf as _gguf
++        n_vocab = self.hparams["vocab_size"]
++        n_unpadded = self.hparams.get("unpadded_vocab_size") or n_vocab
++        if len(tokens) != n_vocab:
++            raise ValueError(f"Inkling tokenizer produced {len(tokens)} entries, expected {n_vocab}")
++        # force-CONTROL special ids from added_tokens_decoder, else the trailing-60 convention
++        try:
++            import json as _json
++            import pathlib as _pl
++            tc = _json.loads((_pl.Path(self.dir_model) / "tokenizer_config.json").read_text())
++            special_ids = sorted(int(i) for i, d in tc.get("added_tokens_decoder", {}).items() if d.get("special"))
++        except Exception:
++            special_ids = list(range(n_unpadded - 60, n_unpadded))
++        for tid in special_ids:
++            if 0 <= tid < n_vocab:
++                toktypes[tid] = _gguf.TokenType.CONTROL
++        if any(t != _gguf.TokenType.UNUSED for t in toktypes[n_unpadded:]):
++            raise ValueError("real tokens found at/above unpadded_vocab_size; padded-vocab mask would hide them")
++        return tokens, toktypes, tokpre
++
++    def set_vocab(self):
++        self._set_vocab_gpt2()
++        eos_id = int(self.hparams.get("eos_token_id", 200006))
++        if eos_id < 199998:
++            # HF-port configs re-save generic bos/eos defaults; the real EOS lives at 199998+
++            eos_id = 200006
++        # 200006 is the SOLE end-of-generation token; <|end_message|> (200010) is an
++        # intra-turn block separator and must NOT be registered eot/eog
++        self.gguf_writer.add_eos_token_id(eos_id)
++        # no BOS is ever prepended; pin bos to EOS so a stale base-tokenizer bos id never surfaces
++        self.gguf_writer.add_bos_token_id(eos_id)
++        self.gguf_writer.add_add_bos_token(False)
++
++    def set_gguf_parameters(self):
++        super().set_gguf_parameters()
++        hp = self.hparams
++
++        self.gguf_writer.add_vocab_size(hp["vocab_size"])
++        self.gguf_writer.add_expert_feed_forward_length(hp["intermediate_size"])
++        self.gguf_writer.add_expert_shared_count(hp["n_shared_experts"])
++        self.gguf_writer.add_expert_weights_scale(hp["route_scale"])
++        self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
++
++        # sliding_window_size is canonical; explicit is-None fallback so a serialized 0 cannot bypass the mismatch check
++        canonical_window = hp["sliding_window_size"]
++        sliding_window = hp.get("sliding_window")
++        if sliding_window is None:
++            sliding_window = canonical_window
++        elif sliding_window != canonical_window:
++            raise ValueError(
++                f"sliding_window {sliding_window} disagrees with sliding_window_size "
++                f"{canonical_window!r}"
++            )
++        if sliding_window <= 0:
++            raise ValueError(f"sliding_window must be positive, got {sliding_window}")
++        self.gguf_writer.add_sliding_window(sliding_window)
++        # true = local (swa) layer
++        all_local_layer_flags = self._local_layer_flags + self._mtp_local_layer_flags
++        self.gguf_writer.add_sliding_window_pattern(all_local_layer_flags)
++        if self._n_nextn > 0:
++            self.gguf_writer.add_nextn_predict_layers(self._n_nextn)
++
++        # no RoPE (arch-determined NONE); custom inkling.* keys per INKLING_DESIGN.md
++        arch = gguf.MODEL_ARCH_NAMES[self.model_arch]
++        self.gguf_writer.add_uint32(f"{arch}.d_rel", hp["d_rel"])
++        self.gguf_writer.add_uint32(f"{arch}.rel_extent", hp["rel_extent"])
++        self.gguf_writer.add_uint32(f"{arch}.rel_extent_swa", sliding_window)
++        self.gguf_writer.add_uint32(f"{arch}.shortconv_kernel", hp["sconv_kernel_size"])
++        self.gguf_writer.add_uint32(f"{arch}.dense_block_count", hp["dense_mlp_idx"])
++        self.gguf_writer.add_float32(f"{arch}.logit_scale_denom", hp["logits_mup_width_multiplier"])
++        self.gguf_writer.add_uint32(f"{arch}.log_scaling_n_floor", int(hp.get("log_scaling_n_floor") or 0))
++        self.gguf_writer.add_float32(f"{arch}.log_scaling_alpha", hp.get("log_scaling_alpha", 0.0))
++        self.gguf_writer.add_uint32(f"{arch}.unpadded_vocab_size", hp["unpadded_vocab_size"])
++
++        logger.info(f"gguf: (inkling) swa pattern (true=local) = {self._local_layer_flags}")
++        if self._n_nextn > 0:
++            logger.info(
++                "gguf: (inkling) MTP depths = %d, local pattern = %s",
++                self._n_nextn,
++                self._mtp_local_layer_flags,
++            )
++        logger.info(f"gguf: (inkling) unpadded_vocab_size = {hp['unpadded_vocab_size']}")
++
++    @classmethod
++    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
++        name, gen = item
++
++        if name.startswith(cls._SKIP_PREFIXES):
++            return None
++        is_mtp = name.startswith("model.mtp.")
++        if is_mtp and cls.no_mtp:
++            return None
++        if cls.mtp_only and not is_mtp and name not in cls._MTP_SHARED_NAMES:
++            return None
++
++        name = name.replace("model.llm.", "model.")
++        # parameter has no ".weight"-style suffix in the checkpoint
++        name = name.replace("rel_logits_proj.proj", "rel_logits_proj.weight")
++
++        return super().filter_tensors((name, gen))
++
++    @staticmethod
++    def _deinterleave_w13(w13: Tensor) -> tuple[Tensor, Tensor]:
++        # interleaved SwiGLU along the output rows: silu(z[..., ::2]) * z[..., 1::2]
++        gate = w13[..., 0::2, :].contiguous()
++        up   = w13[..., 1::2, :].contiguous()
++        return gate, up
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
++        match = re.match(r"^model\.mtp\.layers\.(\d+)\.(.*)$", name)
++        if match is not None:
++            mtp_idx = int(match.group(1))
++            if mtp_idx >= self._n_nextn:
++                raise ValueError(f"MTP layer index {mtp_idx} >= declared count {self._n_nextn}")
++            rest = match.group(2)
++            rest = {
++                "embed_norm.weight": "enorm.weight",
++                "hidden_norm.weight": "hnorm.weight",
++                "input_proj.weight": "eh_proj.weight",
++            }.get(rest, rest.removeprefix("transformer_block."))
++            bid = self.hparams["num_hidden_layers"] + mtp_idx
++            name = f"model.layers.{bid}.{rest}"
++        elif name.startswith("model.mtp."):
++            raise ValueError(f"unexpected Inkling MTP tensor {name!r}")
++
++        # short convs: [C, 1, K] -> [C, K] (same layout as LFM2 shortconv.conv)
++        if name.endswith("_sconv.weight"):
++            data_torch = data_torch.squeeze(1)
++            return [(self.map_tensor_name(name), data_torch)]
++
++        if name.endswith(".mlp.w13_dn.weight"):
++            assert bid is not None
++            gate, up = self._deinterleave_w13(data_torch)
++            return [
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE, bid), gate),
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP,   bid), up),
++            ]
++
++        if name.endswith(".mlp.global_scale") or name.endswith(".mlp.gate.global_scale"):
++            assert bid is not None
++            return [(self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GSCALE, bid), data_torch.float())]
++
++        if name.endswith(".mlp.gate.bias"):
++            assert bid is not None
++            return [(self.format_tensor_name(gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, bid, ".bias"), data_torch.float())]
++
++        if name.endswith(".mlp.experts.w13_weight"):
++            assert bid is not None
++            gate, up = self._deinterleave_w13(data_torch)
++            return [
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_EXP, bid), gate),
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_EXP,   bid), up),
++            ]
++        if name.endswith(".mlp.experts.w2_weight"):
++            assert bid is not None
++            return [(self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_EXP, bid), data_torch)]
++
++        # shared experts stored stacked for mul_mat_id
++        if name.endswith(".mlp.shared_experts.shared_w13_weight"):
++            assert bid is not None
++            gate, up = self._deinterleave_w13(data_torch)
++            return [
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_SHEXP, bid), gate),
++                (self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_SHEXP,   bid), up),
++            ]
++        if name.endswith(".mlp.shared_experts.shared_w2_weight"):
++            assert bid is not None
++            return [(self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_SHEXP, bid), data_torch)]
++
++        return [(self.map_tensor_name(name), data_torch)]
++
++    def tensor_force_quant(self, name: str, new_name: str, bid: int | None, n_dims: int):
++        # used in fp32 rel-bias math; keep full precision
++        if new_name.endswith("attn_rel_proj.weight"):
++            return gguf.GGMLQuantizationType.F32
++        # ggml_ssm_conv kernels are F32-only
++        if ".shortconv_" in new_name:
++            return gguf.GGMLQuantizationType.F32
++        return super().tensor_force_quant(name, new_name, bid, n_dims)
++
++    def prepare_metadata(self, vocab_only: bool):
++        from_dir = self.fname_out.is_dir()
++        super().prepare_metadata(vocab_only=vocab_only)
++        if not self.mtp_only or not from_dir:
++            return
++        output_type: str = self.ftype.name.partition("_")[2]
++        fname_default: str = gguf.naming_convention(
++            self.metadata.name,
++            self.metadata.basename,
++            self.metadata.finetune,
++            self.metadata.version,
++            size_label=None,
++            output_type=output_type,
++            model_type=None,
++        )
++        self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
++
++
++@ModelBase.register("InklingForConditionalGeneration")
++class InklingMmprojModel(MmprojModel):
++    """Export Inkling's hMLP and dMel towers as one mtmd projector."""
++
++    has_vision_encoder = True
++    has_audio_encoder = True
++
++    _IMAGE_MEAN = [0.48145466, 0.4578275, 0.40821073]
++    _IMAGE_STD = [0.26862954, 0.2613026, 0.2757771]
++
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        assert self.hparams_vision is not None
++        hp = self.hparams_vision
++        expected = {
++            "vision_encoder_type": "hmlp",
++            "patch_size": 40,
++            "temporal_patch_size": 2,
++            "n_channels": 3,
++            "n_layers": 4,
++            "decoder_dmodel": 6144,
++            "use_vision_norm": True,
++        }
++        for key, want in expected.items():
++            got = hp.get(key, want)
++            if got != want:
++                raise NotImplementedError(
++                    f"Inkling mmproj requires vision_config.{key}={want!r}, got {got!r}"
++                )
++
++        assert self.hparams_audio is not None
++        ahp = self.hparams_audio
++        audio_expected = {
++            "audio_mode": "dmel",
++            "decoder_dmodel": 6144,
++            "n_mel_bins": 80,
++            "mel_vocab_size": 16,
++            "use_audio_norm": True,
++        }
++        for key, want in audio_expected.items():
++            got = ahp.get(key, want)
++            if got != want:
++                raise NotImplementedError(
++                    f"Inkling mmproj requires audio_config.{key}={want!r}, got {got!r}"
++                )
++
++    def set_gguf_parameters(self):
++        hp = self.hparams_vision
++        assert hp is not None
++
++        self.gguf_writer.add_file_type(self.ftype)
++        self.gguf_writer.add_clip_has_vision_encoder(True)
++        self.gguf_writer.add_clip_has_audio_encoder(True)
++        self.gguf_writer.add_clip_vision_projector_type(gguf.VisionProjectorType.INKLING)
++        self.gguf_writer.add_clip_audio_projector_type(gguf.VisionProjectorType.INKLING)
++        self.gguf_writer.add_vision_projection_dim(hp["decoder_dmodel"])
++
++        # clip.cpp requires these common fields even though hMLP is not a ViT.
++        self.gguf_writer.add_vision_image_size(hp["patch_size"])
++        self.gguf_writer.add_vision_patch_size(hp["patch_size"])
++        self.gguf_writer.add_vision_embedding_length(hp["n_channels"])
++        self.gguf_writer.add_vision_feed_forward_length(0)
++        self.gguf_writer.add_vision_block_count(hp["n_layers"])
++        self.gguf_writer.add_vision_head_count(1)
++        self.gguf_writer.add_vision_attention_layernorm_eps(1e-6)
++        self.gguf_writer.add_vision_image_mean(self._IMAGE_MEAN)
++        self.gguf_writer.add_vision_image_std(self._IMAGE_STD)
++
++        ahp = self.hparams_audio
++        assert ahp is not None
++        self.gguf_writer.add_audio_projection_dim(ahp["decoder_dmodel"])
++        self.gguf_writer.add_audio_embedding_length(ahp["decoder_dmodel"])
++        self.gguf_writer.add_audio_feed_forward_length(0)
++        self.gguf_writer.add_audio_block_count(0)
++        self.gguf_writer.add_audio_head_count(1)
++        self.gguf_writer.add_audio_attention_layernorm_eps(1e-6)
++        self.gguf_writer.add_audio_num_mel_bins(ahp["n_mel_bins"])
++
++    @classmethod
++    def filter_tensors(cls, item):
++        name, gen = item
++        if not name.startswith(("model.visual.", "visual.", "model.audio.", "audio.")):
++            return None
++        return name, gen
++
++    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
++        del bid
++        if name.startswith(("model.audio.", "audio.")):
++            prefix = "model.audio." if name.startswith("model.audio.") else "audio."
++            local = name.removeprefix(prefix)
++            if local == "encoder.weight":
++                yield "a.dmel.embedding.weight", data_torch
++                return
++            if local == "final_norm.weight":
++                yield "a.dmel.final_norm.weight", data_torch
++                return
++            raise ValueError(f"unexpected Inkling audio tensor {name!r}")
++
++        prefix = "model.visual." if name.startswith("model.visual.") else "visual."
++        local = name.removeprefix(prefix)
++        if local == "final_norm.weight":
++            yield "v.hmlp.final_norm.weight", data_torch
++            return
++
++        parts = local.split(".")
++        if len(parts) == 3 and parts[0] == "layers" and parts[2] == "weight":
++            kind, sep, layer_s = parts[1].partition("_")
++            if sep and kind in ("linear", "norm") and layer_s.isdigit():
++                yield f"v.hmlp.{int(layer_s)}.{kind}.weight", data_torch
++                return
++
++        raise ValueError(f"unexpected Inkling vision tensor {name!r}")
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index c99feb3c7..be712cbc5 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -625,6 +625,7 @@ class MODEL_ARCH(IntEnum):
+     NANBEIGE         = auto()
+     QWEN3TTS         = auto()
+     POCKETTTS        = auto()
++    INKLING          = auto()
+ 
+ 
+ class VISION_PROJECTOR_TYPE(IntEnum):
+@@ -872,6 +873,14 @@ class MODEL_TENSOR(IntEnum):
+     SHORTCONV_CONV       = auto()
+     SHORTCONV_INPROJ     = auto()
+     SHORTCONV_OUTPROJ    = auto()
++    # inkling
++    ATTN_R               = auto()
++    ATTN_REL_PROJ        = auto()
++    SHORTCONV_K          = auto()
++    SHORTCONV_V          = auto()
++    SHORTCONV_ATTN       = auto()
++    SHORTCONV_MLP        = auto()
++    FFN_GSCALE           = auto()
+     VISEXP_ATTN_QKV      = auto()
+     VISEXP_ATTN_OUT      = auto()
+     VISEXP_GATE          = auto()
+@@ -1374,6 +1383,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
+     MODEL_ARCH.NANBEIGE:         "nanbeige",
+     MODEL_ARCH.QWEN3TTS:         "qwen3tts",
+     MODEL_ARCH.POCKETTTS:        "pockettts",
++    MODEL_ARCH.INKLING:          "inkling",
+ }
+ 
+ VISION_PROJECTOR_TYPE_NAMES: dict[VISION_PROJECTOR_TYPE, str] = {
+@@ -1619,6 +1629,13 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
+     MODEL_TENSOR.SHORTCONV_CONV:            "blk.{bid}.shortconv.conv",
+     MODEL_TENSOR.SHORTCONV_INPROJ:          "blk.{bid}.shortconv.in_proj",
+     MODEL_TENSOR.SHORTCONV_OUTPROJ:         "blk.{bid}.shortconv.out_proj",
++    MODEL_TENSOR.ATTN_R:                    "blk.{bid}.attn_r",             # inkling
++    MODEL_TENSOR.ATTN_REL_PROJ:             "blk.{bid}.attn_rel_proj",      # inkling
++    MODEL_TENSOR.SHORTCONV_K:               "blk.{bid}.shortconv_k",        # inkling
++    MODEL_TENSOR.SHORTCONV_V:               "blk.{bid}.shortconv_v",        # inkling
++    MODEL_TENSOR.SHORTCONV_ATTN:            "blk.{bid}.shortconv_attn",     # inkling
++    MODEL_TENSOR.SHORTCONV_MLP:             "blk.{bid}.shortconv_mlp",      # inkling
++    MODEL_TENSOR.FFN_GSCALE:                "blk.{bid}.ffn_gscale",         # inkling
+     MODEL_TENSOR.VISEXP_ATTN_QKV:           "blk.{bid}.vis_attn_qkv",
+     MODEL_TENSOR.VISEXP_ATTN_OUT:           "blk.{bid}.vis_attn_output",
+     MODEL_TENSOR.VISEXP_GATE:               "blk.{bid}.vis_gate",
+@@ -4802,6 +4819,38 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
+         MODEL_TENSOR.FFN_UP_EXP,
+         MODEL_TENSOR.FFN_EXP_PROBS_B,
+     ],
++    MODEL_ARCH.INKLING: [
++        MODEL_TENSOR.TOKEN_EMBD,
++        MODEL_TENSOR.TOKEN_EMBD_NORM,
++        MODEL_TENSOR.OUTPUT_NORM,
++        MODEL_TENSOR.OUTPUT,
++        MODEL_TENSOR.ATTN_NORM,
++        MODEL_TENSOR.ATTN_Q,
++        MODEL_TENSOR.ATTN_K,
++        MODEL_TENSOR.ATTN_V,
++        MODEL_TENSOR.ATTN_R,
++        MODEL_TENSOR.ATTN_OUT,
++        MODEL_TENSOR.ATTN_Q_NORM,
++        MODEL_TENSOR.ATTN_K_NORM,
++        MODEL_TENSOR.ATTN_REL_PROJ,
++        MODEL_TENSOR.SHORTCONV_K,
++        MODEL_TENSOR.SHORTCONV_V,
++        MODEL_TENSOR.SHORTCONV_ATTN,
++        MODEL_TENSOR.SHORTCONV_MLP,
++        MODEL_TENSOR.FFN_NORM,
++        MODEL_TENSOR.FFN_GATE,
++        MODEL_TENSOR.FFN_UP,
++        MODEL_TENSOR.FFN_DOWN,
++        MODEL_TENSOR.FFN_GSCALE,
++        MODEL_TENSOR.FFN_GATE_INP,
++        MODEL_TENSOR.FFN_EXP_PROBS_B,
++        MODEL_TENSOR.FFN_GATE_EXP,
++        MODEL_TENSOR.FFN_UP_EXP,
++        MODEL_TENSOR.FFN_DOWN_EXP,
++        MODEL_TENSOR.FFN_GATE_SHEXP,
++        MODEL_TENSOR.FFN_UP_SHEXP,
++        MODEL_TENSOR.FFN_DOWN_SHEXP,
++    ],
+     MODEL_ARCH.SMALLTHINKER: [
+         MODEL_TENSOR.TOKEN_EMBD,
+         MODEL_TENSOR.OUTPUT_NORM,
+@@ -5609,6 +5658,7 @@ class GGUFValueType(IntEnum):
+ 
+ 
+ class VisionProjectorType:
++    INKLING = "inkling"
+     GEMMA3 = "gemma3"
+     GEMMA3NV = "gemma3nv"
+     GEMMA3NA = "gemma3na"
+diff --git a/gguf-py/gguf/tensor_mapping.py b/gguf-py/gguf/tensor_mapping.py
+index 861acfe18..103447d0d 100644
+--- a/gguf-py/gguf/tensor_mapping.py
++++ b/gguf-py/gguf/tensor_mapping.py
+@@ -63,6 +63,7 @@ class TensorNameMap:
+             "model.layers.0.pre_norm",    # rwkv7
+             "backbone.norm",              # wavtokenizer
+             "model.embedding_norm",       # lfm2
++            "model.embed_norm",           # inkling
+         ),
+ 
+         # Position embeddings
+@@ -86,6 +87,7 @@ class TensorNameMap:
+             "model.lm_head",             # dflash
+             "model.transformer.ff_out",  # llada
+             "head.decoder",              # modern-bert
++            "model.unembed",             # inkling
+         ),
+         MODEL_TENSOR.DENSE_2_OUT: (
+             "dense_2_out",  # embeddinggemma
+@@ -2700,6 +2702,53 @@ class TensorNameMap:
+ 
+     # architecture-specific block mappings
+     arch_block_mappings_cfg: dict[MODEL_ARCH, dict[MODEL_TENSOR, tuple[str, ...]]] = {
++        MODEL_ARCH.INKLING: {
++            MODEL_TENSOR.ATTN_NORM: (
++                "model.layers.{bid}.attn_norm",
++            ),
++            MODEL_TENSOR.ATTN_Q: (
++                "model.layers.{bid}.attn.wq_du",
++            ),
++            MODEL_TENSOR.ATTN_K: (
++                "model.layers.{bid}.attn.wk_dv",
++            ),
++            MODEL_TENSOR.ATTN_V: (
++                "model.layers.{bid}.attn.wv_dv",
++            ),
++            MODEL_TENSOR.ATTN_R: (
++                "model.layers.{bid}.attn.wr_du",
++            ),
++            MODEL_TENSOR.ATTN_OUT: (
++                "model.layers.{bid}.attn.wo_ud",
++            ),
++            MODEL_TENSOR.ATTN_Q_NORM: (
++                "model.layers.{bid}.attn.q_norm",
++            ),
++            MODEL_TENSOR.ATTN_K_NORM: (
++                "model.layers.{bid}.attn.k_norm",
++            ),
++            MODEL_TENSOR.ATTN_REL_PROJ: (
++                "model.layers.{bid}.attn.rel_logits_proj",
++            ),
++            MODEL_TENSOR.SHORTCONV_K: (
++                "model.layers.{bid}.attn.k_sconv",
++            ),
++            MODEL_TENSOR.SHORTCONV_V: (
++                "model.layers.{bid}.attn.v_sconv",
++            ),
++            MODEL_TENSOR.SHORTCONV_ATTN: (
++                "model.layers.{bid}.attn_sconv",
++            ),
++            MODEL_TENSOR.SHORTCONV_MLP: (
++                "model.layers.{bid}.mlp_sconv",
++            ),
++            MODEL_TENSOR.FFN_NORM: (
++                "model.layers.{bid}.mlp_norm",
++            ),
++            MODEL_TENSOR.FFN_DOWN: (
++                "model.layers.{bid}.mlp.w2_md",
++            ),
++        },
+         MODEL_ARCH.ARCTIC: {
+             MODEL_TENSOR.FFN_NORM: (
+                 "model.layers.{bid}.residual_layernorm",
+diff --git a/tools/mtmd/clip-impl.h b/tools/mtmd/clip-impl.h
+index f6045093c..83caba9c2 100644
+--- a/tools/mtmd/clip-impl.h
++++ b/tools/mtmd/clip-impl.h
+@@ -371,6 +371,13 @@
+ #define TN_A_FFN_POST_NORM   "%s.blk.%d.ffn_post_norm.%s"
+ #define TN_A_FFN_POST_NORM_1 "%s.blk.%d.ffn_post_norm_1.%s"
+ 
++// Inkling hMLP vision and dMel audio towers.
++#define TN_INKLING_HMLP_LINEAR     "v.hmlp.%d.linear.weight"
++#define TN_INKLING_HMLP_NORM       "v.hmlp.%d.norm.weight"
++#define TN_INKLING_HMLP_FINAL_NORM "v.hmlp.final_norm.weight"
++#define TN_INKLING_DMEL_EMBD       "a.dmel.embedding.weight"
++#define TN_INKLING_DMEL_FINAL_NORM "a.dmel.final_norm.weight"
++
+ // mobilenetv5 (gemma3n) definitions
+ #define TN_MNV5_STEM_CONV        "v.conv_stem.conv.weight"
+ #define TN_MNV5_STEM_BIAS        "v.conv_stem.conv.bias"
+@@ -439,6 +446,7 @@
+ struct clip_ctx;
+ 
+ enum projector_type {
++    PROJECTOR_TYPE_INKLING,
+     PROJECTOR_TYPE_MLP,
+     PROJECTOR_TYPE_MLP_NORM,
+     PROJECTOR_TYPE_LDP,
+@@ -504,6 +512,7 @@ enum projector_type {
+ };
+ 
+ static std::map<projector_type, std::string> PROJECTOR_TYPE_NAMES = {
++    { PROJECTOR_TYPE_INKLING,           "inkling" },
+     { PROJECTOR_TYPE_MLP,               "mlp" },
+     { PROJECTOR_TYPE_LDP,               "ldp" },
+     { PROJECTOR_TYPE_LDPV2,             "ldpv2"},
+diff --git a/tools/mtmd/clip-model.h b/tools/mtmd/clip-model.h
+index 060938d86..5aa659246 100644
+--- a/tools/mtmd/clip-model.h
++++ b/tools/mtmd/clip-model.h
+@@ -546,6 +546,12 @@ struct clip_code2wav {
+     ggml_tensor * dac_post_snake_beta  = nullptr;
+     ggml_tensor * dac_post_conv_w      = nullptr;
+     ggml_tensor * dac_post_conv_b      = nullptr;
++
++};
++
++struct inkling_hmlp_layer {
++    ggml_tensor * linear_w = nullptr;
++    ggml_tensor * norm_w   = nullptr;
+ };
+ 
+ struct clip_model {
+@@ -562,6 +568,12 @@ struct clip_model {
+     ggml_tensor * norm_embd_w = nullptr;
+     ggml_tensor * norm_embd_b = nullptr;
+ 
++    // Inkling towers (neither uses standard transformer blocks).
++    std::vector<inkling_hmlp_layer> inkling_hmlp_layers;
++    ggml_tensor * inkling_hmlp_final_norm_w = nullptr;
++    ggml_tensor * inkling_dmel_embd_w        = nullptr;
++    ggml_tensor * inkling_dmel_final_norm_w  = nullptr;
++
+     // "indexed" patch embedding norms
+     ggml_tensor * patch_norm_1_w = nullptr;
+     ggml_tensor * patch_norm_1_b = nullptr;
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index 90de19575..4d641d197 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -933,6 +933,10 @@ static std::unique_ptr<clip_graph> clip_get_graph_builder(clip_ctx * ctx, const
+     std::unique_ptr<clip_graph> builder;
+ 
+     switch (ctx->proj_type()) {
++        case PROJECTOR_TYPE_INKLING:
++            {
++                builder = std::make_unique<clip_graph_inkling>(ctx, img);
++            } break;
+         case PROJECTOR_TYPE_GEMMA3:
+         case PROJECTOR_TYPE_IDEFICS3:
+         case PROJECTOR_TYPE_LFM2:
+@@ -1410,6 +1414,21 @@ struct clip_model_loader {
+ 
+             // model-specific params
+             switch (model.proj_type) {
++                case PROJECTOR_TYPE_INKLING:
++                    {
++                        if (is_vision) {
++                            hparams.image_resize_algo = RESIZE_ALGO_BICUBIC;
++                            hparams.image_resize_pad  = PAD_NONE;
++                            hparams.warmup_image_size = hparams.patch_size;
++                        } else {
++                            hparams.audio_chunk_len   = 0;
++                            hparams.audio_sample_rate = 16000;
++                            hparams.audio_n_fft       = 1600;
++                            hparams.audio_window_len  = 1600;
++                            hparams.audio_hop_len     = 800;
++                            hparams.warmup_audio_size = 4;
++                        }
++                    } break;
+                 case PROJECTOR_TYPE_MLP:
+                 case PROJECTOR_TYPE_MLP_NORM:
+                 case PROJECTOR_TYPE_LDP:
+@@ -2211,7 +2230,8 @@ struct clip_model_loader {
+         const bool has_standard_layers = (
+             model.proj_type != PROJECTOR_TYPE_GEMMA3NV &&
+             model.proj_type != PROJECTOR_TYPE_QWEN3TTS_SPKENC &&
+-            model.proj_type != PROJECTOR_TYPE_POCKETTTS_GEN);
++            model.proj_type != PROJECTOR_TYPE_POCKETTTS_GEN &&
++            model.proj_type != PROJECTOR_TYPE_INKLING);
+ 
+         // layers
+         const int n_layers_to_load = has_standard_layers ? hparams.n_layer : 0;
+@@ -2305,6 +2325,23 @@ struct clip_model_loader {
+ 
+ 
+         switch (model.proj_type) {
++            case PROJECTOR_TYPE_INKLING:
++                {
++                    if (model.modality == CLIP_MODALITY_VISION) {
++                        model.inkling_hmlp_layers.resize(hparams.n_layer);
++                        for (int il = 0; il < hparams.n_layer; ++il) {
++                            auto & layer = model.inkling_hmlp_layers[il];
++                            layer.linear_w = get_tensor(string_format(TN_INKLING_HMLP_LINEAR, il));
++                            layer.norm_w = il + 1 < hparams.n_layer
++                                ? get_tensor(string_format(TN_INKLING_HMLP_NORM, il))
++                                : nullptr;
++                        }
++                        model.inkling_hmlp_final_norm_w = get_tensor(TN_INKLING_HMLP_FINAL_NORM);
++                    } else {
++                        model.inkling_dmel_embd_w       = get_tensor(TN_INKLING_DMEL_EMBD);
++                        model.inkling_dmel_final_norm_w = get_tensor(TN_INKLING_DMEL_FINAL_NORM);
++                    }
++                } break;
+             case PROJECTOR_TYPE_MLP:
+             case PROJECTOR_TYPE_MLP_NORM:
+                 {
+@@ -3635,6 +3672,11 @@ struct clip_model_loader {
+             LOG_INF("%s: warmup with audio size = %d\n", __func__, hparams.warmup_audio_size);
+         }
+         batch.entries.push_back(img);
++        // One logical Inkling vision patch always contains two adjacent temporal slices (including warmup reserve).
++        if (ctx_clip.model.modality == CLIP_MODALITY_VISION &&
++                ctx_clip.model.proj_type == PROJECTOR_TYPE_INKLING) {
++            batch.entries.push_back(img);
++        }
+         return batch;
+     }
+ 
+@@ -4050,6 +4092,16 @@ int clip_n_output_tokens(const clip_ctx * ctx, const clip_image_f32 * img) {
+     projector_type proj = ctx->proj_type();
+ 
+     switch (proj) {
++        case PROJECTOR_TYPE_INKLING:
++            {
++                if (ctx->model.modality == CLIP_MODALITY_AUDIO) {
++                    // One dMel row is one soft audio token.
++                    n_patches = img->nx();
++                } else {
++                    // Batch entries are temporal slices; each pair emits one token.
++                    n_patches = 1;
++                }
++            } break;
+         case PROJECTOR_TYPE_MLP:
+         case PROJECTOR_TYPE_MLP_NORM:
+         case PROJECTOR_TYPE_JANUS_PRO:
+@@ -4532,6 +4584,10 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+ 
+     // set input per projector
+     switch (ctx->model.proj_type) {
++        case PROJECTOR_TYPE_INKLING:
++            {
++                // inp_raw is the only graph input.
++            } break;
+         case PROJECTOR_TYPE_MUSE_GLIMMER:
+             {
+                 const int grid_w = pos_w;            // image_size_width  / patch_size
+@@ -5798,6 +5854,10 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
+ 
+ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
+     switch (ctx->model.proj_type) {
++        case PROJECTOR_TYPE_INKLING:
++            return ctx->model.modality == CLIP_MODALITY_AUDIO
++                ? ctx->model.inkling_dmel_final_norm_w->ne[0]
++                : ctx->model.inkling_hmlp_final_norm_w->ne[0];
+         case PROJECTOR_TYPE_LDP:
+             return ctx->model.mm_model_block_1_block_2_1_b->ne[0];
+         case PROJECTOR_TYPE_LDPV2:
+diff --git a/tools/mtmd/models/inkling.cpp b/tools/mtmd/models/inkling.cpp
+new file mode 100644
+index 000000000..c072f66a2
+--- /dev/null
++++ b/tools/mtmd/models/inkling.cpp
+@@ -0,0 +1,106 @@
++#include "models.h"
++
++ggml_tensor * clip_graph_inkling::build_mm(ggml_tensor * w, ggml_tensor * x) const {
++    ggml_tensor * cur = ggml_mul_mat(ctx0, w, x);
++    ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
++    return cur;
++}
++
++// fold square neighborhoods from W/H into channels; folded order is [h_fold, w_fold, C]
++static ggml_tensor * inkling_fold_spatial(
++        ggml_context * ctx0,
++        ggml_tensor  * cur,
++        int            scale) {
++    GGML_ASSERT(scale > 0);
++    GGML_ASSERT(cur->ne[1] % scale == 0);
++    GGML_ASSERT(cur->ne[2] % scale == 0);
++
++    const int64_t c = cur->ne[0];
++    const int64_t w = cur->ne[1];
++    const int64_t h = cur->ne[2];
++    const int64_t b = cur->ne[3];
++
++    cur = ggml_reshape_4d(ctx0, cur, c * scale, w / scale, h, b);
++    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
++    cur = ggml_reshape_4d(ctx0, cur, c * scale * scale, h / scale, w / scale, b);
++    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 0, 2, 1, 3));
++    return cur;
++}
++
++ggml_cgraph * clip_graph_inkling::build() {
++    return model.modality == CLIP_MODALITY_AUDIO ? build_audio() : build_vision();
++}
++
++ggml_cgraph * clip_graph_inkling::build_vision() {
++    static constexpr int temporal_patch_size = 2;
++    static constexpr int spatial_folds[] = {5, 2, 4};
++
++    GGML_ASSERT(img.nx() == 40 && img.ny() == 40);
++    GGML_ASSERT(n_batch > 0 && n_batch % temporal_patch_size == 0);
++    GGML_ASSERT(model.inkling_hmlp_layers.size() == 4);
++    GGML_ASSERT(model.inkling_hmlp_final_norm_w);
++
++    // Raw input is [W,H,RGB,temporal*patch]. Put RGB on ne[0].
++    ggml_tensor * cur = build_inp_raw(3);
++    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 2, 0, 3));
++
++    for (int il = 0; il < 3; ++il) {
++        cur = inkling_fold_spatial(ctx0, cur, spatial_folds[il]);
++        const int64_t w = cur->ne[1];
++        const int64_t h = cur->ne[2];
++        const int64_t b = cur->ne[3];
++
++        cur = ggml_reshape_2d(ctx0, cur, cur->ne[0], w * h * b);
++        cur = build_mm(model.inkling_hmlp_layers[il].linear_w, cur);
++        cur = build_norm(cur, model.inkling_hmlp_layers[il].norm_w,
++                         nullptr, NORM_TYPE_RMS, eps, il);
++        cur = ggml_gelu_erf(ctx0, cur);
++        cur = ggml_reshape_4d(ctx0, cur, cur->ne[0], w, h, b);
++    }
++
++    GGML_ASSERT(cur->ne[1] == 1 && cur->ne[2] == 1);
++    const int64_t n_patches = n_batch / temporal_patch_size;
++    cur = ggml_reshape_2d(ctx0, cur, cur->ne[0] * temporal_patch_size, n_patches);
++    cur = build_mm(model.inkling_hmlp_layers[3].linear_w, cur);
++    cur = build_norm(cur, model.inkling_hmlp_final_norm_w,
++                     nullptr, NORM_TYPE_RMS, eps, 3);
++
++    // Batched mtmd convention: one token in ne[1], patch count in ne[2].
++    cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], 1, n_patches);
++    ggml_build_forward_expand(gf, cur);
++    return gf;
++}
++
++ggml_cgraph * clip_graph_inkling::build_audio() {
++    static constexpr int n_mels = 80;
++    static constexpr int mel_vocab_size = 16;
++    static constexpr int n_embd = 6144;
++
++    GGML_ASSERT(img.ny() == n_mels);
++    GGML_ASSERT(model.inkling_dmel_embd_w);
++    GGML_ASSERT(model.inkling_dmel_final_norm_w);
++    GGML_ASSERT(model.inkling_dmel_embd_w->ne[0] == n_embd);
++    GGML_ASSERT(model.inkling_dmel_embd_w->ne[1] == n_mels * mel_vocab_size);
++
++    const int64_t n_tokens = img.nx();
++    // mtmd audio storage is mel-major and represented as [token, mel].
++    ggml_tensor * bins = build_inp_raw(1);
++    bins = ggml_cont(ctx0, ggml_transpose(ctx0, bins));
++    ggml_tensor * offsets = ggml_arange(ctx0, 0, n_mels, 1);
++    offsets = ggml_scale(ctx0, offsets, mel_vocab_size);
++    offsets = ggml_reshape_2d(ctx0, offsets, n_mels, 1);
++    ggml_tensor * indices = ggml_cast(ctx0, ggml_add(ctx0, bins, offsets), GGML_TYPE_I32);
++
++    indices = ggml_reshape_1d(ctx0, indices, n_mels * n_tokens);
++    ggml_tensor * cur = ggml_get_rows(ctx0, model.inkling_dmel_embd_w, indices);
++    cur = ggml_reshape_3d(ctx0, cur, n_embd, n_mels, n_tokens);
++    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 0, 2, 3));
++    cur = ggml_sum_rows(ctx0, cur);
++    cur = ggml_cont(ctx0, ggml_permute(ctx0, cur, 1, 0, 2, 3));
++    cur = ggml_reshape_2d(ctx0, cur, n_embd, n_tokens);
++    cur = build_norm(cur, model.inkling_dmel_final_norm_w,
++                     nullptr, NORM_TYPE_RMS, eps, -1);
++
++    ggml_build_forward_expand(gf, cur);
++    return gf;
++}
+diff --git a/tools/mtmd/models/models.h b/tools/mtmd/models/models.h
+index 10546fa5d..0a72f12f8 100644
+--- a/tools/mtmd/models/models.h
++++ b/tools/mtmd/models/models.h
+@@ -17,6 +17,17 @@ struct clip_graph_siglip : clip_graph {
+     ggml_cgraph * build() override;
+ };
+ 
++struct clip_graph_inkling : clip_graph {
++    clip_graph_inkling(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
++    ggml_cgraph * build() override;
++    ggml_tensor * build_mm(ggml_tensor * w, ggml_tensor * x) const override;
++    bool support_batch() const override { return true; }
++
++private:
++    ggml_cgraph * build_vision();
++    ggml_cgraph * build_audio();
++};
++
+ struct clip_graph_gemma4v : clip_graph {
+     clip_graph_gemma4v(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
+     ggml_cgraph * build() override;
+diff --git a/tools/mtmd/mtmd-audio.cpp b/tools/mtmd/mtmd-audio.cpp
+index ce08f9e93..c349a372f 100644
+--- a/tools/mtmd/mtmd-audio.cpp
++++ b/tools/mtmd/mtmd-audio.cpp
+@@ -283,6 +283,7 @@ struct filter_params {
+     bool    norm_per_feature = false;
+     bool    use_magnitude   = false;  // |X| instead of |X|^2
+     float   mel_floor       = 5.960464477539063e-08f;
++    float   power_floor     = 0.0f;   // clamp |X|^2 to this before sqrt (0 = disabled)
+ };
+ 
+ static void log_mel_spectrogram_worker_thread(int                        ith,
+@@ -327,6 +328,7 @@ static void log_mel_spectrogram_worker_thread(int                        ith,
+         // Calculate modulus^2 (power) or modulus (magnitude)
+         for (int j = 0; j < n_fft_bins; j++) {
+             float power = (fft_out[2 * j + 0] * fft_out[2 * j + 0] + fft_out[2 * j + 1] * fft_out[2 * j + 1]);
++            power = std::max(power, params.power_floor);
+             fft_out[j] = params.use_magnitude ? sqrtf(power) : power;
+         }
+ 
+@@ -537,6 +539,75 @@ static bool log_mel_spectrogram(
+     return true;
+ }
+ 
++void mtmd_audio_preprocessor_inkling::initialize() {
++    GGML_ASSERT(hparams.n_mel_bins == 80);
++    GGML_ASSERT(hparams.audio_n_fft == 1600);
++    cache.fill_sin_cos_table(hparams.audio_n_fft);
++    cache.fill_hann_window(hparams.audio_window_len, true);
++    cache.fill_mel_filterbank_matrix(
++        hparams.n_mel_bins, hparams.audio_n_fft, hparams.audio_sample_rate,
++        0.0f, -1.0f, true, 1.0f, false);
++}
++
++bool mtmd_audio_preprocessor_inkling::preprocess(
++        const float * samples,
++        size_t n_samples,
++        std::vector<mtmd_audio_mel> & output) {
++    if (n_samples == 0) {
++        return false;
++    }
++    GGML_ASSERT(hparams.audio_hop_len == 800);
++    GGML_ASSERT(hparams.audio_window_len == 1600);
++    GGML_ASSERT(!cache.filters.data.empty());
++
++    // Reference behavior: left pad by n_fft-hop, then right pad to a whole hop.
++    const size_t left_pad = static_cast<size_t>(hparams.audio_n_fft - hparams.audio_hop_len);
++    const size_t right_pad =
++        (static_cast<size_t>(hparams.audio_hop_len) - n_samples % hparams.audio_hop_len)
++        % hparams.audio_hop_len;
++    std::vector<float> padded(left_pad + n_samples + right_pad, 0.0f);
++    std::copy(samples, samples + n_samples, padded.begin() + left_pad);
++
++    filter_params params;
++    params.n_mel            = hparams.n_mel_bins;
++    params.n_fft_bins       = 1 + hparams.audio_n_fft / 2;
++    params.hann_window_size = hparams.audio_window_len;
++    params.hop_length       = hparams.audio_hop_len;
++    params.sample_rate      = hparams.audio_sample_rate;
++    params.no_padding       = true;
++    params.use_natural_log  = false;
++    params.use_magnitude    = true;
++    params.mel_floor        = 1e-10f;
++    params.power_floor      = 1e-10f; // reference clamps |X|^2 before sqrt
++
++    mtmd_audio_mel dmel;
++    if (!log_mel_spectrogram(
++            padded.data(), static_cast<int>(padded.size()), 4,
++            params, cache, dmel)) {
++        return false;
++    }
++    dmel.n_len_org = static_cast<int64_t>(n_samples);
++
++    // nearest of 16 float64 centers over [-7,2]; strict '<' keeps the lower bin on midpoints (torch.argmin)
++    for (float & value_f32 : dmel.data) {
++        const double value = std::max(-7.0, std::min(2.0, static_cast<double>(value_f32)));
++        int best = 0;
++        double best_dist = INFINITY;
++        for (int bin = 0; bin < 16; ++bin) {
++            const double center = -7.0 + 9.0 * static_cast<double>(bin) / 15.0;
++            const double dist = std::abs(value - center);
++            if (dist < best_dist) {
++                best = bin;
++                best_dist = dist;
++            }
++        }
++        value_f32 = static_cast<float>(best);
++    }
++
++    output.push_back(std::move(dmel));
++    return true;
++}
++
+ //
+ // mtmd_audio_preprocessor_whisper
+ //
+diff --git a/tools/mtmd/mtmd-audio.h b/tools/mtmd/mtmd-audio.h
+index 0f47d4502..d7c679887 100644
+--- a/tools/mtmd/mtmd-audio.h
++++ b/tools/mtmd/mtmd-audio.h
+@@ -69,6 +69,16 @@ struct mtmd_audio_preprocessor_whisper : mtmd_audio_preprocessor {
+     mtmd_audio_cache cache;
+ };
+ 
++// Inkling dMel: 100 ms Slaney-mel magnitude windows at a 50 ms hop, quantized to 16 bins.
++struct mtmd_audio_preprocessor_inkling : mtmd_audio_preprocessor {
++    mtmd_audio_preprocessor_inkling(const clip_ctx * ctx) : mtmd_audio_preprocessor(ctx) {}
++    void initialize() override;
++    bool preprocess(const float * samples, size_t n_samples, std::vector<mtmd_audio_mel> & output) override;
++
++private:
++    mtmd_audio_cache cache;
++};
++
+ struct mtmd_audio_preprocessor_conformer : mtmd_audio_preprocessor {
+     mtmd_audio_preprocessor_conformer(const clip_ctx * ctx) : mtmd_audio_preprocessor(ctx) {}
+     void initialize() override;
+diff --git a/tools/mtmd/mtmd-image.cpp b/tools/mtmd/mtmd-image.cpp
+index 0dda8770f..ec9bc8f88 100644
+--- a/tools/mtmd/mtmd-image.cpp
++++ b/tools/mtmd/mtmd-image.cpp
+@@ -481,6 +481,78 @@ private:
+ };
+ 
+ 
++static clip_image_u8 mtmd_inkling_resize(const clip_image_u8 & img, resize_algo algo) {
++    constexpr int patch_size = 40;
++    const clip_image_size source_size = img.get_size();
++    const clip_image_size target_size = {
++        std::max(patch_size, ((source_size.width + patch_size - 1) / patch_size) * patch_size),
++        std::max(patch_size, ((source_size.height + patch_size - 1) / patch_size) * patch_size),
++    };
++
++    clip_image_u8 resized;
++    img_tool::resize(img, resized, target_size, algo, PAD_CEIL);
++    return resized;
++}
++
++mtmd_inkling_image_preproc_out mtmd_image_preprocess_inkling(
++        const clip_image_u8 & img,
++        resize_algo algo) {
++    constexpr int patch_size = 40;
++    constexpr int temporal_patch_size = 2;
++
++    const clip_image_u8 resized = mtmd_inkling_resize(img, algo);
++    const clip_image_size resized_size = resized.get_size();
++    mtmd_inkling_image_preproc_out output;
++    output.source_size = img.get_size();
++    output.resized_size = resized_size;
++    output.patch_rows = resized_size.height / patch_size;
++    output.patch_cols = resized_size.width / patch_size;
++    output.resized_rgb = resized.get_ro_buf();
++    output.pixel_values_bthwc.reserve(
++        (size_t) output.patch_rows * output.patch_cols * temporal_patch_size * patch_size * patch_size * 3);
++
++    for (int row = 0; row < output.patch_rows; ++row) {
++        for (int col = 0; col < output.patch_cols; ++col) {
++            for (int temporal = 0; temporal < temporal_patch_size; ++temporal) {
++                (void) temporal;
++                for (int y = 0; y < patch_size; ++y) {
++                    for (int x = 0; x < patch_size; ++x) {
++                        const auto pixel = resized.get_pixel(col * patch_size + x, row * patch_size + y);
++                        output.pixel_values_bthwc.push_back((float) pixel[0] / 255.0f);
++                        output.pixel_values_bthwc.push_back((float) pixel[1] / 255.0f);
++                        output.pixel_values_bthwc.push_back((float) pixel[2] / 255.0f);
++                    }
++                }
++            }
++        }
++    }
++
++    return output;
++}
++
++mtmd_image_preproc_out mtmd_image_preprocessor_inkling::preprocess(const clip_image_u8 & img) {
++    constexpr int patch_size = 40;
++    constexpr int temporal_patch_size = 2;
++
++    const clip_image_u8 resized = mtmd_inkling_resize(img, hparams.image_resize_algo);
++    const clip_image_size resized_size = resized.get_size();
++    const int patch_rows = resized_size.height / patch_size;
++    const int patch_cols = resized_size.width / patch_size;
++
++    mtmd_image_preproc_out output;
++    output.entries.reserve((size_t) patch_rows * patch_cols * temporal_patch_size);
++    for (int row = 0; row < patch_rows; ++row) {
++        for (int col = 0; col < patch_cols; ++col) {
++            clip_image_u8 patch;
++            img_tool::crop(resized, patch, col * patch_size, row * patch_size, patch_size, patch_size);
++            output.append(hparams, patch, true);
++            output.append(hparams, patch, true);
++        }
++    }
++    return output;
++}
++
++
+ //
+ // mtmd_image_preprocessor_llava_uhd
+ //
+diff --git a/tools/mtmd/mtmd-image.h b/tools/mtmd/mtmd-image.h
+index 732e27379..22e4f9968 100644
+--- a/tools/mtmd/mtmd-image.h
++++ b/tools/mtmd/mtmd-image.h
+@@ -26,6 +26,20 @@ struct mtmd_image_preproc_out {
+     }
+ };
+ 
++// Inkling hMLP preprocessing; pixel_values_bthwc is row-major BTHWC [n_patches, 2, 40, 40, 3].
++struct mtmd_inkling_image_preproc_out {
++    clip_image_size source_size;
++    clip_image_size resized_size;
++    int patch_rows = 0;
++    int patch_cols = 0;
++    std::vector<uint8_t> resized_rgb;
++    std::vector<float> pixel_values_bthwc;
++};
++
++mtmd_inkling_image_preproc_out mtmd_image_preprocess_inkling(
++        const clip_image_u8 & img,
++        resize_algo algo = RESIZE_ALGO_LANCZOS);
++
+ // base class, models must inherit from this class
+ struct mtmd_image_preprocessor {
+     const clip_hparams & hparams;
+@@ -115,6 +129,12 @@ struct mtmd_image_preprocessor_fixed_size : mtmd_image_preprocessor {
+     mtmd_image_preproc_out preprocess(const clip_image_u8 & img) override;
+ };
+ 
++// Inkling: split an image into 40x40 hMLP patches, each duplicated across a fixed temporal dimension of two.
++struct mtmd_image_preprocessor_inkling : mtmd_image_preprocessor {
++    mtmd_image_preprocessor_inkling(const clip_ctx * ctx) : mtmd_image_preprocessor(ctx) {}
++    mtmd_image_preproc_out preprocess(const clip_image_u8 & img) override;
++};
++
+ // resize image to multiple of patch_size*n_merge, while preserving aspect ratio
+ // if image_resize_pad is true, the resized image will be padded, otherwise it will be either stretched or center-cropped depending on image_resize_pad
+ // this is used by models with native support for dynamic image size, for example: Qwen-VL, Pixtral, Kimi-VL, etc
+diff --git a/tools/mtmd/mtmd.cpp b/tools/mtmd/mtmd.cpp
+index 5b306180d..8ea35863d 100644
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -629,6 +629,12 @@ struct mtmd_context {
+         projector_type proj = clip_get_projector_type(ctx_v);
+ 
+         switch (proj) {
++            case PROJECTOR_TYPE_INKLING:
++                {
++                    // renderer opens each image part with <|content_image|>; block framing comes from the template
++                    img_beg = "<|content_image|>";
++                    image_preproc = std::make_unique<mtmd_image_preprocessor_inkling>(ctx_v);
++                } break;
+             case PROJECTOR_TYPE_MLP:
+             case PROJECTOR_TYPE_MLP_NORM:
+             case PROJECTOR_TYPE_LDP:
+@@ -921,6 +927,13 @@ struct mtmd_context {
+ 
+         // set preprocessor
+         switch (proj) {
++            case PROJECTOR_TYPE_INKLING:
++                {
++                    // <|content_audio_input|> ... <|audio_end|>, matching the renderer's audio framing
++                    aud_beg = "<|content_audio_input|>";
++                    aud_end = "<|audio_end|>";
++                    audio_preproc = std::make_unique<mtmd_audio_preprocessor_inkling>(ctx_a);
++                } break;
+             case PROJECTOR_TYPE_QWEN2A:
+             case PROJECTOR_TYPE_QWEN25O:
+                 {
+@@ -1452,23 +1465,35 @@ struct mtmd_tokenizer {
+                 }
+ 
+                 size_t n_tokens = 0;
+-                for (auto & e : preproc_out.entries) {
+-                    n_tokens += clip_n_output_tokens(ctx->ctx_v, &e);
+-                    if (clip_model_n_temporal_merge(ctx->ctx_v) == 2) {
+-                        // [QWEN_VIDEO] pair input is merged to the same embd, so only count as one image
+-                        break;
++                if (ctx->proj_type_v() == PROJECTOR_TYPE_INKLING) {
++                    GGML_ASSERT(preproc_out.entries.size() % 2 == 0);
++                    n_tokens = preproc_out.entries.size() / 2;
++                } else {
++                    for (auto & e : preproc_out.entries) {
++                        n_tokens += clip_n_output_tokens(ctx->ctx_v, &e);
++                        if (clip_model_n_temporal_merge(ctx->ctx_v) == 2) {
++                            // [QWEN_VIDEO] pair input is merged to the same embd, so only count as one image
++                            break;
++                        }
+                     }
+                 }
+ 
+                 mtmd_image_tokens_ptr image_tokens(new mtmd_image_tokens);
+ 
+                 // [QWEN_VIDEO] improve this in the future
+-                image_tokens->n_temporal_merge = clip_model_n_temporal_merge(ctx->ctx_v);
++                // Inkling's pair is internal to each patch; it must not merge consecutive user bitmaps as video frames.
++                image_tokens->n_temporal_merge = ctx->proj_type_v() == PROJECTOR_TYPE_INKLING
++                    ? 2
++                    : clip_model_n_temporal_merge(ctx->ctx_v);
+ 
+                 if (mtmd_decode_use_mrope(ctx)) {
+                     // for Qwen2VL, we need this information for M-RoPE decoding positions
+                     image_tokens->nx = clip_n_output_tokens_x(ctx->ctx_v, &preproc_out.entries[0]);
+                     image_tokens->ny = clip_n_output_tokens_y(ctx->ctx_v, &preproc_out.entries[0]);
++                } else if (ctx->proj_type_v() == PROJECTOR_TYPE_INKLING) {
++                    // n_tokens() multiplies 1x1 by the number of temporal groups.
++                    image_tokens->nx = 1;
++                    image_tokens->ny = 1;
+                 } else {
+                     // other models, we only need the total number of tokens
+                     image_tokens->nx = n_tokens;

@@ -72,6 +72,30 @@ pub(super) fn resolve_inventory_source(request: &StageInventoryRequest) -> Optio
         });
     }
     if is_layer_package_ref(&request.package_ref) {
+        let identity = crate::inference::skippy::identity_from_layer_package(&request.package_ref)
+            .map_err(|error| {
+                tracing::debug!(
+                    package_ref = request.package_ref,
+                    error = %error,
+                    "package inventory verification failed"
+                );
+                error
+            })
+            .ok()?;
+        if crate::inference::skippy::is_package_v2_identity(&identity) {
+            let kind = if is_split_gguf_path(&identity.source_model_path) {
+                SourceModelKind::SplitGguf
+            } else {
+                SourceModelKind::PlainGguf
+            };
+            return Some(InventorySource {
+                path: identity.source_model_path,
+                bytes: Some(identity.source_model_bytes),
+                layer_count: identity.layer_count,
+                kind,
+                sha256: Some(identity.source_model_sha256),
+            });
+        }
         let info = inspect_stage_package(&request.package_ref).ok()?;
         return Some(InventorySource {
             path: info.package_dir,
@@ -103,8 +127,7 @@ fn resolve_direct_gguf_inventory_source(candidate: &Path) -> Option<InventorySou
     };
     let source_path = source_paths.first()?.clone();
     let layer_count = crate::models::gguf::scan_gguf_compact_meta(&source_path)
-        .map(|meta| meta.layer_count)
-        .filter(|layer_count| *layer_count > 0)
+        .and_then(|meta| meta.executable_layer_count())
         .or_else(|| crate::inference::skippy::infer_layer_count(&source_path).ok())?;
     let bytes = source_paths
         .iter()

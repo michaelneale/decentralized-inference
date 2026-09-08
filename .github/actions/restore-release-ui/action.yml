@@ -1,0 +1,37 @@
+name: Restore verified release UI
+description: Restore a real UI distribution bound to one immutable release source and version.
+
+inputs:
+  artifact_name:
+    description: Run-scoped artifact produced by the shared UI builder.
+    required: true
+  source_sha:
+    description: Expected immutable source commit.
+    required: true
+  release_tag:
+    description: Expected release version tag.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: crates/mesh-llm-ui/dist
+    - name: Verify release UI identity and contents
+      shell: bash
+      env:
+        UI_SOURCE_SHA: ${{ inputs.source_sha }}
+        UI_RELEASE_TAG: ${{ inputs.release_tag }}
+      run: |
+        set -euo pipefail
+        if command -v python3 >/dev/null 2>&1; then
+          python_bin=python3
+        else
+          python_bin=python
+        fi
+        "$python_bin" scripts/ui-distribution.py verify \
+          --dist crates/mesh-llm-ui/dist \
+          --source-sha "$UI_SOURCE_SHA" \
+          --release-tag "$UI_RELEASE_TAG"

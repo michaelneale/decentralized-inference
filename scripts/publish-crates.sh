@@ -370,6 +370,7 @@ publish_crates=(
     mesh-llm-gpu-bench
     skippy-ffi
     skippy-model
+    skippy-package-format
     skippy-protocol
     skippy-coordinator
     skippy-topology

@@ -113,7 +113,7 @@ class FamilyBatteryPlannerTests(unittest.TestCase):
         result = self._run()
         self.assertEqual(0, result.returncode, result.stderr)
         plan = json.loads(result.stdout)
-        self.assertEqual(33, plan["selected_family_count"])
+        self.assertEqual(50, plan["selected_family_count"])
         self.assertEqual(
             ["single-step", "chain", "state-handoff"],
             plan["required_certification_lanes"],
@@ -183,7 +183,7 @@ class FamilyBatteryPlannerTests(unittest.TestCase):
             if model.get("mmproj_artifact") is not None
         }
         self.assertEqual(
-            {"qwen2-vl", "qwen3-vl"}, set(with_mmproj)
+            {"lfm2-vl", "qwen2-vl", "qwen3-vl"}, set(with_mmproj)
         )
         for family, mmproj in with_mmproj.items():
             with self.subTest(family=family):
@@ -493,8 +493,8 @@ class FamilyBatteryPlannerTests(unittest.TestCase):
         families = [
             family for shard in plan["shards"] for family in shard["families"]
         ]
-        self.assertEqual(33, len(families))
-        self.assertEqual(33, len(set(families)))
+        self.assertEqual(50, len(families))
+        self.assertEqual(50, len(set(families)))
         self.assertEqual(4, len(plan["github_matrix"]["include"]))
 
 

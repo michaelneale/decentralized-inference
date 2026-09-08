@@ -1115,10 +1115,27 @@ pub(super) async fn advertise_run_auto_models(
 ) {
     node.set_model_source(model_source).await;
     let all_declared = build_serving_list(startup_models, model_name);
+    node.set_requested_models(all_declared.clone()).await;
     node.set_serving_models(all_declared.clone()).await;
     node.set_hosted_models(Vec::new()).await;
     node.set_models(all_declared).await;
     node.regossip().await;
+}
+
+fn initial_run_auto_requested_models(
+    startup_specs: &[StartupModelSpec],
+    requested_model_names: &[String],
+) -> Vec<String> {
+    startup_specs
+        .iter()
+        .zip(requested_model_names)
+        .filter(|(spec, _)| {
+            spec.declared_ref.is_some()
+                || spec.config_model_id.is_some()
+                || !super::startup_models::is_direct_local_gguf_source(&spec.model_ref)
+        })
+        .map(|(_, model_name)| model_name.clone())
+        .collect()
 }
 
 pub(super) struct RunAutoRuntimeLoopContext<'a> {
@@ -1292,6 +1309,8 @@ pub(super) async fn spawn_run_auto_startup_model_tasks(ctx: RunAutoStartupTasksC
         target_tx: target_tx.clone(),
         model_path: model_path.to_path_buf(),
         model_ref: primary_model_ref,
+        preindexed_split_package: primary_startup_model
+            .and_then(|model| model.preindexed_split_package.clone()),
         config_model_id: primary_config_model_id,
         readiness_index: 0,
         profile: primary_startup_model
@@ -1491,9 +1510,11 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
     )
     .await?;
 
-    // Advertise what we have on disk and what we want the mesh to serve
-    node.set_requested_models(requested_model_names.clone())
-        .await;
+    // A bare local GGUF has no stable mesh identity until its content scan
+    // completes. Do not advertise its node-local path as temporary demand.
+    let initial_requested_models =
+        initial_run_auto_requested_models(&startup_specs, &requested_model_names);
+    node.set_requested_models(initial_requested_models).await;
 
     run_auto_join_mesh_phase(&mut options, &node, &auto_join_candidates).await?;
 

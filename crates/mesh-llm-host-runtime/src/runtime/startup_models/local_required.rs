@@ -60,6 +60,7 @@ pub(super) fn resolve_local_required_startup_model(
         declared_ref,
         config_model_id: spec.config_model_id.clone(),
         resolved_path,
+        preindexed_split_package: None,
         mmproj_path,
         ctx_size: spec.ctx_size,
         gpu_id: spec.gpu_id.clone(),

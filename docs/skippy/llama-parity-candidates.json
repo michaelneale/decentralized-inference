@@ -9,11 +9,12 @@
   },
   "support_priority": {
     "policy": "Use P0/P1 as the active support queue. Keep the full llama.cpp inventory classified, but do not block Skippy parity on P2 long-tail, non-causal auxiliary, or implementation-base rows unless a user-visible demand signal appears.",
-    "last_reviewed": "2026-05-07",
+    "last_reviewed": "2026-09-07",
     "sources": [
       "Hugging Face GGUF text-generation search sorted by downloads",
       "Mesh deployment demand for Qwen3.6, DeepSeek V3, Qwen Coder, MiniMax, Falcon-H1, and staged package serving",
-      "llama.cpp architecture inventory from the pinned upstream checkout"
+      "llama.cpp architecture inventory from the pinned upstream checkout",
+      "Explicit Skippy review demand for broader multimodal and OCR coverage"
     ],
     "p0": {
       "meaning": "must support: very popular GGUF ecosystems, current Mesh deployment targets, or strategic staged/package/multimodal families",
@@ -99,7 +100,8 @@
         "kimi-linear",
         "seed-oss",
         "gpt2",
-        "mpt"
+        "mpt",
+        "paddleocr"
       ]
     },
     "p2": {
@@ -114,15 +116,24 @@
       "status": "certified",
       "repo": "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "splits": "5,11"
+      "splits": "5,11",
+      "model_pin": {
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "revision": "067b946cf014b7c697f3654f621d577a3e3afd1c",
+        "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 807694464,
+        "blob_sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "qwen2",
       "family": "qwen2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "meshllm/qwen2.5-0.5b-instruct-parity-q8_0-gguf",
       "include": "*.gguf",
-      "notes": "Metal cheap lane passed text split, exact state, and ResidentKv borrowed-hit cache smoke"
+      "notes": "Metal cheap lane passed text split, exact state, and ResidentKv borrowed-hit cache smoke; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen3",
@@ -130,16 +141,26 @@
       "artifact_id": "qwen3-q8-parity",
       "status": "certified",
       "repo": "meshllm/qwen3-0.6b-parity-q8_0-gguf",
-      "include": "*.gguf"
+      "include": "*.gguf",
+      "model_pin": {
+        "repo": "Qwen/Qwen3-0.6B-GGUF",
+        "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+        "file": "Qwen3-0.6B-Q8_0.gguf",
+        "selector": "Q8_0",
+        "size_bytes": 639446688,
+        "blob_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "qwen3next",
       "family": "qwen3next",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/Qwen_Qwen3-Coder-Next-GGUF",
       "include": "*IQ2_XS.gguf",
       "recurrent": "all",
-      "splits": "16,32"
+      "splits": "16,32",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen35moe",
@@ -153,13 +174,13 @@
     {
       "llama_model": "qwen2vl",
       "family": "qwen2vl",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/Qwen2-VL-2B-Instruct-GGUF",
       "include": [
         "Qwen2-VL-2B-Instruct-Q4_K_M.gguf",
         "mmproj-Qwen2-VL-2B-Instruct-f16.gguf"
       ],
-      "notes": "text split/cache and split multimodal serving passed with bartowski/Qwen2-VL-2B-Instruct-GGUF:Q4_K_M plus mmproj-Qwen2-VL-2B-Instruct-f16.gguf after adding per-chunk media activation forwarding, sampled final prefill, and M-RoPE position sideband transport; f16 wire passed, q8 rejected; FullState remains blocked by M-RoPE native-position rules, so use ResidentKv for exact-prefix text cache"
+      "notes": "text split/cache and split multimodal serving passed with bartowski/Qwen2-VL-2B-Instruct-GGUF:Q4_K_M plus mmproj-Qwen2-VL-2B-Instruct-f16.gguf after adding per-chunk media activation forwarding, sampled final prefill, and M-RoPE position sideband transport; f16 wire passed, q8 rejected; FullState remains blocked by M-RoPE native-position rules, so use ResidentKv for exact-prefix text cache; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen4exp",
@@ -173,29 +194,29 @@
     {
       "llama_model": "qwen3vl",
       "family": "qwen3vl",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Qwen/Qwen3-VL-2B-Instruct-GGUF",
       "include": [
         "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
         "mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf"
       ],
-      "notes": "text split/cache and split multimodal serving passed with Qwen/Qwen3-VL-2B-Instruct-GGUF:Q4_K_M plus mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf after adding native input-width activation padding, per-chunk media activation forwarding, sampled final prefill, and M-RoPE position sideband transport; f16 and q8 wire passed; FullState remains blocked by M-RoPE native-position rules, so use ResidentKv for exact-prefix text cache"
+      "notes": "text split/cache and split multimodal serving passed with Qwen/Qwen3-VL-2B-Instruct-GGUF:Q4_K_M plus mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf after adding native input-width activation padding, per-chunk media activation forwarding, sampled final prefill, and M-RoPE position sideband transport; f16 and q8 wire passed; FullState remains blocked by M-RoPE native-position rules, so use ResidentKv for exact-prefix text cache; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen2moe",
       "family": "qwen2moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/Qwen2-1.5B-2x-MoE-GGUF",
       "include": "Qwen2-1.5B-2x-MoE.Q4_K_S.gguf",
-      "notes": "text lane passed in llama-parity-qwen2moe-runtime-slice-4; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke already passed"
+      "notes": "text lane passed in llama-parity-qwen2moe-runtime-slice-4; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke already passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen3moe",
       "family": "qwen3moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-GGUF",
       "include": "Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder.Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-qwen3moe-runtime-slice-2; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke already passed"
+      "notes": "text lane passed in llama-parity-qwen3moe-runtime-slice-2; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke already passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "laguna",
@@ -208,10 +229,10 @@
     {
       "llama_model": "mistral3",
       "family": "mistral",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-mistral3-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-mistral3-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "mistral4",
@@ -225,26 +246,26 @@
     {
       "llama_model": "phi3",
       "family": "phi",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-phi-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-phi-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "phi2",
       "family": "phi2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "TheBloke/phi-2-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-phi2-runtime-slice-2 after the fused-QKV stage-filter fix; ResidentKv one-stage and split-final cache restore passed in llama-parity-phi2-resident-kv-1 and /Volumes/External/tmp/skippy-phi2-resident-kv-stage1-20260506.json; full-state mobility rejected as too large"
+      "notes": "text lane passed in llama-parity-phi2-runtime-slice-2 after the fused-QKV stage-filter fix; ResidentKv one-stage and split-final cache restore passed in llama-parity-phi2-resident-kv-1 and /Volumes/External/tmp/skippy-phi2-resident-kv-stage1-20260506.json; full-state mobility rejected as too large; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "phimoe",
       "family": "phimoe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/Phi-3.5-MoE-instruct-GGUF",
       "include": "Phi-3.5-MoE-instruct-Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-phimoe-runtime-slice-2 after adding PhiMoE staged-graph support; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-phimoe-runtime-slice-2 after adding PhiMoE staged-graph support; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gemma",
@@ -258,61 +279,87 @@
       "llama_model": "gemma2",
       "family": "gemma2",
       "artifact_id": "gemma2-q4-parity-radix",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/gemma-2-2b-it-GGUF",
       "include": "*Q4_K_M.gguf",
-      "splits": "9,17"
+      "splits": "9,17",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gemma3",
       "family": "gemma3",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "ggml-org/gemma-3-1b-it-GGUF",
-      "include": "*Q4_K_M.gguf"
+      "include": "*Q4_K_M.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
+    },
+    {
+      "llama_model": "gemma3",
+      "family": "gemma3_vl",
+      "status": "candidate_multimodal",
+      "repo": "ggml-org/gemma-3-4b-it-GGUF",
+      "include": [
+        "gemma-3-4b-it-Q4_K_M.gguf",
+        "mmproj-model-f16.gguf"
+      ],
+      "notes": "Official Gemma 3 vision model/projector pair; certify text split, projector image prefill, media sideband forwarding, sampled decode, and non-midpoint cuts",
+      "revision": "d0976223747697cb51e056d85c532013931fe52e",
+      "file_integrity": {
+        "gemma-3-4b-it-Q4_K_M.gguf": {
+          "size_bytes": 2489757856,
+          "blob_id": "882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863"
+        },
+        "mmproj-model-f16.gguf": {
+          "size_bytes": 851251104,
+          "blob_id": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb"
+        }
+      }
     },
     {
       "llama_model": "gemma4",
       "family": "gemma4_a4b",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "batiai/Gemma-4-26B-A4B-it-GGUF",
-      "include": "*Q6_K.gguf"
+      "include": "*Q6_K.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gemma4",
       "family": "gemma4_e4b",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "unsloth/gemma-4-E4B-it-GGUF",
       "include": "*Q4_K_M.gguf",
       "splits": "10,21",
-      "notes": "Gemma4 E4B rejects known shared-KV producer/consumer cuts at 12,14,24,28 for the 42-layer representative; use reviewed 0..10,10..21,21..42 split boundaries for parity smoke tests."
+      "notes": "Gemma4 E4B rejects known shared-KV producer/consumer cuts at 12,14,24,28 for the 42-layer representative; use reviewed 0..10,10..21,21..42 split boundaries for parity smoke tests.; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gemma3n",
       "family": "gemma3n",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/gemma-3n-E2B-it-GGUF",
       "include": "*Q4_K_M.gguf",
       "split_layer": 15,
       "splits": "10,15",
       "n_gpu_layers": 0,
-      "notes": "certified with lmstudio-community/gemma-3n-E2B-it-GGUF Q4_K_M in llama-parity-gemma3n-cpu-20260507d; Gemma3n carries AltUp sideband state across activation frames and split topologies must keep KV-reuse layers with their KV-owner layers, so the reviewed three-stage split is 0..10,10..15,15..30 rather than an even 0..10,10..20,20..30 split. The local parity representative runs CPU-only because Metal on the M1 Ultra diverges for split Gemma3n AltUp handoff while CPU matches the full-model baseline."
+      "notes": "certified with lmstudio-community/gemma-3n-E2B-it-GGUF Q4_K_M in llama-parity-gemma3n-cpu-20260507d; Gemma3n carries AltUp sideband state across activation frames and split topologies must keep KV-reuse layers with their KV-owner layers, so the reviewed three-stage split is 0..10,10..15,15..30 rather than an even 0..10,10..20,20..30 split. The local parity representative runs CPU-only because Metal on the M1 Ultra diverges for split Gemma3n AltUp handoff while CPU matches the full-model baseline.; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "deepseek",
       "family": "deepseek",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Morgen0052/deepseek-llm-7b-chat-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "replaces stale legraphista/DeepSeek-LLM-7B-Chat-GGUF; text lane passed in llama-parity-cache-deepseek; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "replaces stale legraphista/DeepSeek-LLM-7B-Chat-GGUF; text lane passed in llama-parity-cache-deepseek; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "deepseek2",
       "family": "deepseek2",
       "artifact_id": "family-deepseek2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "splits": "9,18"
+      "splits": "9,18",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "deepseek2",
@@ -325,32 +372,34 @@
     {
       "llama_model": "glm4",
       "family": "glm4",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "meshllm/glm-4-9b-0414-parity-q4_k_m-gguf",
-      "include": "*.gguf"
+      "include": "*.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "glm4",
       "family": "glm47_flash",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "unsloth/GLM-4.7-Flash-GGUF",
-      "include": "*Q4_K_M.gguf"
+      "include": "*Q4_K_M.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "glm4-moe",
       "family": "glm4_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "noctrex/GLM-4.7-Flash-REAP-23B-A3B-MXFP4_MOE-GGUF",
       "include": "GLM-4.7-Flash-REAP-23B-A3B-MXFP4_MOE.gguf",
-      "notes": "text lane passed in llama-parity-glm4-moe-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-glm4-moe-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "granite",
       "family": "granite",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/ibm-granite_granite-3.2-2b-instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-dense-tranche-2-granite-fix2; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-dense-tranche-2-granite-fix2; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "granite-hybrid",
@@ -359,64 +408,73 @@
       "repo": "magiccodingman/Granite-4.0-H-350M-Unsloth-MXFP4-Hybrid-GGUF",
       "include": "f16-hybrid-granite-4.0-h-350m-unsloth-MXFP4_MOE-output_q6_K-router_gate_emb_q6_K.gguf",
       "recurrent": "all",
-      "notes": "text lane passed in llama-parity-granite-hybrid-runtime-slice-2 after adding Granite-Hybrid graph stage filtering; q8 activation wire validated; use KvRecurrent and keep recurrent ownership sticky because full-state mobility is rejected as too large"
+      "notes": "text lane passed in llama-parity-granite-hybrid-runtime-slice-2 after adding Granite-Hybrid graph stage filtering; q8 activation wire validated; use KvRecurrent and keep recurrent ownership sticky because full-state mobility is rejected as too large",
+      "model_pin": {
+        "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+        "revision": "a864f823cce6e6048b5752e2816fe7a23987d790",
+        "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 222662560,
+        "blob_sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "granite-moe",
       "family": "granite_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/tiny-random-granite-moe-GGUF",
       "include": "tiny-random-granite-moe.Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-granite-moe-runtime-slice-2 after adding Granite-MoE staged-graph support; tiny random GGUF certifies graph/tensor layout only, so replace with a real small artifact when available"
+      "notes": "text lane passed in llama-parity-granite-moe-runtime-slice-2 after adding Granite-MoE staged-graph support; tiny random GGUF certifies graph/tensor layout only, so replace with a real small artifact when available; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gptneox",
       "family": "gptneox",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "warriorknight3/pythia-70m-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "text lane passed in llama-parity-gptneox-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-gptneox-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "bloom",
       "family": "bloom",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "QuantFactory/bloomz-560m-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-bloom-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-bloom-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "baichuan",
       "family": "baichuan",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lucasxx/Baichuan2-7B-Chat-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "text lane passed in llama-parity-baichuan-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-baichuan-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "command-r",
       "family": "command_r",
-      "status": "certified",
-      "notes": "selected true command-r GGUF because newer Command-R7B artifacts report cohere2; text split, chain, dtype matrix, and ResidentKv handoff passed in llama-parity-command-r-20260507; q8 activation wire validated",
+      "status": "needs_boundary_registration",
+      "notes": "selected true command-r GGUF because newer Command-R7B artifacts report cohere2; text split, chain, dtype matrix, and ResidentKv handoff passed in llama-parity-command-r-20260507; q8 activation wire validated; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "qwp4w3hyb/c4ai-command-r-v01-iMat-GGUF",
       "include": "c4ai-command-r-v01-imat-IQ2_M.gguf"
     },
     {
       "llama_model": "cohere2",
       "family": "cohere2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Lumia101/c4ai-command-r7b-12-2024-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "text lane passed in llama-parity-cohere2-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-cohere2-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "jamba",
       "family": "jamba",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/ai21labs_AI21-Jamba2-3B-GGUF",
       "include": "*Q4_K_M.gguf",
       "recurrent": "all",
-      "notes": "replaces gated/non-GGUF AI21-Jamba-1.5-Mini source; text lane passed in llama-parity-jamba-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep hybrid recurrent ownership sticky for normal decode"
+      "notes": "replaces gated/non-GGUF AI21-Jamba-1.5-Mini source; text lane passed in llama-parity-jamba-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep hybrid recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "mamba",
@@ -425,42 +483,51 @@
       "repo": "mradermacher/mamba-130m-hf-GGUF",
       "include": "*Q4_K_M.gguf",
       "recurrent": "all",
-      "notes": "text lane passed in llama-parity-mamba-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode"
+      "notes": "text lane passed in llama-parity-mamba-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode",
+      "model_pin": {
+        "repo": "Felladrin/gguf-mamba-130m-hf",
+        "revision": "83ef2222e1a0437d26bda213537afc195a53b3ad",
+        "file": "mamba-130m-hf.Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 103576544,
+        "blob_sha256": "2784131bc0546f802bcb720cbc77d26c174c85514400cc645507146ad95f07da",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "mamba2",
       "family": "mamba2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/mamba-2.8b-hf-GGUF",
       "include": "*Q4_K_M.gguf",
       "recurrent": "all",
-      "notes": "replaces stale mradermacher/mamba2-130m-GGUF; no small mamba2-130m GGUF candidate found; text lane passed in llama-parity-mamba2-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode"
+      "notes": "replaces stale mradermacher/mamba2-130m-GGUF; no small mamba2-130m GGUF candidate found; text lane passed in llama-parity-mamba2-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "rwkv6",
       "family": "rwkv6",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "latestissue/rwkv-6-finch-1b6-gguf",
       "include": "rwkv-6-finch-1b6-Q4_K.gguf",
       "recurrent": "all",
-      "notes": "replaces jpodivin/rwkv-4-pile-169m-GGUF because those local files use legacy fmgg/GGML magic and cannot be inspected as GGUF; text lane passed in llama-parity-rwkv6-runtime-slice-3; f16 activation wire validated; q8 activation wire rejected; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode"
+      "notes": "replaces jpodivin/rwkv-4-pile-169m-GGUF because those local files use legacy fmgg/GGML magic and cannot be inspected as GGUF; text lane passed in llama-parity-rwkv6-runtime-slice-3; f16 activation wire validated; q8 activation wire rejected; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "rwkv7",
       "family": "rwkv7",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Mungert/rwkv7-191M-world-GGUF",
       "include": "*q4_k.gguf",
       "recurrent": "all",
-      "notes": "replaces stale mradermacher/RWKV-7-World-0.1B-v1-GGUF; text lane passed after adding the layer-0 v_first activation sideband; q8 activation wire validated on sampled artifact; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode"
+      "notes": "replaces stale mradermacher/RWKV-7-World-0.1B-v1-GGUF; text lane passed after adding the layer-0 v_first activation sideband; q8 activation wire validated on sampled artifact; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "arwkv7",
       "family": "rwkv7",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "search": "ARWKV7 GGUF small",
       "recurrent": "all",
-      "notes": "selected public arwkv7 GGUF for separate RWKV7-sideband certification; text split, chain, dtype matrix, and KvRecurrent handoff passed in llama-parity-arwkv7-position-fix-20260507 after preserving the v_first activation sideband across forwarded stages; q8 rejected for this artifact",
+      "notes": "selected public arwkv7 GGUF for separate RWKV7-sideband certification; text split, chain, dtype matrix, and KvRecurrent handoff passed in llama-parity-arwkv7-position-fix-20260507 after preserving the v_first activation sideband across forwarded stages; q8 rejected for this artifact; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mradermacher/ARWKV-7B-Preview-0.1-i1-GGUF",
       "include": "ARWKV-7B-Preview-0.1.i1-IQ2_M.gguf"
     },
@@ -472,81 +539,115 @@
       "repo": "tiiuae/Falcon-H1-1.5B-Instruct-GGUF",
       "include": "*Q4_K_M.gguf",
       "recurrent": "all",
-      "splits": "8,16"
+      "splits": "8,16",
+      "model_pin": {
+        "repo": "tiiuae/Falcon-H1-1.5B-Instruct-GGUF",
+        "revision": "0d3a6cfe25fb4eeab0153fb8623aac5b69d6bd0a",
+        "file": "Falcon-H1-1.5B-Instruct-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 944786656,
+        "blob_sha256": "8b51aa2aa34a0373fd0cd64c02eb91d1bc1da681c09e955ad769d4a9b2d8385f",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "falcon",
       "family": "falcon",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Kondara/falcon-7b-instruct-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "text lane passed in llama-parity-falcon-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-falcon-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "olmo",
       "family": "olmo",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "meshllm/olmo-7b-instruct-hf-parity-f16-gguf",
-      "include": "*.gguf"
+      "include": "*.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "olmo2",
       "family": "olmo2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "allenai/OLMo-2-1124-7B-Instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-olmo2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-olmo2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "olmoe",
       "family": "olmoe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/OLMoE-1B-7B-0924-Instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-olmoe-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke passed for one-stage, split-middle, and split-final"
+      "notes": "text lane passed in llama-parity-olmoe-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; MoE expert-stage smoke passed for one-stage, split-middle, and split-final; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "minimax-m2",
       "family": "minimax_m27",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "unsloth/MiniMax-M2.7-GGUF",
-      "include": "UD-Q2_K_XL/*.gguf"
+      "include": "UD-Q2_K_XL/*.gguf",
+      "notes": "family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "lfm2",
       "family": "lfm2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "meshllm/lfm2-350m-parity-q4_k_m-gguf",
       "include": "*.gguf",
       "recurrent": "all",
-      "notes": "text lane passed in llama-parity-lfm2-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode"
+      "notes": "text lane passed in llama-parity-lfm2-runtime-slice-2; q8 activation wire validated; KvRecurrent native-sequence remap cache smoke passed; keep recurrent ownership sticky for normal decode; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
+    },
+    {
+      "llama_model": "lfm2",
+      "family": "lfm2_vl",
+      "status": "certified",
+      "repo": "ggml-org/LFM2-VL-450M-GGUF",
+      "include": [
+        "LFM2-VL-450M-Q8_0.gguf",
+        "mmproj-LFM2-VL-450M-Q8_0.gguf"
+      ],
+      "recurrent": "all",
+      "notes": "Small official 450M model/projector pair for cheap multimodal staged coverage; certify text split, recurrent state, projector prefill, media sideband forwarding, and sampled decode",
+      "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+      "file_integrity": {
+        "LFM2-VL-450M-Q8_0.gguf": {
+          "size_bytes": 379215264,
+          "blob_id": "e97704a0cf0a1d00ca604b4c672c82f4234318dba9d43a7f7a4c0d2df6747844"
+        },
+        "mmproj-LFM2-VL-450M-Q8_0.gguf": {
+          "size_bytes": 103890016,
+          "blob_id": "a6a813fae4ba3f90852a990fdd4786a017dba0e80e599a366853ba539ee2b5ef"
+        }
+      }
     },
     {
       "llama_model": "hunyuan-dense",
       "family": "hunyuan_dense",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "Edge-Quant/Hunyuan-1.8B-Instruct-Q4_K_M-GGUF",
       "include": "hunyuan-1.8b-instruct-q4_k_m.gguf",
-      "notes": "text lane passed in llama-parity-hunyuan-dense-runtime-slice-2 after adding Hunyuan-Dense graph stage filtering; q8 activation wire validated; ResidentKv cache smoke passed"
+      "notes": "text lane passed in llama-parity-hunyuan-dense-runtime-slice-2 after adding Hunyuan-Dense graph stage filtering; q8 activation wire validated; ResidentKv cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "hunyuan-moe",
       "family": "hunyuan_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "unsloth/Hunyuan-A13B-Instruct-GGUF",
       "include": "Hunyuan-A13B-Instruct-UD-IQ2_XXS.gguf",
-      "notes": "real A13B MoE artifact passed in llama-parity-hunyuan-moe-runtime-slice-1 after adding Hunyuan-MoE graph stage filtering; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "real A13B MoE artifact passed in llama-parity-hunyuan-moe-runtime-slice-1 after adding Hunyuan-MoE graph stage filtering; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "hunyuan-vl",
       "family": "hunyuan_vl",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "ggml-org/HunyuanOCR-GGUF",
       "include": [
         "HunyuanOCR-Q8_0.gguf",
         "mmproj-HunyuanOCR-Q8_0.gguf"
       ],
-      "notes": "HunyuanOCR split multimodal serving passed with ggml-org/HunyuanOCR-GGUF:Q8_0 plus mmproj-HunyuanOCR-Q8_0.gguf using the shared Hunyuan-Dense/VL graph filter and the media activation position sideband; default f16 activation wire is the support target"
+      "notes": "HunyuanOCR split multimodal serving passed with ggml-org/HunyuanOCR-GGUF:Q8_0 plus mmproj-HunyuanOCR-Q8_0.gguf using the shared Hunyuan-Dense/VL graph filter and the media activation position sideband; default f16 activation wire is the support target; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "inkling",
@@ -563,26 +664,26 @@
     {
       "llama_model": "internlm2",
       "family": "internlm2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/internlm2_5-1_8b-chat-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-internlm2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-internlm2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "exaone",
       "family": "exaone",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/EXAONE-3.5-2.4B-Instruct-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-exaone-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-exaone-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "exaone4",
       "family": "exaone4",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/LGAI-EXAONE_EXAONE-4.0-1.2B-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-exaone4-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-exaone4-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "bert",
@@ -603,34 +704,34 @@
     {
       "llama_model": "starcoder2",
       "family": "starcoder2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "combos/starcoder2-3b-Q4_K_M-GGUF",
       "include": "*.gguf",
-      "notes": "replaces stale bigcode/starcoder2-3b-GGUF; text lane passed in llama-parity-starcoder2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "replaces stale bigcode/starcoder2-3b-GGUF; text lane passed in llama-parity-starcoder2-runtime-slice-1; q8 activation wire validated; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "stablelm",
       "family": "stablelm",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "TheBloke/stablelm-zephyr-3b-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-stablelm-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-stablelm-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "gpt2",
       "family": "gpt2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "QuantFactory/gpt2-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-gpt2-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-gpt2-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "mpt",
       "family": "mpt",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/mpt-7b-chat-GGUF",
       "include": "*Q4_K_M.gguf",
-      "notes": "text lane passed in llama-parity-mpt-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed"
+      "notes": "text lane passed in llama-parity-mpt-runtime-slice-1; f16 activation wire validated; q8 activation wire rejected; ResidentKv native-sequence remap cache smoke passed; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "llama4",
@@ -649,16 +750,16 @@
     {
       "llama_model": "apertus",
       "family": "apertus",
-      "status": "certified",
-      "notes": "selected public apertus GGUF for split execution and ResidentKv certification; text split, chain, and ResidentKv handoff passed in llama-parity-apertus-f32-20260507. The current raw-f32 protocol matches that transport evidence; historical f16 and q8 failures remain useful compression research evidence.",
+      "status": "needs_boundary_registration",
+      "notes": "selected public apertus GGUF for split execution and ResidentKv certification; text split, chain, and ResidentKv handoff passed in llama-parity-apertus-f32-20260507. The current raw-f32 protocol matches that transport evidence; historical f16 and q8 failures remain useful compression research evidence.; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "unsloth/Apertus-8B-Instruct-2509-GGUF",
       "include": "Apertus-8B-Instruct-2509-UD-IQ2_M.gguf"
     },
     {
       "llama_model": "arcee",
       "family": "arcee",
-      "status": "certified",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected",
+      "status": "needs_boundary_registration",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "bartowski/arcee-ai_AFM-4.5B-GGUF",
       "include": "arcee-ai_AFM-4.5B-IQ2_M.gguf"
     },
@@ -685,8 +786,8 @@
     {
       "llama_model": "bitnet",
       "family": "bitnet",
-      "status": "certified",
-      "notes": "selected loadable true bitnet GGUF after rejecting llama-architecture false positives and BitNet-specific GGUF tensor encodings that this llama.cpp pin cannot read; text split, chain, dtype matrix, and ResidentKv handoff passed in llama-parity-bitnet-tied-output-20260507 after preserving tied token embeddings as a duplicated output tensor for final runtime slices",
+      "status": "needs_boundary_registration",
+      "notes": "selected loadable true bitnet GGUF after rejecting llama-architecture false positives and BitNet-specific GGUF tensor encodings that this llama.cpp pin cannot read; text split, chain, dtype matrix, and ResidentKv handoff passed in llama-parity-bitnet-tied-output-20260507 after preserving tied token embeddings as a duplicated output tensor for final runtime slices; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "Sarverott/bitnet_b1_58-large-Q4_K_M-GGUF",
       "include": "bitnet_b1_58-large-q4_k_m.gguf"
     },
@@ -694,13 +795,22 @@
       "llama_model": "chameleon",
       "family": "chameleon",
       "status": "candidate_multimodal",
-      "notes": "multimodal family; needs projector/media sideband certification before causal text or multimodal promotion"
+      "notes": "Integrated-image-token multimodal family; use the smallest public Q2_K GGUF for graph/load and staged text-path coverage before media-token parity promotion",
+      "repo": "mradermacher/chameleon-7b-GGUF",
+      "include": "chameleon-7b.Q2_K.gguf",
+      "revision": "ec8b2ed4a4e62316ad114fa9f23eff91962c7938",
+      "file_integrity": {
+        "chameleon-7b.Q2_K.gguf": {
+          "size_bytes": 2694131072,
+          "blob_id": "922fe8edc88bc653ebf7be53b456b391cc7358a79a07f0d003329cc0bbb5e2b3"
+        }
+      }
     },
     {
       "llama_model": "chatglm",
       "family": "chatglm",
-      "status": "certified",
-      "notes": "text split and ResidentKv native-sequence remap cache restore pass on the Q4_K_M ChatGLM3 representative. The prior IQ2_M cheap artifact flips the first-token argmax at the activation boundary even with f32 wire, so the P1 certification row uses the less brittle Q4_K_M artifact and a stable multi-token prompt.",
+      "status": "needs_boundary_registration",
+      "notes": "text split and ResidentKv native-sequence remap cache restore pass on the Q4_K_M ChatGLM3 representative. The prior IQ2_M cheap artifact flips the first-token argmax at the activation boundary even with f32 wire, so the P1 certification row uses the less brittle Q4_K_M artifact and a stable multi-token prompt.; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "Junrui2021/chatglm3-6b-Q4_K_M-GGUF",
       "include": "chatglm3-6b-q4_k_m.gguf",
       "splits": "9,18",
@@ -709,8 +819,8 @@
     {
       "llama_model": "codeshell",
       "family": "codeshell",
-      "status": "certified",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected",
+      "status": "needs_boundary_registration",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mradermacher/CodeShell-7B-i1-GGUF",
       "include": "CodeShell-7B.i1-IQ2_M.gguf"
     },
@@ -718,7 +828,16 @@
       "llama_model": "cogvlm",
       "family": "cogvlm",
       "status": "candidate_multimodal",
-      "notes": "vision-language family; needs projector/media sideband certification before promotion"
+      "notes": "Vision-language family; only a 26 GB F16 public GGUF is currently available, so keep this as an opt-in P2 download and certify projector/media sidebands on larger hardware",
+      "repo": "PandaExpressPatron/cogvlm-chat-gguf",
+      "include": "cogvlm-13B-chat-v1.1-F16.gguf",
+      "revision": "8076a26b5563f170569805cf17e22401f5c790e8",
+      "file_integrity": {
+        "cogvlm-13B-chat-v1.1-F16.gguf": {
+          "size_bytes": 26430130112,
+          "blob_id": "d3f5db973166dbfc39355c85480c9413fa5b67122f87de9f1c08421640acee38"
+        }
+      }
     },
     {
       "llama_model": "dbrx",
@@ -731,21 +850,21 @@
     {
       "llama_model": "deci",
       "family": "deci",
-      "status": "certified",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected",
+      "status": "needs_boundary_registration",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mradermacher/DeciLM-6b-instruct-i1-GGUF",
       "include": "DeciLM-6b-instruct.i1-IQ2_M.gguf"
     },
     {
       "llama_model": "deepseek2ocr",
       "family": "deepseek2ocr",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "ggml-org/DeepSeek-OCR-GGUF",
       "include": [
         "DeepSeek-OCR-Q8_0.gguf",
         "mmproj-DeepSeek-OCR-Q8_0.gguf"
       ],
-      "notes": "OCR multimodal/MLA family; text split, chain, dtype matrix, ResidentKv handoff, and split multimodal serving passed on ggml-org/DeepSeek-OCR-GGUF:Q8_0 plus mmproj-DeepSeek-OCR-Q8_0.gguf after adding staged-graph support and media activation position sideband forwarding; q8 activation wire rejected, default f16 is the support target"
+      "notes": "OCR multimodal/MLA family; text split, chain, dtype matrix, ResidentKv handoff, and split multimodal serving passed on ggml-org/DeepSeek-OCR-GGUF:Q8_0 plus mmproj-DeepSeek-OCR-Q8_0.gguf after adding staged-graph support and media activation position sideband forwarding; q8 activation wire rejected, default f16 is the support target; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "delta-net-base",
@@ -764,26 +883,26 @@
     {
       "llama_model": "dream",
       "family": "dream",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/DreamOn-v0-7B-i1-GGUF",
       "include": "DreamOn-v0-7B.i1-IQ2_XS.gguf",
-      "notes": "public DreamOn IQ2_XS passed split execution and dtype matrix in llama-parity-dreamon-7b-20260507; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export"
+      "notes": "public DreamOn IQ2_XS passed split execution and dtype matrix in llama-parity-dreamon-7b-20260507; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "ernie4-5",
       "family": "ernie4_5",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/ERNIE-4.5-0.3B-GGUF",
       "include": "ERNIE-4.5-0.3B-Q4_K_M.gguf",
-      "notes": "public 0.3B ERNIE 4.5 Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-ernie45-03b-20260507"
+      "notes": "public 0.3B ERNIE 4.5 Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-ernie45-03b-20260507; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "ernie4-5-moe",
       "family": "ernie4_5_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "lmstudio-community/ERNIE-4.5-21B-A3B-PT-GGUF",
       "include": "ERNIE-4.5-21B-A3B-PT-Q4_K_M.gguf",
-      "notes": "text split, chain, dtype matrix, and ResidentKv state handoff passed in llama-parity-ernie45-moe-20260507 on ERNIE-4.5-21B-A3B-PT-Q4_K_M; f16 and q8 activation wire validated"
+      "notes": "text split, chain, dtype matrix, and ResidentKv state handoff passed in llama-parity-ernie45-moe-20260507 on ERNIE-4.5-21B-A3B-PT-Q4_K_M; f16 and q8 activation wire validated; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "eurobert",
@@ -830,16 +949,16 @@
     {
       "llama_model": "jais",
       "family": "jais",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/Jais-family-256m-GGUF",
       "include": "Jais-family-256m.Q4_K_M.gguf",
-      "notes": "public 256M Jais Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-jais-256m-20260507; q8 activation wire is rejected"
+      "notes": "public 256M Jais Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-jais-256m-20260507; q8 activation wire is rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "jais2",
       "family": "jais2",
-      "status": "certified",
-      "notes": "public 0.3B Jais2 Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-jais2-03-20260507 after inceptionai/Jais-2-8B-Chat-GGUF was not downloadable in the local HF account; q8 activation wire is rejected",
+      "status": "needs_boundary_registration",
+      "notes": "public 0.3B Jais2 Q4_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-jais2-03-20260507 after inceptionai/Jais-2-8B-Chat-GGUF was not downloadable in the local HF account; q8 activation wire is rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mradermacher/JAIS2-IT-0.3-GGUF",
       "include": "JAIS2-IT-0.3.Q4_K_M.gguf"
     },
@@ -858,10 +977,10 @@
     {
       "llama_model": "kimi-linear",
       "family": "kimi_linear",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF",
       "include": "moonshotai_Kimi-Linear-48B-A3B-Instruct-IQ2_XXS.gguf",
-      "notes": "text split, chain, f32/f16/q8 dtype matrix, and KvRecurrent handoff passed in llama-parity-kimi-linear-20260507h after fixing optional tensor filter accounting and sparse K-only MLA KV page export/import; KDA recurrent ranges plus sparse K-only MLA KV pages are required",
+      "notes": "text split, chain, f32/f16/q8 dtype matrix, and KvRecurrent handoff passed in llama-parity-kimi-linear-20260507h after fixing optional tensor filter accounting and sparse K-only MLA KV page export/import; KDA recurrent ranges plus sparse K-only MLA KV pages are required; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "recurrent_ranges": [
         "0..3",
         "4..7",
@@ -875,27 +994,27 @@
     {
       "llama_model": "lfm2moe",
       "family": "lfm2moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "recurrent": "all",
       "repo": "noctrex/LFM2-8B-A1B-MXFP4_MOE-GGUF",
       "include": "LFM2-8B-A1B-MXFP4_MOE.gguf",
-      "notes": "public 8B A1B LFM2-MoE MXFP4 passed split execution, dtype matrix, and KvRecurrent handoff in llama-parity-lfm2moe-8b-20260507; recurrent bytes were non-zero and q8 activation wire is validated"
+      "notes": "public 8B A1B LFM2-MoE MXFP4 passed split execution, dtype matrix, and KvRecurrent handoff in llama-parity-lfm2moe-8b-20260507; recurrent bytes were non-zero and q8 activation wire is validated; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "llada",
       "family": "llada",
-      "status": "certified",
-      "notes": "tiny public LLaDA Q2_K passed split execution and dtype matrix in llama-parity-llada-tiny-20260507 after the previous 100M test artifact failed llama.cpp full-model tensor shape validation; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export",
+      "status": "needs_boundary_registration",
+      "notes": "tiny public LLaDA Q2_K passed split execution and dtype matrix in llama-parity-llada-tiny-20260507 after the previous 100M test artifact failed llama.cpp full-model tensor shape validation; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mradermacher/LLaDA-1.5-Tiny-GGUF",
       "include": "LLaDA-1.5-Tiny.Q2_K.gguf"
     },
     {
       "llama_model": "llada-moe",
       "family": "llada_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/LLaDA-MoE-7B-A1B-Instruct-i1-GGUF",
       "include": "LLaDA-MoE-7B-A1B-Instruct.i1-IQ2_XS.gguf",
-      "notes": "public LLaDA-MoE IQ2_XS passed split execution and dtype matrix in llama-parity-llada-moe-7b-20260507; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export"
+      "notes": "public LLaDA-MoE IQ2_XS passed split execution and dtype matrix in llama-parity-llada-moe-7b-20260507; prefix cache remains disabled because llama.cpp uses a non-causal encode context with no resident KV runtime memory to export; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "llama-embed",
@@ -906,10 +1025,10 @@
     {
       "llama_model": "maincoder",
       "family": "maincoder",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/Maincoder-1B-GGUF",
       "include": "Maincoder-1B.Q2_K.gguf",
-      "notes": "cheap candidate selected for llama.cpp maincoder parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp maincoder parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "mamba-base",
@@ -931,18 +1050,18 @@
     {
       "llama_model": "minicpm",
       "family": "minicpm",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "s3nh/MiniCPM-2B-dpo-fp32-GGUF",
       "include": "minicpm-2b-dpo-fp32.Q3_K_S.gguf",
-      "notes": "cheap candidate selected for llama.cpp minicpm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp minicpm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "minicpm3",
       "family": "minicpm3",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "duyntnet/MiniCPM-3B-OpenHermes-2.5-v2-imatrix-GGUF",
       "include": "MiniCPM-3B-OpenHermes-2.5-v2-IQ2_XXS.gguf",
-      "notes": "cheap candidate selected for llama.cpp minicpm3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp minicpm3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "modern-bert",
@@ -953,10 +1072,10 @@
     {
       "llama_model": "nemotron",
       "family": "nemotron",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mradermacher/nemotron-3-8b-chat-4k-sft-hf-i1-GGUF",
       "include": "nemotron-3-8b-chat-4k-sft-hf.i1-IQ2_XS.gguf",
-      "notes": "public Nemotron 8B IQ2_XS passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-nemotron-8b-20260507; q8 activation wire is rejected"
+      "notes": "public Nemotron 8B IQ2_XS passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-nemotron-8b-20260507; q8 activation wire is rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "nemotron-h",
@@ -997,19 +1116,19 @@
     {
       "llama_model": "openai-moe",
       "family": "openai_moe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "ggml-org/gpt-oss-20b-GGUF",
       "include": "gpt-oss-20b-mxfp4.gguf",
       "n_gpu_layers": 0,
-      "notes": "llama.cpp exposes this model file as openai-moe while GGUF metadata reports general.architecture=gpt-oss; text split, chain, dtype matrix, and ResidentKv state handoff passed in llama-parity-gpt-oss-openai-moe-20260507 on ggml-org/gpt-oss-20b-GGUF:gpt-oss-20b-mxfp4; f16 activation wire validated, q8 activation wire rejected. The local cache representative runs CPU-only because Metal on the M1 Ultra diverges for split OpenAI-MoE activation restore while CPU matches the full-model baseline."
+      "notes": "llama.cpp exposes this model file as openai-moe while GGUF metadata reports general.architecture=gpt-oss; text split, chain, dtype matrix, and ResidentKv state handoff passed in llama-parity-gpt-oss-openai-moe-20260507 on ggml-org/gpt-oss-20b-GGUF:gpt-oss-20b-mxfp4; f16 activation wire validated, q8 activation wire rejected. The local cache representative runs CPU-only because Metal on the M1 Ultra diverges for split OpenAI-MoE activation restore while CPU matches the full-model baseline.; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "openelm",
       "family": "openelm",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "LiteLLMs/OpenELM-270M-GGUF",
       "include": "Q2_K/Q2_K-00001-of-00001.gguf",
-      "notes": "cheap candidate selected for llama.cpp openelm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp openelm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "orion",
@@ -1023,7 +1142,23 @@
       "llama_model": "paddleocr",
       "family": "paddleocr",
       "status": "candidate_multimodal",
-      "notes": "OCR multimodal family; needs OCR/media serving lane certification before promotion"
+      "notes": "Official compact OCR multimodal model/projector pair; run split text, projector prefill, media sideband, and sampled decode lanes before promotion",
+      "repo": "PaddlePaddle/PaddleOCR-VL-1.6-GGUF",
+      "include": [
+        "PaddleOCR-VL-1.6-GGUF.gguf",
+        "PaddleOCR-VL-1.6-GGUF-mmproj.gguf"
+      ],
+      "revision": "511b09642bb324401f15f97cc23bc67e8f0a291d",
+      "file_integrity": {
+        "PaddleOCR-VL-1.6-GGUF.gguf": {
+          "size_bytes": 935769056,
+          "blob_id": "f3ae46ec885050acf4b3d31944431e1fd90d50664fb09126af4a3c050ba14ee8"
+        },
+        "PaddleOCR-VL-1.6-GGUF-mmproj.gguf": {
+          "size_bytes": 881770560,
+          "blob_id": "204d757d7610d9b3faab10d506d69e5b244e32bf765e2bab2d0167e65e0a058a"
+        }
+      }
     },
     {
       "llama_model": "pangu-embed",
@@ -1034,71 +1169,80 @@
     {
       "llama_model": "plamo",
       "family": "plamo",
-      "status": "certified",
-      "notes": "QuantFactory plamo-13b Q2_K passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-remaining-needs-20260507; FullState is not the production cache target for this dense family",
+      "status": "needs_boundary_registration",
+      "notes": "QuantFactory plamo-13b Q2_K passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-remaining-needs-20260507; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "QuantFactory/plamo-13b-GGUF",
       "include": "plamo-13b.Q2_K.gguf"
     },
     {
       "llama_model": "plamo2",
       "family": "plamo2",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "recurrent": "all",
-      "notes": "1B public Plamo2 Q4_K_M passed split execution, dtype matrix, and KvRecurrent handoff in llama-parity-plamo2-1b-20260507 after the translate IQ2_M artifact failed llama.cpp full-model tensor shape validation; recurrent bytes were non-zero",
+      "notes": "1B public Plamo2 Q4_K_M passed split execution, dtype matrix, and KvRecurrent handoff in llama-parity-plamo2-1b-20260507 after the translate IQ2_M artifact failed llama.cpp full-model tensor shape validation; recurrent bytes were non-zero; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "mmnga/plamo-2-1b-gguf",
       "include": "plamo-2-1b-Q4_K_M.gguf"
     },
     {
       "llama_model": "plamo3",
       "family": "plamo3",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "mmnga-o/plamo-3-nict-2b-base-gguf",
       "include": "plamo-3-nict-2b-base-IQ3_M.gguf",
-      "notes": "cheap candidate selected for llama.cpp plamo3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp plamo3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "plm",
       "family": "plm",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "StatPan/42dot_LLM-PLM-1.3B_GGUF",
       "include": "gguf-42dot_PLM-q3_k_m.gguf",
-      "notes": "cheap candidate selected for llama.cpp plm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp plm parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen",
       "family": "qwen",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "zhangtao103239/Qwen-1.8B-GGUF",
       "include": "qwen-1.8b-q5_k_m.gguf",
-      "notes": "public legacy Qwen 1.8B Q5_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-qwen1-18b-20260507; q8 activation wire is rejected"
+      "notes": "public legacy Qwen 1.8B Q5_K_M passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-qwen1-18b-20260507; q8 activation wire is rejected; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "qwen35",
       "family": "qwen35",
       "status": "certified",
       "recurrent": "all",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; KvRecurrent cache restore passed in llama-parity-finish-batch2-kvrecurrent-20260506; keep recurrent ownership sticky; q8 validated; full-state rejected as too large",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; KvRecurrent cache restore passed in llama-parity-finish-batch2-kvrecurrent-20260506; keep recurrent ownership sticky; q8 validated; full-state rejected as too large; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration; begin_block/end_block boundaries registered in patch 0078; split-serving admission restored",
       "repo": "mradermacher/UnifiedReward-Edit-qwen35-4b-i1-GGUF",
-      "include": "UnifiedReward-Edit-qwen35-4b.i1-IQ2_M.gguf"
+      "include": "UnifiedReward-Edit-qwen35-4b.i1-IQ2_M.gguf",
+      "model_pin": {
+        "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+        "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+        "file": "Qwen3.5-0.8B-Q4_K_M.gguf",
+        "selector": "Q4_K_M",
+        "size_bytes": 532517120,
+        "blob_sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+        "source": "mirrored from ci/llama-canary/family-certified.json file_integrity"
+      }
     },
     {
       "llama_model": "qwen3vlmoe",
       "family": "qwen3vlmoe",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "noctrex/Qwen3-VL-30B-A3B-Instruct-1M-MXFP4_MOE-GGUF",
       "include": [
         "Qwen3-VL-30B-A3B-Instruct-1M-MXFP4_MOE.gguf",
         "mmproj-F16.gguf"
       ],
-      "notes": "multimodal MoE family; text split, chain, dtype matrix, ResidentKv handoff, and split multimodal serving passed on noctrex/Qwen3-VL-30B-A3B-Instruct-1M-MXFP4_MOE-GGUF:MXFP4_MOE plus mmproj-F16.gguf after adding Qwen3-VL-MoE graph filtering and media activation position sideband forwarding; default f16 activation wire is the support target"
+      "notes": "multimodal MoE family; text split, chain, dtype matrix, ResidentKv handoff, and split multimodal serving passed on noctrex/Qwen3-VL-30B-A3B-Instruct-1M-MXFP4_MOE-GGUF:MXFP4_MOE plus mmproj-F16.gguf after adding Qwen3-VL-MoE graph filtering and media activation position sideband forwarding; default f16 activation wire is the support target; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "refact",
       "family": "refact",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "RichardErkhov/smallcloudai_-_Refact-1_6B-fim-gguf",
       "include": "Refact-1_6B-fim.Q2_K.gguf",
-      "notes": "cheap candidate selected for llama.cpp refact parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp refact parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "rnd1",
@@ -1138,24 +1282,24 @@
     {
       "llama_model": "smallthinker",
       "family": "smallthinker",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/SmallThinker-3B-Preview-GGUF",
       "include": "SmallThinker-3B-Preview-IQ2_M.gguf",
-      "notes": "cheap candidate selected for llama.cpp smallthinker parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp smallthinker parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "smollm3",
       "family": "smollm3",
-      "status": "certified",
+      "status": "needs_boundary_registration",
       "repo": "bartowski/HuggingFaceTB_SmolLM3-3B-GGUF",
       "include": "HuggingFaceTB_SmolLM3-3B-IQ2_M.gguf",
-      "notes": "cheap candidate selected for llama.cpp smollm3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family"
+      "notes": "cheap candidate selected for llama.cpp smollm3 parity; certify split execution plus ResidentKv cache restore before promotion; text split, dtype matrix, and ResidentKv borrowed-hit cache restore passed in llama-parity-finish-small/residentkv 20260506 runs; FullState is not the production cache target for this dense family; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration"
     },
     {
       "llama_model": "starcoder",
       "family": "starcoder",
-      "status": "certified",
-      "notes": "tiny StarCoder Py Q2_K passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-starcoder-pos-slice-20260507 after fixing learned positional embeddings for downstream runtime slices",
+      "status": "needs_boundary_registration",
+      "notes": "tiny StarCoder Py Q2_K passed split execution, dtype matrix, and ResidentKv borrowed-hit cache restore in llama-parity-starcoder-pos-slice-20260507 after fixing learned positional embeddings for downstream runtime slices; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "RichardErkhov/bigcode_-_tiny_starcoder_py-gguf",
       "include": "tiny_starcoder_py.Q2_K.gguf"
     },
@@ -1182,10 +1326,115 @@
     {
       "llama_model": "xverse",
       "family": "xverse",
-      "status": "certified",
-      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 validated",
+      "status": "needs_boundary_registration",
+      "notes": "text split and dtype matrix passed in llama-parity-finish-batch2-20260506; ResidentKv borrowed-hit cache restore passed in llama-parity-finish-batch2-residentkv-20260506; q8 validated; family certified (llama-parity native lane) but model file lacks begin_block/end_block split boundaries; split-serving admission pending boundary registration",
       "repo": "xverse/XVERSE-7B-Chat-GGUF",
       "include": "xverse-7b-chat-q2_k.gguf"
+    },
+    {
+      "llama_model": "bailingmoe3",
+      "family": "bailingmoe3",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "clip",
+      "family": "clip",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "cohere2moe",
+      "family": "cohere2moe",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "deepseek32",
+      "family": "deepseek32",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "deepseek4",
+      "family": "deepseek4",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "dflash",
+      "family": "dflash",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "dots3note",
+      "family": "dots3note",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "eagle3",
+      "family": "eagle3",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "gemma4-assistant",
+      "family": "gemma4_assistant",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "granite-swa",
+      "family": "granite_swa",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "granite-switch",
+      "family": "granite_switch",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "hy-v3",
+      "family": "hy_v3",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "kimi-k3",
+      "family": "kimi_k3",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "mellum",
+      "family": "mellum",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "minimax-01",
+      "family": "minimax_01",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "minimax-m3",
+      "family": "minimax_m3",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "muse-glimmer",
+      "family": "muse_glimmer",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "nanbeige",
+      "family": "nanbeige",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "pockettts",
+      "family": "pockettts",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "qwen3tts",
+      "family": "qwen3tts",
+      "status": "needs_boundary_registration"
+    },
+    {
+      "llama_model": "talkie",
+      "family": "talkie",
+      "status": "needs_boundary_registration"
     }
   ]
 }

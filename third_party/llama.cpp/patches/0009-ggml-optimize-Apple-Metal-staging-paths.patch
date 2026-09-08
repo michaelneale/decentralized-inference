@@ -1,0 +1,374 @@
+From ed08cd540fd3f1b15fda63e76a6553f75af16261 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:35 +1000
+Subject: [PATCH] ggml: optimize Apple Metal staging paths
+
+---
+ ggml/src/ggml-metal/ggml-metal-device.m | 177 +++++++++++++++++++++++-
+ ggml/src/ggml-metal/ggml-metal-impl.h   |  34 ++---
+ 2 files changed, 189 insertions(+), 22 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
+index 41ce90dc8..2f9acd002 100644
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -9,6 +9,7 @@
+ #include <Metal/Metal.h>
+ 
+ #include <stdatomic.h>
++#include <limits.h>
+ 
+ #ifndef TARGET_OS_VISION
+ #define TARGET_OS_VISION 0
+@@ -156,6 +157,11 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+     ggml_metal_device_t dev;
+     ggml_metal_pipelines_t pipelines; // cache of compiled pipelines
+ 
++    // Optional on-disk cache of compiled pipeline states (MTLBinaryArchive),
++    // enabled via GGML_METAL_PIPELINE_CACHE_DIR. nil when disabled.
++    id<MTLBinaryArchive> pso_archive;
++    NSURL * pso_archive_url;
++
+     NSLock * lock;
+ };
+ 
+@@ -173,6 +179,98 @@ static void ggml_metal_library_build_index(ggml_metal_library_t lib) {
+     }
+ }
+ 
++// FNV-1a 64-bit, used to fingerprint the inputs that determine pipeline
++// specialization so a stale on-disk archive is never consulted.
++static uint64_t ggml_metal_fnv1a64(uint64_t h, const void * data, size_t len) {
++    const unsigned char * p = (const unsigned char *) data;
++    for (size_t i = 0; i < len; ++i) {
++        h ^= p[i];
++        h *= 0x100000001b3ULL;
++    }
++    return h;
++}
++
++// Attach an on-disk MTLBinaryArchive to the library so pipeline compilation
++// can load previously compiled pipeline states and append new ones. The file
++// name embeds a fingerprint (device + ggml version + preprocessor macros +
++// kernel source hash) so a changed environment resolves to a different file
++// instead of a stale archive. Any failure leaves the cache disabled; pipeline
++// compilation then proceeds exactly as without this feature.
++static void ggml_metal_pso_cache_setup(ggml_metal_library_t lib, id<MTLDevice> device, NSDictionary * prep, uint64_t source_hash) {
++    if (@available(macOS 11.0, iOS 14.0, *)) {
++        const char * dir = getenv("GGML_METAL_PIPELINE_CACHE_DIR");
++        if (!dir || !dir[0]) {
++            return;
++        }
++
++        const struct ggml_metal_device_props * props = ggml_metal_device_get_props(lib->dev);
++
++        uint64_t h = 0xcbf29ce484222325ULL;
++        h = ggml_metal_fnv1a64(h, props->desc, strlen(props->desc));
++        h = ggml_metal_fnv1a64(h, ggml_version(), strlen(ggml_version()));
++        for (NSString * key in [prep.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
++            NSString * val = prep[key];
++            h = ggml_metal_fnv1a64(h, key.UTF8String, key.length);
++            h = ggml_metal_fnv1a64(h, val.UTF8String, val.length);
++        }
++        h ^= source_hash;
++        h *= 0x100000001b3ULL;
++
++        char path[PATH_MAX];
++        snprintf(path, sizeof(path), "%s/pipelines-%016llx.metallibar", dir, (unsigned long long) h);
++
++        NSString * path_ns = [NSString stringWithUTF8String:path];
++        NSURL * url = [NSURL fileURLWithPath:path_ns];
++
++        NSError * error = nil;
++        if (![[NSFileManager defaultManager] createDirectoryAtPath:[NSString stringWithUTF8String:dir]
++                                      withIntermediateDirectories:YES
++                                                       attributes:nil
++                                                            error:&error]) {
++            GGML_LOG_WARN("%s: cannot create pipeline cache dir '%s'\n", __func__, dir);
++            return;
++        }
++
++        MTLBinaryArchiveDescriptor * desc = [MTLBinaryArchiveDescriptor new];
++        desc.url = url;
++
++        id<MTLBinaryArchive> archive = [device newBinaryArchiveWithDescriptor:desc error:&error];
++        if (!archive) {
++            // no usable archive at this path (missing or incompatible): start a fresh one
++            GGML_LOG_INFO("%s: no usable pipeline cache at '%s', starting fresh\n", __func__, path);
++            desc.url = nil;
++            archive = [device newBinaryArchiveWithDescriptor:desc error:&error];
++        }
++
++        [desc release];
++
++        if (!archive) {
++            GGML_LOG_WARN("%s: failed to create binary archive: %s\n", __func__, [[error description] UTF8String]);
++            return;
++        }
++
++        lib->pso_archive     = archive;
++        lib->pso_archive_url = [url retain];
++
++        GGML_LOG_INFO("%s: Metal pipeline cache: %s\n", __func__, path);
++    }
++}
++
++// Persist the archive so later processes can reuse the compiled pipelines.
++// Called under lib->lock after each newly compiled pipeline is added.
++static void ggml_metal_pso_cache_flush(ggml_metal_library_t lib) {
++    if (@available(macOS 11.0, iOS 14.0, *)) {
++        if (!lib->pso_archive) {
++            return;
++        }
++
++        NSError * error = nil;
++        if (![lib->pso_archive serializeToURL:lib->pso_archive_url error:&error]) {
++            GGML_LOG_WARN("%s: failed to serialize pipeline cache: %s\n", __func__, [[error description] UTF8String]);
++        }
++    }
++}
++
+ // Parse a `#include "name"` line. Returns the quoted name in *include_name on
+ // success. Whitespace-tolerant; ignores `#include <...>` (system headers).
+ static bool ggml_metal_library_parse_quoted_include(NSString * line, NSString ** include_name) {
+@@ -283,12 +381,14 @@ static bool ggml_metal_library_compile_all(
+         id<MTLDevice> device,
+         NSDictionary * prep,
+         NSString * (^source_for_kind)(int kind, NSError ** err),
+-        const char * origin) {
++        const char * origin,
++        uint64_t * source_hash_out) {
+     const int64_t t_start = ggml_time_us();
+ 
+     int64_t  * t_per_lib   = calloc(GGML_METAL_LIB_COUNT, sizeof(int64_t));
+     NSError ** err_per_lib = calloc(GGML_METAL_LIB_COUNT, sizeof(NSError *));
+     __block atomic_bool any_failure = false;
++    uint64_t * source_hash_per_lib = calloc(GGML_METAL_LIB_COUNT, sizeof(uint64_t));
+ 
+     dispatch_group_t group = dispatch_group_create();
+     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+@@ -307,6 +407,11 @@ static bool ggml_metal_library_compile_all(
+                 return;
+             }
+ 
++            // Hash each source independently; fold by kind only after all
++            // concurrent compilation blocks have completed.
++            const char * bytes = src.UTF8String;
++            source_hash_per_lib[kind] = ggml_metal_fnv1a64(0xcbf29ce484222325ULL, bytes, strlen(bytes));
++
+             id<MTLLibrary> lib = nil;
+ 
+             @autoreleasepool {
+@@ -340,6 +445,18 @@ static bool ggml_metal_library_compile_all(
+ 
+     const bool ok = !atomic_load(&any_failure);
+ 
++    uint64_t source_hash = 0xcbf29ce484222325ULL;
++    for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
++        source_hash = ggml_metal_fnv1a64(source_hash, &kind, sizeof(kind));
++        source_hash = ggml_metal_fnv1a64(source_hash, &source_hash_per_lib[kind],
++                                         sizeof(source_hash_per_lib[kind]));
++    }
++
++    if (source_hash_out) {
++        *source_hash_out = source_hash;
++    }
++    free(source_hash_per_lib);
++
+     if (ok) {
+         const int64_t t_total = ggml_time_us() - t_start;
+         int64_t t_max = 0;
+@@ -407,19 +524,23 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+ #undef X
+     };
+ 
++    uint64_t source_hash = 0;
++
+     const bool ok = ggml_metal_library_compile_all(res, device, prep,
+         ^NSString * (int kind, NSError ** err) {
+             (void) err;
+             return [[NSString alloc] initWithBytes:lib_start[kind]
+                                             length:(lib_end[kind] - lib_start[kind])
+                                           encoding:NSUTF8StringEncoding];
+-        }, "embedded data");
++        }, "embedded data", &source_hash);
+ 
+     if (!ok) {
+         ggml_metal_library_free(res);
+         return NULL;
+     }
+ 
++    ggml_metal_pso_cache_setup(res, device, prep, source_hash);
++
+     return res;
+ #else
+ #ifdef SWIFT_PACKAGE
+@@ -478,6 +599,9 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+         }
+ 
+         GGML_LOG_INFO("%s: loaded in %.3f sec\n", __func__, (ggml_time_us() - t_start) / 1e6);
++
++        ggml_metal_pso_cache_setup(res, device, prep, 0);
++
+         return res;
+     }
+ 
+@@ -512,10 +636,11 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+         path_per_kind[kind] = [path_source retain];
+     }
+ 
++    uint64_t source_hash = 0;
+     const bool ok = ggml_metal_library_compile_all(res, device, prep,
+         ^NSString * (int kind, NSError ** err) {
+             return ggml_metal_library_flatten_source(path_per_kind[kind], err);
+-        }, "source");
++        }, "source", &source_hash);
+ 
+     for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
+         [path_per_kind[kind] release];
+@@ -527,6 +652,8 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+         return NULL;
+     }
+ 
++    ggml_metal_pso_cache_setup(res, device, prep, source_hash);
++
+     return res;
+ #endif
+ }
+@@ -616,6 +743,13 @@ void ggml_metal_library_free(ggml_metal_library_t lib) {
+ 
+     ggml_metal_pipelines_free(lib->pipelines);
+ 
++    if (lib->pso_archive) {
++        [lib->pso_archive release];
++    }
++    if (lib->pso_archive_url) {
++        [lib->pso_archive_url release];
++    }
++
+     [lib->lock release];
+ 
+     free(lib);
+@@ -707,7 +841,32 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+         }
+ 
+         id<MTLDevice> device = ggml_metal_device_get_obj(lib->dev);
+-        id<MTLComputePipelineState> obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
++        id<MTLComputePipelineState> obj = nil;
++
++        if (@available(macOS 11.0, iOS 14.0, *)) {
++            if (lib->pso_archive) {
++                // descriptor-based creation consults the archive before compiling
++                NSError * add_error = nil;
++                MTLComputePipelineDescriptor * pdesc = [MTLComputePipelineDescriptor new];
++                pdesc.computeFunction = mtl_function;
++                pdesc.binaryArchives  = @[lib->pso_archive];
++
++                obj = [device newComputePipelineStateWithDescriptor:pdesc
++                                                             options:MTLPipelineOptionNone
++                                                          reflection:nil
++                                                               error:&error];
++
++                if (obj && ![lib->pso_archive addComputePipelineFunctionsWithDescriptor:pdesc error:&add_error]) {
++                    GGML_LOG_WARN("%s: failed to add pipeline to archive: %s\n", __func__, [[add_error description] UTF8String]);
++                }
++
++                [pdesc release];
++            } else {
++                obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
++            }
++        } else {
++            obj = [device newComputePipelineStateWithFunction:mtl_function error:&error];
++        }
+ 
+         [mtl_function release];
+ 
+@@ -741,6 +900,12 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+         res.pipeline->obj = obj;
+ 
+         ggml_metal_pipelines_add(lib->pipelines, name, res.pipeline);
++
++        if (@available(macOS 11.0, iOS 14.0, *)) {
++            if (lib->pso_archive) {
++                ggml_metal_pso_cache_flush(lib);
++            }
++        }
+     }
+ 
+     [lib->lock unlock];
+@@ -1181,7 +1346,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+ #endif
+ 
+                 dev->props.use_shared_buffers = dev->props.has_unified_memory;
+-#if TARGET_OS_OSX
++#if TARGET_OS_OSX && !defined(__aarch64__)
+                 // In case of eGPU, shared memory may be preferable.
+                 dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
+ #endif
+@@ -1241,12 +1406,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+                         }
+                     }
+ 
++#if !defined(__aarch64__)
+                     for (int i = MTLGPUFamilyCommon1 + 5; i >= MTLGPUFamilyCommon1; --i) {
+                         if ([dev->mtl_device supportsFamily:i]) {
+                             GGML_LOG_INFO("%s: GPU family: MTLGPUFamilyCommon%d (%d)\n", __func__, i - (int) MTLGPUFamilyCommon1 + 1, i);
+                             break;
+                         }
+                     }
++#endif
+ 
+                     for (int i = MTLGPUFamilyMetal3_GGML + 5; i >= MTLGPUFamilyMetal3_GGML; --i) {
+                         if ([dev->mtl_device supportsFamily:i]) {
+diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
+index 49102afe9..a018165de 100644
+--- a/ggml/src/ggml-metal/ggml-metal-impl.h
++++ b/ggml/src/ggml-metal/ggml-metal-impl.h
+@@ -994,6 +994,23 @@ typedef struct {
+     uint64_t nb3;
+ } ggml_metal_kargs_solve_tri;
+ 
++typedef struct {
++    int32_t  n_kv;
++    int32_t  n_batch;
++    int32_t  mask_ne3;
++    uint64_t nb1;
++    uint64_t nb3;
++    uint64_t nbq1;
++    uint64_t nbq2;
++    uint64_t nbq3;
++    uint64_t nbk2;
++    uint64_t nbk3;
++    uint64_t nbw1;
++    uint64_t nbw3;
++    uint64_t nbm1;
++    uint64_t nbm3;
++} ggml_metal_kargs_lightning_indexer;
++
+ typedef struct {
+     int32_t  ne00t;
+     int32_t  ne00;
+@@ -1203,23 +1220,6 @@ typedef struct {
+     int64_t val;
+ } ggml_metal_kargs_memset;
+ 
+-typedef struct {
+-    int32_t  n_kv;
+-    int32_t  n_batch;
+-    int32_t  mask_ne3;
+-    uint64_t nb1;
+-    uint64_t nb3;
+-    uint64_t nbq1;
+-    uint64_t nbq2;
+-    uint64_t nbq3;
+-    uint64_t nbk2;
+-    uint64_t nbk3;
+-    uint64_t nbw1;
+-    uint64_t nbw3;
+-    uint64_t nbm1;
+-    uint64_t nbm3;
+-} ggml_metal_kargs_lightning_indexer;
+-
+ typedef struct {
+     int32_t  n_tokens;
+     int32_t  n_iter;

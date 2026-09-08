@@ -1,0 +1,82 @@
+From 1d31a5e6cc788196cb824393955510b10e753bb4 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Tue, 8 Sep 2026 00:28:03 +1000
+Subject: [PATCH] skippy: keep MTP blocks outside pipeline stage ranges
+
+---
+ src/skippy/session.cpp                |  8 ++++----
+ src/skippy/tests/stage_slice_plan.cpp | 16 ++++++++++++++++
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/src/skippy/session.cpp b/src/skippy/session.cpp
+index d9ab0c72b..45f2e98c0 100644
+--- a/src/skippy/session.cpp
++++ b/src/skippy/session.cpp
+@@ -82,10 +82,10 @@ int32_t skippy_stage_layer_count(const llama_model * model) {
+     if (model == nullptr) {
+         return 0;
+     }
+-    const auto & hparams = model->hparams;
+-    if (hparams.n_layer_nextn > 0) {
+-        return static_cast<int32_t>(hparams.n_layer_all);
+-    }
++
++    // Stage ranges cover the executable trunk. Appended NextN/MTP blocks are
++    // retained by the final stage's tensor filter and executed by its MTP
++    // sidecar, but they are not additional pipeline stages.
+     return llama_model_n_layer(model);
+ }
+ 
+diff --git a/src/skippy/tests/stage_slice_plan.cpp b/src/skippy/tests/stage_slice_plan.cpp
+index 11ee232fc..30627b1c5 100644
+--- a/src/skippy/tests/stage_slice_plan.cpp
++++ b/src/skippy/tests/stage_slice_plan.cpp
+@@ -1,8 +1,10 @@
+ #include "ggml.h"
+ #include "ggml-backend.h"
+ #include "ggml-cpu.h"
++#include "llama-model.h"
+ #include "skippy/executable_graph.h"
+ #include "../../../ggml/src/ggml-impl.h"
++#include "skippy/runtime_support.h"
+ #include "skippy/stage_slice_plan.h"
+ #include "skippy/state_effects.h"
+ 
+@@ -10,6 +12,7 @@
+ #include <cstdio>
+ #include <cmath>
+ #include <cstring>
++#include <memory>
+ #include <string>
+ #include <vector>
+ 
+@@ -1054,6 +1057,18 @@ static int check_explicit_final_output() {
+     return 0;
+ }
+ 
++static int check_mtp_stage_layer_count() {
++    std::unique_ptr<llama_model> model(llama_model_create(LLM_ARCH_NEMOTRON_H_MOE, llama_model_default_params()));
++    model->hparams.n_layer_all = 53;
++    model->hparams.n_layer_nextn = 1;
++
++    if (skippy_stage_layer_count(model.get()) != 52) {
++        std::fprintf(stderr, "appended NextN/MTP block was counted as a pipeline stage\n");
++        return 80;
++    }
++    return 0;
++}
++
+ int main() {
+     int result = check_semantic_identities();
+     if (!result) { result = check_middle_stage_selection(); }
+@@ -1065,6 +1080,7 @@ int main() {
+     if (!result) { result = check_executable_slice(false); }
+     if (!result) { result = check_executable_slice(true); }
+     if (!result) { result = check_invalid_executable_slices(); }
++    if (!result) { result = check_mtp_stage_layer_count(); }
+     if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
+     return result;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

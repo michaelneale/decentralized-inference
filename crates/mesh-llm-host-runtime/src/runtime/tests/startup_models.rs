@@ -317,6 +317,7 @@ fn startup_model_plan(model_ref: &str) -> StartupModelPlan {
         declared_ref: model_ref.to_string(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/model.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: None,
         gpu_id: None,
@@ -330,6 +331,127 @@ fn startup_model_plan(model_ref: &str) -> StartupModelPlan {
         local_source_required: false,
         profile: String::new(),
     }
+}
+
+fn write_identity_test_gguf(path: &std::path::Path, context_length: u32) {
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    fn push_string_kv(bytes: &mut Vec<u8>, key: &str, value: &str) {
+        push_string(bytes, key);
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        push_string(bytes, value);
+    }
+    fn push_u32_kv(bytes: &mut Vec<u8>, key: &str, value: u32) {
+        push_string(bytes, key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_i64.to_le_bytes());
+    bytes.extend_from_slice(&8_i64.to_le_bytes());
+    push_string_kv(&mut bytes, "general.architecture", "llama");
+    push_string_kv(&mut bytes, "tokenizer.ggml.model", "gpt2");
+    push_u32_kv(&mut bytes, "llama.context_length", context_length);
+    push_u32_kv(&mut bytes, "llama.embedding_length", 4096);
+    push_u32_kv(&mut bytes, "llama.block_count", 24);
+    push_u32_kv(&mut bytes, "llama.attention.head_count", 32);
+    push_u32_kv(&mut bytes, "llama.attention.head_count_kv", 8);
+    push_u32_kv(&mut bytes, "llama.attention.key_length", 128);
+    std::fs::write(path, bytes).expect("write identity test GGUF");
+}
+
+fn direct_gguf_startup_spec(path: &std::path::Path, alias: Option<&str>) -> StartupModelSpec {
+    StartupModelSpec {
+        model_ref: path.to_path_buf(),
+        declared_ref: alias.map(str::to_string),
+        config_model_id: None,
+        mmproj_ref: None,
+        ctx_size: None,
+        gpu_id: None,
+        cli_device_override: false,
+        resolve_pinned_gpu: false,
+        parallel: None,
+        cache_type_k: None,
+        cache_type_v: None,
+        n_batch: None,
+        n_ubatch: None,
+        flash_attention: FlashAttentionType::Auto,
+        local_source_required: false,
+        profile: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn bare_direct_gguf_startup_identity_is_full_content_hash_across_paths() {
+    let first_dir = tempfile::tempdir().expect("first tempdir");
+    let second_dir = tempfile::tempdir().expect("second tempdir");
+    let first_path = first_dir.path().join("first-name.gguf");
+    let second_path = second_dir.path().join("other-name.gguf");
+    write_identity_test_gguf(&first_path, 4096);
+    std::fs::copy(&first_path, &second_path).expect("copy identical GGUF");
+
+    let first = resolve_startup_models(&[direct_gguf_startup_spec(&first_path, None)], true)
+        .await
+        .expect("resolve first direct GGUF")
+        .remove(0);
+    let second = resolve_startup_models(&[direct_gguf_startup_spec(&second_path, None)], true)
+        .await
+        .expect("resolve second direct GGUF")
+        .remove(0);
+    let first_package = first
+        .preindexed_split_package
+        .as_ref()
+        .expect("direct GGUF package must be indexed at resolution");
+    let second_package = second
+        .preindexed_split_package
+        .as_ref()
+        .expect("second direct GGUF package must be indexed at resolution");
+
+    assert_eq!(first.declared_ref, second.declared_ref);
+    assert_eq!(
+        first.declared_ref,
+        format!("local-gguf/sha256-{}", first_package.source_model_sha256)
+    );
+    assert_eq!(first_package.source_model_sha256.len(), 64);
+    assert_eq!(first_package.package_ref, second_package.package_ref);
+    assert_ne!(first.resolved_path, second.resolved_path);
+}
+
+#[tokio::test]
+async fn direct_gguf_explicit_alias_wins_without_changing_content_identity() {
+    let first_dir = tempfile::tempdir().expect("first tempdir");
+    let second_dir = tempfile::tempdir().expect("second tempdir");
+    let first_path = first_dir.path().join("first.gguf");
+    let second_path = second_dir.path().join("second.gguf");
+    write_identity_test_gguf(&first_path, 4096);
+    std::fs::copy(&first_path, &second_path).expect("copy identical GGUF");
+
+    let first = resolve_startup_models(
+        &[direct_gguf_startup_spec(&first_path, Some("shared/model"))],
+        true,
+    )
+    .await
+    .expect("resolve first aliased GGUF")
+    .remove(0);
+    let second = resolve_startup_models(
+        &[direct_gguf_startup_spec(&second_path, Some("shared/model"))],
+        true,
+    )
+    .await
+    .expect("resolve second aliased GGUF")
+    .remove(0);
+
+    assert_eq!(first.declared_ref, "shared/model");
+    assert_eq!(second.declared_ref, "shared/model");
+    assert_eq!(
+        first.preindexed_split_package.unwrap().package_ref,
+        second.preindexed_split_package.unwrap().package_ref
+    );
 }
 
 #[test]
@@ -996,7 +1118,7 @@ fn gguf_with_hugging_face_model_ref_still_serves_two_models() {
 async fn gguf_alias_resolves_without_catalog_lookup() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let model_path = temp_dir.path().join("deepseek.gguf");
-    std::fs::write(&model_path, b"gguf").expect("write model");
+    write_identity_test_gguf(&model_path, 4096);
     let options = runtime_options_for_test(&[
         "mesh-llm",
         "--gguf",
@@ -1207,6 +1329,7 @@ fn pinned_gpu_startup_preflight_uses_config_gpu_id() {
     let mut plans = vec![StartupModelPlan {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: Some(8192),
         gpu_id: specs[0].gpu_id.clone(),
@@ -1285,6 +1408,7 @@ fn pinned_gpu_startup_preflight_rejects_synthesized_backend_missing_from_probe()
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: Some(4096),
         gpu_id: Some("pci:0000:b3:00.0".into()),
@@ -1351,6 +1475,7 @@ fn pinned_gpu_startup_preflight_canonicalizes_rocm_hip_alias_from_probe() {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: Some(4096),
         gpu_id: Some("pci:0000:b3:00.0".into()),
@@ -1465,6 +1590,7 @@ fn pinned_gpu_startup_preflight_unmatched_cli_models_bypass_config_gpu_id() {
     let mut plans = vec![StartupModelPlan {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: None,
         gpu_id: specs[0].gpu_id.clone(),
@@ -1520,6 +1646,7 @@ fn pinned_gpu_startup_preflight_missing_gpu_id_fails_closed() {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: None,
         gpu_id: None,
@@ -1574,6 +1701,7 @@ fn pinned_gpu_startup_preflight_stores_resolved_pinned_target_in_plan() {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: Some(4096),
         gpu_id: Some("uuid:GPU-123".into()),
@@ -1631,6 +1759,7 @@ fn pinned_gpu_startup_preflight_rejects_resolved_gpu_without_backend_device() {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: Some(4096),
         gpu_id: Some("uuid:GPU-123".into()),
@@ -1685,6 +1814,7 @@ fn pinned_gpu_startup_preflight_unresolvable_gpu_id_fails_closed() {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         config_model_id: None,
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: None,
         ctx_size: None,
         gpu_id: Some("pci:0000:b3:00.0".into()),
