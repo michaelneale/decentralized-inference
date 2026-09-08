@@ -125,6 +125,10 @@ Release efficiency TODOs:
   keeping compiler images and ARC CUDA placement unchanged. QA: compare the
   CUDA compiler job with the baseline and run `just check-release` and
   `just ci-validate`.
+- [x] Accept current catalog-wrapped runtime diagnostics in the shared SDK
+  smoke helper while preserving legacy list support. QA: exercise both JSON
+  forms, malformed reports, incompatible/ambiguous runtimes and ABI checks in
+  `test_ci_prepare_native_runtime`, then run shellcheck and `just ci-validate`.
 - [ ] Validate the shared UI and CPU-image composers in a non-publishing release
   canary. QA: verify all host/runtime hashes, no-driver readiness, SDK resources,
   and per-phase timings on Linux amd64/arm64, macOS, and Windows.
