@@ -471,7 +471,9 @@ fail-open policy.
 - `restore-release-ui` / `scripts/ui-distribution.py`: verify the shared release
   console's source SHA, version, complete file hashes and built JavaScript entry
   before platform-specific Rust compilation or SDK resource packaging. The
-  `prepared-release-ui-*` artifact retains for 90 days and is excluded from the
+  UI producer's version step trusts only `GITHUB_WORKSPACE` in the container's
+  active Git configuration before verifying the exact checkout SHA.
+  The `prepared-release-ui-*` artifact retains for 90 days and is excluded from the
   GitHub release asset glob. Swift release resource assembly skips pnpm and the
   console build when this artifact is supplied; ordinary PR/main behavior is
   unchanged.
