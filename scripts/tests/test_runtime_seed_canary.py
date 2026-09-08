@@ -20,6 +20,21 @@ def cache():
             'ref': 'refs/heads/main', 'size_in_bytes': C.CACHE_SIZE}
 
 
+def representative_stats():
+    # Pinned v0.16.0 ServerStats; duration/location fields are deliberately omitted
+    # from retained evidence. adv_counts uses compiler-qualified language labels.
+    return {'stats': {
+        'compile_requests': 10, 'requests_unsupported_compiler': 0,
+        'requests_not_compile': 0, 'requests_not_cacheable': 0, 'requests_executed': 10,
+        'cache_timeouts': 0, 'cache_read_errors': 0, 'non_cacheable_compilations': 0,
+        'forced_recaches': 0, 'cache_write_errors': 0, 'cache_writes': 8,
+        'compilations': 8, 'compile_fails': 0, 'dist_errors': 0,
+        'cache_hits': {'counts': {'Rust': 1, 'C/C++': 1}, 'adv_counts': {'C/C++ [gcc]': 1, 'Rust': 1}},
+        'cache_misses': {'counts': {'C/C++': 8}, 'adv_counts': {'C/C++ [gcc]': 8}},
+        'cache_errors': {'counts': {}, 'adv_counts': {}}, 'not_cached': {},
+    }}
+
+
 class RuntimeSeedCanaryTests(unittest.TestCase):
     def test_preflight_checks_container_temp_and_retains_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,25 +84,44 @@ class RuntimeSeedCanaryTests(unittest.TestCase):
                 C.cache_identity({'actions_caches': entries})
 
     def test_raw_stats_preserve_languages_and_reject_bad_counters(self):
-        raw = {'stats': {'compile_requests': 3, 'requests_executed': 3,
-               'cache_read_errors': 0, 'cache_write_errors': 0,
-               'non_cacheable_calls': 0, 'non_cacheable_compilations': 0, 'non_compilation_calls': 0,
-               'cache_hits': {'counts': {'Rust': 1, 'C/C++': 1}},
-               'cache_misses': {'counts': {'Assembler': 1}}, 'cache_errors': {'counts': {}}}, 'cache_location': 'not retained'}
+        raw = representative_stats()
+        raw['cache_location'] = 'not retained'
         with patch.object(C.subprocess, 'check_output', return_value=json.dumps(raw)):
             self.assertEqual(C.stats_snapshot(), {'stats': raw['stats']})
         raw['stats']['cache_hits']['counts']['Rust'] = True
         with patch.object(C.subprocess, 'check_output', return_value=json.dumps(raw)), self.assertRaises(ValueError):
             C.stats_snapshot()
 
+    def test_pinned_schema_rejects_missing_and_mistyped_fields(self):
+        for field in C.SCALAR_COUNTERS:
+            for corruption in ('missing', True, {}):
+                with self.subTest(field=field, corruption=corruption):
+                    raw = representative_stats()
+                    if corruption == 'missing':
+                        del raw['stats'][field]
+                    else:
+                        raw['stats'][field] = corruption
+                    with self.assertRaises(ValueError):
+                        C.validate_stats(raw)
+        for field in ('counts', 'adv_counts'):
+            raw = representative_stats()
+            raw['stats']['cache_hits'][field] = {'C/C++': True}
+            with self.assertRaises(ValueError):
+                C.validate_stats(raw)
+        raw = representative_stats()
+        raw['stats']['not_cached'] = {'reason': {}}
+        with self.assertRaises(ValueError):
+            C.validate_stats(raw)
+
     def results(self, root, native_hits=0, warm_time=12):
         for pair in (1, 2, 3):
             for arm in ('cold', 'warm'):
                 path = root/f'{pair}-{arm}'
                 path.mkdir()
-                C.save(path/'raw-stats.json', {'stats': {'compile_requests':10, 'requests_executed':10, 'non_cacheable_calls':0, 'non_cacheable_compilations':0, 'non_compilation_calls':0, 'cache_read_errors':0, 'cache_write_errors':0,
-                    'cache_errors':{'counts':{}}, 'cache_hits':{'counts':{'C/C++':native_hits}},
-                    'cache_misses':{'counts':{'C/C++':10-native_hits}}}})
+                raw = representative_stats()
+                raw['stats']['cache_hits']['counts'] = {'C/C++': native_hits}
+                raw['stats']['cache_misses']['counts'] = {'C/C++': 10-native_hits}
+                C.save(path/'raw-stats.json', raw)
                 C.save(path/'result.json', {'pair': pair, 'arm': arm, 'source': 'a'*40,
                     'image': C.IMAGE, 'epoch': C.EPOCH, 'cache': cache(), 'classification': 'warm-floor-failure' if arm=='warm' and native_hits==0 else 'measured',
                     'total_seconds': 10 if arm=='cold' else warm_time, 'native_hits': native_hits,
@@ -172,7 +206,7 @@ class RuntimeSeedCanaryTests(unittest.TestCase):
                 elif mutation == 'boolean':
                     raw['stats']['compile_requests'] = True
                 else:
-                    del raw['stats']['non_cacheable_calls']
+                    del raw['stats']['requests_not_cacheable']
                 C.save(path/'raw-stats.json', raw)
                 C.save(path/'result.json', result)
                 with self.assertRaises(ValueError):

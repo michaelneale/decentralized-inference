@@ -124,22 +124,36 @@ def stats_snapshot():
     return validate_stats(json.loads(subprocess.check_output(['sccache', '--show-stats', '--stats-format=json'], text=True)))
 
 
+SCALAR_COUNTERS = ('compile_requests', 'requests_unsupported_compiler', 'requests_not_compile',
+                   'requests_not_cacheable', 'requests_executed', 'cache_timeouts',
+                   'cache_read_errors', 'non_cacheable_compilations', 'forced_recaches',
+                   'cache_write_errors', 'cache_writes', 'compilations', 'compile_fails', 'dist_errors')
+
+
 def validate_stats(payload):
-    fields = ('compile_requests', 'requests_executed', 'compilations', 'cache_writes',
-              'cache_read_errors', 'cache_write_errors', 'cache_hits', 'cache_misses', 'cache_errors',
-              'non_cacheable_calls', 'non_cacheable_compilations', 'non_compilation_calls', 'compilation_failures', 'cache_timeouts', 'not_cached', 'not_cacheable')
-    stats = {key: payload['stats'][key] for key in fields if key in payload['stats']}
-    def numeric(value):
-        if isinstance(value, dict):
-            require(len(value) <= 128, 'oversized counter map')
-            for key, child in value.items():
-                require(isinstance(key, str) and len(key) <= 128, 'invalid counter name')
-                numeric(child)
-        else:
-            require(type(value) is int and 0 <= value <= 2**53-1, 'invalid counter value')
-    numeric(stats)
-    for key in ('compile_requests','requests_executed','cache_read_errors','cache_write_errors','cache_hits','cache_misses','cache_errors','non_cacheable_calls','non_cacheable_compilations','non_compilation_calls'):
-        require(key in stats, 'missing counter: '+key)
+    # mozilla/sccache v0.16.0 src/server.rs: ServerStats and PerLanguageCount.
+    require(isinstance(payload, dict) and isinstance(payload.get('stats'), dict), 'invalid stats object')
+    source = payload['stats']
+    def integer(value):
+        require(type(value) is int and 0 <= value <= 2**53-1, 'invalid counter value')
+    def counter_map(value):
+        require(isinstance(value, dict) and len(value) <= 128, 'invalid counter map')
+        for key, count in value.items():
+            require(isinstance(key, str) and len(key) <= 128, 'invalid counter name')
+            integer(count)
+    stats = {}
+    for key in SCALAR_COUNTERS:
+        require(key in source, 'missing counter: '+key)
+        integer(source[key])
+        stats[key] = source[key]
+    for key in ('cache_hits', 'cache_misses', 'cache_errors'):
+        value = source.get(key)
+        require(isinstance(value, dict) and set(value) == {'counts', 'adv_counts'}, 'invalid language counter: '+key)
+        for counts_map in value.values():
+            counter_map(counts_map)
+        stats[key] = value
+    counter_map(source.get('not_cached'))
+    stats['not_cached'] = source['not_cached']
     return {'stats': stats}
 
 
