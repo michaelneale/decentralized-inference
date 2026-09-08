@@ -1,0 +1,44 @@
+{
+  "runner": "micstudio",
+  "hardware_fingerprint": {
+    "machine_model": "Mac15,14",
+    "chip": "Apple M3 Ultra",
+    "gpu_cores": 80,
+    "unified_memory_bytes": 274877906944,
+    "os_version": "26.6.2"
+  },
+  "replay": {
+    "mode": "checkpoint",
+    "dataset": "thoughtworks/agentic-coding-trajectories",
+    "trajectories_per_framework": 4,
+    "passes": 2,
+    "warmup_turns": 4,
+    "max_output_tokens": 2048
+  },
+  "models": [
+    {
+      "family": "qwen25-coder-14b",
+      "class": "dense",
+      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+      "file": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "quant": "Q4_K_M",
+      "sha256": null
+    },
+    {
+      "family": "gpt-oss-20b",
+      "class": "moe",
+      "repo": "ggml-org/gpt-oss-20b-GGUF",
+      "file": "gpt-oss-20b-MXFP4.gguf",
+      "quant": "MXFP4",
+      "sha256": null
+    },
+    {
+      "family": "qwen3-next-80b-a3b",
+      "class": "hybrid-recurrent",
+      "repo": "bartowski/Qwen_Qwen3-Next-80B-A3B-Thinking-GGUF",
+      "file": "Qwen_Qwen3-Next-80B-A3B-Thinking-Q4_K_M-00001-of-00002.gguf",
+      "quant": "Q4_K_M",
+      "sha256": null
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+name: Agentic Replay Nightly (micstudio)
+
+on:
+  schedule:
+    - cron: "23 14 * * *" # after the Linux competitive run settles
+  workflow_dispatch:
+
+# Scheduled runs execute the default-branch definition only; manual dispatch is
+# accepted only from main so caller-selected content never reaches micstudio.
+permissions:
+  contents: read
+
+concurrency:
+  group: agentic-replay-nightly
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    if: >-
+      github.repository == 'Mesh-LLM/mesh-llm' &&
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'schedule' && vars.MESH_AGENTIC_REPLAY_NIGHTLY_ENABLED == '1')
+      )
+    runs-on: [self-hosted, macOS, arm64]
+    timeout-minutes: 720
+    env:
+      EXPECTED_REPLAY_RUNNER_NAME: micstudio
+      MATRIX_FILE: ci/agentic-replay-nightly/matrix.json
+      DATASET_REPO: ${{ vars.MESH_AGENTIC_REPLAY_DATASET || 'meshllm/agentic-replay-nightly' }}
+      HISTORY_LOCAL: ${{ github.workspace }}/.replay-history-cache
+      OUTPUT_DIR: ${{ github.workspace }}/replay-artifacts
+    steps:
+      - name: Verify pinned replay runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_NAME" != "$EXPECTED_REPLAY_RUNNER_NAME" ]]; then
+            echo "agentic replay nightly requires runner '$EXPECTED_REPLAY_RUNNER_NAME'; got '$RUNNER_NAME'" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main # trusted pinned checkout; never PR content
+          persist-credentials: false
+
+      - name: Record hardware fingerprint
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR/summary"
+          python3 - <<'PY' > "$OUTPUT_DIR/hardware.json"
+          import json, subprocess
+          sysctl = lambda k: subprocess.check_output(["sysctl", "-n", k]).decode().strip()
+          print(json.dumps({
+              "machine_model": sysctl("hw.model"),
+              "chip": sysctl("machdep.cpu.brand_string"),
+              "gpu_cores": 80,
+              "unified_memory_bytes": int(sysctl("hw.memsize")),
+              "os_version": subprocess.check_output(["sw_vers", "-productVersion"]).decode().strip(),
+          }))
+          PY
+
+      - name: Replay each pinned model
+        run: |
+          set -euo pipefail
+          FAILED=0
+          for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
+            model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
+            if ! python3 evals/agentic-replay.py run \
+                --ref main=main \
+                --model "$model_uri" \
+                --backend metal \
+                --trajectories-per-framework 4 \
+                --passes 2 \
+                --warmup-turns 4 \
+                --dataset-file "$MESH_AGENTIC_REPLAY_DATASET_FILE" \
+                --output "$OUTPUT_DIR/$family"; then
+              FAILED=1
+            fi
+          done
+          exit $FAILED # failures continue to the gate step via `if: always()`
+
+      - name: Download cohort-matched history
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf "$HISTORY_LOCAL"
+          "$MESH_AGENTIC_REPLAY_HF_CLI" download "$DATASET_REPO" \
+            --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" || \
+            echo "no history yet (bootstrap run)"
+
+      - name: Normalize history and gate on regression
+        id: history
+        if: always()
+        run: |
+          set -euo pipefail
+          args=(
+            --matrix "$MATRIX_FILE"
+            --summary-dir "$OUTPUT_DIR/summary"
+            --hardware "$OUTPUT_DIR/hardware.json"
+            --source-sha "$(git rev-parse HEAD)"
+            --replay <(python3 -c "import json;print(json.dumps(json.load(open('$MATRIX_FILE'))['replay']))")
+            --output "$OUTPUT_DIR/summary/history.jsonl"
+          )
+          if [[ -d "$HISTORY_LOCAL/data/runs" ]]; then
+            args+=(--baseline "$HISTORY_LOCAL/data/runs")
+          fi
+          if [[ "${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}" == "1" ]]; then
+            args+=(--gate)
+          fi
+          python3 scripts/agentic-replay-history.py "${args[@]}"
+
+      - name: Publish immutable run shard and card
+        if: always() && steps.history.outcome != 'skipped'
+        env:
+          HF_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          RUN_DATE=$(date -u +%F)
+          "$MESH_AGENTIC_REPLAY_HF_CLI" upload "$DATASET_REPO" \
+            "$OUTPUT_DIR/summary/history.jsonl" "data/runs/$RUN_DATE/${{ github.run_id }}.jsonl" \
+            --repo-type dataset --commit-message "run $RUN_DATE ${{ github.run_id }} @ ${{ github.sha }}"
+          python3 scripts/agentic-replay-card.py \
+            --history "$HISTORY_LOCAL/data/runs" \
+            --latest "$OUTPUT_DIR/summary/history.jsonl" \
+            --output "$OUTPUT_DIR/card.md"
+          "$MESH_AGENTIC_REPLAY_HF_CLI" upload "$DATASET_REPO" \
+            "$OUTPUT_DIR/card.md" "card.md" --repo-type dataset \
+            --commit-message "card refresh $RUN_DATE"
+
+      - name: Open repair PR on regression (opencode loop)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          scripts/agentic-replay-repair.sh "$OUTPUT_DIR" || {
+            echo "repair did not clear the regression — PR opened flagged needs-attention" >&2
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: replay-artifacts
+          path: replay-artifacts/
+          retention-days: 30

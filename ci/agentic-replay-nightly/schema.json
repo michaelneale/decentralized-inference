@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MeshLLM agentic replay nightly history row",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "created_utc",
+    "source_sha",
+    "cohort_key",
+    "cohort",
+    "backend_binary_sha256",
+    "hardware_fingerprint",
+    "model",
+    "replay",
+    "prompt_count",
+    "successful_requests",
+    "failed_requests",
+    "output_tokens",
+    "measured_wall_ms",
+    "decode_tokens_per_second",
+    "end_to_end_tokens_per_second",
+    "ttft_ms_mean",
+    "ttft_ms_p90",
+    "cache_hit_pct",
+    "finish_reason_length_pct",
+    "complete",
+    "artifact_result"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "created_utc": {"type": "string"},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "cohort_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "cohort": {"type": "object"},
+    "backend_binary_sha256": {"type": ["string", "null"]},
+    "hardware_fingerprint": {
+      "type": "object",
+      "required": ["machine_model", "chip", "gpu_cores", "unified_memory_bytes", "os_version"],
+      "properties": {
+        "machine_model": {"type": "string"},
+        "chip": {"type": "string"},
+        "gpu_cores": {"type": "integer"},
+        "unified_memory_bytes": {"type": "integer"},
+        "os_version": {"type": "string"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["family", "repo", "file", "quant", "sha256", "class"],
+      "properties": {
+        "family": {"type": "string"},
+        "repo": {"type": "string"},
+        "file": {"type": "string"},
+        "quant": {"type": "string"},
+        "sha256": {"type": ["string", "null"]},
+        "class": {"enum": ["dense", "moe", "hybrid-recurrent"]}
+      }
+    },
+    "replay": {
+      "type": "object",
+      "required": ["mode", "dataset", "trajectories_per_framework", "passes", "warmup_turns", "concurrency", "max_output_tokens"],
+      "properties": {
+        "mode": {"type": "string"},
+        "dataset": {"type": "string"},
+        "dataset_sha256": {"type": ["string", "null"]},
+        "trajectories_per_framework": {"type": "integer"},
+        "passes": {"type": "integer"},
+        "warmup_turns": {"type": "integer"},
+        "concurrency": {"type": "integer"},
+        "max_output_tokens": {"type": "integer"}
+      }
+    },
+    "prompt_count": {"type": "integer", "minimum": 1},
+    "successful_requests": {"type": "integer", "minimum": 0},
+    "failed_requests": {"type": "integer", "minimum": 0},
+    "output_tokens": {"type": "integer", "minimum": 0},
+    "measured_wall_ms": {"type": "number", "minimum": 0},
+    "decode_tokens_per_second": {"type": "number", "minimum": 0},
+    "end_to_end_tokens_per_second": {"type": "number", "minimum": 0},
+    "ttft_ms_mean": {"type": "number", "minimum": 0},
+    "ttft_ms_p90": {"type": "number", "minimum": 0},
+    "cache_hit_pct": {"type": ["number", "null"], "minimum": 0},
+    "finish_reason_length_pct": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+    "complete": {"type": "boolean"},
+    "artifact_result": {"type": "string"}
+  },
+  "additionalProperties": false
+}
