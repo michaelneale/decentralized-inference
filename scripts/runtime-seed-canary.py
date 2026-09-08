@@ -73,7 +73,7 @@ def preflight(directory):
         require(not os.environ.get(name), 'unexpected override: ' + name)
     for name in (BUILD_DIR, 'target', 'runtime-input'):
         require(not Path(name).exists() and not Path(name).is_symlink(), 'existing native/Cargo/package output: ' + name)
-    cache = Path(os.environ['SCCACHE_DIR'])
+    cache = Path(os.environ['RUNNER_TEMP'])/'mesh-llm-sccache'
     require(not cache.is_symlink() and (not cache.exists() or not any(cache.iterdir())), 'initial compiler cache is not empty')
     source = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     require(source == os.environ['GITHUB_SHA'], 'source differs from dispatch revision')
@@ -255,6 +255,8 @@ def main():
     try:
         return globals()[args.command](args.directory) or 0
     except (ValueError,KeyError,TypeError,OSError,subprocess.SubprocessError) as error:
+        if args.command=='preflight' and args.directory.is_dir():
+            save(args.directory/'preflight-failure.json', {'classification':'inconclusive','phase':'preflight','reason':str(error),'eligibility_changed':False})
         if args.command=='summarize':
             args.directory.mkdir(parents=True,exist_ok=True)
             save(args.directory/'summary.json', {'classification':'inconclusive','reason':str(error),'eligibility_changed':False})

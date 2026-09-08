@@ -711,6 +711,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Trust checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify existing CPU image
         run: verify-runner-image public cpu
       - uses: ./.github/actions/resolve-native-toolchain-epoch
@@ -719,7 +721,6 @@ jobs:
       - name: Admit exact seed and observe fresh filesystem
         id: seed_key
         env:
-          SCCACHE_DIR: ${{ runner.temp }}/mesh-llm-sccache
           GH_TOKEN: ${{ github.token }}
           CANARY_KEY: mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-${{ hashFiles('Cargo.lock', '.github/cache-version.txt', 'Justfile', 'just/**') }}
         run: python3 scripts/runtime-seed-canary.py preflight runtime-seed-evidence

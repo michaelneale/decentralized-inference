@@ -1,4 +1,5 @@
 import copy
+from contextlib import chdir
 import importlib.util
 import json
 from pathlib import Path
@@ -20,6 +21,43 @@ def cache():
 
 
 class RuntimeSeedCanaryTests(unittest.TestCase):
+    def test_preflight_checks_container_temp_and_retains_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            container = root/'container'
+            cache_dir = container/'mesh-llm-sccache'
+            cache_dir.mkdir(parents=True)
+            (cache_dir/'unexpected-cache').write_text('existing')
+            evidence = root/'evidence'
+            environment = {
+                'CANARY_KEY': C.KEY, 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_ARCH': 'X64',
+                'LLAMA_STAGE_BUILD_DIR': C.BUILD_DIR, 'RUSTC_WRAPPER': 'sccache',
+                'MESH_LLM_REQUIRE_SCCACHE': '1', 'CARGO_INCREMENTAL': '0',
+                'CACHE_NAMESPACE': 'mesh-llm', 'SCCACHE_GHA_ENABLED': 'false',
+                'SCCACHE_MULTILEVEL_CHAIN': 'disk', 'SCCACHE_CACHE_SIZE': '2G',
+                'LLAMA_STAGE_BACKEND': 'cpu', 'RUNNER_TEMP': str(container),
+                'SCCACHE_DIR': str(root/'host-temp/mesh-llm-sccache'),
+            }
+            with chdir(root), patch.dict(C.os.environ, environment, clear=True), patch.object(
+                C.sys, 'argv', ['canary', 'preflight', str(evidence)]
+            ), patch.object(C.subprocess, 'check_output') as command:
+                self.assertEqual(C.main(), 1)
+                command.assert_not_called()
+            failure = C.read(evidence/'preflight-failure.json')
+            self.assertEqual(failure['reason'], 'initial compiler cache is not empty')
+            self.assertEqual(failure['classification'], 'inconclusive')
+
+    def test_container_checkout_is_trusted_before_preflight(self):
+        job = yaml.safe_load((ROOT/'.github/workflows/depot-canary.yml').read_text())['jobs']['runtime_seed']
+        steps = job['steps']
+        self.assertTrue(steps[0]['uses'].startswith('actions/checkout@'))
+        self.assertEqual(steps[1], {'name': 'Trust checkout directory',
+            'run': 'git config --global --add safe.directory "$GITHUB_WORKSPACE"'})
+        preflight = next(step for step in steps if step.get('id') == 'seed_key')
+        self.assertNotIn('SCCACHE_DIR', preflight['env'])
+        self.assertGreater(steps.index(preflight), 1)
+
     def test_cache_admission_rejects_missing_shadow_and_wrong_identity(self):
         self.assertEqual(C.cache_identity({'actions_caches': [cache()]}), cache())
         for field, value in [('id', 1), ('version', 'wrong'), ('ref', 'refs/heads/feature'), ('size_in_bytes', 1)]:
