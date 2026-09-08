@@ -30,20 +30,37 @@
       "full": {
         "status": "certified",
         "oracle": "local-monolithic",
-        "required_lanes": ["single-step", "chain", "state-handoff"]
+        "required_lanes": [
+          "single-step",
+          "chain",
+          "state-handoff"
+        ]
       },
       "package-oracle": {
         "status": "certified",
         "oracle": "independent-trace",
-        "required_lanes": ["single-step", "chain", "state-handoff"]
+        "required_lanes": [
+          "single-step",
+          "chain",
+          "state-handoff"
+        ]
       },
       "graph-only": {
         "status": "provisional",
         "oracle": "none",
-        "required_lanes": ["graph-parse", "tensor-ownership", "stage-load"]
+        "required_lanes": [
+          "graph-parse",
+          "tensor-ownership",
+          "stage-load"
+        ]
       }
     },
-    "cadences": ["llama-bump", "manual-full", "nightly", "rotating"]
+    "cadences": [
+      "llama-bump",
+      "manual-full",
+      "nightly",
+      "rotating"
+    ]
   },
   "artifacts": [
     {
@@ -2472,6 +2489,1202 @@
       }
     },
     {
+      "id": "family-afmoe",
+      "family": "afmoe",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "MaziyarPanahi/Trinity-Mini-GGUF",
+        "revision": "3a7d7a64abeabff7302851a2bc98508b36d0b8f7",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Trinity-Mini.Q4_K_M.gguf",
+            "size_bytes": 15823053440,
+            "sha256": "2c43474de9017d68331455cbf3852c1d365f7a5f9d3b050418e024ba3374a19e"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 15823053440
+        },
+        "notes": "downloaded AFMoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-arwkv7",
+      "family": "arwkv7",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "recurrent"
+      ],
+      "artifact": {
+        "repo": "mradermacher/ARWKV-7B-Preview-0.1-NoG-32B-i1-GGUF",
+        "revision": "301a9554c8271bca175a78f599b20e49bce383fa",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "ARWKV-7B-Preview-0.1-NoG-32B.i1-Q4_K_M.gguf",
+            "size_bytes": 5117561504,
+            "sha256": "841c66e3242e2a7e1b64641e1ff92248b2650129b196dc3e27c016f541cb0059"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 28,
+          "mtp_layers": 0,
+          "activation_width": 3584,
+          "boundary_sweep_period": 1,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 5117561504
+        },
+        "notes": "ARWKV recurrent architecture coverage"
+      }
+    },
+    {
+      "id": "family-bailingmoe3",
+      "family": "bailingmoe3",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "moe",
+        "recurrent"
+      ],
+      "artifact": {
+        "repo": "SC117/Ling-3.0-tiny-abliterated-APEX-GGUF",
+        "revision": "b923d16fcf28261f12be9ece2b520ed442403f70",
+        "selector": "BF16",
+        "files": [
+          {
+            "path": "Ling-3.0-tiny-abliterated-bf16.gguf",
+            "size_bytes": 15803475200,
+            "sha256": "8c2ea2ead488a0e00bcc02c41fd144d6226ef70eb626afcd589e3960ce39fc85"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 24,
+          "mtp_layers": 0,
+          "activation_width": 1536,
+          "boundary_sweep_period": 4,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 15803475200
+        },
+        "notes": "hybrid three-recurrent-to-one-attention boundary sweep"
+      }
+    },
+    {
+      "id": "family-chameleon",
+      "family": "chameleon",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "multimodal"
+      ],
+      "artifact": {
+        "repo": "mradermacher/AA-chameleon-7b-plus-i1-GGUF",
+        "revision": "5e13750981e775965061feefb701f4b6e1e1f7d9",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "AA-chameleon-7b-plus.i1-Q4_K_M.gguf",
+            "size_bytes": 4274466400,
+            "sha256": "6af766cf8ac2c729c06c430eabc506e32ce10d237c92b426742b3b4cceabcd37"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 4096,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 4274466400
+        },
+        "notes": "downloaded Chameleon architecture coverage"
+      }
+    },
+    {
+      "id": "family-deepseek32",
+      "family": "deepseek32",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "mla",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "sszymczyk/DeepSeek-V3.2-4Layers-GGUF",
+        "revision": "54c8e50a9bfaced560a51eeb63cace952e3ea247",
+        "selector": "Q8_0",
+        "files": [
+          {
+            "path": "DeepSeek-V3.2-4Layers-Q8_0.gguf",
+            "size_bytes": 16131110560,
+            "sha256": "a7587dc5291aab8ce6d806c1046a169c499fb39008d4188acbca223fd6ad686d"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 4,
+          "mtp_layers": 0,
+          "activation_width": 7168,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 16131110560
+        },
+        "notes": "compact four-layer DeepSeek 3.2 architecture probe"
+      }
+    },
+    {
+      "id": "family-deepseek4",
+      "family": "deepseek4",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "huihui-ai/Huihui-DeepSeek-V4-Flash-0731-abliterated-GGUF",
+        "revision": "a8dfba9c1e43bdf324ee2c7787ed01c70975ffb4",
+        "selector": "Q8_0",
+        "files": [
+          {
+            "path": "dspark-abliterated/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf",
+            "size_bytes": 10896057440,
+            "sha256": "6575853d1c3736c160101bc7cd117c8edd39ca847cfdf2273d9a344108edfaf8"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 3,
+          "mtp_layers": 0,
+          "activation_width": 16384,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 10896057440
+        },
+        "notes": "DeepSeek V4 Flash dflash path with four hyper-connection streams"
+      }
+    },
+    {
+      "id": "family-dots1",
+      "family": "dots1",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "Robertp423/dots.llm1.test-Q6_K-GGUF",
+        "revision": "a0404996541e6505cad00b7e3bfa4c7447f4f501",
+        "selector": "Q6_K",
+        "files": [
+          {
+            "path": "dots.llm1.test-q6_k.gguf",
+            "size_bytes": 14302555328,
+            "sha256": "2789482e96ffe36999a3c32c1224f0747c030f7aefe576a3a8510a0aa84fde7e"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 27,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 14302555328
+        },
+        "notes": "downloaded dots1 MoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-ernie4-5",
+      "family": "ernie4-5",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "Arm/ernie-4-5-0-3b-pt-q4-k-m-llamacpp-raspberrypi5",
+        "revision": "86a80f7bb8780cdc73bed0ffbaab3f6ed98c8b63",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "baidu__ERNIE-4.5-0.3B-PT_llamacpp_optimized.gguf",
+            "size_bytes": 240645504,
+            "sha256": "86202506dbbffaddaaa615c932676d3e4c21d1f93e11cd1da3ffb9c6d10cbaed"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 18,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 240645504
+        },
+        "notes": "small ERNIE 4.5 dense architecture probe"
+      }
+    },
+    {
+      "id": "family-ernie4-5-moe",
+      "family": "ernie4-5-moe",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "mradermacher/ERNIE-21B-A3B-Claude-4.5-High-OPUS-Thinking-i1-GGUF",
+        "revision": "51b8fa4872193aee98ddf4ae60c63aef52e2a07a",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "ERNIE-21B-A3B-Claude-4.5-High-OPUS-Thinking.i1-Q4_K_M.gguf",
+            "size_bytes": 13245833216,
+            "sha256": "5658d5e0b82578ea7ec0a40d022cbed31013dc6bb0da11c11d16261915b7bcf3"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 28,
+          "mtp_layers": 0,
+          "activation_width": 2560,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 13245833216
+        },
+        "notes": "downloaded ERNIE 4.5 MoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-gemma3n",
+      "family": "gemma3n",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "lmstudio-community/gemma-3n-E4B-it-text-GGUF",
+        "revision": "48ddb4928f7910916a599054277dac92ab70201a",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "gemma-3n-E4B-it-Q4_K_M.gguf",
+            "size_bytes": 4237063328,
+            "sha256": "7fcb647151fa19a0750538672cf824ef6cf18f74bb86ebe5592e1ed59b4070a0"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 35,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 4237063328
+        },
+        "notes": "text-only Gemma 3n architecture coverage"
+      }
+    },
+    {
+      "id": "family-gemma4",
+      "family": "gemma4",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "multimodal"
+      ],
+      "artifact": {
+        "repo": "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+        "revision": "45b6a334b4bcd1d7f37179df58b3b1d66a184e5d",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+            "size_bytes": 5335285728,
+            "sha256": "d0027dd3a9128d9323e9f282c8bf010a8526c46477584535991dc1a869b56e96"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 42,
+          "mtp_layers": 0,
+          "activation_width": 2560,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 5335285728
+        },
+        "notes": "Gemma 4 text and projector lanes",
+        "mmproj_artifact": {
+          "repo": "HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive",
+          "revision": "45b6a334b4bcd1d7f37179df58b3b1d66a184e5d",
+          "selector": "F16",
+          "files": [
+            {
+              "path": "mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf",
+              "size_bytes": 990288832,
+              "sha256": "debad39ab9c1152ab67695a674fb35e8375b2320c57bfd5075835d3ccb16c7db"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "family-gemma4-assistant",
+      "family": "gemma4-assistant",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "RachidAR/gemma-4-26B-A4B-it-qat-assistant-q4_0-gguf",
+        "revision": "64fc324e6829824a37518f5a7c8841ac9a559d5b",
+        "selector": "Q4_0",
+        "files": [
+          {
+            "path": "gemma-4-26b-A4B-it-assistant-Q4_0-q4emb.gguf",
+            "size_bytes": 251938176,
+            "sha256": "6195511a1bf402b1ab3ec3631347f310b4085774a17a0c6e673ea8988cc0a9fc"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 4,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 251938176
+        },
+        "notes": "compact Gemma 4 assistant architecture probe"
+      }
+    },
+    {
+      "id": "family-gptneox",
+      "family": "gptneox",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "mradermacher/gpt-neox-20b-i1-GGUF",
+        "revision": "aea1d77733d7cef1ccc4556c63666d17e5f95a28",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "gpt-neox-20b.i1-Q4_K_M.gguf",
+            "size_bytes": 13135032320,
+            "sha256": "1a35c13535c26bb925a2379d9f021de67a0390124ffe2051aa94412002652d6d"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 44,
+          "mtp_layers": 0,
+          "activation_width": 6144,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 13135032320
+        },
+        "notes": "downloaded GPT-NeoX architecture coverage"
+      }
+    },
+    {
+      "id": "family-granite-swa",
+      "family": "granite-swa",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "emredeveloper/granite-swash-3b-a600m-GGUF",
+        "revision": "d20c88f11ef8622464f9678e6437ed9e72a07dcd",
+        "selector": "BF16",
+        "files": [
+          {
+            "path": "granite-swash-3b-a600m-BF16.gguf",
+            "size_bytes": 6047918368,
+            "sha256": "1961c3d8eb4e97536a2b95ebe0bd6830d508031443e81124516c05505af8c615"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 28,
+          "mtp_layers": 0,
+          "activation_width": 1280,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 6047918368
+        },
+        "notes": "Granite sliding-window MoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-granite-moe",
+      "family": "granite-moe",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "sinatras/granite-moe-1b-split",
+        "revision": "3beccd31cf6d51f94c93007e56a21e0df41a101a",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Q4_K_M/granite-3.1-1b-a400m-instruct-Q4_K_M.gguf",
+            "size_bytes": 821847360,
+            "sha256": "3a2ec1c2a78cb29d901e29bbf5162dcd03381e13803d2cbdcff838d4d08142eb"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 24,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 821847360
+        },
+        "notes": "downloaded Granite MoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-granite-switch",
+      "family": "granite-switch",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "barha/granite-switch-4.1-3b-preview-GGUF",
+        "revision": "1537da1c12cd890ef0e632678221ecd663485d4e",
+        "selector": "F16",
+        "files": [
+          {
+            "path": "granite-switch-4.1-3b-preview-f16.gguf",
+            "size_bytes": 8428497696,
+            "sha256": "3c5edd7df00fa175defc73b6f4af58c9b3d66bfc091ade885d3acdd4ded87510"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 40,
+          "mtp_layers": 0,
+          "activation_width": 2560,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 8428497696
+        },
+        "notes": "Granite Switch adapter-router architecture coverage"
+      }
+    },
+    {
+      "id": "family-grovemoe",
+      "family": "grovemoe",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "mradermacher/GroveMoE-Inst-i1-GGUF",
+        "revision": "4e342287d10e5b616e087509fe2a979293bc7b0d",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "GroveMoE-Inst.i1-Q4_K_M.gguf",
+            "size_bytes": 20167310304,
+            "sha256": "e1d8ce9e762f74e65d85bea1e8f8e06db70f2dd735cecee9a6d889c71e6fc010"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 48,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 20167310304
+        },
+        "notes": "downloaded GroveMoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-hunyuan-dense",
+      "family": "hunyuan-dense",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "bartowski/tencent_Hunyuan-1.8B-Instruct-GGUF",
+        "revision": "bc16eeb7f561c3d7937aa2cde457668695c237ca",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "tencent_Hunyuan-1.8B-Instruct-Q4_K_M.gguf",
+            "size_bytes": 1133084864,
+            "sha256": "558ae86fc4251fd73cd54685319a83e7550997537e3ad41043ad5c0b5a2a26d4"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 1133084864
+        },
+        "notes": "downloaded Hunyuan dense architecture coverage"
+      }
+    },
+    {
+      "id": "family-hy-v3",
+      "family": "hy-v3",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "mradermacher/Tencent-Hy-30B-A3B-uncensored-heretic-i1-GGUF",
+        "revision": "6a7a7d5bea1641ec15202f14d4b467d45c104f06",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Tencent-Hy-30B-A3B-uncensored-heretic.i1-Q4_K_M.gguf",
+            "size_bytes": 18236703520,
+            "sha256": "76d19eb68bea4de46f2f3dfc82cfa6896da447b9aec91d7c6c3e7791f2d306ac"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 48,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 18236703520
+        },
+        "notes": "downloaded Tencent HY v3 MoE architecture coverage"
+      }
+    },
+    {
+      "id": "family-jais",
+      "family": "jais",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "mradermacher/jais-family-13b-i1-GGUF",
+        "revision": "0339532e089ec7b6dd502eee16c758fc324046c3",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "jais-family-13b.i1-Q4_K_M.gguf",
+            "size_bytes": 8967115424,
+            "sha256": "8783a7d62b714c8520f2b03155f7f52145714dd9006653b7a64a6a6a097f5407"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 40,
+          "mtp_layers": 0,
+          "activation_width": 5120,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 8967115424
+        },
+        "notes": "downloaded Jais architecture coverage"
+      }
+    },
+    {
+      "id": "family-jais2",
+      "family": "jais2",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "inception42/Jais-2-8B-Chat-GGUF",
+        "revision": "61365d41aad6a2ffa9d7b7f79dfce21b65833254",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Q4_K_M.gguf",
+            "size_bytes": 5104022560,
+            "sha256": "26aef0cee0f9960cb12cc74ffa1049ca5e35e8159621aa1bacd9f9f703239923"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 3328,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 5104022560
+        },
+        "notes": "gated Jais 2 artifact with locally verified immutable digest"
+      }
+    },
+    {
+      "id": "family-kimi-k3",
+      "family": "kimi-k3",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "moe",
+        "recurrent"
+      ],
+      "artifact": {
+        "repo": "murillo2000/Kimi-K3-0.40B-GGUF",
+        "revision": "88de02cf8fa37f87eb06daaed370ac9c3411d5ca",
+        "selector": "F16",
+        "files": [
+          {
+            "path": "Kimi-K3-0.40B-F16.gguf",
+            "size_bytes": 784318432,
+            "sha256": "411c197b503e6fb9199a2b22115e32dc4e2cad803fb112b24967737b3bab26c7"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 8,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 4,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 784318432
+        },
+        "notes": "compact hybrid three-recurrent-to-one-attention boundary sweep"
+      }
+    },
+    {
+      "id": "family-lfm2-moe",
+      "family": "lfm2-moe",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "moe",
+        "mxfp4",
+        "recurrent"
+      ],
+      "artifact": {
+        "repo": "noctrex/LFM2.5-8B-A1B-MXFP4_MOE-GGUF",
+        "revision": "6f9e38da4a1715057e3c3a45105037944e767117",
+        "selector": "MXFP4_MOE",
+        "files": [
+          {
+            "path": "LFM2.5-8B-A1B-MXFP4_MOE.gguf",
+            "size_bytes": 5138197824,
+            "sha256": "a492e8b1d8c201b90de421f0ea1b6ed478aa7f4948604ea6659cd9afca715f3a"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 24,
+          "mtp_layers": 0,
+          "activation_width": 2048,
+          "boundary_sweep_period": 4,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 5138197824
+        },
+        "notes": "LFM2 MoE hybrid recurrent boundary sweep"
+      }
+    },
+    {
+      "id": "family-maincoder",
+      "family": "maincoder",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "mradermacher/Maincoder-1B-GGUF",
+        "revision": "1c963c98dfb478ea3b4719299bd85fbb5cf30899",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Maincoder-1B.Q4_K_M.gguf",
+            "size_bytes": 672108288,
+            "sha256": "2db4b53955a58f4483442110fdd5534bfa22a45447f35a131b839a034ffa2998"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 1536,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 672108288
+        },
+        "notes": "downloaded Maincoder architecture coverage"
+      }
+    },
+    {
+      "id": "family-mellum",
+      "family": "mellum",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "moe"
+      ],
+      "artifact": {
+        "repo": "yuxinlu1/Mellum2-12B-A2.5B-Claude-4.6-4.8-Opus-Thinking-GGUF",
+        "revision": "a9c7b1a32ead28d4a868ff31bbf9c15a97362cfe",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "mellum2-claude-Q4_K_M.gguf",
+            "size_bytes": 8071294784,
+            "sha256": "2086900d9374d7a12388b6a44f7d34afcf5817abcba7983dc733d38c5003e2ea"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 28,
+          "mtp_layers": 0,
+          "activation_width": 2304,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 8071294784
+        },
+        "notes": "Mellum MoE sliding-window architecture coverage"
+      }
+    },
+    {
+      "id": "family-minicpm",
+      "family": "minicpm",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "dense",
+        "gguf"
+      ],
+      "artifact": {
+        "repo": "openbmb/MiniCPM4.1-8B-GGUF",
+        "revision": "ebb834d0ad9acfa98bd16bc963ec51be5f7e08c1",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "MiniCPM4.1-8B-Q4_K_M.gguf",
+            "size_bytes": 4965526048,
+            "sha256": "9d2ffb9145bf7a88ddb94b2542b42d925293666c42962aa158eeb62fc9708654"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 32,
+          "mtp_layers": 0,
+          "activation_width": 4096,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 4965526048
+        },
+        "notes": "downloaded MiniCPM 4.1 architecture coverage"
+      }
+    },
+    {
+      "id": "family-muse-glimmer",
+      "family": "muse-glimmer",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "moe",
+        "multimodal"
+      ],
+      "artifact": {
+        "repo": "Blackfrost-AI/Muse-Glimmer-30B-Abliterated-GGUF",
+        "revision": "83e7dc723f5515704adc8767dfeb279de3df914d",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "dflash-Muse-Glimmer-30B-Abliterated-Q4_K_M.gguf",
+            "size_bytes": 1631210720,
+            "sha256": "1b58b92b670d20b49d06a9a1210e4bf5350696bb8f7b4931769b7000d0456eda"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 5,
+          "mtp_layers": 0,
+          "activation_width": 6656,
+          "boundary_sweep_period": 0,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 1631210720
+        },
+        "notes": "Muse Glimmer dflash text and projector lanes",
+        "mmproj_artifact": {
+          "repo": "Blackfrost-AI/Muse-Glimmer-30B-Abliterated-GGUF",
+          "revision": "83e7dc723f5515704adc8767dfeb279de3df914d",
+          "selector": "F16",
+          "files": [
+            {
+              "path": "mmproj-Muse-Glimmer-30B-Abliterated-F16.gguf",
+              "size_bytes": 3847367616,
+              "sha256": "c2e08b8bd13ca60b59ffdcb79b969b354b1edda9b9198047d10621adc11591bb"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "smollm2-q8-inference",
       "family": "smollm2",
       "suites": [
@@ -2646,9 +3859,9 @@
           }
         ]
       },
-    "quantizations": [
-      "preserve",
-      "F32",
+      "quantizations": [
+        "preserve",
+        "F32",
         "F16",
         "BF16",
         "Q1_0",

@@ -38,7 +38,7 @@ Scheduled coverage details: an unchanged-pin llama canary uses the bounded
 `nightly` cadence (Qwen3 dense, Falcon-H1, Qwen3Next, and Mamba). Changed pins
 use `llama-bump`, and a forced dispatch uses `manual-full`. A mapped model-only
 upstream bump may select affected families plus sentinels; all other bumps and
-forced dispatches retain the complete 35-family certification described in the table. The
+forced dispatches retain the complete generated family certification described in the table. The
 competitive benchmark can optionally download exact-cohort history from
 `MESH_PERFORMANCE_HISTORY_DATASET`, validate the checked-in schema, report
 regression candidates, and append one immutable run shard using

@@ -129,20 +129,22 @@ def _gguf_dimensions(path: Path) -> tuple[int, int] | None:
                 f"GGUF must contain exactly one positive *.embedding_length: {path}"
             )
         activation_width = embedding_lengths[0]
-        if architecture == "qwen4exp":
+        if architecture == "qwen4exp" or (
+            architecture == "dflash" and hyper_connection_counts
+        ):
             if len(hyper_connection_counts) != 1 or hyper_connection_counts[0] < 1:
                 raise PlanError(
-                    "qwen4exp GGUF must contain exactly one positive "
+                    f"{architecture} GGUF must contain exactly one positive "
                     f"*.hyper_connection.count: {path}"
                 )
             activation_width *= hyper_connection_counts[0]
             if activation_width > 0x7FFFFFFF:
-                raise PlanError(f"qwen4exp activation width exceeds i32: {path}")
+                raise PlanError(f"{architecture} activation width exceeds i32: {path}")
             if len(embedding_lengths_out) > 1 or (
                 embedding_lengths_out and embedding_lengths_out[0] != activation_width
             ):
                 raise PlanError(
-                    "qwen4exp *.embedding_length_out disagrees with "
+                    f"{architecture} *.embedding_length_out disagrees with "
                     f"hyper-connected activation width {activation_width}: {path}"
                 )
         return block_counts[0], activation_width
