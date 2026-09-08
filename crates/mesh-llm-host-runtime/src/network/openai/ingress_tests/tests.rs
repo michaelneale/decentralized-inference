@@ -314,6 +314,122 @@ fn moa_degraded_model_is_consumed_by_pipeline_dispatch() {
     );
 }
 
+fn dispatch_kind_request(
+    model: Option<&str>,
+    response_adapter: proxy::ResponseAdapter,
+) -> proxy::BufferedHttpRequest {
+    proxy::BufferedHttpRequest {
+        raw: Vec::new(),
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: 0,
+        completion_tokens: None,
+        stream: None,
+        model_name: model.map(str::to_owned),
+        request_object_request_ids: Vec::new(),
+        response_adapter,
+        correlation_id: None,
+    }
+}
+
+/// Regression (CodeRabbit + ndizazzo P1, PR #1671 round 2): mesh routing
+/// headers must be enforced before MoA dispatch, not just inside
+/// `route_request`'s model-bearing branch -- MoA runs first and never
+/// consults them.
+#[test]
+fn mesh_routing_unsupported_dispatch_kind_flags_moa_dispatch() {
+    let request =
+        dispatch_kind_request(Some(moa::VIRTUAL_MODEL_NAME), proxy::ResponseAdapter::None);
+    let decision = AutoRouteDecision {
+        effective_model: Some(moa::VIRTUAL_MODEL_NAME.to_owned()),
+        classification: None,
+        required_tokens: None,
+    };
+    assert_eq!(
+        mesh_routing_unsupported_dispatch_kind(
+            &request,
+            &decision,
+            decision.effective_model.as_deref()
+        ),
+        Some("multi-agent orchestration")
+    );
+}
+
+/// Regression (CodeRabbit + ndizazzo P1, PR #1671 round 2): same gap for
+/// pipeline dispatch, which also runs before `route_request`.
+#[test]
+fn mesh_routing_unsupported_dispatch_kind_flags_pipeline_dispatch() {
+    use crate::network::router::{Category, Classification, Complexity};
+
+    let request = dispatch_kind_request(
+        Some("local/only-model:Q4_K_M"),
+        proxy::ResponseAdapter::None,
+    );
+    let decision = AutoRouteDecision {
+        effective_model: Some("local/only-model:Q4_K_M".to_owned()),
+        classification: Some(Classification {
+            category: Category::Code,
+            complexity: Complexity::Deep,
+            needs_tools: true,
+            has_media_inputs: false,
+        }),
+        required_tokens: None,
+    };
+    assert_eq!(
+        mesh_routing_unsupported_dispatch_kind(
+            &request,
+            &decision,
+            decision.effective_model.as_deref()
+        ),
+        Some("pipeline")
+    );
+}
+
+/// Regression (CodeRabbit, PR #1671 round 1/2): the model-less fallback
+/// (no `model` in the request at all) also bypasses `route_request`'s
+/// model-bearing branch and must not silently ignore a routing header.
+#[test]
+fn mesh_routing_unsupported_dispatch_kind_flags_model_less_dispatch() {
+    let request = dispatch_kind_request(None, proxy::ResponseAdapter::None);
+    let decision = AutoRouteDecision {
+        effective_model: None,
+        classification: None,
+        required_tokens: None,
+    };
+    assert_eq!(
+        mesh_routing_unsupported_dispatch_kind(&request, &decision, None),
+        Some("no model specified")
+    );
+}
+
+/// The ordinary model-bearing path (no MoA, no pipeline, a real model) must
+/// remain unaffected -- `route_request` enforces the headers itself there.
+#[test]
+fn mesh_routing_unsupported_dispatch_kind_is_none_for_ordinary_dispatch() {
+    let request = dispatch_kind_request(
+        Some("local/only-model:Q4_K_M"),
+        proxy::ResponseAdapter::None,
+    );
+    let decision = AutoRouteDecision {
+        effective_model: Some("local/only-model:Q4_K_M".to_owned()),
+        classification: None,
+        required_tokens: None,
+    };
+    assert_eq!(
+        mesh_routing_unsupported_dispatch_kind(
+            &request,
+            &decision,
+            decision.effective_model.as_deref()
+        ),
+        None
+    );
+}
+
 // --- Routing behavior tests for model-independent daemon support ---
 
 #[test]
@@ -1249,4 +1365,200 @@ async fn resolve_remote_mesh_route_with_no_headers_pools_every_serving_peer() {
         }
         _ => panic!("expected the ordinary multi-candidate pool"),
     }
+}
+
+fn plugin_only_request(model: &str) -> proxy::BufferedHttpRequest {
+    let body = b"{}";
+    let raw = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(body.iter().copied())
+    .collect::<Vec<u8>>();
+    proxy::BufferedHttpRequest {
+        raw,
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: body.len(),
+        completion_tokens: None,
+        stream: None,
+        model_name: Some(model.to_owned()),
+        request_object_request_ids: Vec::new(),
+        response_adapter: proxy::ResponseAdapter::None,
+        correlation_id: None,
+    }
+}
+
+fn empty_test_plugin_manager() -> crate::plugin::PluginManager {
+    crate::plugin::PluginManager::for_test_summaries(Vec::new())
+}
+
+/// Regression (ndizazzo P2a, PR #1671 round 2): an explicit `x-mesh-target`
+/// naming THIS node must resolve against LOCAL PLUGIN availability instead
+/// of failing closed with a spurious 409 because `resolve_remote_mesh_route`
+/// only ever searches OTHER peers. Proven here by dialing a plugin endpoint
+/// that refuses the connection (nothing bound to it): if the fix holds, the
+/// outcome is the plugin-dispatch-attempted 503 `try_route_plugin_model`
+/// itself produces on a failed endpoint -- never the fail-closed 409 that
+/// never even looks at the plugin manager.
+#[tokio::test]
+async fn route_self_targeted_model_attempts_a_registered_plugin_instead_of_failing_closed() {
+    use tokio::io::AsyncReadExt;
+
+    let node = mesh::Node::new_for_tests(mesh::NodeRole::Client)
+        .await
+        .expect("test node should start");
+    let targets = election::ModelTargets::default();
+    let affinity = affinity::AffinityRouter::new();
+    let model = "acme/plugin-model:Q4_K_M";
+
+    // Bind then immediately drop the listener: the port is real but nothing
+    // answers, so a dial there deterministically refuses instead of racing a
+    // live server this test doesn't need.
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind reserved port");
+    let refusing_addr = reserved.local_addr().expect("addr");
+    drop(reserved);
+
+    let plugin_manager = empty_test_plugin_manager();
+    plugin_manager
+        .set_test_inference_endpoints(vec![crate::plugin::InferenceEndpointRoute {
+            plugin_name: "acme".to_string(),
+            endpoint_id: "ep1".to_string(),
+            address: format!("http://{refusing_addr}"),
+            models: vec![model.to_string()],
+        }])
+        .await;
+
+    let ctx = IngressRouteContext {
+        node: &node,
+        targets: &targets,
+        affinity: &affinity,
+        plugin_manager: Some(&plugin_manager),
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let client = tokio::net::TcpStream::connect(addr);
+    let server = async { listener.accept().await.map(|(stream, _)| stream) };
+    let (client_side, server_side) = tokio::join!(client, server);
+    let mut client_side = client_side.expect("connect");
+    let tcp_stream: ClientStream = server_side.expect("accept").into();
+
+    let request = plugin_only_request(model);
+    let outcome = route_self_targeted_model(
+        tcp_stream,
+        &request,
+        &ctx,
+        model,
+        &[],
+        OpenAiRouteObserver::default(),
+    )
+    .await;
+
+    let mut response = Vec::new();
+    client_side
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response_text = String::from_utf8_lossy(&response);
+
+    assert!(
+        !response_text.starts_with("HTTP/1.1 409"),
+        "self-target with a registered plugin model must not fail closed with the \
+         'refusing to fall back to another peer' 409: {response_text}"
+    );
+    assert!(
+        response_text.contains("plugin endpoint"),
+        "expected the plugin-dispatch-attempted failure message, got: {response_text}"
+    );
+    assert!(
+        matches!(outcome, proxy::RouteDispatchOutcome::Responded(503)),
+        "expected the plugin attempt's own 503, got {outcome:?}"
+    );
+}
+
+/// Regression (ndizazzo P2b, PR #1671 round 2): `x-mesh-exclude` naming this
+/// node must block LOCAL PLUGIN fallback too. Proven by registering a
+/// plugin endpoint at an address that would hang/fail if dialed, and
+/// asserting the exclude check still produces 409 -- i.e. the plugin is
+/// never even attempted once this node is excluded.
+#[tokio::test]
+async fn route_missing_local_model_excluding_self_blocks_local_plugin_fallback() {
+    use tokio::io::AsyncReadExt;
+
+    let node = mesh::Node::new_for_tests(mesh::NodeRole::Client)
+        .await
+        .expect("test node should start");
+    let self_id = node.id();
+    let targets = election::ModelTargets::default();
+    let affinity = affinity::AffinityRouter::new();
+    let model = "acme/plugin-model:Q4_K_M";
+
+    let plugin_manager = empty_test_plugin_manager();
+    plugin_manager
+        .set_test_inference_endpoints(vec![crate::plugin::InferenceEndpointRoute {
+            plugin_name: "acme".to_string(),
+            endpoint_id: "ep1".to_string(),
+            // Never dialed if the exclude check runs first, as it must.
+            address: "http://127.0.0.1:1".to_string(),
+            models: vec![model.to_string()],
+        }])
+        .await;
+
+    let ctx = IngressRouteContext {
+        node: &node,
+        targets: &targets,
+        affinity: &affinity,
+        plugin_manager: Some(&plugin_manager),
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let client = tokio::net::TcpStream::connect(addr);
+    let server = async { listener.accept().await.map(|(stream, _)| stream) };
+    let (client_side, server_side) = tokio::join!(client, server);
+    let mut client_side = client_side.expect("connect");
+    let tcp_stream: ClientStream = server_side.expect("accept").into();
+
+    let request = plugin_only_request(model);
+    let outcome = route_missing_local_model(
+        tcp_stream,
+        &request,
+        &ctx,
+        model,
+        None,
+        &[self_id],
+        None,
+        OpenAiRouteObserver::default(),
+    )
+    .await;
+
+    let mut response = Vec::new();
+    client_side
+        .read_to_end(&mut response)
+        .await
+        .expect("read response");
+    let response_text = String::from_utf8_lossy(&response);
+
+    assert!(
+        response_text.starts_with("HTTP/1.1 409"),
+        "x-mesh-exclude naming this node must block local plugin fallback with 409, got: {response_text}"
+    );
+    assert!(
+        matches!(outcome, proxy::RouteDispatchOutcome::Responded(409)),
+        "expected 409, got {outcome:?}"
+    );
 }

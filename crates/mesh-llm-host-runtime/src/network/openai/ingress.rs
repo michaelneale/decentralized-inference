@@ -523,6 +523,25 @@ async fn route_missing_local_model(
     required_tokens: Option<u32>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> proxy::RouteDispatchOutcome {
+    // An explicit self-target can never be found by `resolve_remote_mesh_route`
+    // below -- it only searches OTHER peers' advertised hosts -- so it always
+    // failed closed with a spurious 409 even when this node serves the model
+    // itself via a plugin (ndizazzo P2a, PR #1671 round 2). The caller only
+    // reaches this function for a self-target once local HOST-served
+    // candidates already came up empty (see `route_request`), so what's left
+    // to check here is plugin-served availability.
+    if target == Some(ctx.node.id()) {
+        return route_self_targeted_model(
+            tcp_stream,
+            request,
+            ctx,
+            model_name,
+            excluded,
+            route_observer,
+        )
+        .await;
+    }
+
     // Try remote mesh first.
     match resolve_remote_mesh_route(ctx, model_name, target, excluded).await {
         RemoteMeshRoute::TargetUnavailable { target_hex } => {
@@ -622,6 +641,30 @@ async fn route_missing_local_model(
         );
     }
 
+    // `x-mesh-exclude` naming this node must block LOCAL PLUGIN fallback too
+    // -- otherwise the client's explicit "not this node" is honored for
+    // host-served candidates (via `mesh_headers_force_remote`, which is why
+    // execution reached this function at all) but silently ignored the
+    // moment the model turns out to be plugin-served instead, and the
+    // excluded node serves the request anyway (ndizazzo P2b, PR #1671
+    // round 2). Fail closed with 409, matching `x-mesh-target`'s contract,
+    // rather than the generic "not found anywhere" 404.
+    if excluded.contains(&ctx.node.id()) {
+        return response_outcome(
+            409,
+            proxy::send_error_observed(
+                tcp_stream,
+                409,
+                &format!(
+                    "this node ({}) is excluded via x-mesh-exclude and no other candidate serves model '{model_name}'",
+                    hex::encode(ctx.node.id().as_bytes())
+                ),
+                route_observer,
+            )
+            .await,
+        );
+    }
+
     // Try plugin dispatch (admission-checked inside).
     if ctx.plugin_manager.is_some() {
         return try_route_plugin_model(ctx, tcp_stream, request, model_name, route_observer).await;
@@ -635,6 +678,51 @@ async fn route_missing_local_model(
             tcp_stream,
             404,
             &format!("model '{model_name}' not found (no local or remote host serving this model)"),
+            route_observer,
+        )
+        .await,
+    )
+}
+
+/// Resolve an explicit `x-mesh-target` naming THIS node against local
+/// availability -- host-served or plugin-served -- instead of asking
+/// `resolve_remote_mesh_route` to find "self" among other peers, which it
+/// never will (ndizazzo P2a, PR #1671 round 2). The caller guarantees this
+/// node does not currently host-serve `model_name` (see
+/// `route_missing_local_model`), so only plugin-served availability remains
+/// to check. Fails closed with 409 -- the same contract `x-mesh-target` uses
+/// for a peer that turns out not to serve the model -- when this node
+/// doesn't serve it either, or when `x-mesh-exclude` names this node too (a
+/// self-target contradicted by a self-exclude).
+async fn route_self_targeted_model(
+    tcp_stream: ClientStream,
+    request: &proxy::BufferedHttpRequest,
+    ctx: &IngressRouteContext<'_>,
+    model_name: &str,
+    excluded: &[iroh::EndpointId],
+    route_observer: OpenAiRouteObserver<'_>,
+) -> proxy::RouteDispatchOutcome {
+    let self_id = ctx.node.id();
+    if !excluded.contains(&self_id)
+        && let Some(plugin_manager) = ctx.plugin_manager
+        && plugin_manager
+            .inference_endpoint_for_model(model_name)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return try_route_plugin_model(ctx, tcp_stream, request, model_name, route_observer).await;
+    }
+    response_outcome(
+        409,
+        proxy::send_error_observed(
+            tcp_stream,
+            409,
+            &format!(
+                "x-mesh-target '{}' does not serve model '{model_name}' -- refusing to fall back to another peer",
+                hex::encode(self_id.as_bytes())
+            ),
             route_observer,
         )
         .await,
@@ -1109,6 +1197,107 @@ fn pipeline_route_model<'a>(
     use_pipeline.then_some(routing_model).flatten()
 }
 
+/// Which non-`route_request` dispatch kind, if any, this request will take —
+/// each one bypasses `route_request`'s own header enforcement entirely, so a
+/// caller holding `x-mesh-target`/`x-mesh-exclude` must reject before
+/// dispatching into one of them rather than silently ignoring the headers.
+/// `None` means the request will reach `route_request`'s ordinary
+/// model-bearing path, where the headers are enforced against real
+/// candidates. Mirrors the same checks `try_handle_moa_intercept` and
+/// `try_pipeline_route` make, evaluated one step earlier and side-effect
+/// free.
+fn mesh_routing_unsupported_dispatch_kind(
+    request: &proxy::BufferedHttpRequest,
+    decision: &AutoRouteDecision,
+    routing_model: Option<&str>,
+) -> Option<&'static str> {
+    if decision.effective_model.as_deref() == Some(moa::VIRTUAL_MODEL_NAME) {
+        Some("multi-agent orchestration")
+    } else if pipeline_route_model(request, decision, routing_model).is_some() {
+        Some("pipeline")
+    } else if decision.effective_model.is_none() {
+        Some("no model specified")
+    } else {
+        None
+    }
+}
+
+/// Enforce `x-mesh-target`/`x-mesh-exclude` before ANY dispatch decision is
+/// made -- not just the ordinary model-bearing path inside `route_request`.
+/// MoA (`model: "mesh"`), pipeline, and the model-less fallback all run
+/// before `route_request` ever parses the headers, so a malformed header on
+/// one of those paths used to reach whatever status that dispatch kind
+/// happens to fail with instead of 400, and a *valid* header was silently
+/// ignored rather than being honored or explicitly rejected (CodeRabbit +
+/// ndizazzo P1, PR #1671 round 2 -- "where are these headers enforced" is
+/// answered once, here, rather than once per dispatch kind). Returns the
+/// stream to continue dispatch when the headers are absent or compatible
+/// with where this request is headed; returns the terminal outcome (already
+/// written to the stream) otherwise. `route_request` re-parses the same
+/// immutable request headers for its own model-bearing enforcement; that
+/// second parse is cheap and keeps this function from having to thread the
+/// parsed values through.
+async fn enforce_mesh_routing_headers_before_dispatch(
+    tcp_stream: ClientStream,
+    request: &proxy::BufferedHttpRequest,
+    decision: &AutoRouteDecision,
+    routing_model: Option<&str>,
+    route_observer: OpenAiRouteObserver<'_>,
+) -> Result<ClientStream, proxy::RouteDispatchOutcome> {
+    let (target, excluded) = match parse_mesh_routing_headers(request) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return Err(response_outcome(
+                400,
+                proxy::send_400_observed(tcp_stream, &message, route_observer).await,
+            ));
+        }
+    };
+    if target.is_none() && excluded.is_empty() {
+        return Ok(tcp_stream);
+    }
+    match mesh_routing_unsupported_dispatch_kind(request, decision, routing_model) {
+        Some(kind) => Err(response_outcome(
+            400,
+            proxy::send_400_observed(
+                tcp_stream,
+                &format!("routing headers not supported for this dispatch ({kind})"),
+                route_observer,
+            )
+            .await,
+        )),
+        None => Ok(tcp_stream),
+    }
+}
+
+/// The pre-dispatch gates every ingress path shares: reject legacy/
+/// control-plane requests before ordinary routing ever sees them, then apply
+/// activity-policy admission to whatever remains. Consolidated into one
+/// stage returning a single `Result` so the caller matches on it once
+/// instead of twice.
+async fn admit_buffered_api_request(
+    tcp_stream: ClientStream,
+    request: &proxy::BufferedHttpRequest,
+    ctx: &ProxyConnectionContext<'_>,
+    ingress_type: crate::runtime::IngressType,
+    lifecycle: &OpenAiLifecycleAttachment,
+) -> Result<ClientStream, proxy::RouteDispatchOutcome> {
+    let tcp_stream =
+        match maybe_handle_control_request(tcp_stream, request, ctx, lifecycle.route_observer())
+            .await
+        {
+            Ok(outcome) => return Err(outcome),
+            Err(tcp_stream) => tcp_stream,
+        };
+    check_activity_admission(
+        tcp_stream,
+        &ctx.route.node.activity_policy_guard,
+        ingress_type,
+        lifecycle.route_observer(),
+    )
+    .await
+}
+
 async fn try_pipeline_route(
     tcp_stream: &mut ClientStream,
     request: &mut proxy::BufferedHttpRequest,
@@ -1214,6 +1403,12 @@ async fn try_handle_moa_intercept(
     }
 }
 
+/// Drive one buffered OpenAI-shaped request through every ingress stage in
+/// order: control-plane/admission gates, auto-route resolution, mesh routing
+/// header enforcement, MoA, pipeline, and finally `route_request`'s ordinary
+/// dispatch. Each stage either hands the stream to the next one or writes a
+/// terminal response and returns -- this function owns the single terminal
+/// lifecycle event for the request no matter which stage ends it.
 async fn handle_buffered_api_request(
     tcp_stream: ClientStream,
     mut request: proxy::BufferedHttpRequest,
@@ -1249,28 +1444,17 @@ async fn handle_buffered_api_request(
         }
     }
 
-    let tcp_stream =
-        match maybe_handle_control_request(tcp_stream, &request, &ctx, lifecycle.route_observer())
-            .await
-        {
-            Ok(outcome) => {
-                lifecycle.terminal(terminal_outcome_for_dispatch(outcome));
-                return;
-            }
-            Err(tcp_stream) => tcp_stream,
-        };
-
     let local_models = ctx.route.node.models_being_served().await;
     let callable = callable_models_with_local_served(ctx.route.targets, local_models);
     let descriptors = ctx.route.node.all_served_model_descriptors().await;
     proxy::rewrite_public_model_alias(&mut request, &callable, &descriptors);
 
-    // Admission applies to inference work after control-path rejection.
-    let tcp_stream = match check_activity_admission(
+    let tcp_stream = match admit_buffered_api_request(
         tcp_stream,
-        &ctx.route.node.activity_policy_guard,
+        &request,
+        &ctx,
         ingress_type,
-        lifecycle.route_observer(),
+        &lifecycle,
     )
     .await
     {
@@ -1291,6 +1475,23 @@ async fn handle_buffered_api_request(
     };
 
     let mut routing_model = decision.effective_model.clone();
+
+    let tcp_stream = match enforce_mesh_routing_headers_before_dispatch(
+        tcp_stream,
+        &request,
+        &decision,
+        routing_model.as_deref(),
+        lifecycle.route_observer(),
+    )
+    .await
+    {
+        Ok(stream) => stream,
+        Err(outcome) => {
+            lifecycle.terminal(terminal_outcome_for_dispatch(outcome));
+            return;
+        }
+    };
+
     let tcp_stream = match try_handle_moa_intercept(
         tcp_stream,
         &mut request,

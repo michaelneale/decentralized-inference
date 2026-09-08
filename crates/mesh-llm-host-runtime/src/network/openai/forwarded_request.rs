@@ -162,15 +162,26 @@ pub(super) fn finalize_forwarded_request(
     Ok(forwarded)
 }
 
-/// Rebuild a request for a remote peer without forwarding ingress credentials.
+/// Rebuild a request for a remote peer without forwarding ingress credentials
+/// or the routing headers the ROUTING node already consumed.
+///
+/// `x-mesh-target` / `x-mesh-exclude` express the client's routing intent to
+/// the node the client is talking to; they must never survive onto a
+/// peer-to-peer hop. Without this, a peer that re-enters `route_request`
+/// still carrying the original target/exclude can re-route the request
+/// itself -- and since nothing here carries a hop count or visited-peer
+/// list, a stale advertisement can bounce a request between peers with no
+/// bound (CodeRabbit / erlich, PR #1671 round 2).
 pub(super) fn prepare_peer_forwarded_request(raw: &[u8]) -> Result<Vec<u8>> {
-    const CALLER_CREDENTIAL_HEADERS: &[&str] = &[
+    const OMITTED_ON_PEER_FORWARD: &[&str] = &[
         "authorization",
         "proxy-authorization",
         "x-api-key",
         "api-key",
+        super::request_parse::MESH_TARGET_HEADER,
+        super::request_parse::MESH_EXCLUDE_HEADER,
     ];
-    finalize_forwarded_request(raw, false, None, None, CALLER_CREDENTIAL_HEADERS)
+    finalize_forwarded_request(raw, false, None, None, OMITTED_ON_PEER_FORWARD)
 }
 
 #[cfg(test)]
@@ -196,6 +207,36 @@ mod tests {
         .into_bytes();
         expected.extend_from_slice(body);
         assert_eq!(forwarded, expected);
+    }
+
+    /// Regression (CodeRabbit / erlich, PR #1671 round 2): routing headers
+    /// must never survive a peer-to-peer hop, or a peer that re-enters
+    /// `route_request` can re-route the request again with no hop bound.
+    #[test]
+    fn peer_forwarding_strips_mesh_routing_headers() {
+        let body = b"{}";
+        let raw = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nx-mesh-target: aabbcc\r\nx-mesh-exclude: ddeeff,001122\r\nX-Keep: yes\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut raw = raw.into_bytes();
+        raw.extend_from_slice(body);
+
+        let forwarded = prepare_peer_forwarded_request(&raw).unwrap();
+        let text = String::from_utf8_lossy(&forwarded);
+
+        assert!(
+            !text.to_ascii_lowercase().contains("x-mesh-target"),
+            "x-mesh-target must not reach the peer: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("x-mesh-exclude"),
+            "x-mesh-exclude must not reach the peer: {text}"
+        );
+        assert!(
+            text.contains("X-Keep: yes"),
+            "unrelated headers must survive: {text}"
+        );
     }
 
     #[test]

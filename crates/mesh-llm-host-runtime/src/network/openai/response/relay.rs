@@ -95,19 +95,29 @@ fn oversized_error_http_response(status_code: u16) -> Vec<u8> {
 /// response, for splicing an extra header into a buffer whose header block
 /// wasn't tracked through the branch that produced it (oversized / remapped /
 /// passthrough error bodies each build `outgoing` differently).
-fn response_header_end(response: &[u8]) -> usize {
+///
+/// `None` when no `\r\n\r\n` terminator is found (e.g. an upstream that ends
+/// its header block with a bare LF) -- returning `response.len()` here used
+/// to look like a valid offset to `insert_header_before_body`, which would
+/// then splice two bytes before the end of an already-complete response,
+/// corrupting it silently instead of skipping the insert.
+fn response_header_end(response: &[u8]) -> Option<usize> {
     response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .map_or(response.len(), |pos| pos + 4)
+        .map(|pos| pos + 4)
 }
 
 /// Splice `x-mesh-served-by` into an already-built error response, when set.
 fn append_served_by_to_error_response(outgoing: &mut Vec<u8>, served_by: Option<&str>) {
-    if let Some(served_by) = served_by {
-        let header_end = response_header_end(outgoing);
-        insert_header_before_body(outgoing, header_end, MESH_SERVED_BY_HEADER, served_by);
-    }
+    let Some(served_by) = served_by else { return };
+    let Some(header_end) = response_header_end(outgoing) else {
+        tracing::debug!(
+            "no header terminator found while echoing x-mesh-served-by on an error response; skipping insert"
+        );
+        return;
+    };
+    insert_header_before_body(outgoing, header_end, MESH_SERVED_BY_HEADER, served_by);
 }
 
 /// Relay a non-2xx upstream response, echoing `x-mesh-served-by` when set.
@@ -179,12 +189,15 @@ pub(in crate::network::openai::response) async fn relay_success_response<R: Asyn
             let body_len = body.len();
             let mut outgoing_end = body_end;
             if let Some(served_by) = served_by {
-                outgoing_end += insert_header_before_body(
+                let delta = insert_header_before_body(
                     &mut buffered,
                     parsed.header_end,
                     MESH_SERVED_BY_HEADER,
                     served_by,
                 );
+                outgoing_end = outgoing_end
+                    .checked_add_signed(delta)
+                    .expect("served-by splice delta must keep outgoing_end in bounds");
             }
             // Reads may include bytes beyond the declared HTTP body. Only the
             // declared response is client-visible and capturable.
@@ -227,6 +240,39 @@ pub(in crate::network::openai::response) async fn relay_success_response<R: Asyn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_header_end_finds_the_terminator() {
+        let response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(response_header_end(response), Some(response.len()));
+    }
+
+    /// Regression (erlich, PR #1671 round 2): a response whose header block
+    /// ends in a bare LF (no `\r\n\r\n`) must report `None`, not
+    /// `response.len()` -- the old fallback looked like a valid offset to
+    /// `insert_header_before_body` and caused it to splice two bytes before
+    /// the end of an already-complete response.
+    #[test]
+    fn response_header_end_is_none_without_a_terminator() {
+        let response = b"HTTP/1.1 500 Internal Server Error\nContent-Length: 0\n\n{}";
+        assert_eq!(response_header_end(response), None);
+    }
+
+    /// Regression (erlich, PR #1671 round 2): with no terminator found,
+    /// `append_served_by_to_error_response` must be a no-op -- never splice
+    /// at `buf.len() - 2`, which would corrupt whatever bytes are there
+    /// (here, the tail of the body) instead of skipping the insert.
+    #[test]
+    fn append_served_by_to_error_response_skips_insert_without_a_terminator() {
+        let original = b"HTTP/1.1 500 Internal Server Error\nContent-Length: 2\n\n{}".to_vec();
+        let mut outgoing = original.clone();
+        append_served_by_to_error_response(&mut outgoing, Some("ab12cd34"));
+        assert_eq!(
+            outgoing, original,
+            "no header terminator means the served-by insert must be skipped entirely"
+        );
+    }
+
     use crate::logging::{OpenAiArtifactCapture, OpenAiRouteObserver};
     use mesh_llm_events::logging::identifiers::RequestId;
     use std::sync::{Arc, Mutex};
