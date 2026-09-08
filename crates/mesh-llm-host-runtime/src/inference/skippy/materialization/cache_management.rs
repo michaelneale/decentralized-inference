@@ -12,17 +12,6 @@ fn materialized_stage_cache_dir() -> PathBuf {
     super::materialized_stage_cache_dir()
 }
 
-#[derive(Debug)]
-pub struct MaterializedStagePin {
-    path: PathBuf,
-}
-
-impl Drop for MaterializedStagePin {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct PinFile {
     artifact_path: PathBuf,
@@ -169,60 +158,10 @@ fn remove_materialized_stage_artifact(path: &Path) -> Result<bool> {
     Ok(removed)
 }
 
-pub(super) fn pin_materialized_stage(
-    artifact_path: &Path,
-    package_ref: &str,
-    topology_id: &str,
-    run_id: &str,
-    stage_id: &str,
-) -> Result<MaterializedStagePin> {
-    let root = materialized_stage_cache_dir();
-    let pin_dir = root.join("pins");
-    fs::create_dir_all(&pin_dir).with_context(|| format!("create {}", pin_dir.display()))?;
-    let pin = PinFile {
-        artifact_path: artifact_path.to_path_buf(),
-        package_ref: package_ref.to_string(),
-        topology_id: topology_id.to_string(),
-        run_id: run_id.to_string(),
-        stage_id: stage_id.to_string(),
-    };
-    let pin_path = pin_dir.join(format!(
-        "{}.json",
-        cache_key(&format!(
-            "{package_ref}\0{topology_id}\0{run_id}\0{stage_id}"
-        ))
-    ));
-    fs::write(&pin_path, serde_json::to_vec_pretty(&pin)?)
-        .with_context(|| format!("write {}", pin_path.display()))?;
-    write_source_index(artifact_path, &pin)?;
-    Ok(MaterializedStagePin { path: pin_path })
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct SourceIndex {
     artifact_path: PathBuf,
     source_model_path: String,
-}
-
-fn write_source_index(artifact_path: &Path, pin: &PinFile) -> Result<()> {
-    let root = materialized_stage_cache_dir();
-    let Ok(info) = package::inspect_layer_package(&pin.package_ref) else {
-        return Ok(());
-    };
-    let index = SourceIndex {
-        artifact_path: artifact_path.to_path_buf(),
-        source_model_path: info.source_model_path,
-    };
-    let path = root.join(format!(
-        "source-{}.json",
-        cache_key(&format!(
-            "{}\0{}",
-            index.source_model_path,
-            artifact_path.to_string_lossy()
-        ))
-    ));
-    fs::write(path, serde_json::to_vec_pretty(&index)?).context("write source index")?;
-    Ok(())
 }
 
 fn active_pin_artifacts(root: &Path) -> Result<Vec<PathBuf>> {

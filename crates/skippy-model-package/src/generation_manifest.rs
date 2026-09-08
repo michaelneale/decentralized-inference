@@ -18,6 +18,7 @@ pub(crate) struct PackageGeneration<S = serde_json::Value> {
     pub(crate) policy: Option<PackageGenerationPolicy>,
     #[serde(default)]
     pub(crate) thresholds: Option<PackageGenerationThresholds>,
+    #[allow(dead_code)]
     pub(crate) speculative_decoding: Option<S>,
 }
 

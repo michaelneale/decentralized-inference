@@ -11,9 +11,7 @@ use anyhow::{Context, Result};
 use skippy_protocol::LoadMode;
 use tokio::sync::Mutex;
 
-use crate::inference::skippy::materialization::{
-    inspect_stage_package, is_layer_package_ref, resolve_stage_load_package,
-};
+use crate::inference::skippy::materialization::{is_layer_package_ref, resolve_stage_load_package};
 
 use super::{
     SourceModelKind, StageInventoryRequest, StageLoadRequest, StagePackagePrefetcher,
@@ -82,27 +80,17 @@ pub(super) fn resolve_inventory_source(request: &StageInventoryRequest) -> Optio
                 error
             })
             .ok()?;
-        if crate::inference::skippy::is_package_v2_identity(&identity) {
-            let kind = if is_split_gguf_path(&identity.source_model_path) {
-                SourceModelKind::SplitGguf
-            } else {
-                SourceModelKind::PlainGguf
-            };
-            return Some(InventorySource {
-                path: identity.source_model_path,
-                bytes: Some(identity.source_model_bytes),
-                layer_count: identity.layer_count,
-                kind,
-                sha256: Some(identity.source_model_sha256),
-            });
-        }
-        let info = inspect_stage_package(&request.package_ref).ok()?;
+        let kind = if is_split_gguf_path(&identity.source_model_path) {
+            SourceModelKind::SplitGguf
+        } else {
+            SourceModelKind::PlainGguf
+        };
         return Some(InventorySource {
-            path: info.package_dir,
-            bytes: info.source_model_bytes,
-            layer_count: info.layer_count,
-            kind: SourceModelKind::LayerPackage,
-            sha256: Some(info.source_model_sha256),
+            path: identity.source_model_path,
+            bytes: Some(identity.source_model_bytes),
+            layer_count: identity.layer_count,
+            kind,
+            sha256: Some(identity.source_model_sha256),
         });
     }
 

@@ -29,9 +29,7 @@ pub(crate) use types::*;
 struct RunningStage {
     load: StageLoadRequest,
     server: EmbeddedServerHandle,
-    materialized: Option<super::materialization::MaterializedStageArtifact>,
     package: Option<super::materialization::ResolvedStagePackage>,
-    _materialized_pin: Option<super::materialization::MaterializedStagePin>,
 }
 
 #[derive(Default)]
@@ -492,7 +490,7 @@ impl StageControlState {
             effective_load.source_model_bytes = package.source_model_bytes;
             resolved_package = Some(package);
         }
-        let config = stage_config(&effective_load, None, resolved_package.as_ref())?;
+        let config = stage_config(&effective_load, resolved_package.as_ref())?;
         let server = skippy_server::start_binary_stage(BinaryStageOptions {
             config,
             topology: None,
@@ -514,9 +512,7 @@ impl StageControlState {
             RunningStage {
                 load: effective_load.clone(),
                 server,
-                materialized: None,
                 package: resolved_package,
-                _materialized_pin: None,
             },
         );
         self.readiness_probe = Some(start_binary_stage_ready_probe(
@@ -835,7 +831,6 @@ fn probe_binary_stage_ready(
 
 fn stage_config(
     load: &StageLoadRequest,
-    materialized: Option<&super::materialization::MaterializedStageArtifact>,
     package: Option<&super::materialization::ResolvedStagePackage>,
 ) -> Result<StageConfig> {
     anyhow::ensure!(!load.topology_id.is_empty(), "topology_id is required");
@@ -861,20 +856,17 @@ fn stage_config(
         model_id: load.model_id.clone(),
         package_ref: Some(load.package_ref.clone()),
         manifest_sha256: Some(load.manifest_sha256.clone()),
-        source_model_path: materialized
-            .map(|artifact| artifact.source_model_path.clone())
-            .or_else(|| package.map(|package| package.source_model_path.clone()))
+        source_model_path: package
+            .map(|package| package.source_model_path.clone())
             .or_else(|| load.model_path.clone()),
-        source_model_sha256: materialized
-            .map(|artifact| artifact.source_model_sha256.clone())
-            .or_else(|| package.map(|package| package.source_model_sha256.clone()))
+        source_model_sha256: package
+            .map(|package| package.source_model_sha256.clone())
             .or_else(|| load.source_model_sha256.clone()),
-        source_model_bytes: materialized
-            .and_then(|artifact| artifact.source_model_bytes)
-            .or_else(|| package.and_then(|package| package.source_model_bytes))
+        source_model_bytes: package
+            .and_then(|package| package.source_model_bytes)
             .or(load.source_model_bytes),
-        materialized_path: materialized.map(|artifact| artifact.path.to_string_lossy().to_string()),
-        materialized_pinned: materialized.is_some(),
+        materialized_path: None,
+        materialized_pinned: false,
         model_path: load.model_path.clone(),
         model_part_paths: package
             .map(|package| {
@@ -950,7 +942,7 @@ fn stage_config(
     Ok(config)
 }
 
-fn admitted_resident_tensor_names(
+pub(crate) fn admitted_resident_tensor_names(
     load: &StageLoadRequest,
     package: Option<&super::materialization::ResolvedStagePackage>,
 ) -> Result<Vec<String>> {
@@ -1051,45 +1043,24 @@ fn status_from_running(stage: &RunningStage) -> StageStatusSnapshot {
         source_model_path: (!content_addressed_ref)
             .then(|| {
                 stage
-                    .materialized
+                    .package
                     .as_ref()
-                    .map(|artifact| artifact.source_model_path.clone())
-                    .or_else(|| {
-                        stage
-                            .package
-                            .as_ref()
-                            .map(|package| package.source_model_path.clone())
-                    })
+                    .map(|package| package.source_model_path.clone())
                     .or_else(|| stage.load.model_path.clone())
             })
             .flatten(),
         source_model_sha256: stage
-            .materialized
+            .package
             .as_ref()
-            .map(|artifact| artifact.source_model_sha256.clone())
-            .or_else(|| {
-                stage
-                    .package
-                    .as_ref()
-                    .map(|package| package.source_model_sha256.clone())
-            })
+            .map(|package| package.source_model_sha256.clone())
             .or_else(|| stage.load.source_model_sha256.clone()),
         source_model_bytes: stage
-            .materialized
+            .package
             .as_ref()
-            .and_then(|artifact| artifact.source_model_bytes)
-            .or_else(|| {
-                stage
-                    .package
-                    .as_ref()
-                    .and_then(|package| package.source_model_bytes)
-            })
+            .and_then(|package| package.source_model_bytes)
             .or(stage.load.source_model_bytes),
-        materialized_path: stage
-            .materialized
-            .as_ref()
-            .map(|artifact| artifact.path.to_string_lossy().to_string()),
-        materialized_pinned: stage.materialized.is_some(),
+        materialized_path: None,
+        materialized_pinned: false,
         projector_path: (!stage.load.local_source_required && !content_addressed_ref)
             .then(|| stage.load.projector_path.clone())
             .flatten(),

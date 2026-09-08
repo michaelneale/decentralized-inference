@@ -1073,7 +1073,7 @@ new file mode 100644
 index 000000000..7e87226dc
 --- /dev/null
 +++ b/tests/test-skippy-model-loader-accounting.cpp
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,306 @@
 +#include "llama.h"
 +#include "llama-model-loader.h"
 +
@@ -1336,10 +1336,15 @@ index 000000000..7e87226dc
 +    params.n_gpu_layers = 99;
 +    params.progress_callback = observe_progress;
 +    params.progress_callback_user_data = &progress;
++    llama_model_loader accounting_loader = make_loader(argv[1]);
++    std::unordered_set<std::string> resident_tensor_names;
++    for (const auto & [name, _] : accounting_loader.weights_map) {
++        resident_tensor_names.insert(name);
++    }
 +
 +    llama_model * model = nullptr;
 +    {
-+        stage_filter_guard filter;
++        stage_filter_guard filter(resident_tensor_names);
 +        model = llama_model_load_from_file(argv[1], params);
 +    }
 +
