@@ -152,6 +152,8 @@ def validate(catalog: dict[str, Any], root: Path = ROOT) -> None:
         require(role_id in roles and roles[role_id]["image_id"] == seed["image_id"] and
                 roles[role_id]["scope"] == "ordinary", f"compiler_seed: incompatible role {role_id}")
     fields(seed["runtime_consumer"], "workflow job row_id", "compiler_seed.runtime_consumer")
+    require(len(roles[seed["publisher_role"]]["bindings"]) == 1,
+            "compiler_seed: publisher role must declare exactly one binding")
     runtime = seed["runtime_consumer"]
     require(isinstance(runtime["workflow"], str) and bool(re.fullmatch(r"[a-z0-9_-]+\.ya?ml", runtime["workflow"])) and
             isinstance(runtime["job"], str) and bool(IDENTIFIER.fullmatch(runtime["job"])), "compiler_seed: invalid runtime consumer")
@@ -160,6 +162,8 @@ def validate(catalog: dict[str, Any], root: Path = ROOT) -> None:
     sdk = catalog["sdk_rust"]
     fields(sdk, "role target rust_action_ref toolchain_epoch profile_linker cache_namespace cache_recipe_inputs", "sdk_rust")
     require(sdk["role"] in roles, "sdk_rust: unknown role")
+    require(len(roles[sdk["role"]]["bindings"]) == 1,
+            "sdk_rust: role must declare exactly one binding")
     for key in ("target", "toolchain_epoch", "profile_linker", "cache_namespace"):
         nonempty(sdk[key], f"sdk_rust.{key}")
     require(isinstance(sdk["rust_action_ref"], str) and
@@ -357,7 +361,9 @@ def diagnose(catalog: dict[str, Any], root: Path) -> list[str]:
     runtime = catalog["compiler_seed"]["runtime_consumer"]
     job = workflow_jobs(root / ".github/workflows" / runtime["workflow"])[runtime["job"]]
     guard_architectures = re.findall(r"matrix\.runtime\.architecture == '([^']+)'", job)
-    actual = next(row for row in planner_rows(root) if row["id"] == runtime["row_id"])["architecture"]
+    matches = [row for row in planner_rows(root) if row["id"] == runtime["row_id"]]
+    require(len(matches) == 1, f"planner has no unique row {runtime['row_id']}")
+    actual = matches[0]["architecture"]
     messages = []
     if guard_architectures != [actual]:
         messages.append(f"runtime seed architecture guard {guard_architectures!r} differs from planner {actual!r}; eligibility requires a separate workload coverage decision")

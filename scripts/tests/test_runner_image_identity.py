@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import importlib.util
 import json
 import os
@@ -10,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -244,6 +247,38 @@ class RunnerImageIdentityTests(unittest.TestCase):
         result = self.cli("seed-key", "--recipe-hash", "a" * 64)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-" + "a" * 64)
+
+    def test_publisher_and_sdk_roles_require_single_bindings(self) -> None:
+        for role_id, message in (
+            (self.catalog["compiler_seed"]["publisher_role"], "publisher role must declare exactly one binding"),
+            (self.catalog["sdk_rust"]["role"], "sdk_rust: role must declare exactly one binding"),
+        ):
+            with self.subTest(role=role_id):
+                catalog = copy.deepcopy(self.catalog)
+                extra = copy.deepcopy(catalog["consumer_roles"][role_id]["bindings"][0])
+                extra["job"] = "additional_binding"
+                catalog["consumer_roles"][role_id]["bindings"].append(extra)
+                with self.assertRaisesRegex(IDENTITY.IdentityError, message):
+                    IDENTITY.validate(catalog, self.root)
+
+    def test_product_smoke_role_keeps_multiple_bindings(self) -> None:
+        self.assertEqual(len(self.catalog["consumer_roles"]["product-smoke"]["bindings"]), 2)
+        IDENTITY.validate(self.catalog, self.root)
+
+    def test_diagnose_cli_rejects_missing_or_ambiguous_planner_row(self) -> None:
+        row_id = self.catalog["compiler_seed"]["runtime_consumer"]["row_id"]
+        row = {"id": row_id, "architecture": "amd64"}
+        for rows in ([], [row, copy.deepcopy(row)]):
+            with self.subTest(rows=rows):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(IDENTITY, "planner_rows", return_value=rows), \
+                     patch.object(sys, "argv", [str(SCRIPT), "--root", str(self.root), "diagnose"]), \
+                     redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = IDENTITY.main()
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(f"runner image identity: planner has no unique row {row_id}", stderr.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_cli_failure_never_reports_success(self) -> None:
         for arguments in (("lookup", "missing-role"), ("seed-key", "--recipe-hash", "../../bad")):
