@@ -50,6 +50,12 @@ skippy-native-tests backend="cpu":
     scripts/prepare-llama.sh pinned
     LLAMA_STAGE_BACKEND="{{ backend }}" LLAMA_STAGE_LINK_MODE=static LLAMA_STAGE_BUILD_TESTS=ON scripts/build-llama.sh
 
+# Replay every retained and current native Skippy gate without broad upstream tests.
+[unix]
+skippy-native-full-replay backend="cpu":
+    scripts/prepare-llama.sh pinned
+    LLAMA_STAGE_BACKEND="{{ backend }}" LLAMA_STAGE_LINK_MODE=static LLAMA_STAGE_BUILD_DIR="$PWD/.deps/llama-build/build-stage-full-replay-static-{{ backend }}" LLAMA_STAGE_FULL_REPLAY=ON LLAMA_STAGE_FORCE_BUILD=1 scripts/build-llama.sh
+
 # Generate a reproducible benchmark corpus for skippy bench tooling.
 bench-corpus tier="smoke" *ARGS="":
     scripts/generate-bench-corpus.py "{{ tier }}" {{ ARGS }}

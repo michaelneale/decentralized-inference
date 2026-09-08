@@ -103,6 +103,9 @@ pub struct RuntimeConfig {
     pub include_output: bool,
     pub mtp_source: MtpSource,
     pub filter_tensors_on_load: bool,
+    /// Exact native tensor names admitted for this stage. Empty preserves the
+    /// legacy range-based loader filter.
+    pub resident_tensor_names: Vec<String>,
     /// Tensor type policy used when `StageModel::open` receives a SafeTensors checkpoint.
     pub checkpoint_quantization: CheckpointQuantization,
     /// Importance matrix used by quantization recipes that require calibration data.
@@ -186,6 +189,10 @@ impl RuntimeConfig {
 
     pub(crate) fn as_raw(&self) -> Result<RawRuntimeConfigParts> {
         self.validate().map_err(anyhow::Error::msg)?;
+        let mmap = self.mmap.or_else(|| {
+            (self.filter_tensors_on_load && self.load_mode == LoadMode::RuntimeSlice)
+                .then_some(false)
+        });
         let n_batch = self
             .n_batch
             .unwrap_or_else(|| default_n_batch_for_lane_count(self.lane_count));
@@ -202,6 +209,30 @@ impl RuntimeConfig {
             .as_ref()
             .map(|device| device.as_ptr())
             .unwrap_or(ptr::null());
+        let resident_tensor_names = self
+            .resident_tensor_names
+            .iter()
+            .map(|name| {
+                anyhow::ensure!(!name.is_empty(), "resident tensor name must not be empty");
+                CString::new(name.as_bytes())
+                    .context("resident tensor name contains an interior NUL byte")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            resident_tensor_names
+                .windows(2)
+                .all(|window| window[0].as_bytes() < window[1].as_bytes()),
+            "resident tensor names must be strictly sorted and unique"
+        );
+        let resident_tensor_name_ptrs = resident_tensor_names
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<_>>();
+        let resident_tensor_names_ptr = if resident_tensor_name_ptrs.is_empty() {
+            ptr::null()
+        } else {
+            resident_tensor_name_ptrs.as_ptr()
+        };
         Ok(RawRuntimeConfigParts {
             raw: RawRuntimeConfig {
                 stage_index: i32::try_from(self.stage_index).context("stage_index exceeds i32")?,
@@ -225,8 +256,8 @@ impl RuntimeConfig {
                     .context("n_threads_batch exceeds i32")?
                     .unwrap_or(0),
                 n_gpu_layers: self.n_gpu_layers,
-                has_mmap_override: self.mmap.is_some(),
-                use_mmap: self.mmap.unwrap_or(false),
+                has_mmap_override: mmap.is_some(),
+                use_mmap: mmap.unwrap_or(false),
                 use_mlock: self.mlock,
                 cache_type_k: i32::try_from(self.cache_type_k)
                     .context("cache_type_k exceeds i32")?,
@@ -238,6 +269,8 @@ impl RuntimeConfig {
                 use_mmap_prefetch: false,
                 use_mmap_buffer: false,
                 filter_tensors_on_load: self.filter_tensors_on_load,
+                resident_tensor_names: resident_tensor_names_ptr,
+                resident_tensor_name_count: resident_tensor_name_ptrs.len(),
                 include_embeddings: self.include_embeddings,
                 include_output: self.include_output,
                 mtp_source: self.mtp_source.as_raw(),
@@ -277,6 +310,8 @@ impl RuntimeConfig {
                 split_mode: self.split_mode.as_raw(),
             },
             _selected_backend_device: selected_backend_device,
+            _resident_tensor_names: resident_tensor_names,
+            _resident_tensor_name_ptrs: resident_tensor_name_ptrs,
         })
     }
 
@@ -319,9 +354,12 @@ pub(crate) fn default_n_batch_for_lane_count(_lane_count: u32) -> u32 {
     SKIPPY_UNIFIED_KV_DEFAULT_N_BATCH
 }
 
+#[derive(Debug)]
 pub(crate) struct RawRuntimeConfigParts {
     pub(crate) raw: RawRuntimeConfig,
     _selected_backend_device: Option<CString>,
+    _resident_tensor_names: Vec<CString>,
+    _resident_tensor_name_ptrs: Vec<*const std::ffi::c_char>,
 }
 
 impl Default for RuntimeConfig {
@@ -356,6 +394,7 @@ impl Default for RuntimeConfig {
             include_output: true,
             mtp_source: MtpSource::Disabled,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             checkpoint_quantization: CheckpointQuantization::Preserve,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
@@ -384,6 +423,8 @@ pub fn parse_cache_type(value: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CStr;
+
     use super::*;
 
     #[test]
@@ -445,6 +486,92 @@ mod tests {
         assert!(!auto_raw.raw.use_mlock);
 
         Ok(())
+    }
+
+    #[test]
+    fn filtered_runtime_slice_disables_mmap_by_default() -> anyhow::Result<()> {
+        let filtered = RuntimeConfig {
+            mmap: None,
+            filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
+            ..RuntimeConfig::default()
+        }
+        .as_raw()?
+        .raw;
+        let explicitly_enabled = RuntimeConfig {
+            mmap: Some(true),
+            filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
+            ..RuntimeConfig::default()
+        }
+        .as_raw()?
+        .raw;
+
+        assert!(filtered.has_mmap_override);
+        assert!(!filtered.use_mmap);
+        assert!(explicitly_enabled.has_mmap_override);
+        assert!(explicitly_enabled.use_mmap);
+
+        let materialized = RuntimeConfig {
+            mmap: None,
+            filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
+            load_mode: LoadMode::LayerPackage,
+            ..RuntimeConfig::default()
+        }
+        .as_raw()?
+        .raw;
+        assert!(!materialized.has_mmap_override);
+
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_raw_preserves_exact_resident_tensor_names() -> anyhow::Result<()> {
+        let parts = RuntimeConfig {
+            resident_tensor_names: vec!["blk.0.attn.weight".into(), "output.weight".into()],
+            ..RuntimeConfig::default()
+        }
+        .as_raw()?;
+
+        assert_eq!(parts.raw.resident_tensor_name_count, 2);
+        assert!(!parts.raw.resident_tensor_names.is_null());
+        let names = unsafe {
+            std::slice::from_raw_parts(
+                parts.raw.resident_tensor_names,
+                parts.raw.resident_tensor_name_count,
+            )
+        };
+        assert_eq!(
+            unsafe { CStr::from_ptr(names[0]) }.to_str()?,
+            "blk.0.attn.weight"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(names[1]) }.to_str()?,
+            "output.weight"
+        );
+
+        let empty = RuntimeConfig::default().as_raw()?;
+        assert_eq!(empty.raw.resident_tensor_name_count, 0);
+        assert!(empty.raw.resident_tensor_names.is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_rejects_noncanonical_resident_tensor_names() {
+        for names in [
+            vec!["output.weight".into(), "blk.0.attn.weight".into()],
+            vec!["output.weight".into(), "output.weight".into()],
+            vec![String::new()],
+        ] {
+            let error = RuntimeConfig {
+                resident_tensor_names: names,
+                ..RuntimeConfig::default()
+            }
+            .as_raw()
+            .expect_err("noncanonical resident tensor names must fail");
+            assert!(error.to_string().contains("resident tensor name"));
+        }
     }
 
     #[test]

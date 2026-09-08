@@ -13,6 +13,7 @@ MESH_LLM="${1:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}
 BIN_DIR="${2:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}"
 MODEL="${3:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}"
 MMPROJ="${4:-}"
+DEVICE="${MESH_CI_DEVICE:-CPU}"
 API_PORT="${MESH_CI_API_PORT:-9337}"
 CONSOLE_PORT="${MESH_CI_CONSOLE_PORT:-3131}"
 MAX_WAIT="${MESH_CI_MAX_WAIT:-180}"
@@ -56,6 +57,7 @@ fi
 echo "  api port:  $API_PORT"
 echo "  console:   $CONSOLE_PORT"
 echo "  os:        $(uname -s)"
+echo "  device:    $DEVICE"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -80,7 +82,7 @@ ARGS=(
     serve
     --model "$MODEL"
     --no-draft
-    --device CPU
+    --device "$DEVICE"
     --ctx-size "${MESH_CI_CTX_SIZE:-256}"
     --port "$API_PORT"
     --console "$CONSOLE_PORT"
@@ -229,7 +231,7 @@ HEADLESS_ARGS=(
     serve
     --model "$MODEL"
     --no-draft
-    --device CPU
+    --device "$DEVICE"
     --ctx-size "${MESH_CI_CTX_SIZE:-256}"
     --port "$HEADLESS_API_PORT"
     --console "$HEADLESS_CONSOLE_PORT"

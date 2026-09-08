@@ -29,6 +29,13 @@ in those skills are hard requirements for this repair, not suggestions.
    semantic fix in the broken ones. Regenerate the series so
    `scripts/prepare-llama.sh` runs clean end to end.
 
+   Model-builder stage controls live in the single generated family patch.
+   Run the Clang rewriter and `scripts/generate-skippy-family-patch.py`; do not
+   hand-edit per-family stage-filter or `begin_block`/`end_block` patches. A
+   conventional builder must be regenerated from its proven source shape. An
+   irregular builder remains unchanged with the rewriter's precise
+   `unsupported_shape` reason until a sound general rule exists.
+
 3. **Build.** `scripts/build-llama.sh` then
    `cargo check -p skippy-ffi -p skippy-runtime -p skippy-server`.
 
@@ -62,4 +69,29 @@ Notes:
   the pin file yourself.
 - Do not modify files outside `third_party/llama.cpp/patches/` unless the
   Rust ABI mirrors in `crates/` genuinely need to track a patch ABI change
-  (bump `PREPARE_SCHEMA`/ABI version together in that case).
+  (bump `PREPARE_SCHEMA`/ABI version together in that case). Existing
+  model-manifest rows may be corrected when a battery failure proves they are
+  stale. Do not add a checkpoint merely because an upstream builder is new;
+  the source rewriter supplies structural stage-control coverage.
+
+## New upstream model families
+
+Run the source rewriter across every `src/models/*.cpp` translation unit. A
+new conventional builder should appear in the consolidated generated patch
+without a family-specific rule or checkpoint. If it reports
+`unsupported_shape`, preserve the refusal and add a general AST rule only when
+the activation loop and ownership edits can be proved. Never use an
+architecture name or tensor spelling as the eligibility predicate.
+
+The family manifests remain the executable numeric battery. New source
+coverage does not automatically create a new model row and does not trigger a
+download. Add or change a row only when there is an independent numeric,
+backend, or state-pattern reason and immutable artifact evidence is available.
+
+The canary continues to run `scripts/skippy-canary-live-matrix.sh` after the smoke
+gates: every runnable `model_pin` row must resolve its pinned GGUF, pass
+size/sha256 verification, package as source-complete package-v2, pass
+independent `verify-package-v2`, and pass the two-node split smoke. Its
+per-row evidence lives under `target/family-battery/<run>/live-matrix/` in
+the uploaded battery artifact; a failed existing row routes here for a
+semantic patch or manifest repair backed by that evidence.

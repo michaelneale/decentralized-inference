@@ -1,0 +1,154 @@
+name: Reusable Product Integration Suite
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      artifact_name:
+        required: true
+        type: string
+      artifact_path:
+        required: true
+        type: string
+      staged_binary_path:
+        required: true
+        type: string
+      platform:
+        description: "Typed operating-system selector: linux or macos."
+        required: true
+        type: string
+      backend:
+        description: "Typed backend selector: cpu, cuda, metal, vulkan, or rocm."
+        required: true
+        type: string
+      timeout_minutes:
+        required: false
+        default: 45
+        type: number
+    secrets:
+      HF_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  product_integration:
+    name: Product integration (${{ inputs.platform }}/${{ inputs.backend }})
+    if: ${{ inputs.backend != 'rocm' || vars.MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true' }}
+    runs-on: ${{ inputs.platform == 'macos' && 'macos-15' || (inputs.backend == 'cuda' || inputs.backend == 'vulkan') && fromJSON('["self-hosted","Linux","X64","amd64","gpu-nvidia","mesh-llm-amd64","mesh-llm"]') || inputs.backend == 'rocm' && fromJSON('["self-hosted","Linux","X64","amd64","gpu-amd","mesh-llm-amd64","mesh-llm"]') || 'ubuntu-24.04' }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    container:
+      image: ${{ inputs.platform == 'linux' && inputs.backend == 'cpu' && 'ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d' || '' }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+      PIP_CACHE_DIR: /tmp/pip-cache
+    steps:
+      - name: Validate typed platform/backend selection
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          BACKEND: ${{ inputs.backend }}
+        run: |
+          set -euo pipefail
+          case "${PLATFORM}/${BACKEND}" in
+            linux/cpu|linux/cuda|linux/vulkan|linux/rocm|macos/metal) ;;
+            *) echo "unsupported product integration platform/backend: ${PLATFORM}/${BACKEND}" >&2; exit 2 ;;
+          esac
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Trust checkout directory
+        if: job.container.id != ''
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        if: job.container.id == ''
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            .github/cache-version.txt
+            ci/requirements-ci-python.txt
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: job.container.id == ''
+        with:
+          node-version: 24.20.0
+          package-manager-cache: false
+
+      - name: Verify CPU runner image
+        if: inputs.platform == 'linux' && inputs.backend == 'cpu'
+        run: verify-runner-image public cpu
+
+      - name: Install CUDA runtime libraries and record device provenance
+        if: inputs.platform == 'linux' && inputs.backend == 'cuda'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-cudart-12-9 libcublas-12-9 curl jq lsof
+          nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
+
+      - name: Record Vulkan device provenance
+        if: inputs.platform == 'linux' && inputs.backend == 'vulkan'
+        run: vulkaninfo --summary
+
+      - name: Record ROCm device provenance
+        if: inputs.platform == 'linux' && inputs.backend == 'rocm'
+        run: |
+          rocminfo
+          rocm-smi --showproductname --showdriverversion
+
+      - name: Install product smoke dependencies
+        run: python -m pip install --upgrade pip -r ci/requirements-ci-python.txt
+
+      - name: Install OpenAI client
+        env:
+          HF_TOKEN: ''
+          HUGGING_FACE_HUB_TOKEN: ''
+        run: npm install --global openai@7.5.0
+
+      - uses: ./.github/actions/restore-product-integration-inputs
+        id: inputs
+        with:
+          artifact_name: ${{ inputs.artifact_name }}
+          artifact_path: ${{ inputs.artifact_path }}
+          staged_binary_path: ${{ inputs.staged_binary_path }}
+          model_cadence: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || github.event.inputs.original_event_name == 'pull_request' || github.event.inputs.original_event_name == 'pull_request_target') && 'pull-request' || 'main' }}
+          save_model_cache: ${{ github.ref == 'refs/heads/main' && github.event.inputs.original_event_name != 'pull_request' && github.event.inputs.original_event_name != 'pull_request_target' }}
+
+      - name: Run typed product integration suite
+        env:
+          MESH_PRODUCT_INTEGRATION_PHASE_ROOT: ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}
+        run: |
+          scripts/ci-product-integration-smoke.sh \
+            "${{ inputs.staged_binary_path }}" \
+            "${{ inputs.artifact_path }}" \
+            "$HOME/.models/${{ steps.inputs.outputs.dense_model_file }}" \
+            "$HOME/.models/${{ steps.inputs.outputs.recurrent_model_file }}" \
+            "${{ inputs.platform }}" \
+            "${{ inputs.backend }}" \
+            "${{ steps.inputs.outputs.dense_model_artifact_id }}" \
+            "${{ steps.inputs.outputs.dense_model_sha256 }}" \
+            "${{ steps.inputs.outputs.recurrent_model_artifact_id }}" \
+            "${{ steps.inputs.outputs.recurrent_model_sha256 }}"
+
+      - name: Upload product integration phase evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: product-integration-${{ inputs.platform }}-${{ inputs.backend }}-evidence
+          path: |
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/phase-results.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence-snapshots/*.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/*.log
+          if-no-files-found: error

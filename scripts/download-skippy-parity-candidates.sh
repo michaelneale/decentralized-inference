@@ -19,6 +19,10 @@ need certification evidence. By default this includes:
 
 and only P0/P1 popularity-priority rows.
 
+Candidate rows may carry an immutable revision and per-file integrity records.
+The downloader pins those revisions and verifies every downloaded model and
+projector file before returning success.
+
 Environment:
   SKIPPY_PARITY_MANIFEST=/path/to/llama-parity-candidates.json
   SKIPPY_PARITY_DOWNLOAD_STATUSES=needs_candidate,candidate_multimodal
@@ -113,7 +117,7 @@ for item in data.get("candidates", []):
             f"registered parity artifact is not allowed for manual downloads: {artifact_id}"
         )
     repo = artifact.get("repo") if artifact else item.get("repo")
-    revision = artifact.get("revision") if artifact else None
+    revision = artifact.get("revision") if artifact else item.get("revision")
     include = artifact.get("files") if artifact else item.get("include", "*.gguf")
     if not repo:
         missing_repos.append(
@@ -135,7 +139,11 @@ for item in data.get("candidates", []):
             "repo": repo,
             "revision": revision,
             "includes": includes,
-            "integrity": artifact.get("file_integrity") if artifact else None,
+            "integrity": (
+                artifact.get("file_integrity")
+                if artifact
+                else item.get("file_integrity")
+            ),
         }
     )
 

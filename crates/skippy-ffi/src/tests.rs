@@ -2,7 +2,9 @@ use std::mem::{offset_of, size_of};
 
 use crate::{
     ABI_VERSION_MAJOR, ABI_VERSION_MINOR, ABI_VERSION_PATCH, AbiVersion, ActivationBoundaryDesc,
-    runtime_abi_supported,
+    StagePlanDescV1, StagePlanProfileDescV1, StagePlanStateDescV1, StagePlanStateKind,
+    StagePlanStringRefV1, StagePlanValueDescV1, StagePlannerConfigV1, StagePlannerProfileV1,
+    StagePlannerTensorV1, runtime_abi_supported,
 };
 
 #[cfg(target_pointer_width = "64")]
@@ -72,6 +74,33 @@ fn activation_boundary_descriptor_matches_native_layout() {
     assert_eq!(offset_of!(ActivationBoundaryDesc, bytes_per_token), 24);
     assert_eq!(offset_of!(ActivationBoundaryDesc, required_frame_flags), 32);
     assert_eq!(offset_of!(ActivationBoundaryDesc, required_sidebands), 40);
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn stage_plan_types_match_native_layout() {
+    assert_eq!(StagePlanStateKind::DerivedPersistent as i32, 4);
+    assert_eq!(size_of::<StagePlanStringRefV1>(), 16);
+    assert_eq!(size_of::<StagePlannerTensorV1>(), 88);
+    assert_eq!(offset_of!(StagePlannerTensorV1, dimensions), 32);
+    assert_eq!(offset_of!(StagePlannerTensorV1, stored_length), 80);
+
+    assert_eq!(size_of::<StagePlannerProfileV1>(), 32);
+    assert_eq!(offset_of!(StagePlannerProfileV1, profile_id), 8);
+    assert_eq!(size_of::<StagePlannerConfigV1>(), 80);
+    assert_eq!(offset_of!(StagePlannerConfigV1, shard_paths), 16);
+    assert_eq!(offset_of!(StagePlannerConfigV1, profiles), 48);
+    assert_eq!(offset_of!(StagePlannerConfigV1, graph_configuration_id), 64);
+    assert_eq!(offset_of!(StagePlannerConfigV1, backend_id), 72);
+
+    assert_eq!(size_of::<StagePlanDescV1>(), 72);
+    assert_eq!(offset_of!(StagePlanDescV1, profile_count), 56);
+    assert_eq!(size_of::<StagePlanProfileDescV1>(), 168);
+    assert_eq!(offset_of!(StagePlanProfileDescV1, n_tokens), 120);
+    assert_eq!(offset_of!(StagePlanProfileDescV1, state_effect_count), 160);
+    assert_eq!(size_of::<StagePlanValueDescV1>(), 24);
+    assert_eq!(size_of::<StagePlanStateDescV1>(), 48);
+    assert_eq!(offset_of!(StagePlanStateDescV1, write_ordinal), 40);
 }
 
 #[test]

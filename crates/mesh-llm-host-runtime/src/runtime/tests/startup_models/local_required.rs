@@ -59,7 +59,7 @@ async fn different_local_paths_advertise_the_same_logical_model_demand() {
 async fn local_required_source_policy_bypasses_remote_startup_resolution() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let model_path = temp_dir.path().join("local-required.gguf");
-    std::fs::write(&model_path, b"gguf").expect("write model");
+    super::write_identity_test_gguf(&model_path, 4096);
     let options = runtime_options_for_test(&["mesh-llm"]);
     let config = plugin::MeshConfig {
         models: vec![plugin::ModelConfigEntry {

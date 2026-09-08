@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use skippy_protocol::binary::WireMessageKind;
+use skippy_protocol::binary::{
+    WireMessageKind, activation_payload_multiplier_from_state_flags,
+    activation_state_flags_from_frame_flags,
+};
 use skippy_runtime::ActivationFrame;
 
 pub(in crate::binary_transport) fn executable_prefill_start(
@@ -32,14 +35,30 @@ pub(in crate::binary_transport) fn suffix_activation_frame(
     if token_start >= token_count {
         bail!("suffix activation start {token_start} exceeds frame token count {token_count}");
     }
-    if frame.payload.len() % token_count != 0 {
+    let plane_count = activation_payload_multiplier_from_state_flags(
+        activation_state_flags_from_frame_flags(frame.desc.flags),
+    );
+    if !frame.payload.len().is_multiple_of(plane_count) {
         bail!(
-            "activation payload is not divisible by token count: payload={} tokens={token_count}",
+            "activation payload is not divisible by plane count: payload={} planes={plane_count}",
             frame.payload.len()
         );
     }
-    let row_bytes = frame.payload.len() / token_count;
-    let payload = frame.payload[token_start * row_bytes..].to_vec();
+    let plane_bytes = frame.payload.len() / plane_count;
+    if !plane_bytes.is_multiple_of(token_count) {
+        bail!(
+            "activation plane is not divisible by token count: plane={plane_bytes} tokens={token_count}",
+        );
+    }
+    let row_bytes = plane_bytes / token_count;
+    let suffix_offset = token_start * row_bytes;
+    let suffix_plane_bytes = plane_bytes - suffix_offset;
+    let mut payload = Vec::with_capacity(suffix_plane_bytes * plane_count);
+    if plane_bytes > 0 {
+        for plane in frame.payload.chunks_exact(plane_bytes) {
+            payload.extend_from_slice(&plane[suffix_offset..]);
+        }
+    }
     let suffix_tokens = token_count - token_start;
     let mut desc = frame.desc;
     desc.token_count = u32::try_from(suffix_tokens).context("suffix token count overflow")?;
@@ -106,6 +125,31 @@ mod tests {
         let mut expected = vec![3_u8; 8];
         expected.extend(vec![4_u8; 8]);
         assert_eq!(&sliced.payload, &expected);
+    }
+
+    #[test]
+    fn suffix_frame_slices_each_sideband_plane_by_token() {
+        use skippy_protocol::binary::ACTIVATION_FLAG_RWKV7_V_FIRST;
+
+        let mut input = frame(5, 4);
+        input.desc.flags = ACTIVATION_FLAG_RWKV7_V_FIRST;
+        input.payload.clear();
+        for plane in [0_u8, 10] {
+            for row_idx in 0..5 {
+                input.payload.extend(vec![plane + row_idx; 4]);
+            }
+        }
+        input.desc.payload_bytes = input.payload.len() as u64;
+
+        let sliced = suffix_activation_frame(Some(input), 3).unwrap().unwrap();
+        let mut expected = vec![3_u8; 4];
+        expected.extend(vec![4_u8; 4]);
+        expected.extend(vec![13_u8; 4]);
+        expected.extend(vec![14_u8; 4]);
+        assert_eq!(sliced.payload, expected);
+        assert_eq!(sliced.desc.token_count, 2);
+        assert_eq!(sliced.desc.payload_bytes, 16);
+        assert_eq!(sliced.desc.flags, ACTIVATION_FLAG_RWKV7_V_FIRST);
     }
 
     #[test]

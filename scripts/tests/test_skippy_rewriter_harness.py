@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "skippy-rewriter-harness.py"
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("skippy_rewriter_harness", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+PROOF = {
+    "loop": {"var": "il", "start": "il_start", "end": "il_end"},
+    "activation_in": "inpL",
+    "activation_out": "cur",
+    "embedding_owner": True,
+    "output_owner": True,
+    "terminal_predicates": ["il == il_end - 1 && inp_out_ids"],
+    "nonlocal_exits": [],
+    "execution_scope": "partitioned_decoder",
+    "scope_evidence": [],
+}
+
+EDITS = [{"kind": "insert", "file": "src/models/llama.cpp", "range": [1, 2], "text_ref": "a"}]
+
+
+def make_report(builders, **overrides):
+    report = {
+        "schema_version": 1,
+        "llama_cpp_commit": "cc83d7b4824f73cfdda4dfbb47ee39804f71b328",
+        "generator_version": "0.2.0",
+        "builders": builders,
+        "summary": {},
+    }
+    report.update(overrides)
+    counts = {v: 0 for v in {
+        "transformable",
+        "already_transformed",
+        "supported_auxiliary",
+        "supported_whole_model",
+        "unsupported_shape",
+        "error",
+    }}
+    for builder in builders:
+        verdict = builder.get("verdict")
+        if verdict in counts:
+            counts[verdict] += 1
+    report["summary"] = counts
+    return report
+
+
+class SkippyRewriterHarnessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = load_module()
+
+    def test_valid_transformable_report_passes(self) -> None:
+        report = make_report(
+            [{"file": "src/models/llama.cpp", "constructor": "llama_build_graph", "verdict": "transformable", "proof": PROOF, "edits": EDITS}]
+        )
+        self.assertEqual(self.harness.validate_report(report), [])
+
+    def test_missing_proof_field_is_contract_violation(self) -> None:
+        broken = {k: v for k, v in PROOF.items() if k != "activation_out"}
+        report = make_report(
+            [{"file": "src/models/llama.cpp", "verdict": "transformable", "proof": broken, "edits": EDITS}]
+        )
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("activation_out" in e for e in errors))
+
+    def test_unsupported_shape_requires_reason(self) -> None:
+        report = make_report(
+            [{"file": "src/models/rwkv7-base.cpp", "verdict": "unsupported_shape"}]
+        )
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("unsupported_reason" in e for e in errors))
+
+    def test_unknown_verdict_rejected(self) -> None:
+        # The superseded vocabulary schema's 'understood' must NOT validate.
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "understood"}])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("unknown verdict" in e for e in errors))
+
+    def test_already_transformed_carries_no_edits(self) -> None:
+        report = make_report(
+            [{"file": "src/models/qwen3.cpp", "verdict": "already_transformed", "edits": EDITS}]
+        )
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("no edits" in e for e in errors))
+
+    def test_supported_auxiliary_requires_scope_proof(self) -> None:
+        report = make_report([
+            {
+                "file": "src/models/example.cpp",
+                "constructor": "model::graph_mtp::graph_mtp",
+                "verdict": "supported_auxiliary",
+                "proof": {
+                    "execution_scope": "final_stage_sidecar",
+                    "scope_evidence": ["typed_mtp_builder"],
+                },
+                "edits": [],
+            }
+        ])
+        self.assertEqual(self.harness.validate_report(report), [])
+
+    def test_supported_whole_model_rejects_missing_domain_evidence(self) -> None:
+        report = make_report([
+            {
+                "file": "src/models/example.cpp",
+                "constructor": "model::graph::graph",
+                "verdict": "supported_whole_model",
+                "proof": {
+                    "execution_scope": "multiple_sequential_layer_domains",
+                    "scope_evidence": [],
+                },
+                "edits": [],
+            }
+        ])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("scope evidence" in e for e in errors))
+
+    def test_duplicate_builder_record_rejected(self) -> None:
+        record = {
+            "file": "src/models/llama.cpp",
+            "constructor": "llama_build_graph",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        report = make_report([record, dict(record)])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("duplicate" in e for e in errors))
+
+    def test_same_file_distinct_constructors_are_not_duplicates(self) -> None:
+        # 19 model files contain multiple graph constructors; the builder
+        # key is (file, constructor), so two records in one file with
+        # different constructor names must both validate.
+        first = {
+            "file": "src/models/granite.cpp",
+            "constructor": "build_graph_attention",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        second = {
+            "file": "src/models/granite.cpp",
+            "constructor": "build_graph_ffn",
+            "verdict": "transformable",
+            "proof": PROOF,
+            "edits": EDITS,
+        }
+        report = make_report([first, second])
+        self.assertEqual(self.harness.validate_report(report), [])
+
+    def test_duplicate_detected_on_file_with_missing_constructor(self) -> None:
+        # Two records in the same file that both omit `constructor` collide
+        # on the empty-name fallback -- still a duplicate.
+        record = {"file": "src/models/llama.cpp", "verdict": "already_transformed"}
+        report = make_report([record, dict(record)])
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("duplicate" in e for e in errors))
+
+    def test_summary_must_match_builder_count(self) -> None:
+        report = make_report(
+            [{"file": "src/models/llama.cpp", "verdict": "transformable", "proof": PROOF, "edits": EDITS}]
+        )
+        report["summary"]["transformable"] = 2
+        errors = self.harness.validate_report(report)
+        self.assertTrue(any("summary counts" in e for e in errors))
+
+    def test_idempotence_flags_second_run_transformable(self) -> None:
+        report = make_report(
+            [{"file": "src/models/llama.cpp", "verdict": "transformable", "proof": PROOF, "edits": EDITS}]
+        )
+        errors = self.harness.check_idempotence(report)
+        self.assertTrue(any("idempotence" in e for e in errors))
+
+    def test_idempotence_all_ready_tree(self) -> None:
+        report = make_report(
+            [{"file": "src/models/llama.cpp", "verdict": "already_transformed"}]
+        )
+        self.assertEqual(self.harness.check_idempotence(report), [])
+
+    def _run_main(self, report, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            return self.harness.main(["--report", str(path), *sum(kwargs.items(), ())] if False else
+                                     self._argv(path, **kwargs))
+
+    @staticmethod
+    def _argv(path, **kwargs):
+        argv = ["--report", str(path)]
+        for key, value in kwargs.items():
+            argv += [f"--{key.replace('_', '-')}", value]
+        return argv
+
+    def test_cli_gates_on_patch_drift_when_policy_is_fail(self) -> None:
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "already_transformed"}])
+        code = self._run_main(report, patch_check="fail", patch_drift_gate="fail")
+        self.assertEqual(code, 1)
+
+    def test_cli_warns_on_patch_drift_when_policy_is_warn(self) -> None:
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "already_transformed"}])
+        code = self._run_main(report, patch_check="fail", patch_drift_gate="warn")
+        self.assertEqual(code, 0)
+
+    def test_cli_gates_on_compile_failure_from_day_one(self) -> None:
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "already_transformed"}])
+        code = self._run_main(report, compile_result="fail")
+        self.assertEqual(code, 1)
+
+    def test_cli_gates_on_graph_verifier_failure_from_day_one(self) -> None:
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "already_transformed"}])
+        code = self._run_main(report, graph_verify_result="fail")
+        self.assertEqual(code, 1)
+
+    def test_cli_accepts_clean_report(self) -> None:
+        report = make_report([{"file": "src/models/llama.cpp", "verdict": "already_transformed"}])
+        code = self._run_main(report)
+        self.assertEqual(code, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

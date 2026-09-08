@@ -8,12 +8,17 @@ mod glm_dsa_generation_policy;
 mod hash;
 mod inspect;
 mod package;
+mod package_v2;
 mod plan;
 mod preflight;
 mod progress;
+mod source_inventory;
+#[cfg(test)]
+mod test_gguf;
 #[cfg(test)]
 mod tests;
 mod validate;
+mod verify_v2;
 mod write;
 
 use cli::{Args, Command};
@@ -44,8 +49,10 @@ fn prepare_model_download_directories() {
 const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn main() -> Result<()> {
-    prepare_model_download_directories();
     let args = Args::parse();
+    if !matches!(args.command, Command::VerifyPackageV2 { .. }) {
+        prepare_model_download_directories();
+    }
 
     let handle = std::thread::Builder::new()
         .stack_size(MAIN_STACK_SIZE)
@@ -96,7 +103,7 @@ fn run(args: Args) -> Result<()> {
             source_revision,
             source_file,
             resume_existing_artifacts,
-        } => package::write_package(
+        } => package_v2::write_package(
             model,
             out_dir,
             projectors,
@@ -114,6 +121,21 @@ fn run(args: Args) -> Result<()> {
             },
             resume_existing_artifacts,
         ),
+        Command::VerifyPackageV2 {
+            package,
+            source,
+            source_file,
+            source_projectors,
+        } => {
+            let report = verify_v2::verify_package(
+                &package,
+                &source,
+                source_file.as_deref(),
+                &source_projectors,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Command::Validate { full, slices } => validate::validate(full, slices),
         Command::ValidatePackage { full, package } => validate::validate_package(full, package),
         Command::Preflight {

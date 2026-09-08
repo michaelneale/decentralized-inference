@@ -330,18 +330,34 @@ pub(crate) fn artifact_transfer_allowed_by_topology(
                 return Ok(true);
             }
             let include_output = final_stage_index == Some(assignment.stage_index);
-            let allowed = crate::models::artifact_transfer::required_stage_package_artifacts(
-                package_dir,
-                &topology.package_ref,
-                &topology.manifest_sha256,
-                crate::models::artifact_transfer::StageArtifactSelection {
-                    layer_start: assignment.layer_start,
-                    layer_end: assignment.layer_end,
-                    include_embeddings: assignment.layer_start == 0,
-                    include_output,
-                    include_projectors: assignment.layer_start == 0,
-                },
-            )?;
+            let allowed =
+                if crate::models::artifact_transfer::package_manifest_schema_version(package_dir)?
+                    == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)
+                {
+                    let admission = topology
+                        .admissions
+                        .get(&assignment.stage_id)
+                        .context("package-v2 topology is missing stage admission")?;
+                    crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
+                        package_dir,
+                        &topology.package_ref,
+                        &topology.manifest_sha256,
+                        admission,
+                    )?
+                } else {
+                    crate::models::artifact_transfer::required_stage_package_artifacts(
+                        package_dir,
+                        &topology.package_ref,
+                        &topology.manifest_sha256,
+                        crate::models::artifact_transfer::StageArtifactSelection {
+                            layer_start: assignment.layer_start,
+                            layer_end: assignment.layer_end,
+                            include_embeddings: assignment.layer_start == 0,
+                            include_output,
+                            include_projectors: assignment.layer_start == 0,
+                        },
+                    )?
+                };
             if allowed.iter().any(|artifact| {
                 artifact.relative_path == relative_path
                     && request
@@ -386,6 +402,7 @@ pub struct StageTopologyInstance {
     pub model_id: String,
     pub package_ref: String,
     pub manifest_sha256: String,
+    pub admissions: std::collections::BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
     pub stages: Vec<StageAssignment>,
 }
 
@@ -423,6 +440,9 @@ pub struct StageRuntimeStatus {
     pub node_id: Option<EndpointId>,
     pub layer_start: u32,
     pub layer_end: u32,
+    pub admission: Option<skippy_protocol::StageAdmissionDescriptor>,
+    pub activation_codec: skippy_protocol::StageActivationCodec,
+    pub activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
     pub state: crate::inference::skippy::StageRuntimeState,
     pub bind_addr: String,
     pub input_activation_boundary: Option<skippy_runtime::ActivationBoundaryDesc>,
@@ -543,11 +563,14 @@ impl StageTopologyState {
         failure: StageStatusRefreshFailure,
     ) {
         // A transient refresh failure (peer briefly unreachable, request
-        // timeout) must NOT mark the stage Failed — that discards a still-valid
-        // last-known status and can wrongly tear down a healthy split on a
-        // momentary blip. Only a definitive "missing from runtime" signal, where
-        // the peer answered but has no such stage, marks the stage Failed.
-        if failure == StageStatusRefreshFailure::Transient {
+        // timeout) must NOT mark the stage Failed. A newly published stage can
+        // also be absent from the responder until its embedded runtime records
+        // the first status, so retain Starting and retry. Once a stage has been
+        // observed Ready, a definitive "missing from runtime" response still
+        // marks it Failed.
+        if failure == StageStatusRefreshFailure::Transient
+            || status.state == crate::inference::skippy::StageRuntimeState::Starting
+        {
             return;
         }
         self.record_status(stage_runtime_status_from_snapshot(
@@ -708,6 +731,33 @@ impl Node {
         self.stage_topologies.lock().await.record_topology(topology);
     }
 
+    pub(crate) async fn record_stage_load_topology(
+        &self,
+        load: &crate::inference::skippy::StageLoadRequest,
+    ) {
+        let topology = stage_topology_from_load(self.endpoint.id(), load);
+        let mut state = self.stage_topologies.lock().await;
+        state.record_topology(topology.clone());
+        for stage in topology.stages {
+            let mut snapshot = crate::mesh::stage_status_from_load(
+                load,
+                crate::inference::skippy::StageRuntimeState::Starting,
+            );
+            snapshot.stage_id = stage.stage_id;
+            snapshot.stage_index = stage.stage_index;
+            snapshot.layer_start = stage.layer_start;
+            snapshot.layer_end = stage.layer_end;
+            snapshot.bind_addr = stage.endpoint.bind_addr;
+            snapshot.admission =
+                (snapshot.stage_id == load.stage_id).then(|| load.admission.clone());
+            snapshot.error = None;
+            state.record_status(stage_runtime_status_from_snapshot(
+                Some(stage.node_id),
+                snapshot,
+            ));
+        }
+    }
+
     pub async fn activate_stage_topology(&self, topology: StageTopologyInstance) {
         self.stage_topologies
             .lock()
@@ -730,6 +780,37 @@ impl Node {
         self.stage_topologies.lock().await.runtime_statuses()
     }
 
+    pub(crate) async fn locally_executing_stage_statuses(
+        &self,
+        filter: &crate::inference::skippy::StageStatusFilter,
+    ) -> Vec<crate::inference::skippy::StageStatusSnapshot> {
+        let local_node = self.endpoint.id();
+        self.stage_topologies
+            .lock()
+            .await
+            .runtime_statuses()
+            .into_iter()
+            .filter(|status| {
+                status.node_id == Some(local_node)
+                    && filter
+                        .topology_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.topology_id)
+                    && filter
+                        .run_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.run_id)
+                    && filter
+                        .stage_id
+                        .as_ref()
+                        .is_none_or(|value| value == &status.stage_id)
+            })
+            .map(|status| {
+                stage_snapshot_from_runtime_status(&status, status.state, status.error.clone())
+            })
+            .collect()
+    }
+
     pub async fn refresh_stage_runtime_statuses(&self, timeout: std::time::Duration) {
         let active_statuses = self.stage_topologies.lock().await.active_statuses();
         for status in active_statuses {
@@ -742,12 +823,12 @@ impl Node {
         status: StageRuntimeStatus,
         timeout: std::time::Duration,
     ) {
-        if status.stage_index == 0 {
-            return;
-        }
         let Some(peer_id) = status.node_id else {
             return;
         };
+        if peer_id == self.endpoint.id() {
+            return;
+        }
         let filter = crate::inference::skippy::StageStatusFilter {
             topology_id: Some(status.topology_id.clone()),
             run_id: Some(status.run_id.clone()),
@@ -885,8 +966,7 @@ impl Node {
         if let crate::inference::skippy::StageControlRequest::Load(load)
         | crate::inference::skippy::StageControlRequest::LoadLocal(load) = &request
         {
-            self.record_stage_topology(stage_topology_from_load(self.endpoint.id(), load))
-                .await;
+            self.record_stage_load_topology(load).await;
         }
         // Load/Prepare can take minutes on large stages; use the same
         // per-request budget remote control uses instead of the short default.
@@ -929,8 +1009,7 @@ impl Node {
         if let crate::inference::skippy::StageControlRequest::Load(load)
         | crate::inference::skippy::StageControlRequest::LoadLocal(load) = &request
         {
-            self.record_stage_topology(stage_topology_from_load(peer_id, load))
-                .await;
+            self.record_stage_load_topology(load).await;
         }
         let frame = stage_control_request_to_proto(self.endpoint.id(), request)?;
         let response = tokio::time::timeout(timeout, async {

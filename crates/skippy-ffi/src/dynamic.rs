@@ -12,7 +12,9 @@ use crate::{
     MtmdHelperVideo, MtmdInputChunkType, MtmdInputChunks, MtmdInputText, NativeMtpDraft,
     NativeRuntimeLoadError, NgramCache, Opaque, RuntimeConfig, SamplingConfig, Session,
     SkippyDecodeStepSampledMtpFn, SkippyModelAttachMtpDraftModelFn, SkippyRuntimeEventReporterV1,
-    SlicePlan, Status, TensorInfo, TokenSignal, runtime_abi_supported,
+    SlicePlan, StagePlan, StagePlanDescV1, StagePlanProfileDescV1, StagePlanStateDescV1,
+    StagePlanStringRefV1, StagePlanValueDescV1, StagePlanValueKind, StagePlanner,
+    StagePlannerConfigV1, Status, TensorInfo, TokenSignal, runtime_abi_supported,
 };
 
 static SYMBOLS: OnceLock<Symbols> = OnceLock::new();
@@ -236,6 +238,17 @@ dynamic_symbols! {
     skippy_slice_plan_add_layer_range(plan: *mut SlicePlan, stage_index: i32, layer_start: i32, layer_end: i32, include_embeddings: bool, include_output: bool, include_per_layer_token_embd: bool, out_error: *mut *mut Error) -> Status;
     skippy_write_slice_gguf(info: *mut ModelInfo, plan: *const SlicePlan, stage_index: i32, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
     skippy_write_gguf_from_parts(input_paths: *const *const c_char, input_count: usize, output_path: *const c_char, out_error: *mut *mut Error) -> Status;
+    skippy_stage_planner_create_v1(config: *const StagePlannerConfigV1, out_planner: *mut *mut StagePlanner, out_error: *mut *mut Error) -> Status;
+    skippy_stage_planner_free(planner: *mut StagePlanner);
+    skippy_stage_planner_realize_v1(planner: *const StagePlanner, layer_start: i32, layer_end: i32, out_plan: *mut *mut StagePlan, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_free(plan: *mut StagePlan);
+    skippy_stage_plan_describe_v1(plan: *const StagePlan, out_desc: *mut StagePlanDescV1, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_profile_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanProfileDescV1, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_resident_tensor_at_v1(plan: *const StagePlan, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_value_at_v1(plan: *const StagePlan, profile_index: usize, kind: StagePlanValueKind, index: usize, out_desc: *mut StagePlanValueDescV1, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_state_at_v1(plan: *const StagePlan, profile_index: usize, index: usize, out_desc: *mut StagePlanStateDescV1, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_string_v1(plan: *const StagePlan, reference: StagePlanStringRefV1, out_data: *mut *const c_char, out_length: *mut usize, out_error: *mut *mut Error) -> Status;
+    skippy_stage_plan_validate_chain_v1(plans: *const *const StagePlan, plan_count: usize, out_error: *mut *mut Error) -> Status;
     mtmd_default_marker() -> *const c_char;
     mtmd_helper_log_set(log_callback: LlamaLogCallback, user_data: *mut c_void);
     mtmd_context_params_default() -> MtmdContextParams;

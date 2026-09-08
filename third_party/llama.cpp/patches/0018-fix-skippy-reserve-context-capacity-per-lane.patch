@@ -1,0 +1,179 @@
+From fbaef5c3b18658287a31000cfe7a2ee291c51bfb Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Tue, 8 Sep 2026 02:40:22 +1000
+Subject: [PATCH] fix(skippy): reserve context capacity per lane
+
+---
+ src/skippy/model_loading.cpp                  | 59 ++++++++++++++++---
+ tests/test-skippy-model-loader-accounting.cpp | 42 ++++++++++++-
+ 2 files changed, 93 insertions(+), 8 deletions(-)
+
+diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
+index 0e23cfef2..628fa6008 100644
+--- a/src/skippy/model_loading.cpp
++++ b/src/skippy/model_loading.cpp
+@@ -477,6 +477,22 @@ static bool skippy_resolve_tristate(int32_t tristate, bool derived_default) {
+     return derived_default;
+ }
+ 
++static bool skippy_context_capacity(
++        const skippy_runtime_config * config,
++                         uint32_t   lane_count,
++                         uint32_t & context_size_per_lane,
++                         uint32_t & context_size_total) {
++    context_size_per_lane = config != nullptr && config->ctx_size > 0
++        ? static_cast<uint32_t>(config->ctx_size)
++        : 512;
++    lane_count = std::max<uint32_t>(lane_count, 1);
++    if (context_size_per_lane > std::numeric_limits<uint32_t>::max() / lane_count) {
++        return false;
++    }
++    context_size_total = context_size_per_lane * lane_count;
++    return true;
++}
++
+ extern "C" {
+ 
+ struct skippy_runtime_config skippy_runtime_config_default(void) {
+@@ -535,19 +551,34 @@ enum skippy_status skippy_finish_model_open(
+         }
+     }
+ 
++    const uint32_t lane_count = config != nullptr && config->lane_count > 0
++        ? static_cast<uint32_t>(config->lane_count)
++        : 1;
++    uint32_t context_size_per_lane = 0;
++    uint32_t context_size_total = 0;
++    if (!skippy_context_capacity(config, lane_count, context_size_per_lane, context_size_total)) {
++        llama_model_free(model);
++        const char * message = "ctx_size multiplied by lane_count exceeds the native context range";
++        if (event_scope != nullptr) {
++            event_scope->emit_failure(SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
+     skippy_model * stage_model = new skippy_model{};
+     stage_model->model = model;
+     if (config != nullptr) {
+         stage_model->config = *config;
+         stage_model->executable = true;
+     }
+-    stage_model->lane_count = config != nullptr && config->lane_count > 0
+-        ? static_cast<uint32_t>(config->lane_count)
+-        : 1;
++    stage_model->lane_count = lane_count;
+ 
+     llama_context_params params = llama_context_default_params();
+-    params.n_ctx = config != nullptr && config->ctx_size > 0 ? static_cast<uint32_t>(config->ctx_size) : 512;
+-    params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : params.n_ctx;
++    // ctx_size is the per-lane request limit. llama.cpp's n_ctx is the total
++    // cell pool, so every simultaneously admitted lane needs that capacity.
++    params.n_ctx = context_size_total;
++    params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : context_size_per_lane;
+     params.n_ubatch = config != nullptr && config->n_ubatch > 0 ? static_cast<uint32_t>(config->n_ubatch) : 0u;
+     params.n_threads = config != nullptr && config->n_threads > 0 ? config->n_threads : skippy_default_thread_count();
+     params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : params.n_threads;
+@@ -861,6 +892,20 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+         return SKIPPY_STATUS_INVALID_ARGUMENT;
+     }
+ 
++    uint32_t context_size_per_lane = 0;
++    uint32_t context_size_total = 0;
++    if (!skippy_context_capacity(
++            config,
++            target_model->lane_count,
++            context_size_per_lane,
++            context_size_total)) {
++        skippy_set_error(
++                out_error,
++                SKIPPY_STATUS_INVALID_ARGUMENT,
++                "ctx_size multiplied by lane_count exceeds the native context range");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
+     llama_model_params model_params = llama_model_default_params();
+     // The guard above already established an external MTP source, so this model
+     // backs an LLAMA_CONTEXT_TYPE_MTP draft context and must retain MTP tensors.
+@@ -890,8 +935,8 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+     llama_context_params ctx_params = llama_context_default_params();
+     ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+     ctx_params.ctx_other = target_model->ctx;
+-    ctx_params.n_ctx = config != nullptr && config->ctx_size > 0 ? static_cast<uint32_t>(config->ctx_size) : 512;
+-    ctx_params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : ctx_params.n_ctx;
++    ctx_params.n_ctx = context_size_total;
++    ctx_params.n_batch = config != nullptr && config->n_batch > 0 ? static_cast<uint32_t>(config->n_batch) : context_size_per_lane;
+     ctx_params.n_ubatch = config != nullptr && config->n_ubatch > 0 ? static_cast<uint32_t>(config->n_ubatch) : 0u;
+     ctx_params.n_threads = config != nullptr && config->n_threads > 0 ? config->n_threads : skippy_default_thread_count();
+     ctx_params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : ctx_params.n_threads;
+diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
+index 7e87226dc..417ac4347 100644
+--- a/tests/test-skippy-model-loader-accounting.cpp
++++ b/tests/test-skippy-model-loader-accounting.cpp
+@@ -1,5 +1,6 @@
+ #include "llama.h"
+ #include "llama-model-loader.h"
++#include "skippy.h"
+ 
+ #include <cmath>
+ #include <cstdio>
+@@ -239,6 +240,44 @@ static bool check_contextless_fallback(const char * model_path) {
+     return true;
+ }
+ 
++static bool check_multilane_context_capacity(const char * model_path) {
++    skippy_runtime_config config = skippy_runtime_config_default();
++    config.ctx_size = 256;
++    config.lane_count = 3;
++    config.n_batch = 32;
++    config.n_ubatch = 32;
++
++    skippy_model * model = nullptr;
++    skippy_error * error = nullptr;
++    if (skippy_model_open(model_path, &config, &model, &error) != SKIPPY_STATUS_OK) {
++        std::fprintf(stderr, "multi-lane model open failed: %s\n", error != nullptr ? error->message : "unknown error");
++        skippy_error_free(error);
++        return false;
++    }
++
++    skippy_session * session = nullptr;
++    if (skippy_session_create(model, &session, &error) != SKIPPY_STATUS_OK) {
++        std::fprintf(stderr, "multi-lane session create failed: %s\n", error != nullptr ? error->message : "unknown error");
++        skippy_error_free(error);
++        skippy_model_free(model, nullptr);
++        return false;
++    }
++
++    const llama_context * context = skippy_session_llama_context(session);
++    const bool valid = context != nullptr && llama_n_ctx(context) == 3 * 256;
++    if (!valid) {
++        std::fprintf(
++                stderr,
++                "multi-lane context capacity mismatch: expected %d cells, got %u\n",
++                3 * 256,
++                context != nullptr ? llama_n_ctx(context) : 0);
++    }
++
++    skippy_session_free(session, nullptr);
++    skippy_model_free(model, nullptr);
++    return valid;
++}
++
+ int main(int argc, char ** argv) {
+     if (argc != 2) {
+         std::fprintf(stderr, "usage: %s MODEL\n", argv[0]);
+@@ -249,7 +288,8 @@ int main(int argc, char ** argv) {
+ 
+     if (!check_context_load_lifecycle(argv[1]) ||
+             !check_contextless_fallback(argv[1]) ||
+-            !check_exact_resident_filter(argv[1])) {
++            !check_exact_resident_filter(argv[1]) ||
++            !check_multilane_context_capacity(argv[1])) {
+         llama_backend_free();
+         return EXIT_FAILURE;
+     }
+-- 
+2.54.0 (Apple Git-157)
+

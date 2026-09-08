@@ -1,13 +1,16 @@
 //! Native runtime resolution, download, and installation.
 
 use crate::cache::{host_runtime_profile, native_runtime_cache};
-use crate::manifest::{load_release_manifest_with_bundle_dirs, normalize_sha256};
+use crate::manifest::{
+    NativeRuntimeCatalogSources, load_release_manifest_with_sources, normalize_sha256,
+};
 use crate::types::*;
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use mesh_llm_native_runtime::{
-    InstalledNativeRuntime, NativeRuntimeArtifact, NativeRuntimeCache, NativeRuntimeManifest,
-    NativeRuntimeResolver, NativeRuntimeSource,
+    CandidateEvaluation, CandidateRejection, InstalledNativeRuntime, NativeRuntimeArtifact,
+    NativeRuntimeCache, NativeRuntimeManifest, NativeRuntimeResolver, NativeRuntimeSource,
+    RuntimeSelection,
 };
 use sha2::Digest;
 use std::fs;
@@ -21,36 +24,239 @@ use tokio::io::AsyncWriteExt;
 pub async fn install_native_runtime(
     options: NativeRuntimeInstallOptions,
 ) -> Result<NativeRuntimeInstallOutcome> {
-    let (manifest, bundle_dirs) =
-        load_release_manifest_with_bundle_dirs(NativeRuntimeManifestOptions {
-            mesh_version: options.mesh_version.clone(),
-            manifest_path: options.manifest_path.clone(),
-            manifest_url: options.manifest_url.clone(),
-            bundle_dirs: options.bundle_dirs.clone(),
-            // Offline installs (`allow_download: false`) must not reach out
-            // for the default catalog either; bundles and the cache are the
-            // only sources then. Explicit manifest URLs are still honoured.
-            allow_default_manifest_url: options.allow_download,
-        })
-        .await?;
+    let (manifest, sources) = load_release_manifest_with_sources(NativeRuntimeManifestOptions {
+        mesh_version: options.mesh_version.clone(),
+        manifest_path: options.manifest_path.clone(),
+        manifest_url: options.manifest_url.clone(),
+        bundle_dirs: options.bundle_dirs.clone(),
+        // Offline installs (`allow_download: false`) must not reach out
+        // for the default catalog either; bundles and the cache are the
+        // only sources then. Explicit manifest URLs are still honoured.
+        allow_default_manifest_url: options.allow_download,
+    })
+    .await?;
     if manifest.artifacts.is_empty() {
-        bail!("no native runtime manifest entries found");
+        return Err(NativeRuntimeResolutionError::empty_catalog(
+            sources,
+            options.selection.clone(),
+        )
+        .into());
     }
     let skippy_abi_version = options
         .skippy_abi_version
         .clone()
         .unwrap_or_else(|| manifest.skippy_abi.clone());
     let cache = native_runtime_cache(options.cache_dir.as_deref())?;
-    let resolution = NativeRuntimeResolver::new(
+    let resolver = NativeRuntimeResolver::new(
         &options.mesh_version,
         host_runtime_profile(),
         manifest,
         cache.clone(),
     )
     .with_skippy_abi_version(skippy_abi_version)
-    .with_bundle_dirs(bundle_dirs)
-    .resolve(&options.selection)?;
-    install_resolved_runtime(&cache, resolution, &options).await
+    .with_bundle_dirs(sources.bundle_dirs.clone());
+    let resolution = match resolver.resolve(&options.selection) {
+        Ok(resolution) => resolution,
+        Err(err) => {
+            // The explanation becomes the outermost context of the resolver's
+            // own error: one line on top, the resolver's verdict and the
+            // deeper causes (an unreadable cache, a manifest that failed to
+            // parse) preserved underneath for the chain readers.
+            let explanation = match resolver.evaluate(&options.selection) {
+                Ok(evaluated) => NativeRuntimeResolutionError::rejected(
+                    sources,
+                    options.selection.clone(),
+                    &evaluated,
+                ),
+                // `evaluate` fails for the same reason `resolve` did when the
+                // candidates could not be enumerated at all; that is not a
+                // selection problem and must not read like one.
+                Err(_) => NativeRuntimeResolutionError::enumeration_failed(
+                    sources,
+                    options.selection.clone(),
+                ),
+            };
+            return Err(err.context(explanation));
+        }
+    };
+    let mut outcome = install_resolved_runtime(&cache, resolution, &options).await?;
+    outcome.sources = sources;
+    Ok(outcome)
+}
+
+/// Why native runtime resolution failed, kept structured so `--json`
+/// consumers can read the catalogs and the candidates instead of parsing
+/// prose. It travels as the outermost context of the install error: its
+/// `Display` is a single line, the resolver's own verdict and the deeper
+/// causes stay underneath in the error chain, and
+/// `anyhow::Error::downcast_ref` recovers the structure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct NativeRuntimeResolutionError {
+    /// One-line verdict; also what this error displays as.
+    pub summary: String,
+    /// What the caller asked for.
+    pub selection: RuntimeSelection,
+    /// Which catalogs were consulted.
+    pub catalogs: NativeRuntimeCatalogSources,
+    /// Candidates that were plausible for this host and selection, with why
+    /// each one was rejected. Empty when the candidates could not be
+    /// enumerated at all.
+    pub candidates: Vec<RejectedCandidate>,
+    /// Candidates set aside before explaining anything: built for another
+    /// platform, or not matching an explicit selection.
+    pub set_aside: usize,
+    /// `true` when the candidates could not be enumerated (unreadable bundle
+    /// manifest, unreadable cache). The cause is in the error chain and the
+    /// catalog is not at fault.
+    pub enumeration_failed: bool,
+}
+
+/// A plausible candidate and the reasons it was rejected.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RejectedCandidate {
+    pub id: String,
+    pub reasons: Vec<CandidateRejection>,
+}
+
+impl NativeRuntimeResolutionError {
+    /// The merged catalog listed nothing at all.
+    pub(crate) fn empty_catalog(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+    ) -> Self {
+        Self {
+            summary: "no native runtime manifest entries found".to_string(),
+            selection,
+            catalogs,
+            candidates: Vec::new(),
+            set_aside: 0,
+            enumeration_failed: false,
+        }
+    }
+
+    /// Every candidate was evaluated and none could be selected.
+    pub(crate) fn rejected(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+        evaluated: &[CandidateEvaluation],
+    ) -> Self {
+        let (plausible, set_aside): (Vec<_>, Vec<_>) = evaluated
+            .iter()
+            .partition(|candidate| candidate_is_plausible(candidate));
+        let candidates = plausible
+            .into_iter()
+            .map(|candidate| RejectedCandidate {
+                id: candidate.artifact.id.clone(),
+                reasons: candidate.rejection_reasons.clone(),
+            })
+            .collect::<Vec<_>>();
+        let summary = if candidates.is_empty() {
+            format!(
+                "no native runtime candidate applies to this host and selection ({} set aside)",
+                set_aside.len()
+            )
+        } else {
+            format!(
+                "no compatible native runtime: {} candidate(s) rejected, {} set aside",
+                candidates.len(),
+                set_aside.len()
+            )
+        };
+        Self {
+            summary,
+            selection,
+            catalogs,
+            candidates,
+            set_aside: set_aside.len(),
+            enumeration_failed: false,
+        }
+    }
+
+    /// The candidates could not be enumerated, so nothing was evaluated.
+    pub(crate) fn enumeration_failed(
+        catalogs: NativeRuntimeCatalogSources,
+        selection: RuntimeSelection,
+    ) -> Self {
+        Self {
+            summary: "native runtime candidates could not be enumerated".to_string(),
+            selection,
+            catalogs,
+            candidates: Vec::new(),
+            set_aside: 0,
+            enumeration_failed: true,
+        }
+    }
+
+    /// Lines for a human reader: the catalogs consulted, then the plausible
+    /// candidates with their rejection reasons, then what was set aside.
+    pub fn explanation_lines(&self) -> Vec<String> {
+        let mut lines = self
+            .catalogs
+            .describe()
+            .into_iter()
+            .map(|line| format!("catalog: {line}"))
+            .collect::<Vec<_>>();
+        if self.enumeration_failed {
+            lines.push(
+                "the candidates could not be enumerated; the cause is reported below, the catalog is not at fault"
+                    .to_string(),
+            );
+            return lines;
+        }
+        for candidate in &self.candidates {
+            let reasons = if candidate.reasons.is_empty() {
+                "compatible".to_string()
+            } else {
+                candidate
+                    .reasons
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            lines.push(format!("candidate {}: {reasons}", candidate.id));
+        }
+        if self.candidates.is_empty() && self.set_aside > 0 {
+            lines.push(
+                "no catalog entry applies to this host and the requested selection".to_string(),
+            );
+        }
+        if self.set_aside > 0 {
+            lines.push(format!(
+                "{} other candidates were set aside: built for another platform, or not matching the requested selection",
+                self.set_aside
+            ));
+        }
+        if let RuntimeSelection::Backend { kind, .. } = &self.selection {
+            lines.push(format!(
+                "the {kind} runtime was requested explicitly; it was not replaced by another backend"
+            ));
+        }
+        lines
+    }
+}
+
+impl std::fmt::Display for NativeRuntimeResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary)
+    }
+}
+
+impl std::error::Error for NativeRuntimeResolutionError {}
+
+/// A candidate is worth explaining when it is built for this host and
+/// matches the requested selection; anything else is only counted, so a
+/// plain `runtime install` does not list every other platform's artifact.
+fn candidate_is_plausible(candidate: &CandidateEvaluation) -> bool {
+    !candidate.rejection_reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            CandidateRejection::SelectionMismatch { .. }
+                | CandidateRejection::OsMismatch { .. }
+                | CandidateRejection::ArchMismatch { .. }
+                | CandidateRejection::TargetTripleMismatch { .. }
+        )
+    })
 }
 
 pub(crate) async fn install_resolved_runtime(
@@ -67,6 +273,7 @@ pub(crate) async fn install_resolved_runtime(
                     status: NativeRuntimeInstallStatus::Installed,
                     runtime,
                     resolution,
+                    sources: crate::manifest::NativeRuntimeCatalogSources::default(),
                 });
             }
             in_place_bundle_outcome(&path, resolution)
@@ -78,6 +285,7 @@ pub(crate) async fn install_resolved_runtime(
                 status: NativeRuntimeInstallStatus::Installed,
                 runtime,
                 resolution,
+                sources: crate::manifest::NativeRuntimeCatalogSources::default(),
             })
         }
         NativeRuntimeSource::Download { url: _ } => {
@@ -148,6 +356,7 @@ pub(crate) fn in_place_bundle_outcome(
         status: NativeRuntimeInstallStatus::AlreadyInstalled,
         runtime,
         resolution,
+        sources: crate::manifest::NativeRuntimeCatalogSources::default(),
     })
 }
 
@@ -165,6 +374,7 @@ pub(crate) fn installed_outcome(
         status: NativeRuntimeInstallStatus::AlreadyInstalled,
         runtime,
         resolution,
+        sources: crate::manifest::NativeRuntimeCatalogSources::default(),
     })
 }
 

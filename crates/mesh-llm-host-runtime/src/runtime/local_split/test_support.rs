@@ -53,6 +53,12 @@ pub(super) fn stage_load_request(load_mode: LoadMode) -> skippy::StageLoadReques
         stage_index: 1,
         layer_start: 18,
         layer_end: 36,
+        admission: skippy::test_stage_admission(18, 36),
+        participant_set_hash: "participants".to_string(),
+        topology_hash: "topology".to_string(),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
+        topology_stages: Vec::new(),
         model_path: Some("/models/qwen.gguf".to_string()),
         source_model_bytes: Some(4_900_000_000),
         source_model_sha256: None,
@@ -336,6 +342,12 @@ pub(super) fn runtime_status_for_stage(
         node_id: Some(stage.node_id),
         layer_start: stage.layer_start,
         layer_end: stage.layer_end,
+        admission: Some(skippy::test_stage_admission(
+            stage.layer_start,
+            stage.layer_end,
+        )),
+        activation_codec: generation.activation_codec,
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: "127.0.0.1:31000".to_string(),
         input_activation_boundary: None,
@@ -536,6 +548,29 @@ stop = ["END"]
     );
     assert_eq!(settings.embedded_openai.speculative_window, 7);
     assert_eq!(settings.embedded_openai.draft_n_gpu_layers, Some(11));
+    let downstream_stage = &generation.stages[1];
+    let stage0_options = stage0_runtime_options(
+        &spec,
+        &settings,
+        &skippy::StagePeerDescriptor {
+            stage_id: downstream_stage.stage_id.clone(),
+            stage_index: downstream_stage.stage_index,
+            endpoint: "127.0.0.1:41001".to_string(),
+            node_id: Some(downstream_stage.node_id),
+        },
+        "127.0.0.1:41001",
+        "127.0.0.1:41000",
+    )
+    .await
+    .expect("stage 0 runtime options should resolve");
+    assert_eq!(
+        stage0_options.config.activation_codec,
+        generation.activation_codec
+    );
+    assert_eq!(
+        stage0_options.config.activation_codec_policy,
+        generation.activation_codec_policy
+    );
     spec.capacity_budget_bytes = Some(0);
     assert_eq!(
         split_allocatable_memory_bytes(&spec),
@@ -888,6 +923,9 @@ pub(super) fn test_stage_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
+        activation_codec: load.activation_codec,
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: "127.0.0.1:31000".to_string(),
         input_activation_boundary: boundary.filter(|_| load.layer_start > 0),
@@ -936,6 +974,9 @@ pub(super) fn test_stage_status_from_stop(
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state: skippy::StageRuntimeState::Stopped,
         bind_addr: String::new(),
         input_activation_boundary: None,
@@ -968,6 +1009,9 @@ pub(super) fn test_preparation_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
+        activation_codec: load.activation_codec,
+        activation_codec_policy: Default::default(),
         state: skippy::StagePreparationState::Available,
         bytes_done: load.source_model_bytes,
         bytes_total: load.source_model_bytes,

@@ -179,6 +179,7 @@ fn multimodal_stage_config(
         swa_full: None,
         cache_idle_slots: None,
         filter_tensors_on_load: layer_start != 0 || layer_end != fixture.layer_end,
+        resident_tensor_names: Vec::new(),
         selected_device: None,
         kv_cache: None,
         native_mtp_enabled: true,
