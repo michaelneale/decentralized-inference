@@ -30,6 +30,11 @@ jobs:
       EXPECTED_REPLAY_RUNNER_NAME: micstudio
       MATRIX_FILE: ci/agentic-replay-nightly/matrix.json
       DATASET_REPO: ${{ vars.MESH_AGENTIC_REPLAY_DATASET || 'meshllm/agentic-replay-nightly' }}
+      # Same model-access config as the llama canary: micstudio ships a
+      # pre-warmed read-only HF cache exported as HF_CACHE; the workflow
+      # normalizes it into HF_HOME/HF_HUB_CACHE so `hf download` is only a
+      # cache-miss backfill. Dataset writes go through the runner-local hf CLI.
+      HF_HUB_OFFLINE: "1"
       HISTORY_LOCAL: ${{ github.workspace }}/.replay-history-cache
       OUTPUT_DIR: ${{ github.workspace }}/replay-artifacts
     steps:
@@ -46,6 +51,26 @@ jobs:
         with:
           ref: main # trusted pinned checkout; never PR content
           persist-credentials: false
+
+      - name: Verify runner toolchain
+        run: |
+          set -euo pipefail
+          missing=0
+          for cmd in cargo just jq python3 uv git-lfs hf opencode; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              echo "missing on micstudio image: $cmd" >&2
+              missing=1
+            fi
+          done
+          if [[ -z "${HF_CACHE:-}" ]]; then
+            echo "HF_CACHE is not exported on this runner" >&2
+            missing=1
+          fi
+          if [[ "$missing" == "1" ]]; then exit 1; fi
+          export HF_HOME="$HF_CACHE"
+          export HF_HUB_CACHE="$HF_CACHE/hub"
+          echo "HF_HOME=$HF_HOME" >> "$GITHUB_ENV"
+          echo "HF_HUB_CACHE=$HF_HUB_CACHE" >> "$GITHUB_ENV"
 
       - name: Record hardware fingerprint
         run: |
@@ -94,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$HISTORY_LOCAL"
-          "$MESH_AGENTIC_REPLAY_HF_CLI" download "$DATASET_REPO" \
+          HF_HUB_OFFLINE=0 hf download "$DATASET_REPO" \
             --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" || \
             echo "no history yet (bootstrap run)"
 
@@ -126,14 +151,14 @@ jobs:
         run: |
           set -euo pipefail
           RUN_DATE=$(date -u +%F)
-          "$MESH_AGENTIC_REPLAY_HF_CLI" upload "$DATASET_REPO" \
+          HF_HUB_OFFLINE=0 hf upload "$DATASET_REPO" \
             "$OUTPUT_DIR/summary/history.jsonl" "data/runs/$RUN_DATE/${{ github.run_id }}.jsonl" \
             --repo-type dataset --commit-message "run $RUN_DATE ${{ github.run_id }} @ ${{ github.sha }}"
           python3 scripts/agentic-replay-card.py \
             --history "$HISTORY_LOCAL/data/runs" \
             --latest "$OUTPUT_DIR/summary/history.jsonl" \
             --output "$OUTPUT_DIR/card.md"
-          "$MESH_AGENTIC_REPLAY_HF_CLI" upload "$DATASET_REPO" \
+          HF_HUB_OFFLINE=0 hf upload "$DATASET_REPO" \
             "$OUTPUT_DIR/card.md" "card.md" --repo-type dataset \
             --commit-message "card refresh $RUN_DATE"
 
