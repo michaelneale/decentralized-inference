@@ -56,12 +56,33 @@ class SmokeOffloadTests(unittest.TestCase):
 
     def test_smoke_scripts_reject_unknown_device_before_launch(self):
         for script in ("ci-smoke-test.sh", "ci-compat-smoke.sh"):
-            with self.subTest(script=script):
-                result = subprocess.run(["bash", str(ROOT / "scripts" / script)],
-                                        env={**os.environ, "MESH_CI_DEVICE": "auto"},
-                                        capture_output=True, text=True)
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                launched = root / "launched"
+                binary = root / "mesh-llm"
+                binary.write_text('#!/bin/sh\nprintf "launch\\n" >> "$LAUNCH_PROBE"\nexit 1\n')
+                binary.chmod(0o755)
+                model = root / "model.gguf"
+                model.touch()
+                (root / "native-runtimes").mkdir()
+                # Isolate the SDK preflight too: a misplaced guard must be able
+                # to reach the launch probe, never a real runtime or endpoint.
+                (root / "scripts").mkdir()
+                helper = root / "scripts/ci-prepare-native-runtime.sh"
+                helper.write_text('#!/bin/sh\nexit 0\n')
+                helper.chmod(0o755)
+                env = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("MESH_", "BASH_ENV"))}
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts" / script), str(binary), str(root), str(model)],
+                    cwd=root, env={**env, "MESH_CI_DEVICE": "auto",
+                                   "LAUNCH_PROBE": str(launched),
+                                   "MESH_CI_LOG": str(root / "smoke.log"),
+                                   "MESH_COMPAT_LOG": str(root / "compat.log")},
+                    capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Unsupported MESH_CI_DEVICE", result.stderr)
+                self.assertFalse(launched.exists(), "invalid device launched mesh-llm")
 
 
     def test_other_product_backends_are_preserved_without_cuda_claim(self):

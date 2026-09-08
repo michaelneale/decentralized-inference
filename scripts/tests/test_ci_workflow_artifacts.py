@@ -174,8 +174,9 @@ class CiWorkflowArtifactTests(unittest.TestCase):
             product_smoke,
         )
         self.assertIn("inputs.platform == 'linux' && inputs.backend == 'cuda'", product_smoke)
-        self.assertIn("cuda-cudart-12-9", product_smoke)
-        self.assertIn("libcublas-12-9", product_smoke)
+        for library in ("libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"):
+            self.assertIn(library, product_smoke)
+        self.assertNotIn("sudo apt-get", product_smoke)
 
     def test_product_integration_supports_accelerator_backends(self):
         product_smoke = (WORKFLOWS / "product-integration-smoke.yml").read_text()

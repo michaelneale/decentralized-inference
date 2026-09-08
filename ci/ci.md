@@ -355,10 +355,10 @@ runtime producers are not duplicated.
   protected default-branch reusable workflows, receives no repository secrets or
   credential-bearing caches, and is restricted to the repository's GPU runner
   group. Its PR runtime is compiled for both sm86 and sm120 because the scale
-  set currently contains RTX 3080 and RTX 5090 workers. The core CUDA smoke
-  verifies preinstalled CUDA 12 user-space libraries before inference; it never
-  repairs a mismatched worker with sudo. The separate product-integration CUDA
-  workflow still installs its CUDA dependencies. Vulkan product integration uses
+  set currently contains RTX 3080 and RTX 5090 workers. Both core and typed
+  product-integration CUDA smoke verify preinstalled utilities and CUDA 12
+  user-space libraries before recording device provenance and starting inference;
+  neither repairs a mismatched worker with sudo. Vulkan product integration uses
   the same approved `gpu-nvidia` host with the explicit `Vulkan0` device. ROCm
   uses `ROCm0` and its reusable job is skipped unless
   `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; the corresponding
@@ -747,8 +747,12 @@ process-scoped to the exact checkout, including child version-script commands.
 Candidate workflow YAML still requires explicit execution evidence before merge:
 the protected default-branch PR executor does not execute edited YAML.
 
-GPU smoke checks existing utilities and dynamically loads the CUDA 12 runtime
-libraries rather than installing system packages with sudo. Missing tools or
+Both legacy `smoke.yml` and typed `product-integration-smoke.yml` CUDA setup
+check existing curl/jq/lsof utilities and dynamically load all three CUDA 12
+runtime libraries rather than installing system packages with sudo. Both retain
+GPU name, compute capability and driver provenance via `nvidia-smi`. Executed
+workflow-block tests cover missing utilities, each missing library and failed
+device provenance; these isolated probes do not qualify an actual runner image. Missing tools or
 libraries fail the runner contract before inference. This does not itself prove
 ephemeral placement: administrators must keep persistent runner labels disjoint
 from the CI pool and enforce protected workflow restrictions on its runner group.

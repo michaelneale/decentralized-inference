@@ -90,11 +90,19 @@ jobs:
         if: inputs.platform == 'linux' && inputs.backend == 'cpu'
         run: verify-runner-image public cpu
 
-      - name: Install CUDA runtime libraries and record device provenance
+      - name: Verify prebuilt CUDA utilities and libraries and record device provenance
         if: inputs.platform == 'linux' && inputs.backend == 'cuda'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-cudart-12-9 libcublas-12-9 curl jq lsof
+          set -euo pipefail
+          for tool in curl jq lsof; do
+            command -v "$tool" || { echo "GPU runner image is missing $tool" >&2; exit 1; }
+          done
+          python3 - <<'PYTHON'
+          import ctypes
+          for library in ("libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"):
+              ctypes.CDLL(library)
+              print(f"GPU runner library load passed: {library}")
+          PYTHON
           nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader
 
       - name: Record Vulkan device provenance

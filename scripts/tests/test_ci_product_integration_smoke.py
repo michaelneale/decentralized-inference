@@ -88,8 +88,14 @@ esac
             )
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
             return
+        # Execute the actual consumer's device selection/guard before the
+        # harmless phase stub, so typed-call environment drift cannot hide
+        # behind the suite manifest's independently recorded device.
+        consumer = (ROOT / "scripts" / path.name).read_text()
+        device_setup = consumer[:consumer.index("MESH_LLM=")]
         path.write_text(
-            """#!/usr/bin/env bash
+            device_setup + '\n[[ "$SMOKE_DEVICE" == "$STUB_EXPECTED_DEVICE" ]]\n' +
+            """
 set -euo pipefail
 phase="${MESH_PRODUCT_INTEGRATION_PHASE:?missing phase}"
 for log_path in "${MESH_CI_LOG:-}" "${MESH_CI_HEADLESS_LOG:-}" "${MESH_COMPAT_LOG:-}"; do
@@ -155,6 +161,13 @@ fi
                 "PATH": "/usr/bin:/bin",
                 "MESH_PRODUCT_INTEGRATION_PHASE_ROOT": str(phase_root),
                 "STUB_SPLIT_EVIDENCE_MODE": split_evidence_mode,
+                "STUB_EXPECTED_DEVICE": {"cpu": "CPU", "cuda": "CUDA0", "metal": "MTL0",
+                                         "vulkan": "Vulkan0", "rocm": "ROCm0"}.get(backend, "invalid"),
+                # A typed compatibility call must override the generic CPU
+                # fallback via MESH_COMPAT_DEVICE; the standalone caller must
+                # override this common default via MESH_CI_DEVICE.
+                "MESH_CI_DEVICE": "CPU",
+                "MESH_COMPAT_DEVICE": "CPU",
             }
             if failure_phase is not None:
                 env["STUB_FAIL_PHASE"] = failure_phase
