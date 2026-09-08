@@ -1,0 +1,334 @@
+From e9610c5ce96ead1b18114b52ed4e74322331f66c Mon Sep 17 00:00:00 2001
+From: scama <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Wed, 9 Sep 2026 09:18:53 +1000
+Subject: [PATCH] skippy: write and load metadata-only carriers
+
+Assisted-by: scama
+---
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 6fe522303..5e4fe26eb 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -611,7 +611,7 @@ llama_model_loader::llama_model_loader(
+             }
+             n_elements += ggml_nelements(cur);
+             n_bytes    += ggml_nbytes(cur);
+-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
++            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur, no_alloc));
+         }
+ 
+         if (ordered_parts) {
+@@ -644,7 +644,7 @@ llama_model_loader::llama_model_loader(
+                     }
+                     n_elements += ggml_nelements(cur);
+                     n_bytes    += ggml_nbytes(cur);
+-                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), part_idx, ctx_gguf.get(), cur));
++                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), part_idx, ctx_gguf.get(), cur, no_alloc));
+                 }
+             }
+ 
+@@ -716,7 +716,7 @@ llama_model_loader::llama_model_loader(
+                     }
+                     n_elements += ggml_nelements(cur);
+                     n_bytes    += ggml_nbytes(cur);
+-                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur));
++                    weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), idx, ctx_gguf.get(), cur, no_alloc));
+                 }
+             }
+ 
+@@ -760,7 +760,7 @@ llama_model_loader::llama_model_loader(
+             }
+             n_elements += ggml_nelements(cur);
+             n_bytes    += ggml_nbytes(cur);
+-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
++            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur, no_alloc));
+         }
+     } else {
+         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index 68b47e1b0..23f6e2849 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -52,14 +52,20 @@ struct llama_model_loader {
+ 
+         ggml_tensor * tensor;
+ 
+-        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
++        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor, bool no_alloc) : idx(idx), tensor(tensor) {
+             const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
+             if (tensor_idx < 0) {
+                 throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
+             }
+ 
+             offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
+-            if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
++            const int metadata_only_key = gguf_find_key(gguf_ctx, "skippy.package.metadata_only");
++            const bool metadata_only = no_alloc &&
++                    metadata_only_key >= 0 &&
++                    gguf_get_kv_type(gguf_ctx, metadata_only_key) == GGUF_TYPE_BOOL &&
++                    gguf_get_val_bool(gguf_ctx, metadata_only_key);
++            if (offs + ggml_nbytes(tensor) < offs ||
++                    (!metadata_only && offs + ggml_nbytes(tensor) > file->size())) {
+                 throw std::runtime_error(format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete", ggml_get_name(tensor)));
+             }
+         }
+diff --git a/src/skippy/model_package.cpp b/src/skippy/model_package.cpp
+index ffd84c132..b2dce591b 100644
+--- a/src/skippy/model_package.cpp
++++ b/src/skippy/model_package.cpp
+@@ -10,6 +10,7 @@
+ #include <cstring>
+ #include <limits>
+ #include <regex>
++#include <set>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -640,6 +641,103 @@ enum skippy_status skippy_write_slice_gguf(
+     return skippy_success(out_error);
+ }
+ 
++enum skippy_status skippy_write_gguf_metadata_from_parts(
++        const char * const * input_paths,
++        size_t input_count,
++        const char * output_path,
++        struct skippy_error ** out_error) {
++    if (input_paths == nullptr || input_count == 0 || output_path == nullptr) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "input paths and output_path are required");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++
++    std::vector<skippy_model_info *> sources;
++    sources.reserve(input_count);
++    for (size_t i = 0; i < input_count; ++i) {
++        if (input_paths[i] == nullptr) {
++            for (skippy_model_info * source : sources) {
++                skippy_model_info_delete(source);
++            }
++            skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "input path is null");
++            return SKIPPY_STATUS_INVALID_ARGUMENT;
++        }
++        skippy_model_info * source = skippy_model_info_open_owned(input_paths[i]);
++        if (source == nullptr) {
++            for (skippy_model_info * opened : sources) {
++                skippy_model_info_delete(opened);
++            }
++            skippy_set_error(out_error, SKIPPY_STATUS_MODEL_ERROR, "failed to open GGUF metadata source");
++            return SKIPPY_STATUS_MODEL_ERROR;
++        }
++        sources.push_back(source);
++    }
++
++    std::vector<skippy_source_tensor> selected;
++    std::set<std::string> names;
++    for (const skippy_model_info * source : sources) {
++        for (const skippy_tensor_meta & tensor : source->tensors) {
++            if (names.insert(tensor.name).second) {
++                selected.push_back({ source, &tensor });
++            }
++        }
++    }
++
++    gguf_context * out_ctx = gguf_init_empty();
++    if (out_ctx == nullptr) {
++        for (skippy_model_info * source : sources) {
++            skippy_model_info_delete(source);
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_ERROR, "failed to allocate output GGUF context");
++        return SKIPPY_STATUS_ERROR;
++    }
++
++    gguf_set_kv(out_ctx, sources.front()->ctx);
++    skippy_clear_split_metadata(out_ctx);
++    gguf_set_val_bool(out_ctx, "skippy.package.metadata_only", true);
++    gguf_set_val_u32(out_ctx, "skippy.package.part_count", static_cast<uint32_t>(input_count));
++
++    const size_t tensor_mem = ggml_tensor_overhead() * (selected.size() + 1) + 1024 * 1024;
++    ggml_init_params ggml_params = {
++        /*.mem_size   =*/ tensor_mem,
++        /*.mem_buffer =*/ nullptr,
++        /*.no_alloc   =*/ true,
++    };
++    ggml_context * ggml_ctx = ggml_init(ggml_params);
++    if (ggml_ctx == nullptr) {
++        gguf_free(out_ctx);
++        for (skippy_model_info * source : sources) {
++            skippy_model_info_delete(source);
++        }
++        skippy_set_error(out_error, SKIPPY_STATUS_ERROR, "failed to allocate tensor metadata context");
++        return SKIPPY_STATUS_ERROR;
++    }
++
++    for (const skippy_source_tensor & item : selected) {
++        const enum skippy_status status = skippy_add_tensor_to_context(ggml_ctx, out_ctx, *item.tensor, out_error);
++        if (status != SKIPPY_STATUS_OK) {
++            ggml_free(ggml_ctx);
++            gguf_free(out_ctx);
++            for (skippy_model_info * source : sources) {
++                skippy_model_info_delete(source);
++            }
++            return status;
++        }
++    }
++
++    const bool written = gguf_write_to_file(out_ctx, output_path, true);
++    ggml_free(ggml_ctx);
++    gguf_free(out_ctx);
++    for (skippy_model_info * source : sources) {
++        skippy_model_info_delete(source);
++    }
++    if (!written) {
++        skippy_set_error(out_error, SKIPPY_STATUS_IO_ERROR, "failed to write metadata-only GGUF");
++        return SKIPPY_STATUS_IO_ERROR;
++    }
++
++    return skippy_success(out_error);
++}
++
+ enum skippy_status skippy_write_gguf_from_parts(
+         const char * const * input_paths,
+         size_t input_count,
+diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
+index 8f4e7dd44..3391f6342 100644
+--- a/src/skippy/tests/renamed_multishard_planning.cpp
++++ b/src/skippy/tests/renamed_multishard_planning.cpp
+@@ -8,6 +8,7 @@
+ #include "llama-mmap.h"
+ #include "llama-model.h"
+ #include "llama.h"
++#include "skippy/model_package.h"
+ #include "skippy/package_tensor_binding.h"
+ #include "skippy/stage_plan.h"
+ #include "skippy/stage_slice_plan.h"
+@@ -269,6 +270,85 @@ bool inspect_package_splits(
+     return true;
+ }
+ 
++bool write_metadata_carrier(
++        const std::vector<std::string> & input_paths,
++        const std::string & output_path,
++        std::string & error) {
++    std::vector<const char *> paths;
++    for (const auto & path : input_paths) {
++        paths.push_back(path.c_str());
++    }
++    skippy_error * native_error = nullptr;
++    const skippy_status status = skippy_write_gguf_metadata_from_parts(
++            paths.data(), paths.size(), output_path.c_str(), &native_error);
++    if (status == SKIPPY_STATUS_OK) {
++        return true;
++    }
++    error = native_error == nullptr ? "metadata carrier write failed" : native_error->message;
++    skippy_error_free(native_error);
++    return false;
++}
++
++bool inspect_metadata_carrier(
++        const std::string & path,
++        const package_inventory & source,
++        size_t expected_part_count,
++        package_inventory & carrier,
++        std::string & error) {
++    ggml_context * tensors_raw = nullptr;
++    gguf_init_params init = { true, &tensors_raw };
++    gguf_context_owner metadata(gguf_init_from_file(path.c_str(), init), gguf_free);
++    ggml_context_owner tensors(tensors_raw, ggml_free);
++    if (!metadata || !tensors) {
++        error = "cannot inspect metadata carrier";
++        return false;
++    }
++    const int metadata_only_key = gguf_find_key(metadata.get(), "skippy.package.metadata_only");
++    const int part_count_key = gguf_find_key(metadata.get(), "skippy.package.part_count");
++    if (metadata_only_key < 0 || part_count_key < 0 ||
++            gguf_get_kv_type(metadata.get(), metadata_only_key) != GGUF_TYPE_BOOL ||
++            gguf_get_kv_type(metadata.get(), part_count_key) != GGUF_TYPE_UINT32 ||
++            !gguf_get_val_bool(metadata.get(), metadata_only_key) ||
++            gguf_get_val_u32(metadata.get(), part_count_key) != expected_part_count ||
++            std::filesystem::file_size(path) != gguf_get_data_offset(metadata.get()) ||
++            gguf_get_n_tensors(metadata.get()) != static_cast<int64_t>(source.tensors.size())) {
++        error = "metadata carrier markers, size, or tensor count are invalid";
++        return false;
++    }
++    std::map<std::string, const skippy_package_tensor_binding_input *> source_by_name;
++    for (const auto & tensor : source.tensors) {
++        source_by_name.emplace(tensor.native_name, &tensor);
++    }
++    carrier = {};
++    carrier.ordered_paths.push_back(path);
++    for (int64_t index = 0; index < gguf_get_n_tensors(metadata.get()); ++index) {
++        const char * name = gguf_get_tensor_name(metadata.get(), index);
++        ggml_tensor * tensor = name == nullptr ? nullptr : ggml_get_tensor(tensors.get(), name);
++        const auto found = name == nullptr ? source_by_name.end() : source_by_name.find(name);
++        if (tensor == nullptr || found == source_by_name.end()) {
++            error = "metadata carrier tensor inventory differs from source";
++            return false;
++        }
++        const auto & expected = *found->second;
++        const int dimensions = ggml_n_dims(tensor);
++        if (expected.dimensions.size() != static_cast<size_t>(dimensions) ||
++                tensor->type != expected.type ||
++                !std::equal(tensor->ne, tensor->ne + dimensions, expected.dimensions.begin(), expected.dimensions.end())) {
++            error = "metadata carrier tensor descriptor differs from source";
++            return false;
++        }
++        auto input = expected;
++        input.split_no = 0;
++        input.data_offset = gguf_get_data_offset(metadata.get()) + gguf_get_tensor_offset(metadata.get(), index);
++        input.stored_length = ggml_nbytes(tensor);
++        carrier.tensors.push_back(std::move(input));
++    }
++    std::sort(carrier.tensors.begin(), carrier.tensors.end(), [](const auto & left, const auto & right) {
++        return left.tensor_id < right.tensor_id;
++    });
++    return true;
++}
++
+ bool is_dummy_buffer(const ggml_tensor * tensor) {
+     return tensor != nullptr && tensor->buffer != nullptr &&
+            ggml_backend_buffer_get_size(tensor->buffer) == 0 &&
+@@ -765,17 +845,19 @@ bool check_public_stage_plan_abi(
+     }
+     skippy_error_free(error);
+     error = nullptr;
+-    auto reversed_paths = shard_paths;
+-    std::reverse(reversed_paths.begin(), reversed_paths.end());
+-    malformed = config;
+-    malformed.shard_paths = reversed_paths.data();
+-    partial_planner = nullptr;
+-    if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
+-            partial_planner != nullptr) {
++    if (shard_paths.size() > 1) {
++        auto reversed_paths = shard_paths;
++        std::reverse(reversed_paths.begin(), reversed_paths.end());
++        malformed = config;
++        malformed.shard_paths = reversed_paths.data();
++        partial_planner = nullptr;
++        if (skippy_stage_planner_create_v1(&malformed, &partial_planner, &error) == SKIPPY_STATUS_OK ||
++                partial_planner != nullptr) {
++            skippy_error_free(error);
++            return false;
++        }
+         skippy_error_free(error);
+-        return false;
+     }
+-    skippy_error_free(error);
+     return true;
+ }
+ 
+@@ -858,6 +940,14 @@ int run_proof(const char * source_path, const char * output_directory, bool expe
+         std::fprintf(stderr, "public stage-plan ABI proof failed\n");
+         return 9;
+     }
++    const std::string carrier_path = std::string(output_directory) + "/metadata-only.gguf";
++    package_inventory carrier;
++    if (!write_metadata_carrier(inventory.ordered_paths, carrier_path, error) ||
++            !inspect_metadata_carrier(carrier_path, inventory, inventory.ordered_paths.size(), carrier, error) ||
++            !check_public_stage_plan_abi(carrier, carrier.ordered_paths, llama_model_n_layer(model.get()))) {
++        std::fprintf(stderr, "metadata carrier stage-plan ABI proof failed: %s\n", error.c_str());
++        return 10;
++    }
+     std::printf(
+             "renamed multishard metadata planning: tensors=%zu dependencies=%zu payload_reads=%zu payload_bytes=%zu recurrent=%d\n",
+             bindings.size(),
+-- 
+2.50.1

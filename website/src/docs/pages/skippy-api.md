@@ -9,7 +9,7 @@ description: Generated reference for the capability-oriented Skippy C ABI.
 
 This reference is generated from the patched llama.cpp public headers. It documents the native C ABI used by Skippy's Rust FFI layer and staged runtime. The ABI is experimental and versioned for lockstep native/Rust builds.
 
-Current generated surface: **15 headers** and **91 exported functions**.
+Current generated surface: **15 headers** and **92 exported functions**.
 
 ## Quick navigation
 
@@ -62,7 +62,7 @@ Current generated surface: **15 headers** and **91 exported functions**.
       </div>
     </section>
     <section class="skippy-api-index__group">
-      <a class="skippy-api-index__group-title" href="#skippy-header-model-package-h"><code>model_package.h</code><span>9 functions</span></a>
+      <a class="skippy-api-index__group-title" href="#skippy-header-model-package-h"><code>model_package.h</code><span>10 functions</span></a>
       <div class="skippy-api-index__functions">
         <a href="#skippy-fn-skippy-model-info-open"><code>skippy_model_info_open</code></a>
         <a href="#skippy-fn-skippy-model-info-free"><code>skippy_model_info_free</code></a>
@@ -72,6 +72,7 @@ Current generated surface: **15 headers** and **91 exported functions**.
         <a href="#skippy-fn-skippy-slice-plan-free"><code>skippy_slice_plan_free</code></a>
         <a href="#skippy-fn-skippy-slice-plan-add-layer-range"><code>skippy_slice_plan_add_layer_range</code></a>
         <a href="#skippy-fn-skippy-write-slice-gguf"><code>skippy_write_slice_gguf</code></a>
+        <a href="#skippy-fn-skippy-write-gguf-metadata-from-parts"><code>skippy_write_gguf_metadata_from_parts</code></a>
         <a href="#skippy-fn-skippy-write-gguf-from-parts"><code>skippy_write_gguf_from_parts</code></a>
       </div>
     </section>
@@ -679,6 +680,19 @@ LLAMA_API enum skippy_status skippy_write_slice_gguf(
          struct skippy_model_info * info,
         const struct skippy_slice_plan * plan,
         int32_t stage_index,
+        const char * output_path,
+        struct skippy_error ** out_error);
+```
+
+<a id="skippy-fn-skippy-write-gguf-metadata-from-parts"></a>
+#### `skippy_write_gguf_metadata_from_parts`
+
+Writes complete GGUF model metadata and tensor descriptors without payload bytes.
+
+```cpp
+LLAMA_API enum skippy_status skippy_write_gguf_metadata_from_parts(
+         const char * const * input_paths,
+        size_t input_count,
         const char * output_path,
         struct skippy_error ** out_error);
 ```
@@ -1557,7 +1571,7 @@ SKIPPY_COMMON_API enum skippy_status skippy_parse_chat_response_json(
 The headers also define the following enums, structs, opaque handles, and ABI constants:
 
 - `activation.h`: `skippy_activation_dtype`, `skippy_activation_layout`, `skippy_activation_boundary_desc`, `skippy_activation_desc`, `SKIPPY_ACTIVATION_BOUNDARY_DESC_VERSION = 1`, `SKIPPY_ACTIVATION_SIDEBAND_TOKEN_IDS = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_RWKV7_V_FIRST = (UINT64_C(1) << 0)`, `SKIPPY_ACTIVATION_FLAG_GEMMA3N_ALTUP = (UINT64_C(1) << 1)`, `SKIPPY_ACTIVATION_FLAG_INKLING_MTP_EMBD = (UINT64_C(1) << 2)`, `SKIPPY_ACTIVATION_FLAG_GLM_DSA_TOP_K = (UINT64_C(1) << 3)`
-- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 52`
+- `common.h`: `skippy_feature`, `skippy_status`, `skippy_error`, `skippy_abi_version`, `SKIPPY_ABI_VERSION_MAJOR = 0`, `SKIPPY_ABI_VERSION_MINOR = 1`, `SKIPPY_ABI_VERSION_PATCH = 53`
 - `devices.h`: `skippy_backend_device_type`, `skippy_backend_device_cap`, `skippy_backend_device`
 - `events.h`: `skippy_runtime_event_v1`, `skippy_runtime_event_reporter_v1`, `SKIPPY_RUNTIME_EVENT_V1_ABI_VERSION = 1`
 - `execution.h`: `skippy_iteration_request`

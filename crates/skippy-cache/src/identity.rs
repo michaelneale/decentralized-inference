@@ -1,6 +1,6 @@
 use skippy_protocol::{FlashAttentionType, LoadMode, StageConfig};
 
-pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1.52/native-kv-page-v3";
+pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1.53/native-kv-page-v3";
 pub const NATIVE_KV_DTYPE: &str = "ggml-native-kv";
 const NATIVE_KV_LAYER_CONTIGUOUS_LAYOUT: i32 = 4;
 
