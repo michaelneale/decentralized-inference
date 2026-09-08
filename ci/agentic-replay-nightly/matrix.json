@@ -10,10 +10,16 @@
   "replay": {
     "mode": "checkpoint",
     "dataset": "thoughtworks/agentic-coding-trajectories",
-    "trajectories_per_framework": 4,
+    "trajectories_per_framework": 8,
     "passes": 2,
     "warmup_turns": 4,
-    "max_output_tokens": 2048
+    "max_output_tokens": 2048,
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ]
   },
   "models": [
     {

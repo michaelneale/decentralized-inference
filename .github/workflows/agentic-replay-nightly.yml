@@ -65,6 +65,9 @@ jobs:
       - name: Replay each pinned model
         run: |
           set -euo pipefail
+          LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
+          LEVEL_ARGS=""
+          for level in $LEVELS; do LEVEL_ARGS="$LEVEL_ARGS --concurrency $level"; done
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
@@ -72,7 +75,8 @@ jobs:
                 --ref main=main \
                 --model "$model_uri" \
                 --backend metal \
-                --trajectories-per-framework 4 \
+                --trajectories-per-framework 8 \
+                $LEVEL_ARGS \
                 --passes 2 \
                 --warmup-turns 4 \
                 --dataset-file "$MESH_AGENTIC_REPLAY_DATASET_FILE" \

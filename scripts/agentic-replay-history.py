@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             build_row(
                 summary,
                 model=model,
-                replay={**replay, "concurrency": summary["concurrency"]},
+                replay={k: v for k, v in replay.items() if k != "concurrency"} | {"concurrency": summary["concurrency"]},
                 hardware=hardware,
                 source_sha=args.source_sha,
                 backend_binary_sha256=args.backend_binary_sha256,
