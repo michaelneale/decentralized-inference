@@ -9,6 +9,7 @@ on:
 # accepted only from main so caller-selected content never reaches micstudio.
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: agentic-replay-nightly
@@ -89,7 +90,7 @@ jobs:
       - name: Download cohort-matched history
         if: always()
         env:
-          HF_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           rm -rf "$HISTORY_LOCAL"
@@ -121,7 +122,7 @@ jobs:
       - name: Publish immutable run shard and card
         if: always() && steps.history.outcome != 'skipped'
         env:
-          HF_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           RUN_DATE=$(date -u +%F)
@@ -139,7 +140,7 @@ jobs:
       - name: Open repair PR on regression (opencode loop)
         if: failure()
         env:
-          GH_TOKEN: ${{ secrets.MESH_AGENTIC_REPLAY_BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           scripts/agentic-replay-repair.sh "$OUTPUT_DIR" || {
