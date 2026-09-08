@@ -350,6 +350,18 @@ checked-in expiry are the maintainer-controlled approval boundary.
   additional coverage, not a replacement.
 - Restore smoke inputs through the shared restore action and reusable smoke
   workflows. Every CI invocation of `mesh-llm` includes `--log-format json`.
+- New release-only preparation paths must execute without publication in PR/main
+  validation using the same implementation and container as release. CI-definition
+  changes need candidate-definition evidence; green protected-main execution alone
+  is not evidence that edited workflow YAML ran. Record any bootstrap gap before
+  requesting merge.
+- Hardware CUDA smoke must select a CUDA backend device explicitly and require
+  positive layer-offload and CUDA model-buffer evidence from each serving
+  process after successful inference. Device enumeration, library loading, or
+  a CPU-forced completion alone do not qualify GPU execution. CPU rows retain
+  explicit CPU selection.
+- CLI JSON consumed by scripts must be exercised with the actual composed host
+  in product smoke, not only with mocked JSON or Cargo dependency coverage.
 - Release and packaging wrap the same producers with signing, attestation,
   publication, and retention. They do not fork the underlying build commands.
 

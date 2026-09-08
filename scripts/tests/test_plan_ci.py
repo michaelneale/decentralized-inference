@@ -28,6 +28,30 @@ def fixture(name: str) -> dict[str, object]:
 
 
 class PlanCiTests(unittest.TestCase):
+    def test_script_only_changes_reach_their_executable_consumers(self) -> None:
+        cases = (
+            ("release-ui-script.json", {"ui-artifact"}, set()),
+            ("release-version-script.json", {"ui-artifact"}, set()),
+            ("native-runtime-consumer-script.json", {"product-smoke", "sdk"}, {"rust", "kotlin", "swift"}),
+            ("product-smoke-script.json", {"product-smoke"}, set()),
+        )
+        for fixture_name, required, sdk_languages in cases:
+            with self.subTest(fixture=fixture_name):
+                payload = fixture(fixture_name)
+                self.assertEqual(len(payload["changed_files"]), 1)
+                plan = PLANNER.build_plan(payload, root=ROOT)
+                self.assertTrue(required <= set(plan["required_slices"]), plan["required_slices"])
+                self.assertTrue(plan["matrices"]["hosts"], "UI must feed a real host producer")
+                if "product-smoke" in required:
+                    self.assertIn("core", {row["id"] for row in plan["matrices"]["smoke"]})
+                self.assertTrue(sdk_languages <= {row["language"] for row in plan["matrices"]["sdk"]})
+
+    def test_cuda_smoke_scripts_select_hardware_consumer(self) -> None:
+        for name in ("product-smoke-script.json", "compat-smoke-script.json", "smoke-offload-script.json"):
+            with self.subTest(fixture=name):
+                plan = PLANNER.build_plan(fixture(name), root=ROOT)
+                self.assertTrue({"core", "core-cuda"} <= {row["id"] for row in plan["matrices"]["smoke"]})
+
     def test_manifest_root_is_independent_from_workspace_root(self) -> None:
         with (
             tempfile.TemporaryDirectory() as workspace_directory,

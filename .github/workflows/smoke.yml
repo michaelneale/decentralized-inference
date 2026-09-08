@@ -76,6 +76,8 @@ jobs:
       # `~/.cache/pip` and onto this ephemeral runner's `/tmp` instead.
       # Harmless (the runner is single-use), just not container-only.
       PIP_CACHE_DIR: /tmp/pip-cache
+      # Shared by normal, headless, compatibility and constrained-stack smokes.
+      MESH_CI_DEVICE: ${{ inputs.runner == 'gpu-nvidia' && 'CUDA0' || 'CPU' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -120,11 +122,13 @@ jobs:
         if: inputs.runner != 'gpu-nvidia'
         run: verify-runner-image public cpu
 
-      - name: Install smoke runtime utilities (self-hosted)
+      - name: Verify prebuilt GPU smoke utilities
         if: inputs.runner == 'gpu-nvidia'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq lsof
+          set -euo pipefail
+          for tool in curl jq lsof; do
+            command -v "$tool" || { echo "GPU runner image is missing $tool" >&2; exit 1; }
+          done
 
       - name: Install smoke dependencies
         # The venv baked into the image is pinned to the image's own mesh-llm
@@ -154,12 +158,16 @@ jobs:
           HUGGING_FACE_HUB_TOKEN: ""
         run: npm install --global openai@7.5.0
 
-      - name: Install CUDA smoke runtime libraries
+      - name: Verify prebuilt CUDA smoke runtime libraries
         if: inputs.runner == 'gpu-nvidia'
         run: |
-          sudo apt-get install -y --no-install-recommends \
-            cuda-cudart-12-9 \
-            libcublas-12-9
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import ctypes
+          for library in ("libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12"):
+              ctypes.CDLL(library)
+              print(f"GPU runner library load passed: {library}")
+          PYTHON
           nvidia-smi --query-gpu=name,compute_cap,driver_version \
             --format=csv,noheader
 

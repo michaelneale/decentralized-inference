@@ -355,14 +355,16 @@ runtime producers are not duplicated.
   protected default-branch reusable workflows, receives no repository secrets or
   credential-bearing caches, and is restricted to the repository's GPU runner
   group. Its PR runtime is compiled for both sm86 and sm120 because the scale
-  set currently contains RTX 3080 and RTX 5090 workers. The smoke installs the
-  pinned CUDA 12.9 user-space runtime libraries required by the host-linked
-  product before inference. Vulkan uses the same approved `gpu-nvidia` host
-  with the explicit `Vulkan0` device. ROCm uses `ROCm0` and its reusable job is
-  skipped unless `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; the
-  corresponding repository-scoped `gpu-amd` runner could not be verified from
-  the current GitHub token. Accelerator product-integration rows remain absent
-  from the checked plan until their live qualification is accepted.
+  set currently contains RTX 3080 and RTX 5090 workers. The core CUDA smoke
+  verifies preinstalled CUDA 12 user-space libraries before inference; it never
+  repairs a mismatched worker with sudo. The separate product-integration CUDA
+  workflow still installs its CUDA dependencies. Vulkan product integration uses
+  the same approved `gpu-nvidia` host with the explicit `Vulkan0` device. ROCm
+  uses `ROCm0` and its reusable job is skipped unless
+  `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; the corresponding
+  repository-scoped `gpu-amd` runner could not be verified from the current
+  GitHub token. Accelerator product-integration rows remain absent from the
+  checked plan until their live qualification is accepted.
 - `ci-linux-sdk-slice.yml` and `ci-macos-sdk-slice.yml` — platform-local
   Rust, Kotlin and Swift consumers. Each smoke downloads the matching
   platform lane's immutable UI artifact before packaging SDK resources;
@@ -719,3 +721,50 @@ complete
 [manage-ci validation contract](../.agents/skills/manage-ci/SKILL.md#validation-contract)
 for scope-specific checks, and run the canonical `just test-all` target when
 full repository validation is required.
+
+### PR/main recurrence coverage
+
+Explicit ownership routes script-only changes: release UI preparation and the
+version updater select the UI producer; product smoke and the native-runtime
+reader select product smoke; the shared native-runtime reader also selects all
+three SDK consumers. Six single-path planner fixtures protect these edges,
+including CUDA hardware selection for both smoke scripts and the offload verifier.
+The ownership catalog delta must land as a separate maintainer-controlled
+catalog-only change before the implementation is rebased; protected PR catalog
+comparison must not be bypassed. Until then this combined working diff cannot
+pass its protected Plan gate.
+
+Product inference smoke invokes `ci-prepare-native-runtime.sh` against the real
+composed binary before starting inference, with build fallback disabled. This
+exercises the SDK CLI-JSON consumer even when full SDK rows are not selected;
+mocked report tests alone do not establish producer/consumer compatibility.
+
+Every console UI producer invokes `ci-prepare-release-ui.sh` in the same pinned
+web container. Release prepares the requested immutable source/version; ordinary
+PR/main producers rehearse that same release preparation in a disposable clone,
+without altering their source, UI mode, or publishing anything. Git trust is
+process-scoped to the exact checkout, including child version-script commands.
+Candidate workflow YAML still requires explicit execution evidence before merge:
+the protected default-branch PR executor does not execute edited YAML.
+
+GPU smoke checks existing utilities and dynamically loads the CUDA 12 runtime
+libraries rather than installing system packages with sudo. Missing tools or
+libraries fail the runner contract before inference. This does not itself prove
+ephemeral placement: administrators must keep persistent runner labels disjoint
+from the CI pool and enforce protected workflow restrictions on its runner group.
+
+The CUDA smoke row sets `MESH_CI_DEVICE=CUDA0` for normal, headless,
+compatibility and constrained-stack probes; other rows retain the CPU default.
+Each serving process must complete inference and then pass
+`ci-verify-smoke-offload.py` against its own isolated runtime-root/PID native
+log: positive GPU-offloaded layers plus a nonzero CUDA0 model buffer. Missing
+logs, zero offload and CPU-only/device-enumeration output fail closed. Selected
+summary lines are printed as JSON evidence before scoped cleanup removes the
+runtime directory. This does not prove runner isolation or performance, and
+local fixture tests are not live GPU qualification.
+
+Product-integration callers retain explicit `MTL0`, `Vulkan0` and `ROCm0`
+selection; this CUDA-specific verifier does not claim offload qualification for
+those backends. Compatibility smoke honors `MESH_COMPAT_DEVICE` first, falling
+back to `MESH_CI_DEVICE` and then CPU, so both the new product suite and legacy
+core CUDA workflow select their intended device.

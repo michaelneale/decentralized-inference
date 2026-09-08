@@ -5,10 +5,16 @@
 
 set -euo pipefail
 
+# Bounded hardware selection; CUDA can never silently opt out of offload checks.
+SMOKE_DEVICE="${MESH_COMPAT_DEVICE:-${MESH_CI_DEVICE:-CPU}}"
+case "$SMOKE_DEVICE" in
+    CPU|CUDA0|Vulkan0|ROCm0|MTL0) ;;
+    *) echo "Unsupported MESH_CI_DEVICE: $SMOKE_DEVICE (expected CPU, CUDA0, Vulkan0, ROCm0 or MTL0)" >&2; exit 1 ;;
+esac
+
 MESH_LLM="${1:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
 BIN_DIR="${2:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
 MODEL="${3:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
-DEVICE="${MESH_COMPAT_DEVICE:-CPU}"
 API_PORT="${MESH_COMPAT_API_PORT:-9348}"
 CONSOLE_PORT="${MESH_COMPAT_CONSOLE_PORT:-3142}"
 MAX_WAIT="${MESH_COMPAT_MAX_WAIT:-180}"
@@ -18,6 +24,7 @@ ATTESTATION_EXPECTED_STATUS="${MESH_RELEASE_ATTESTATION_EXPECTED_STATUS:-valid}"
 SMOKE_STATE_DIR="$(mktemp -d /tmp/mesh-llm-compat-state.XXXXXX)"
 SMOKE_CONFIG_PATH="$SMOKE_STATE_DIR/config.toml"
 SMOKE_RUNTIME_ROOT="$SMOKE_STATE_DIR/runtime"
+trap 'rm -rf -- "$SMOKE_STATE_DIR"' EXIT
 
 inspect_release_attestation() {
     if [[ -z "$ATTESTATION_PUBLIC_KEY_FILE" ]]; then
@@ -42,7 +49,7 @@ echo "  bin-dir:   $BIN_DIR (compatibility placeholder)"
 echo "  model:     $MODEL"
 echo "  api port:  $API_PORT"
 echo "  console:   $CONSOLE_PORT"
-echo "  device:    $DEVICE"
+echo "  device:    $SMOKE_DEVICE"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -69,7 +76,7 @@ env MESH_LLM_CONFIG="$SMOKE_CONFIG_PATH" MESH_LLM_RUNTIME_ROOT="$SMOKE_RUNTIME_R
     serve \
     --model "$MODEL" \
     --no-draft \
-    --device "$DEVICE" \
+    --device "$SMOKE_DEVICE" \
     --ctx-size "${MESH_COMPAT_CTX_SIZE:-256}" \
     --port "$API_PORT" \
     --console "$CONSOLE_PORT" \
@@ -133,5 +140,8 @@ python3 scripts/ci-openai-python-smoke.py --base-url "$BASE_URL"
 python3 scripts/ci-litellm-smoke.py --base-url "$BASE_URL" --model "$MODEL_ID"
 python3 scripts/ci-langchain-openai-smoke.py --base-url "$BASE_URL" --model "$MODEL_ID"
 NODE_PATH="${NODE_PATH:-$(npm root -g 2>/dev/null || true)}" node scripts/ci-openai-node-smoke.cjs --base-url "$BASE_URL"
+
+python3 scripts/ci-verify-smoke-offload.py --device "$SMOKE_DEVICE" \
+    --native-log "$SMOKE_RUNTIME_ROOT/$MESH_PID/logs/skippy-native.log"
 
 echo "OpenAI compatibility smoke passed"

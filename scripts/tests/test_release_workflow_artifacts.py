@@ -24,7 +24,9 @@ class ReleaseWorkflowArtifactTests(unittest.TestCase):
         artifact = "prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}"
         self.assertIn(f"artifact_name: {artifact}", producer)
         ui_workflow = (ROOT / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
-        self.assertIn('echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"', ui_workflow)
+        preparation = (ROOT / "scripts/ci-prepare-release-ui.sh").read_text()
+        self.assertIn('echo "VITE_MESH_LLM_DEBUG_UI=false"', preparation)
+        self.assertIn('scripts/ci-prepare-release-ui.sh "$UI_SOURCE_SHA" "$RELEASE_TAG"', ui_workflow)
         self.assertLess(ui_workflow.index("Prepare release UI version"), ui_workflow.index("Install UI dependencies"))
         self.assertIn("python3 scripts/ui-distribution.py stamp", ui_workflow)
         restore = (ROOT / ".github/actions/restore-release-ui/action.yml").read_text()

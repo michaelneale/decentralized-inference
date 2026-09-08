@@ -92,19 +92,13 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
-      - name: Prepare release UI version
-        if: ${{ inputs.release_tag != '' }}
+      - name: Prepare release UI version (or rehearse without publication)
         working-directory: .
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          UI_SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$UI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$UI_SOURCE_SHA"
-          scripts/release-version.sh "$RELEASE_TAG"
-          echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"
+          UI_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: scripts/ci-prepare-release-ui.sh "$UI_SOURCE_SHA" "$RELEASE_TAG"
       # The container image bakes a warm pnpm store at
       # /home/runner/.local/share/pnpm/store (mesh-llm-runner-images
       # scripts/warm-dependencies.sh). Point pnpm at it directly instead of

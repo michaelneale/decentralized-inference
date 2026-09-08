@@ -1,0 +1,23 @@
+{
+  "profile": "pr-ready",
+  "event_name": "pull_request",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "changed_files": [
+    "scripts/ci-compat-smoke.sh"
+  ],
+  "affected_crates": [
+    "mesh-llm-host-runtime",
+    "mesh-llm"
+  ],
+  "workspace_packages": [
+    {
+      "name": "mesh-llm-host-runtime",
+      "path": "crates/mesh-llm-host-runtime"
+    },
+    {
+      "name": "mesh-llm",
+      "path": "crates/mesh-llm"
+    }
+  ]
+}

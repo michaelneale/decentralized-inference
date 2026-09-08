@@ -9,11 +9,17 @@
 
 set -euo pipefail
 
+# Bounded hardware selection; CUDA can never silently opt out of offload checks.
+SMOKE_DEVICE="${MESH_CI_DEVICE:-CPU}"
+case "$SMOKE_DEVICE" in
+    CPU|CUDA0|Vulkan0|ROCm0|MTL0) ;;
+    *) echo "Unsupported MESH_CI_DEVICE: $SMOKE_DEVICE (expected CPU, CUDA0, Vulkan0, ROCm0 or MTL0)" >&2; exit 1 ;;
+esac
+
 MESH_LLM="${1:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}"
 BIN_DIR="${2:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}"
 MODEL="${3:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path> [mmproj-path]}"
 MMPROJ="${4:-}"
-DEVICE="${MESH_CI_DEVICE:-CPU}"
 API_PORT="${MESH_CI_API_PORT:-9337}"
 CONSOLE_PORT="${MESH_CI_CONSOLE_PORT:-3131}"
 MAX_WAIT="${MESH_CI_MAX_WAIT:-180}"
@@ -23,6 +29,7 @@ ATTESTATION_EXPECTED_STATUS="${MESH_RELEASE_ATTESTATION_EXPECTED_STATUS:-valid}"
 SMOKE_STATE_DIR="$(mktemp -d /tmp/mesh-llm-smoke-state.XXXXXX)"
 SMOKE_CONFIG_PATH="$SMOKE_STATE_DIR/config.toml"
 SMOKE_RUNTIME_ROOT="$SMOKE_STATE_DIR/runtime"
+trap 'rm -rf -- "$SMOKE_STATE_DIR"' EXIT
 
 inspect_release_attestation() {
     if [[ -z "$ATTESTATION_PUBLIC_KEY_FILE" ]]; then
@@ -57,7 +64,7 @@ fi
 echo "  api port:  $API_PORT"
 echo "  console:   $CONSOLE_PORT"
 echo "  os:        $(uname -s)"
-echo "  device:    $DEVICE"
+echo "  device:    $SMOKE_DEVICE"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -77,12 +84,18 @@ if [[ ! -d "$RUNTIME_BUNDLE" ]]; then
 fi
 export MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$RUNTIME_BUNDLE"
 
+# Exercise the SDK's CLI-JSON consumer with the actual composed host, even when
+# semantic routing did not select a full SDK build. Mock JSON fixtures cannot
+# catch a producer changing its output shape independently of this consumer.
+MESH_SDK_NATIVE_RUNTIME_BUILD_FALLBACK=0 scripts/ci-prepare-native-runtime.sh \
+    "$SMOKE_STATE_DIR/sdk-runtime" cpu --reuse-from-binary "$MESH_LLM"
+
 ARGS=(
     --log-format json
     serve
     --model "$MODEL"
     --no-draft
-    --device "$DEVICE"
+    --device "$SMOKE_DEVICE"
     --ctx-size "${MESH_CI_CTX_SIZE:-256}"
     --port "$API_PORT"
     --console "$CONSOLE_PORT"
@@ -222,6 +235,9 @@ AUTO_PAYLOAD="$(
 AUTO_RESPONSE="$(curl -fsS --max-time 60 "${BASE_URL}/chat/completions" -H 'content-type: application/json' -d "$AUTO_PAYLOAD")"
 printf '%s' "$AUTO_RESPONSE" | jq -e '(.choices[0].message.content | length > 0)' >/dev/null
 
+python3 scripts/ci-verify-smoke-offload.py --device "$SMOKE_DEVICE" \
+    --native-log "$SMOKE_RUNTIME_ROOT/$MESH_PID/logs/skippy-native.log"
+
 echo "Testing headless mode subcase..."
 HEADLESS_API_PORT="${MESH_CI_HEADLESS_API_PORT:-9338}"
 HEADLESS_CONSOLE_PORT="${MESH_CI_HEADLESS_CONSOLE_PORT:-3132}"
@@ -231,7 +247,7 @@ HEADLESS_ARGS=(
     serve
     --model "$MODEL"
     --no-draft
-    --device "$DEVICE"
+    --device "$SMOKE_DEVICE"
     --ctx-size "${MESH_CI_CTX_SIZE:-256}"
     --port "$HEADLESS_API_PORT"
     --console "$HEADLESS_CONSOLE_PORT"
@@ -261,8 +277,8 @@ for i in $(seq 1 "$MAX_WAIT"); do
         exit 1
     fi
 
-    if curl -sf "http://127.0.0.1:${HEADLESS_API_PORT}/v1/models" >/dev/null 2>&1 &&
-       curl -sf "http://127.0.0.1:${HEADLESS_CONSOLE_PORT}/api/status" >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${HEADLESS_API_PORT}/v1/models" | jq -e '.data | length > 0' >/dev/null 2>&1 &&
+       curl -sf "http://127.0.0.1:${HEADLESS_CONSOLE_PORT}/api/status" | jq -e '.llama_ready == true' >/dev/null 2>&1; then
         echo "Headless mode ready after ${i}s"
         break
     fi
@@ -285,5 +301,15 @@ if [[ -n "$ATTESTATION_PUBLIC_KEY_FILE" && "$HEADLESS_ATTESTATION_STATUS" != "$A
     echo "Unexpected headless runtime release-attestation status: expected $ATTESTATION_EXPECTED_STATUS, got ${HEADLESS_ATTESTATION_STATUS:-<empty>}" >&2
     exit 1
 fi
+
+# HTTP readiness alone can precede model loading. Exercise this process too,
+# rather than borrowing the first process's successful completion/offload log.
+echo "Testing headless chat completion..."
+HEADLESS_RESPONSE="$(curl -fsS --max-time 60 \
+    "http://127.0.0.1:${HEADLESS_API_PORT}/v1/chat/completions" \
+    -H 'content-type: application/json' -d "$AUTO_PAYLOAD")"
+printf '%s' "$HEADLESS_RESPONSE" | jq -e '(.choices[0].message.content | length > 0)' >/dev/null
+python3 scripts/ci-verify-smoke-offload.py --device "$SMOKE_DEVICE" \
+    --native-log "$SMOKE_RUNTIME_ROOT/$HEADLESS_PID/logs/skippy-native.log"
 
 echo "Skippy smoke passed"
