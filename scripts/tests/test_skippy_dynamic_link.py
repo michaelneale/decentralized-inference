@@ -20,11 +20,15 @@ class SkippyDynamicLinkTests(unittest.TestCase):
         cls.binary = Path(cls.directory.name) / (
             "build-script.exe" if os.name == "nt" else "build-script"
         )
-        subprocess.run(
-            ["just", "with-lld", "rustc", "--edition=2024",
+        # Compile a standalone test fixture with the host linker. The contracts
+        # job has Rust and cc but does not install LLD.
+        result = subprocess.run(
+            ["rustc", "--edition=2024",
              str(ROOT / "crates/skippy-ffi/build.rs"), "-o", str(cls.binary)],
-            cwd=ROOT, check=True, capture_output=True, text=True,
+            cwd=ROOT, capture_output=True, text=True,
         )
+        if result.returncode:
+            raise RuntimeError(f"build-script fixture compilation failed:\n{result.stderr}")
 
     def run_build_script(self, target: str, backend: str, *, runtime_loader: bool = False,
                          legacy: bool = False) -> tuple[list[str], Path]:
