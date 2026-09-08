@@ -135,10 +135,13 @@ same host and port.
 
 The JSON config is intentionally explicit. Each arm records its executable,
 model and tokenizer locations, context capacity, maximum server concurrency,
-cache policy, and extra launch arguments. Before launch, the runner queries the
-engine's reported version (`--version`, or Python package metadata for SGLang)
-and uses SHA-256 of that version string as the arm identity. It does not gate on
-executable, model, or tokenizer file hashes.
+cache policy, and extra launch arguments. Relative executable paths resolve the
+way the launch runs them: a path with a separator is read against the arm's
+`cwd`, a bare name is searched on the runner `PATH`. Before launch, the runner
+queries the engine's reported version (`--version`, or Python package metadata
+for SGLang, bounded by a 30 second timeout) on that same resolved executable
+and uses SHA-256 of that version string as the arm identity. It does not gate
+on executable, model, or tokenizer file hashes.
 
 ```json
 {

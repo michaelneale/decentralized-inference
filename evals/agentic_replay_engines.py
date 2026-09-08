@@ -11,11 +11,15 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 SUPPORTED_ENGINES = ("llama.cpp", "vllm", "sglang")
 LABEL_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+VERSION_COMMAND_TIMEOUT_SECONDS = 30
+# Placeholder for the not-yet-verified external arm identity. The runner
+# replaces it with the verified version SHA-256 before writing artifacts.
+PENDING_VERSION_SHA256 = "reported-version-sha256-at-run"
 
 
 def resolve_path(root: Path, value: Any, field: str) -> Path:
@@ -182,7 +186,8 @@ def parse_arm(
 
 def load_engine_config(path: Path) -> EngineConfig:
     resolved = path.expanduser().resolve()
-    document = json.loads(resolved.read_text(encoding="utf-8"))
+    raw = resolved.read_bytes()
+    document = json.loads(raw.decode("utf-8"))
     if not isinstance(document, dict):
         raise ValueError("engine config must be a JSON object")
     if document.get("schema_version") != 1:
@@ -200,7 +205,7 @@ def load_engine_config(path: Path) -> EngineConfig:
         raise ValueError("engine arm labels must be unique")
     return EngineConfig(
         path=resolved,
-        sha256=hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        sha256=hashlib.sha256(raw).hexdigest(),
         comparison=comparison,
         arms=arms,
     )
@@ -296,20 +301,30 @@ def engine_server_command(
     return command
 
 
-def version_command(arm: EngineArm) -> list[str]:
+def version_command(arm: EngineArm, executable: str) -> list[str]:
     if arm.engine == "sglang":
         return [
-            str(arm.executable),
+            executable,
             "-c",
             "import importlib.metadata; print(importlib.metadata.version('sglang'))",
         ]
-    return [str(arm.executable), "--version"]
+    return [executable, "--version"]
 
 
-def engine_version(arm: EngineArm) -> str:
-    result = subprocess.run(
-        version_command(arm), text=True, capture_output=True, check=False
-    )
+def engine_version(arm: EngineArm, executable: str) -> str:
+    try:
+        result = subprocess.run(
+            version_command(arm, executable),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=VERSION_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"{arm.label} version command timed out after "
+            f"{VERSION_COMMAND_TIMEOUT_SECONDS}s"
+        ) from error
     value = (result.stdout or result.stderr).strip()
     if result.returncode != 0 or not value:
         raise RuntimeError(
@@ -319,13 +334,39 @@ def engine_version(arm: EngineArm) -> str:
     return value
 
 
+def resolve_engine_executable(arm: EngineArm) -> str:
+    """Resolve the arm executable the way the server launch will run it.
+
+    Preflight must inspect the exact binary that ``start_server`` launches.
+    That launch runs the command with ``cwd=arm.cwd``, which gives standard
+    ``execvp`` semantics: a relative path with a separator (``./server``) is
+    resolved against the launch working directory, an absolute path is used
+    as-is, and a bare name is searched on the runner's ``PATH``. Matching that
+    here guarantees the recorded version belongs to the launched executable.
+    """
+    has_separator = os.sep in arm.executable or (
+        os.altsep is not None and os.altsep in arm.executable
+    )
+    if has_separator:
+        candidate = Path(arm.executable).expanduser()
+        if not candidate.is_absolute():
+            candidate = arm.cwd / candidate
+        if candidate.is_file():
+            return str(candidate.resolve())
+        return ""
+    return shutil.which(arm.executable) or ""
+
+
 def verify_engine_arm(arm: EngineArm) -> dict[str, Any]:
-    executable = shutil.which(arm.executable)
-    if executable is None:
-        raise FileNotFoundError(f"{arm.label} executable not found: {arm.executable}")
+    executable = resolve_engine_executable(arm)
+    if not executable:
+        raise FileNotFoundError(
+            f"{arm.label} executable not found: {arm.executable} "
+            f"(resolved against cwd {arm.cwd})"
+        )
     if not arm.cwd.is_dir():
         raise FileNotFoundError(f"{arm.label} cwd not found: {arm.cwd}")
-    version = engine_version(arm)
+    version = engine_version(arm, executable)
     version_sha256 = hashlib.sha256(version.encode()).hexdigest()
     provenance = {
         **arm.plan_identity(),
@@ -357,12 +398,22 @@ def external_server_environment(hf_home: Path | None) -> dict[str, str]:
     return environment
 
 
-def engine_order_specs(config: EngineConfig) -> list[dict[str, str]]:
+def engine_order_specs(
+    config: EngineConfig,
+    version_sha256_by_label: Mapping[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Return plan-order specs for the external arms.
+
+    ``version_sha256_by_label`` supplies the verified arm identity once the
+    runner has run preflight; without it the placeholder
+    ``PENDING_VERSION_SHA256`` marks the identity as not yet verified.
+    """
+    verified = version_sha256_by_label or {}
     return [
         {
             "label": arm.label,
             "ref": f"external:{arm.engine}",
-            "commit": "reported-version-sha256-at-run",
+            "commit": verified.get(arm.label, PENDING_VERSION_SHA256),
         }
         for arm in config.arms
     ]

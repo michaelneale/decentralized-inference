@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
 
@@ -55,6 +55,16 @@ from agentic_replay_engines import (  # noqa: E402
     load_engine_config,
     verify_engine_arm,
 )
+
+
+def verified_version_sha256_by_label(
+    builds: Sequence[dict[str, Any]],
+) -> dict[str, str]:
+    return {
+        build["label"]: build["version_sha256"]
+        for build in builds
+        if build.get("engine", "mesh") != "mesh"
+    }
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -177,7 +187,9 @@ def external_config(args: argparse.Namespace) -> EngineConfig | None:
 
 
 def combined_specs(
-    mesh_specs: Sequence[RefSpec], config: EngineConfig | None
+    mesh_specs: Sequence[RefSpec],
+    config: EngineConfig | None,
+    version_sha256_by_label: Mapping[str, str] | None = None,
 ) -> list[RefSpec]:
     if config is None:
         return list(mesh_specs)
@@ -188,7 +200,10 @@ def combined_specs(
         )
     return [
         *mesh_specs,
-        *(RefSpec(**item) for item in engine_order_specs(config)),
+        *(
+            RefSpec(**item)
+            for item in engine_order_specs(config, version_sha256_by_label)
+        ),
     ]
 
 
@@ -1725,6 +1740,24 @@ def markdown_cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
+def markdown_code_cell(value: Any) -> str:
+    """Render an arbitrary string as a delimiter-safe Markdown code cell.
+
+    The report wraps these values in fixed backtick fences, so a literal
+    backtick would terminate the span, and backslash-pipe escaping is unsafe
+    when the value itself ends in a backslash (the pair would un-escape the
+    pipe and re-split the table cell). Render as an HTML code element with
+    every Markdown/HTML delimiter entity-escaped: table renderers honor HTML
+    escapes inside GitHub-flavored Markdown tables, and with no raw pipe,
+    backtick, or angle brackets left in the cell it cannot split the table or
+    re-enter Markdown syntax.
+    """
+    text = html.escape(str(value), quote=False)
+    text = text.replace("|", "&#124;").replace("`", "&#96;")
+    text = text.replace("\r", " ").replace("\n", " ")
+    return f"<code>{text}</code>"
+
+
 def svg_chart(
     title: str,
     rows: Sequence[dict[str, Any]],
@@ -1855,7 +1888,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
         identity = build.get("commit", "unknown")
         lines.append(
             f"| {markdown_cell(build['label'])} | {markdown_cell(engine)} | "
-            f"`{markdown_cell(version_or_ref)}` | `{identity[:12]}` |"
+            f"{markdown_code_cell(version_or_ref)} | `{identity[:12]}` |"
         )
     lines.extend(
         [
@@ -2007,10 +2040,11 @@ def benchmark_plan(
     args: argparse.Namespace,
     specs: Sequence[RefSpec],
     engine_config: EngineConfig | None = None,
+    version_sha256_by_label: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     config = load_competitive_config()
     dataset = config["thoughtworks"]["dataset"]
-    order_specs = combined_specs(specs, engine_config)
+    order_specs = combined_specs(specs, engine_config, version_sha256_by_label)
     return {
         "schema_version": 3,
         "repo": str(args.repo),
@@ -2130,12 +2164,21 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         args.hf_home = args.hf_home.resolve()
     specs = parse_ref_specs(args.repo, args.ref)
     engine_config = external_config(args)
-    plan = benchmark_plan(args, specs, engine_config)
-    order_specs = combined_specs(specs, engine_config)
     external_builds = (
         [verify_engine_arm(arm) for arm in engine_config.arms]
         if engine_config is not None
         else []
+    )
+    plan = benchmark_plan(
+        args,
+        specs,
+        engine_config,
+        version_sha256_by_label=verified_version_sha256_by_label(external_builds),
+    )
+    order_specs = combined_specs(
+        specs,
+        engine_config,
+        version_sha256_by_label=verified_version_sha256_by_label(external_builds),
     )
     args.output.mkdir(parents=True, exist_ok=True)
     existing = args.output / "run.json"
@@ -2219,7 +2262,11 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             for build in builds
         }
         if previous_builds != current_builds:
-            raise RuntimeError("cannot resume: built binary or runtime hashes differ")
+            raise RuntimeError(
+                "cannot resume: arm build identity differs from the existing "
+                "run.json (commit, binary or runtime hashes, or reported "
+                "engine version_sha256 changed)"
+            )
         if previous.get("inputs", {}).get("manifest_sha256") != inputs["manifest_sha256"]:
             raise RuntimeError("cannot resume: Thoughtworks trajectory manifest differs")
         run_document["results"] = previous["results"]

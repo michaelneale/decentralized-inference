@@ -1293,6 +1293,119 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(plan["workload"]["measured_requests_total"], 216)
         self.assertIn("--max-num-seqs", plan["external_server_commands"][0])
 
+    def test_plan_order_uses_verified_engine_identity_when_supplied(self) -> None:
+        args = SimpleNamespace(
+            repo=REPO,
+            backend="metal",
+            model="model-uri",
+            passes=1,
+            source_dataset=["swe-smith-claude-3-7-sonnet"],
+            framework=["swe-agent", "mini-swe-agent", "openhands"],
+            trajectories_per_framework=4,
+            min_isl=8192,
+            max_isl=65536,
+            min_turns=5,
+            concurrency=[1, 2, 4],
+            max_output_tokens=2048,
+            warmup_turns=4,
+            replay_mode="checkpoints",
+        )
+        external_builds = [
+            {
+                "label": "rc8",
+                "engine": "mesh",
+                "version_sha256": "mesh-hash",
+            },
+            {
+                "label": "vllm",
+                "engine": "vllm",
+                "version_sha256": "c" * 64,
+            },
+        ]
+        verified = BENCH.verified_version_sha256_by_label(external_builds)
+        self.assertEqual(verified, {"vllm": "c" * 64})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 65536,
+                                "max_concurrency": 4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            engine_config = BENCH.load_engine_config(path)
+
+            plan = BENCH.benchmark_plan(
+                args, self.specs(), engine_config, version_sha256_by_label=verified
+            )
+
+        self.assertEqual(
+            [item["commit"] for item in plan["order"]],
+            ["a" * 40, "b" * 40, "c" * 64],
+        )
+        self.assertEqual(
+            [spec.commit for spec in BENCH.combined_specs(self.specs(), None)],
+            ["a" * 40, "b" * 40],
+        )
+
+    def test_build_resume_identity_compares_external_version_hashes(self) -> None:
+        mesh = {
+            "label": "rc8",
+            "engine": "mesh",
+            "commit": "a" * 40,
+            "binary_sha256": "x" * 64,
+            "runtime_sha256": "y" * 64,
+        }
+        external = {
+            "label": "vllm",
+            "engine": "vllm",
+            "version_sha256": "c" * 64,
+        }
+
+        self.assertEqual(
+            BENCH.build_resume_identity(mesh),
+            ("a" * 40, "x" * 64, "y" * 64),
+        )
+        self.assertEqual(
+            BENCH.build_resume_identity(external),
+            ("c" * 64,),
+        )
+
+    def test_resume_mismatch_message_reports_arm_identity_not_binary_claims(
+        self,
+    ) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("engine version_sha256 changed", source)
+        self.assertNotIn("built binary or runtime hashes differ", source)
+
+    def test_report_escapes_backticks_and_pipes_in_version_cells(self) -> None:
+        self.assertEqual(
+            BENCH.markdown_code_cell("v`0`|x"),
+            "<code>v&#96;0&#96;&#124;x</code>",
+        )
+        self.assertEqual(
+            BENCH.markdown_code_cell("a\\|b"),
+            "<code>a\\&#124;b</code>",
+        )
+        self.assertEqual(
+            BENCH.markdown_code_cell("multi\r\nline"),
+            "<code>multi  line</code>",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
