@@ -15,6 +15,62 @@ def job_block(workflow: str, job_name: str, next_job_name: str) -> str:
 
 
 class ReleaseWorkflowArtifactTests(unittest.TestCase):
+    def test_release_ui_is_one_verified_producer_for_hosts_and_sdks(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        producer = job_block(workflow, "release_ui", "build")
+        self.assertIn("uses: ./.github/workflows/ci-ui-artifact-slice.yml", producer)
+        self.assertIn("source_sha: ${{ needs.metadata.outputs.source_sha }}", producer)
+        self.assertIn("release_tag: ${{ needs.metadata.outputs.tag }}", producer)
+        artifact = "prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}"
+        self.assertIn(f"artifact_name: {artifact}", producer)
+        ui_workflow = (ROOT / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
+        self.assertIn('echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"', ui_workflow)
+        self.assertLess(ui_workflow.index("Prepare release UI version"), ui_workflow.index("Install UI dependencies"))
+        self.assertIn("python3 scripts/ui-distribution.py stamp", ui_workflow)
+        restore = (ROOT / ".github/actions/restore-release-ui/action.yml").read_text()
+        self.assertIn('"$python_bin" scripts/ui-distribution.py verify', restore)
+        for name, next_name in (("build", "compose_cpu_products"),
+                                ("build_linux_arm64", "compose_linux_arm64_cpu"),
+                                ("windows_host_input", "compose_windows_gpu")):
+            host = job_block(workflow, name, next_name)
+            with self.subTest(host=name):
+                self.assertIn("needs: [metadata, release_ui]", host)
+                self.assertIn(f"artifact_name: {artifact}", host)
+                self.assertIn('skip_ui: "true"', host)
+                self.assertNotIn("pnpm/action-setup", host)
+                self.assertLess(host.index("restore-release-ui"), host.index("Build and attest"))
+        swift = job_block(workflow, "build_swift_sdk_artifact", "build_linux_arm64")
+        self.assertIn("needs: [metadata, release_ui]", swift)
+        self.assertIn(f"ui_artifact_name: {artifact}", swift)
+        swift_workflow = (ROOT / ".github/workflows/swift-sdk-artifact.yml").read_text()
+        self.assertIn("if: ${{ inputs.ui_artifact_name == '' }}", swift_workflow)
+        self.assertIn("scripts/package-sdk-console-assets.sh --sdk swift --skip-build", swift_workflow)
+        publish = job_block(workflow, "publish", "dispatch_packaging_release")
+        self.assertIn("      - release_ui", publish)
+        self.assertIn("--sdk all --skip-build", publish)
+        self.assertNotIn("pnpm/action-setup", publish)
+        self.assertFalse(artifact.startswith("release-"), "UI must not match published release-* assets")
+
+    def test_linux_release_composers_use_cpu_tools_and_keep_readiness(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cpu = "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d"
+        for name, next_name in (("compose_linux_aarch64_cuda", "compose_linux_cuda"),
+                                ("compose_linux_cuda", "compose_linux_rocm"),
+                                ("compose_linux_rocm", "compose_linux_vulkan"),
+                                ("compose_linux_vulkan", "windows_host_input")):
+            compose = job_block(workflow, name, next_name)
+            with self.subTest(composer=name):
+                self.assertIn(f"image: {cpu}", compose)
+                self.assertIn("verify-runner-image public cpu", compose)
+                self.assertIn('readiness_smoke: "true"', compose)
+                self.assertIn("MESH_RELEASE_HOST_PRESTAMPED", compose)
+                self.assertNotIn("prepare-native-runtime-input", compose)
+        cuda = job_block(workflow, "build_native_runtime_linux_x86_64_cuda", "build_native_runtime_linux_x86_64_rocm")
+        self.assertIn("vars.USE_SELF_HOSTED == 'true'", cuda)
+        self.assertIn('"amd64","gpu-nvidia"', cuda)
+        self.assertIn("image: ${{ matrix.runner_image }}", cuda)
+        self.assertIn("verify-runner-image public cuda", cuda)
+
     def test_release_entrypoint_rejects_untrusted_refs(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         metadata = job_block(workflow, "metadata", "build")

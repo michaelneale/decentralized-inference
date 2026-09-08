@@ -157,7 +157,7 @@ it after the protected-main runner-contract update is active.
 | `ci-windows-lane.yml` | Windows host/runtime/product/platform graph with one platform-local UI producer |
 | `ci-quality-slice.yml` | Contracts, format, Clippy and generated CLI inventory freshness; additive protected authority sentinel |
 | `ci-web-slice.yml` | Console quality, console Playwright E2E, public website build, and CLI explorer browser validation |
-| `ci-ui-artifact-slice.yml` | Immutable console distribution producer |
+| `ci-ui-artifact-slice.yml` | Immutable console distribution producer; release callers prepare one source/version-bound UI with complete file checksums, shared by all hosts and SDK resources |
 | `static-abi-artifact.yml` | Typed static llama ABI producer with internal runner policy and an exact toolchain-epoch output |
 | `ci-rust-tests-slice.yml` | Typed deterministic Cargo test batches that verify the producer-owned static ABI toolchain epoch and a pinned, digest-verified Skippy correctness fixture; related PR changes additionally compile one asserted, fully qualified runtime test and smoke an immutable SmolLM2 SafeTensors checkpoint through the complete Mesh config/resolver/server/native path to sampled prefill and decode with every supported load-time quantization |
 | `ci-{linux,macos,windows}-host-slice.yml` | Platform-pure neutral host producers; no empty cross-platform jobs |
@@ -213,7 +213,8 @@ Reusable slices/workflows with a `container:` job, and what backs it:
 | `website-pages.yml` | `build` | `public web` |
 | `nightly-stability-run.yml` | `stability` | `public web` (bakes node/pnpm the CLI-smoke step needs) |
 | `nightly-kv-coverage.yml` | `ownership-state-machines` | `public cpu`, sha256:8d93de6b... |
-| `release.yml` (several CUDA/ROCm/Vulkan build/compose rows) | per-backend `public` digests | pre-existing, unrelated to this containerization work; each row pins its own backend digest via `ci/slices.yml` / job matrix, not a shared convention |
+| `release.yml` (CUDA/ROCm/Vulkan compiler rows) | per-backend `public` digests | Native compiler/toolkit images remain backend-specific; amd64 CUDA preserves its intentional ARC self-hosted placement |
+| `release.yml` (Linux CUDA/ROCm/Vulkan composition rows) | `public cpu`, sha256:8d93de6b... | Verify, compose, readiness-test and archive exact producer bytes without downloading a compiler toolkit |
 
 `public cpu` and `public web` are separate image builds (the latter adds
 `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`,
@@ -466,6 +467,14 @@ changed paths require the documented CI-control or runner-infrastructure
 fail-open policy.
 
 ## Artifact and cache owners
+
+- `restore-release-ui` / `scripts/ui-distribution.py`: verify the shared release
+  console's source SHA, version, complete file hashes and built JavaScript entry
+  before platform-specific Rust compilation or SDK resource packaging. The
+  `prepared-release-ui-*` artifact retains for 90 days and is excluded from the
+  GitHub release asset glob. Swift release resource assembly skips pnpm and the
+  console build when this artifact is supplied; ordinary PR/main behavior is
+  unchanged.
 
 - `prepare-host-input` / `prepare-windows-host-input`: neutral host bytes,
   import report and checksum.
