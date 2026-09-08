@@ -659,6 +659,16 @@ The warmer's `just ci-sccache-seed-build` recipe covers both the dominant
 `mesh-llm` Clippy graph and the isolated `mesh-llm-cli` test graph used by the
 Rust-test matrix; its `Justfile` and `just/**` inputs are part of the exact
 seed key.
+`ci/runner-images.json` and `scripts/runner-image-identity.py check` make the
+current image, native epoch, compiler-seed and SDK Rust identities auditable
+without changing execution. The existing Python test discovery verifies the
+catalog against workflow bindings and real planner rows. Historical tool
+receipts and source provenance remain unknown until qualified image receipts
+exist. Workload coverage is a separate unknown: the host seed does not build
+the llama.cpp runtime graph, and the current CPU runtime architecture guard
+does not match its `amd64` planner row. A spelling correction alone cannot
+establish useful cache hits. The separate `diagnose` command reports this
+condition; the initial catalog does not enable runtime restoration.
 These four high-fanout job families also disable the per-object GHA backend on
 every provider. Small exact native
 caches have substantially better reuse-to-storage value. Cache hits are always
@@ -728,3 +738,72 @@ complete
 [manage-ci validation contract](../.agents/skills/manage-ci/SKILL.md#validation-contract)
 for scope-specific checks, and run the canonical `just test-all` target when
 full repository validation is required.
+
+### Offline runner identity qualification
+
+Runner-images PR #23 merged as `f73c2a9`. Trusted producer admission must run
+`runner-cohort.py fetch` for the exact successful staged attempt before a
+maintainer adopts its exact-byte cohort hash, origin and admission-validator
+revision. Offline structural validation alone cannot perform that admission.
+
+The consumer's `runner-image-identity.py bind` accepts a separate reviewed anchor
+and emits a fresh proposal directory containing `ci/runner-images.json` plus
+content-addressed `ci/runner-image-evidence/<sha256>.json` files. It does not
+modify the input catalog, workflows, image pins, compiler seed or cache policy.
+Qualified public UI and browser entries retain reviewed admission evidence; historical full-web and native entries remain null.
+
+```sh
+python3 scripts/runner-image-identity.py --root /trusted/mesh-llm bind \
+  --image-id public-cpu --cohort /admitted/staged-cohort.json \
+  --anchor /reviewed/anchor.json --output /new/proposal
+python3 scripts/runner-image-identity.py --root /new/proposal validate
+```
+
+The anchor has exactly `receipt` and `provenance` objects. Receipt fields are
+`schema: 1`, `cohort_sha256` and `index_candidate_key`. Provenance fields are
+`schema: 1`, `scope: reviewed_producer_admission`,
+`validation: offline_binding_only`, `cohort_sha256`, the exact producer `origin`
+object, and `admission_validator_revision`. The anchor must come from the
+maintainer's reviewed admission result, never from a downloaded assertion that
+it was admitted. Hashes identify bytes; they do not authenticate their author.
+
+Review and apply both catalog and evidence together. `validate` works on the
+proposal alone; `check` also needs the trusted workflow/planner tree after
+reviewed application. Every command validates non-null bindings. `--catalog`
+changes only the catalog input; evidence always resolves beneath explicit
+`--root`. Existing output directories fail rather than being overwritten.
+
+Bindings require the existing pinned family-index digest and exact platform,
+source and family relationships. Full producer tool-policy, OCI and cache-input
+verification remains producer admission's responsibility. The complete hashed
+cohort retains those observations without a mandatory external checkout at
+ordinary check time. This is reviewed producer admission with offline binding
+only, never independently authenticated provenance or verified attestation.
+Matching identity does not establish compiler workload coverage, authorize
+cross-image reuse, or enable a currently ineligible cache restore.
+
+### Qualified lean UI consumers
+
+Public UI and browser images were admitted from runner-images run `34256062098`,
+attempt 1, producer `f73c2a956a992e55bc100fe9543fe60f4cc77684`, Mesh source
+`8578d0f467de5ba659d376d52079ae1d63ed2871`. Their full retained cohort is
+content-addressed under `ci/runner-image-evidence/`; catalog provenance describes
+reviewed producer admission and offline binding, not independent authentication.
+
+UI quality and ordinary UI artifact builds use public UI; E2E uses public browser.
+The UI artifact job selects full web only when `release_tag` is nonempty, preserving
+release version preparation with Cargo and Perl. Both conditional image branches
+are catalogued and checked exactly. Website crate docs, AI runtime, and other
+full-web consumers retain their existing image. CPU seed eligibility and hardware
+runner placement are unchanged.
+
+Before merge, dispatch the existing `ci-website-lane.yml` and an applicable fully
+hosted platform lane, such as `ci-macos-lane.yml`, on the reviewed candidate branch
+with the actual candidate source SHA and canonical
+planner-generated lane projections and full-plan digest. Preserve the actual PR
+profile, changed files, required slices and matrices; do not trim a projection to
+avoid required work. These lanes call same-commit slices, proving UI quality, E2E
+and ordinary artifact execution in the new images. Retain logs and artifact checks.
+Protected default-branch PR slices alone can still execute old image definitions;
+their success is not candidate-image qualification. Release-tag selection must also
+retain its full-web image and release-only preparation guard.
