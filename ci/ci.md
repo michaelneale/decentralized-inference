@@ -741,8 +741,7 @@ full repository validation is required.
 
 ### Offline runner identity qualification
 
-The proposed retained-cohort producer flow belongs to runner-images PR #23,
-which is still pending. Upon merge, trusted producer admission must run
+Runner-images PR #23 merged as `f73c2a9`. Trusted producer admission must run
 `runner-cohort.py fetch` for the exact successful staged attempt before a
 maintainer adopts its exact-byte cohort hash, origin and admission-validator
 revision. Offline structural validation alone cannot perform that admission.
@@ -751,7 +750,7 @@ The consumer's `runner-image-identity.py bind` accepts a separate reviewed ancho
 and emits a fresh proposal directory containing `ci/runner-images.json` plus
 content-addressed `ci/runner-image-evidence/<sha256>.json` files. It does not
 modify the input catalog, workflows, image pins, compiler seed or cache policy.
-All current catalog receipt/provenance fields remain null.
+Qualified public UI and browser entries retain reviewed admission evidence; historical full-web and native entries remain null.
 
 ```sh
 python3 scripts/runner-image-identity.py --root /trusted/mesh-llm bind \
@@ -782,3 +781,28 @@ ordinary check time. This is reviewed producer admission with offline binding
 only, never independently authenticated provenance or verified attestation.
 Matching identity does not establish compiler workload coverage, authorize
 cross-image reuse, or enable a currently ineligible cache restore.
+
+### Qualified lean UI consumers
+
+Public UI and browser images were admitted from runner-images run `34256062098`,
+attempt 1, producer `f73c2a956a992e55bc100fe9543fe60f4cc77684`, Mesh source
+`8578d0f467de5ba659d376d52079ae1d63ed2871`. Their full retained cohort is
+content-addressed under `ci/runner-image-evidence/`; catalog provenance describes
+reviewed producer admission and offline binding, not independent authentication.
+
+UI quality and ordinary UI artifact builds use public UI; E2E uses public browser.
+The UI artifact job selects full web only when `release_tag` is nonempty, preserving
+release version preparation with Cargo and Perl. Both conditional image branches
+are catalogued and checked exactly. Website crate docs, AI runtime, and other
+full-web consumers retain their existing image. CPU seed eligibility and hardware
+runner placement are unchanged.
+
+Before merge, dispatch the existing `ci-website-lane.yml` and `ci-linux-lane.yml`
+on the reviewed candidate branch with the actual candidate source SHA and canonical
+planner-generated lane projections and full-plan digest. Preserve the actual PR
+profile, changed files, required slices and matrices; do not trim a projection to
+avoid required work. These lanes call same-commit slices, proving UI quality, E2E
+and ordinary artifact execution in the new images. Retain logs and artifact checks.
+Protected default-branch PR slices alone can still execute old image definitions;
+their success is not candidate-image qualification. Release-tag selection must also
+retain its full-web image and release-only preparation guard.

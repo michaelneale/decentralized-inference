@@ -186,7 +186,7 @@ bindings, native epochs, compiler-seed identity and the separate SDK Rust
 toolchain identity. `scripts/runner-image-identity.py check` compares those
 values with every literal workflow image binding and the actual planner rows.
 Its focused tests run through the existing `just ci-validate` discovery. This
-catalog adds no planner authority and changes no image pins or cache keys.
+catalog adds no planner authority and changes no cache keys.
 Historical receipt, provenance and workload-coverage fields are explicitly
 unknown. `diagnose` reports the runtime architecture guard mismatch separately;
 matching image identity does not qualify the host seed for native runtime work.
@@ -200,7 +200,7 @@ backend) and `5ea673b` (#21, the Playwright version assert). The GHCR
 package name
 `ghcr.io/mesh-llm/mesh-llm-cuda-runner` is legacy: it hosts every backend
 family (`public cpu`, `public cuda`, `public rocm`, `public vulkan`,
-`public web`, `self-hosted`), not only CUDA. Each image bakes
+`public web`, `public ui`, `public browser`, `self-hosted`), not only CUDA. Full native/web images bake
 `cargo cmake docker git jq just lld node ninja npm pnpm python rustc sccache`
 (asserted by `verify-runner-image`, see below) plus a Python venv on `PATH`
 (`VIRTUAL_ENV=/opt/mesh-llm/venv`), pinned pnpm/node (`PNPM_HOME`,
@@ -218,8 +218,8 @@ Reusable slices/workflows with a `container:` job, and what backs it:
 | `hf-download-smoke.yml`, `scripted-binary-smoke.yml` | their single job | `public cpu`, sha256:8d93de6b... -- unconditional, no bare-metal row |
 | `smoke.yml` | `smoke_tests` | `public cpu` when `inputs.runner != 'gpu-nvidia'`, else uncontainerized (see opt-out below) |
 | `sdk-smoke.yml` | its job | `public cpu` when `inputs.sdk_kind != 'swift'`, else uncontainerized |
-| `ci-ui-artifact-slice.yml` | `ui_artifact` | `public web`, sha256:1c73f0f2... |
-| `ci-web-slice.yml` | `ui_quality`, `ui_e2e`, `website` | `public web` |
+| `ci-ui-artifact-slice.yml` | `ui_artifact` | `public ui` ordinarily; existing `public web` for nonempty release tags |
+| `ci-web-slice.yml` | `ui_quality`, `ui_e2e`, `website` | `public ui`, `public browser`, existing `public web`, respectively |
 | `website-pages.yml` | `build` | `public web` |
 | `nightly-stability-run.yml` | `stability` | `public web` (bakes node/pnpm the CLI-smoke step needs) |
 | `nightly-kv-coverage.yml` | `ownership-state-machines` | `public cpu`, sha256:8d93de6b... |
@@ -363,7 +363,7 @@ the test rather than by anything failing.
 
 Containerized jobs run `verify-runner-image <environment> <backend> ...`
 (positional args: environment, backend, mesh-llm revision, CUDA series, ROCm
-version, runner-images revision, and -- `public web` only -- expected
+version, runner-images revision, and -- browser/web images -- expected
 Playwright version, added in `mesh-llm-runner-images`#21) before doing real
 work, asserting `/etc/mesh-runner-*` files match what the job expects rather
 than trusting the digest pin alone. `ci-web-slice.yml`'s `ui_e2e` job
@@ -709,4 +709,13 @@ Current image references and historical null evidence remain unchanged.
 The `product-smoke` catalog role covers both the legacy `smoke.yml` job and
 the typed `product-integration-smoke.yml` job. The latter uses the same pinned
 CPU image only for Linux CPU; accelerator and macOS paths retain their existing
-container opt-outs. The inventory has 30 roles and 31 literal workflow bindings.
+container opt-outs. The inventory has 9 images, 31 roles and 32 literal workflow image bindings.
+
+### Qualified lean UI consumers
+
+UI quality and ordinary UI artifacts use qualified public UI; E2E uses public
+browser. Nonempty release tags keep UI artifact preparation on existing full web.
+The catalog retains the admitted run `34256062098` attempt 1 cohort for UI/browser;
+other historical receipts and CPU seed workload coverage remain unknown.
+See [CI topology](../../../../ci/ci.md#qualified-lean-ui-consumers) for admission
+scope and the required candidate-branch lane execution before merge.

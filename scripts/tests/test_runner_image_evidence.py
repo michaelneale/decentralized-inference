@@ -22,6 +22,8 @@ class EvidenceTests(unittest.TestCase):
         self.raw = (ROOT / "scripts/tests/fixtures/runner-image-evidence/synthetic-cohort.json").read_bytes()
         self.cohort = E.decode(self.raw)
         self.catalog = json.loads((ROOT / "ci/runner-images.json").read_text())
+        for image in self.catalog["images"].values():
+            image["receipt"] = image["provenance"] = None
         self.image = self.catalog["images"]["public-cpu"]
         # Only test copies use the synthetic index; checked-in pins remain unchanged.
         self.image["reference"] = E.IMAGE + "@" + self.cohort["candidates"]["candidate-index-public-cpu"]["digest"]

@@ -109,10 +109,10 @@ def validate(catalog: dict[str, Any], root: Path = ROOT) -> None:
                     bool(re.fullmatch(r"[a-z0-9_-]+\.ya?ml", binding["workflow"])), f"{role_id}: invalid workflow")
             require(isinstance(binding["job"], str) and bool(IDENTIFIER.fullmatch(binding["job"])),
                     f"{role_id}: invalid job")
-            require((binding["workflow"] == "release.yml") == (role["scope"] == "release"),
+            require((binding["workflow"] == "release.yml" or binding["matrix_selector"] == {"release_tag": "nonempty"}) == (role["scope"] == "release"),
                     f"{role_id}: release scope mismatch")
             selector = binding["matrix_selector"]
-            require(selector is None or selector in ({"cuda_major": "12"}, {"cuda_major": "13"}),
+            require(selector is None or selector in ({"cuda_major": "12"}, {"cuda_major": "13"}, {"release_tag": "empty"}, {"release_tag": "nonempty"}),
                     f"{role_id}: unsupported matrix selector")
             expression = binding["image_expression"]
             require(isinstance(expression, str) and expression.count("{image}") == 1 and "\n" not in expression,
@@ -123,6 +123,16 @@ def validate(catalog: dict[str, Any], root: Path = ROOT) -> None:
                     f"{role_id}: native epoch is unknown")
             bindings.append((binding["workflow"], binding["job"], json.dumps(selector, sort_keys=True)))
     require(len(bindings) == len(set(bindings)), "duplicate consumer binding")
+    conditional = [binding for role in roles.values() for binding in role["bindings"]
+                   if binding["matrix_selector"] in ({"release_tag": "empty"}, {"release_tag": "nonempty"})]
+    if conditional:
+        occupants = [binding for role in roles.values() for binding in role["bindings"]
+                     if binding["workflow"] == "ci-ui-artifact-slice.yml" and binding["job"] == "ui_artifact"]
+        require(len(occupants) == 2 and len(conditional) == 2 and
+                {binding["matrix_selector"]["release_tag"] for binding in conditional} == {"empty", "nonempty"} and
+                all(binding["workflow"] == "ci-ui-artifact-slice.yml" and binding["job"] == "ui_artifact" and
+                    binding["image_expression"] == "{image}" and binding["epoch_field"] is None for binding in conditional),
+                "release-tag image branches must be one complete UI artifact pair")
     named_map(catalog["runtime_rows"], "runtime_rows")
     for row_id, row in catalog["runtime_rows"].items():
         fields(row, "image_id platform architecture backend", row_id)
@@ -267,7 +277,16 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
             require(workflow in workflows and job_id in workflows[workflow], f"{where}: missing job")
             job = workflows[workflow][job_id]
             selected = job
-            if binding["matrix_selector"] is not None:
+            selector = binding["matrix_selector"]
+            if selector in ({"release_tag": "empty"}, {"release_tag": "nonempty"}):
+                branches = {item["matrix_selector"]["release_tag"]: images[owner["image_id"]]["reference"]
+                            for owner in roles.values() for item in owner["bindings"]
+                            if item["workflow"] == workflow and item["job"] == job_id}
+                expression = "${{ inputs.release_tag != '' && '" + branches["nonempty"] + "' || '" + branches["empty"] + "' }}"
+                require(one_field(job, "image", where, 6) == expression, f"{where}: conditional image reference drift")
+                expected_locations[(workflow, job_id)] += 1
+                continue
+            if selector is not None:
                 require(one_field(job, "image", where, 6) == "${{ matrix.runner_image }}", f"{where}: matrix image consumer drift")
                 require(one_field(job, "pinned_epoch", where) == "${{ matrix.toolchain_epoch }}", f"{where}: matrix epoch consumer drift")
                 selected = matrix_row(job, binding["matrix_selector"], where)
@@ -281,7 +300,7 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
     for workflow, jobs in workflows.items():
         for job_id, job in jobs.items():
             values = re.findall(r"^ +(?:image|runner_image):\s*([^\n]+)$", job, re.MULTILINE)
-            actual_locations[(workflow, job_id)] += sum(REPOSITORY in value for value in values)
+            actual_locations[(workflow, job_id)] += sum(value.count(REPOSITORY) for value in values)
     require(+actual_locations == expected_locations, "runner image consumer census drift; register every literal image binding")
 
     runtime = catalog["compiler_seed"]["runtime_consumer"]

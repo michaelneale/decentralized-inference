@@ -56,6 +56,66 @@
       "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-ce55fed5c680cd3184b5d4770d9a77c43a702687690906e5753efd2cea27ed80",
       "receipt": null,
       "provenance": null
+    },
+    "public-browser": {
+      "backend": "browser",
+      "environment": "public",
+      "native_toolchain_epoch": null,
+      "provenance": {
+        "admission_validator_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "origin": {
+          "event": "push",
+          "mesh_revision": "8578d0f467de5ba659d376d52079ae1d63ed2871",
+          "repository": "Mesh-LLM/mesh-llm-runner-images",
+          "repository_id": 1210986689,
+          "run_attempt": 1,
+          "run_id": 34256062098,
+          "runner_images_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+          "timestamp": "20260908171716",
+          "workflow_id": 318369515,
+          "workflow_path": ".github/workflows/build-and-push.yml"
+        },
+        "schema": 1,
+        "scope": "reviewed_producer_admission",
+        "validation": "offline_binding_only"
+      },
+      "receipt": {
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "index_candidate_key": "candidate-index-public-browser",
+        "schema": 1
+      },
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:4c3f0a73b8d47c10f2ac98047b3f1ca226992dcff72cb57b029238c98b828f94"
+    },
+    "public-ui": {
+      "backend": "ui",
+      "environment": "public",
+      "native_toolchain_epoch": null,
+      "provenance": {
+        "admission_validator_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "origin": {
+          "event": "push",
+          "mesh_revision": "8578d0f467de5ba659d376d52079ae1d63ed2871",
+          "repository": "Mesh-LLM/mesh-llm-runner-images",
+          "repository_id": 1210986689,
+          "run_attempt": 1,
+          "run_id": 34256062098,
+          "runner_images_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+          "timestamp": "20260908171716",
+          "workflow_id": 318369515,
+          "workflow_path": ".github/workflows/build-and-push.yml"
+        },
+        "schema": 1,
+        "scope": "reviewed_producer_admission",
+        "validation": "offline_binding_only"
+      },
+      "receipt": {
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "index_candidate_key": "candidate-index-public-ui",
+        "schema": 1
+      },
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:b0fa8081c77334b47744f87a0dd46bf092dfc8badc75a832b72233feb026ec25"
     }
   },
   "consumer_roles": {
@@ -249,7 +309,7 @@
       ]
     },
     "ui-quality": {
-      "image_id": "public-web",
+      "image_id": "public-ui",
       "scope": "ordinary",
       "bindings": [
         {
@@ -262,7 +322,7 @@
       ]
     },
     "ui-e2e": {
-      "image_id": "public-web",
+      "image_id": "public-browser",
       "scope": "ordinary",
       "bindings": [
         {
@@ -288,13 +348,15 @@
       ]
     },
     "ui-artifact": {
-      "image_id": "public-web",
+      "image_id": "public-ui",
       "scope": "ordinary",
       "bindings": [
         {
           "workflow": "ci-ui-artifact-slice.yml",
           "job": "ui_artifact",
-          "matrix_selector": null,
+          "matrix_selector": {
+            "release_tag": "empty"
+          },
           "image_expression": "{image}",
           "epoch_field": null
         }
@@ -463,6 +525,21 @@
           "epoch_field": null
         }
       ]
+    },
+    "release-ui-artifact": {
+      "bindings": [
+        {
+          "epoch_field": null,
+          "image_expression": "{image}",
+          "job": "ui_artifact",
+          "matrix_selector": {
+            "release_tag": "nonempty"
+          },
+          "workflow": "ci-ui-artifact-slice.yml"
+        }
+      ],
+      "image_id": "public-web",
+      "scope": "release"
     }
   },
   "runtime_rows": {

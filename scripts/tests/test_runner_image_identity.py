@@ -33,6 +33,7 @@ class RunnerImageIdentityTests(unittest.TestCase):
             destination = self.root / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, destination)
+        shutil.copytree(ROOT / "ci/runner-image-evidence", self.root / "ci/runner-image-evidence")
         self.catalog = IDENTITY.read_json(self.root / "ci/runner-images.json")
 
     def replace(self, name: str, old: str, new: str, count: int = 1) -> None:
@@ -59,18 +60,18 @@ class RunnerImageIdentityTests(unittest.TestCase):
         paths = list((self.root / ".github/workflows").glob("*.yml")) + [self.root / "ci/slices.yml", self.root / "ci/ownership.yml"]
         before = {path: path.read_bytes() for path in paths}
         self.assertEqual(IDENTITY.check(self.catalog, self.root), {
-            "images": 7, "roles": 30, "workflow_bindings": 31,
+            "images": 9, "roles": 31, "workflow_bindings": 32,
             "runtime_rows": 4, "seed_consumers": 5,
         })
         self.assertEqual(before, {path: path.read_bytes() for path in paths})
 
     def test_historical_tools_provenance_and_seed_coverage_are_unknown(self) -> None:
-        for image in self.catalog["images"].values():
+        for image in (value for key, value in self.catalog["images"].items() if key not in ("public-ui", "public-browser")):
             self.assertIsNone(image["receipt"])
             self.assertIsNone(image["provenance"])
             self.assertNotIn("tools", image)
         self.assertIsNone(self.catalog["compiler_seed"]["workload_coverage"])
-        result = self.cli("lookup", "ui-quality", "--field", "receipt")
+        result = self.cli("lookup", "release-ui-artifact", "--field", "receipt")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), None)
 
@@ -159,7 +160,7 @@ class RunnerImageIdentityTests(unittest.TestCase):
             for binding in role["bindings"]:
                 if binding["workflow"] == original:
                     binding["workflow"] = renamed
-        self.assertEqual(IDENTITY.check(self.catalog, self.root)["workflow_bindings"], 31)
+        self.assertEqual(IDENTITY.check(self.catalog, self.root)["workflow_bindings"], 32)
         self.replace(".github/workflows/" + renamed, self.image("public-web"), self.image("public-cpu"))
         self.assert_drift("image reference drift")
 
@@ -288,6 +289,55 @@ class RunnerImageIdentityTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertIn("runner image identity:", result.stderr)
 
+
+    def test_release_tag_branches_cannot_be_swapped_or_collapsed(self) -> None:
+        path = ".github/workflows/ci-ui-artifact-slice.yml"
+        original = (self.root / path).read_text()
+        for replacement in ("inputs.release_tag == ''", "inputs.source_sha != ''"):
+            with self.subTest(replacement=replacement):
+                (self.root / path).write_text(original.replace("inputs.release_tag != '' &&", replacement + " &&"))
+                self.assert_drift("conditional image reference drift")
+        (self.root / path).write_text(original)
+        del self.catalog["consumer_roles"]["release-ui-artifact"]
+        self.assert_drift("complete UI artifact pair")
+
+    def test_release_tag_selector_is_bounded_to_artifact_job(self) -> None:
+        self.catalog["consumer_roles"]["ui-artifact"]["bindings"][0]["job"] = "ui_quality"
+        self.assert_drift("complete UI artifact pair")
+
+    def test_qualified_lean_receipts_match_retained_admission(self) -> None:
+        for family in ("ui", "browser"):
+            image = self.catalog["images"]["public-" + family]
+            self.assertEqual(image["receipt"]["index_candidate_key"], "candidate-index-public-" + family)
+            self.assertEqual(image["provenance"]["origin"]["run_id"], 34256062098)
+            self.assertEqual(image["provenance"]["origin"]["run_attempt"], 1)
+            self.assertEqual(image["provenance"]["validation"], "offline_binding_only")
+        self.catalog["images"]["public-ui"]["receipt"]["index_candidate_key"] = "candidate-index-public-browser"
+        self.assert_drift("image/index binding mismatch")
+
+    def test_ordinary_and_release_artifact_workloads_keep_their_image_roles(self) -> None:
+        self.assertEqual(self.catalog["consumer_roles"]["ui-artifact"]["image_id"], "public-ui")
+        self.assertEqual(self.catalog["consumer_roles"]["release-ui-artifact"]["image_id"], "public-web")
+        workflow = (self.root / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
+        self.assertIn("if: ${{ inputs.release_tag != '' }}", workflow)
+        self.assertIn('scripts/release-version.sh "$RELEASE_TAG"', workflow)
+        self.assertIn("run: pnpm run build", workflow)
+
+    def test_unregistered_mutable_image_is_not_hidden_from_census(self) -> None:
+        path = self.root / ".github/workflows/unregistered.yml"
+        path.write_text("jobs:\n  extra:\n    container:\n      image: " + IDENTITY.REPOSITORY + ":public-latest\n")
+        self.assert_drift("consumer census drift")
+
+    def test_extra_unconditional_binding_on_conditional_job_fails_cleanly(self) -> None:
+        extra = copy.deepcopy(self.catalog["consumer_roles"]["ui-artifact"])
+        extra["bindings"][0]["matrix_selector"] = None
+        self.catalog["consumer_roles"]["extra-artifact"] = extra
+        (self.root / "ci/runner-images.json").write_text(json.dumps(self.catalog))
+        result = self.cli("check")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("complete UI artifact pair", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()
