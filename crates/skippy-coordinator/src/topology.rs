@@ -213,7 +213,13 @@ fn validate_input(input: &TopologyPlanningInput) -> Result<(), TopologyPlanError
     if input.model_weight_bytes == 0 {
         return Err(TopologyPlanError::MissingModelWeights);
     }
-    if input.kv_bytes_per_token == 0 {
+    let recurrent_only = input.recurrent_bytes_per_sequence_by_layer.len()
+        == input.layer_count as usize
+        && input
+            .recurrent_bytes_per_sequence_by_layer
+            .iter()
+            .all(|bytes| *bytes > 0);
+    if input.kv_bytes_per_token == 0 && !recurrent_only {
         return Err(TopologyPlanError::MissingKvBytesPerToken);
     }
     if input.nodes.is_empty() {
@@ -785,6 +791,34 @@ mod tests {
         request.nodes[0].detected_vram_bytes = old_required + recurrent_required;
         assert!(plan_topology(&request).is_ok());
         assert_eq!(recurrent_required, 29_387_390_976);
+    }
+
+    #[test]
+    fn pure_recurrent_topology_accepts_zero_kv_bytes() {
+        let mut request = input(vec![node("mamba-node", 80)]);
+        request.kv_bytes_per_token = 0;
+        request.recurrent_bytes_per_sequence_by_layer = vec![1024; request.layer_count as usize];
+
+        assert!(plan_topology(&request).is_ok());
+    }
+
+    #[test]
+    fn zero_kv_bytes_rejects_dense_and_hybrid_metadata() {
+        let mut dense = input(vec![node("dense-node", 80)]);
+        dense.kv_bytes_per_token = 0;
+        assert_eq!(
+            plan_topology(&dense),
+            Err(TopologyPlanError::MissingKvBytesPerToken)
+        );
+
+        let mut hybrid = input(vec![node("hybrid-node", 80)]);
+        hybrid.kv_bytes_per_token = 0;
+        hybrid.recurrent_bytes_per_sequence_by_layer = vec![1024; hybrid.layer_count as usize];
+        hybrid.recurrent_bytes_per_sequence_by_layer[0] = 0;
+        assert_eq!(
+            plan_topology(&hybrid),
+            Err(TopologyPlanError::MissingKvBytesPerToken)
+        );
     }
 
     fn metal_node(id: &str, metal_recommended_bytes: u64) -> TopologyNode {

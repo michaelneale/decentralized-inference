@@ -243,9 +243,17 @@ pub fn load_runtime_with_overrides(
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
     let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
+    let admitted_model_parts = config
+        .model_part_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
     let model = match config.load_mode {
         _ if std::env::var("MESH_LLM_BYPASS_SKIPPY_MODEL_LOAD").is_ok() => {
             skippy_runtime::StageModel::new_dummy()
+        }
+        _ if !admitted_model_parts.is_empty() => {
+            open_stage_model_from_parts(&admitted_model_parts, &runtime_config)?
         }
         LoadMode::LayerPackage => {
             let selected =
@@ -291,10 +299,20 @@ pub fn load_runtime_with_overrides_and_open_events(
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
     let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
+    let admitted_model_parts = config
+        .model_part_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
     let model = match config.load_mode {
         _ if std::env::var("MESH_LLM_BYPASS_SKIPPY_MODEL_LOAD").is_ok() => {
             skippy_runtime::StageModel::new_dummy()
         }
+        _ if !admitted_model_parts.is_empty() => open_stage_model_from_parts_with_events(
+            &admitted_model_parts,
+            &runtime_config,
+            model_open_event_reporter,
+        )?,
         LoadMode::LayerPackage => {
             let selected =
                 select_package_parts(config).context("select layer package parts for stage")?;
@@ -424,6 +442,7 @@ fn runtime_config_from_stage_config(
         include_output: config.downstream.is_none(),
         mtp_source: overrides.mtp_source,
         filter_tensors_on_load: config.filter_tensors_on_load,
+        resident_tensor_names: config.resident_tensor_names.clone(),
         checkpoint_quantization: config
             .checkpoint_quantization
             .as_deref()
@@ -540,6 +559,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "Vulkan1".into(),
                 stable_id: Some("pci:0000:65:00.0".into()),
@@ -662,6 +682,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -730,6 +751,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "CPU".into(),
                 stable_id: None,
@@ -810,6 +832,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: Some(StageDevice {
                 backend_device: "CPU".into(),
                 stable_id: None,
@@ -1033,6 +1056,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -1136,6 +1160,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -1196,6 +1221,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,

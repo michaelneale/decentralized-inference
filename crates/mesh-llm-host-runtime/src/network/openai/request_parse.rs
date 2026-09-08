@@ -834,7 +834,7 @@ fn capsule_nonce_headers_from_raw(raw: &[u8]) -> (Option<String>, Option<String>
     let header_end = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .map_or(raw.len(), |pos| pos);
+        .unwrap_or(raw.len());
     let mut headers_buf = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut req = httparse::Request::new(&mut headers_buf);
     if req

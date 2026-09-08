@@ -77,6 +77,12 @@ fn load_request() -> StageLoadRequest {
         stage_index: 0,
         layer_start: 0,
         layer_end: 12,
+        admission: crate::inference::skippy::test_stage_admission(0, 12),
+        participant_set_hash: "participants".to_string(),
+        topology_hash: "topology".to_string(),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
+        topology_stages: Vec::new(),
         model_path: Some("/models/model.gguf".to_string()),
         source_model_bytes: Some(64 * 1024 * 1024 * 1024),
         source_model_sha256: None,
@@ -119,6 +125,7 @@ fn load_request() -> StageLoadRequest {
             kv_unified: Some(true),
             swa_full: Some(false),
             cache_idle_slots: Some(3),
+            activation_codec_policy: Default::default(),
         },
         native_mtp_enabled: true,
         shutdown_generation: 7,
@@ -364,6 +371,8 @@ fn stage_config_prefers_package_source_identity_over_local_ref() {
         source_model_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
         source_model_bytes: Some(456),
+        model_part_paths: Vec::new(),
+        projector_path: None,
     };
 
     let config = stage_config(&request, None, Some(&package)).unwrap();

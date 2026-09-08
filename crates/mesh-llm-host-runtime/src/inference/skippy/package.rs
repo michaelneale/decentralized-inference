@@ -9,6 +9,11 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skippy_ffi::TensorRole;
+use skippy_package_format::{
+    Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, PackageManifest as PackageManifestV2,
+    ProposerKind, SourceFile, SourceModel, StrategyKind, Tensor, TensorCatalog, TensorIntegrity,
+    TensorStorage,
+};
 use skippy_runtime::package::PackageGenerationInfo;
 
 use super::hash_cache::{self, SidecarDigestCache};
@@ -17,6 +22,31 @@ mod content_addressed;
 mod legacy_identity;
 
 pub use content_addressed::synthetic_content_addressed_gguf_package;
+
+const PACKAGE_V2_MANIFEST: &str = "model-package.json";
+
+pub(crate) fn is_package_v2_ref(package_ref: &str) -> bool {
+    let manifest_path = Path::new(package_ref).join(PACKAGE_V2_MANIFEST);
+    std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+        })
+        == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION))
+}
+
+pub(crate) fn is_package_v2_identity(package: &SkippyPackageIdentity) -> bool {
+    if is_package_v2_ref(&package.package_ref) {
+        return true;
+    }
+    package
+        .source_model_path
+        .ancestors()
+        .any(|path| is_package_v2_ref(&path.to_string_lossy()))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
@@ -38,6 +68,383 @@ pub struct SkippyPackageSourceFile {
     pub path: PathBuf,
     pub bytes: u64,
     pub sha256: String,
+}
+
+/// Resolve a validated package-v2 directory into the existing host planning
+/// identity. The content-derived package ID remains in the v2 manifest and is
+/// carried into split control by the generation-8 admission descriptor.
+pub fn identity_from_package_v2(package_dir: &Path) -> Result<SkippyPackageIdentity> {
+    let package_dir = package_dir.canonicalize().with_context(|| {
+        format!(
+            "canonicalize package-v2 directory {}",
+            package_dir.display()
+        )
+    })?;
+    anyhow::ensure!(
+        package_dir.is_dir(),
+        "package-v2 path is not a directory: {}",
+        package_dir.display()
+    );
+    let manifest_path = package_dir.join(PACKAGE_V2_MANIFEST);
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?;
+    let schema_version = serde_json::from_slice::<serde_json::Value>(&manifest_bytes)
+        .context("parse package manifest envelope")?
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("package manifest is missing integer schema_version")?;
+    anyhow::ensure!(
+        schema_version == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION),
+        "split serving requires package schema {}; found schema {schema_version}",
+        skippy_package_format::PACKAGE_SCHEMA_VERSION
+    );
+    let manifest: PackageManifestV2 =
+        serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    manifest
+        .validate()
+        .context("validate package-v2 manifest")?;
+    let computed_package_id = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed_package_id,
+        "package-v2 manifest package_id does not match its content"
+    );
+    let required_native_abi = format!(
+        "{}.{}.{}",
+        skippy_ffi::ABI_VERSION_MAJOR,
+        skippy_ffi::ABI_VERSION_MINOR,
+        skippy_ffi::ABI_VERSION_PATCH
+    );
+    anyhow::ensure!(
+        manifest.native_abi_version == required_native_abi,
+        "package-v2 native ABI {} differs from runtime ABI {required_native_abi}",
+        manifest.native_abi_version
+    );
+
+    let metadata_artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .context("package-v2 metadata artifact is absent")?;
+    let source_model_path = safe_package_v2_artifact_path(&package_dir, &metadata_artifact.path)?;
+    let source_metadata = source_model_path
+        .metadata()
+        .with_context(|| format!("stat package-v2 source {}", source_model_path.display()))?;
+    anyhow::ensure!(
+        source_metadata.is_file(),
+        "package-v2 metadata artifact is not a file: {}",
+        source_model_path.display()
+    );
+    anyhow::ensure!(
+        source_metadata.len() == metadata_artifact.byte_size,
+        "package-v2 metadata artifact size {} differs from manifest {}",
+        source_metadata.len(),
+        metadata_artifact.byte_size
+    );
+    let source_sha256 = source_file_sha256(
+        &source_model_path,
+        &source_metadata,
+        SidecarDigestCache::open_default().as_ref(),
+    )?;
+    anyhow::ensure!(
+        source_sha256 == metadata_artifact.sha256,
+        "package-v2 metadata artifact SHA-256 differs from manifest"
+    );
+    anyhow::ensure!(
+        source_sha256 == manifest.source_model.sha256,
+        "package-v2 metadata artifact SHA-256 differs from source model identity"
+    );
+
+    let architecture = manifest
+        .model_metadata
+        .get("general.architecture")
+        .and_then(serde_json::Value::as_str)
+        .context("package-v2 model metadata is missing general.architecture")?;
+    let activation_width_key = format!("{architecture}.embedding_length");
+    let activation_width = manifest
+        .model_metadata
+        .get(&activation_width_key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .with_context(|| {
+            format!("package-v2 model metadata is missing positive {activation_width_key}")
+        })?;
+
+    let source_model_bytes = manifest
+        .source_model
+        .files
+        .iter()
+        .try_fold(0_u64, |total, file| total.checked_add(file.byte_size))
+        .context("package-v2 source byte count overflow")?;
+    anyhow::ensure!(
+        source_model_bytes > 0,
+        "package-v2 source model byte count must be positive"
+    );
+    let mut source_files = package_v2_source_files(&package_dir, &manifest)?;
+    let layer_weight_bytes = package_v2_layer_weight_bytes(&manifest)?;
+    let tensor_count = u64::try_from(manifest.tensor_catalog.entries.len())
+        .context("package-v2 tensor count exceeds u64")?;
+    let manifest_sha256 = hex_lower(&Sha256::digest(&manifest_bytes));
+    source_files.push(SkippyPackageSourceFile {
+        path: manifest_path,
+        bytes: u64::try_from(manifest_bytes.len())
+            .context("package-v2 manifest byte count exceeds u64")?,
+        sha256: manifest_sha256.clone(),
+    });
+    let generation = manifest.generation.as_ref().map(package_v2_generation_info);
+
+    Ok(SkippyPackageIdentity {
+        package_ref: package_dir.to_string_lossy().into_owned(),
+        manifest_sha256,
+        source_model_path,
+        source_model_sha256: manifest.source_model.sha256,
+        source_model_bytes,
+        source_files,
+        layer_weight_bytes,
+        layer_count: manifest.layer_count,
+        activation_width,
+        tensor_count,
+        generation,
+    })
+}
+
+fn safe_package_v2_artifact_path(package_dir: &Path, relative: &str) -> Result<PathBuf> {
+    let relative = Path::new(relative);
+    anyhow::ensure!(
+        !relative.as_os_str().is_empty()
+            && relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "package-v2 artifact path is not a safe relative path: {relative:?}"
+    );
+    let resolved = package_dir
+        .join(relative)
+        .canonicalize()
+        .with_context(|| format!("canonicalize package-v2 artifact {relative:?}"))?;
+    anyhow::ensure!(
+        resolved.starts_with(package_dir),
+        "package-v2 artifact escapes its package directory: {relative:?}"
+    );
+    Ok(resolved)
+}
+
+fn package_v2_source_files(
+    package_dir: &Path,
+    manifest: &PackageManifestV2,
+) -> Result<Vec<SkippyPackageSourceFile>> {
+    let referenced_artifact_ids = manifest
+        .tensor_catalog
+        .entries
+        .iter()
+        .filter_map(|tensor| match &tensor.storage {
+            TensorStorage::Owned { artifact_id, .. } => Some(artifact_id.as_str()),
+            TensorStorage::Alias { .. } => None,
+        })
+        .chain(std::iter::once(
+            manifest.source_model.metadata_artifact_id.as_str(),
+        ))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut artifacts = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .filter(|artifact| referenced_artifact_ids.contains(artifact.id.as_str()))
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| left.id.cmp(&right.id));
+    let digest_cache = SidecarDigestCache::open_default();
+    artifacts
+        .into_iter()
+        .map(|artifact| {
+            let path = safe_package_v2_artifact_path(package_dir, &artifact.path)?;
+            let source = source_file(&path, digest_cache.as_ref())?;
+            anyhow::ensure!(
+                source.bytes == artifact.byte_size,
+                "package-v2 artifact {:?} size differs from manifest",
+                artifact.id
+            );
+            anyhow::ensure!(
+                source.sha256 == artifact.sha256,
+                "package-v2 artifact {:?} SHA-256 differs from manifest",
+                artifact.id
+            );
+            Ok(source)
+        })
+        .collect()
+}
+
+fn package_v2_layer_weight_bytes(manifest: &PackageManifestV2) -> Result<Vec<u64>> {
+    if !manifest
+        .tensor_catalog
+        .entries
+        .iter()
+        .any(|tensor| tensor.layer_ordinal.is_some())
+    {
+        return Ok(Vec::new());
+    }
+    let mut layer_bytes = vec![0_u64; manifest.layer_count as usize];
+    for tensor in &manifest.tensor_catalog.entries {
+        let Some(layer) = tensor.layer_ordinal else {
+            continue;
+        };
+        let TensorStorage::Owned { stored_length, .. } = tensor.storage else {
+            continue;
+        };
+        let slot = layer_bytes
+            .get_mut(layer as usize)
+            .with_context(|| format!("package-v2 tensor layer {layer} exceeds layer count"))?;
+        *slot = slot
+            .checked_add(stored_length)
+            .context("package-v2 layer byte count overflow")?;
+    }
+    if layer_bytes.contains(&0) {
+        return Ok(Vec::new());
+    }
+    Ok(layer_bytes)
+}
+
+fn package_v2_generation_info(
+    generation: &skippy_package_format::Generation,
+) -> PackageGenerationInfo {
+    PackageGenerationInfo {
+        speculative_decoding: generation.speculative_decoding.as_ref().map(|speculative| {
+            skippy_runtime::package::PackageSpeculativeDecodingInfo {
+                default: speculative.default.clone(),
+                proposers: speculative
+                    .proposers
+                    .iter()
+                    .map(|(name, proposer)| {
+                        let info = match &proposer.kind {
+                            ProposerKind::NativeMtp {
+                                prediction_depth,
+                                layer_indices,
+                            } => skippy_runtime::package::PackageSpeculativeProposerInfo {
+                                proposer_type: "native-mtp".to_string(),
+                                prediction_depth: Some(*prediction_depth),
+                                layer_indices: layer_indices.clone(),
+                                ngram_min: None,
+                                ngram_max: None,
+                                max_proposal_tokens: None,
+                                history_scope: None,
+                            },
+                            ProposerKind::NgramCache {
+                                ngram_min,
+                                ngram_max,
+                                max_proposal_tokens,
+                                history_scope,
+                            }
+                            | ProposerKind::NgramSuffix {
+                                ngram_min,
+                                ngram_max,
+                                max_proposal_tokens,
+                                history_scope,
+                            } => skippy_runtime::package::PackageSpeculativeProposerInfo {
+                                proposer_type: match &proposer.kind {
+                                    ProposerKind::NgramCache { .. } => "ngram-cache",
+                                    ProposerKind::NgramSuffix { .. } => "ngram-suffix",
+                                    ProposerKind::NativeMtp { .. } => unreachable!(),
+                                }
+                                .to_string(),
+                                prediction_depth: None,
+                                layer_indices: Vec::new(),
+                                ngram_min: Some(*ngram_min),
+                                ngram_max: Some(*ngram_max),
+                                max_proposal_tokens: Some(*max_proposal_tokens),
+                                history_scope: Some(history_scope.clone()),
+                            },
+                        };
+                        (name.clone(), info)
+                    })
+                    .collect(),
+                strategies: speculative
+                    .strategies
+                    .iter()
+                    .map(|(name, strategy)| {
+                        let info = match &strategy.kind {
+                            StrategyKind::NativeMtp {
+                                proposer,
+                                prediction_depth,
+                                layer_indices,
+                                window_policy,
+                            } => skippy_runtime::package::PackageSpeculativeStrategyInfo {
+                                strategy_type: "native-mtp".to_string(),
+                                prediction_depth: *prediction_depth,
+                                layer_indices: layer_indices.clone(),
+                                window_policy: window_policy
+                                    .as_ref()
+                                    .map(package_v2_window_policy_info),
+                                proposer: proposer.clone(),
+                                primary: None,
+                                extender: None,
+                                extension_policy: None,
+                            },
+                            StrategyKind::NgramCache {
+                                proposer,
+                                window_policy,
+                            }
+                            | StrategyKind::NgramSuffix {
+                                proposer,
+                                window_policy,
+                            } => skippy_runtime::package::PackageSpeculativeStrategyInfo {
+                                strategy_type: match &strategy.kind {
+                                    StrategyKind::NgramCache { .. } => "ngram-cache",
+                                    StrategyKind::NgramSuffix { .. } => "ngram-suffix",
+                                    StrategyKind::NativeMtp { .. }
+                                    | StrategyKind::Composite { .. } => unreachable!(),
+                                }
+                                .to_string(),
+                                prediction_depth: None,
+                                layer_indices: Vec::new(),
+                                window_policy: window_policy
+                                    .as_ref()
+                                    .map(package_v2_window_policy_info),
+                                proposer: Some(proposer.clone()),
+                                primary: None,
+                                extender: None,
+                                extension_policy: None,
+                            },
+                            StrategyKind::Composite {
+                                primary,
+                                extender,
+                                extension_policy,
+                                window_policy,
+                            } => skippy_runtime::package::PackageSpeculativeStrategyInfo {
+                                strategy_type: "composite".to_string(),
+                                prediction_depth: None,
+                                layer_indices: Vec::new(),
+                                window_policy: window_policy
+                                    .as_ref()
+                                    .map(package_v2_window_policy_info),
+                                proposer: None,
+                                primary: Some(primary.clone()),
+                                extender: Some(extender.clone()),
+                                extension_policy: Some(
+                                    skippy_runtime::package::PackageExtensionPolicyInfo {
+                                        max_tokens: extension_policy.max_tokens,
+                                    },
+                                ),
+                            },
+                        };
+                        (name.clone(), info)
+                    })
+                    .collect(),
+            }
+        }),
+    }
+}
+
+fn package_v2_window_policy_info(
+    policy: &skippy_package_format::WindowPolicy,
+) -> skippy_runtime::package::PackageWindowPolicyInfo {
+    skippy_runtime::package::PackageWindowPolicyInfo {
+        default: policy.default.clone(),
+        initial_window: policy.initial_window,
+        min_window: policy.min_window,
+        max_window: policy.max_window,
+        pipeline_depth: policy.pipeline_depth,
+    }
 }
 
 #[derive(Serialize)]
@@ -64,12 +471,6 @@ struct SyntheticGgufManifestFile {
     sha256: String,
 }
 
-#[derive(Clone, Copy)]
-enum SyntheticIdentityMode {
-    LegacyPath,
-    ContentAddressed,
-}
-
 pub fn synthetic_direct_gguf_package(
     model_id: &str,
     model_path: &Path,
@@ -77,7 +478,7 @@ pub fn synthetic_direct_gguf_package(
     if let Some(root) = safetensors_checkpoint_root(model_path) {
         return synthetic_safetensors_package(model_id, &root);
     }
-    synthetic_gguf_package(model_id, model_path, SyntheticIdentityMode::LegacyPath)
+    synthetic_gguf_package(model_id, model_path)
 }
 
 fn safetensors_checkpoint_root(model_path: &Path) -> Option<PathBuf> {
@@ -187,37 +588,21 @@ fn synthetic_safetensors_package(
     })
 }
 
-fn synthetic_gguf_package(
-    model_id: &str,
-    model_path: &Path,
-    identity_mode: SyntheticIdentityMode,
-) -> Result<SkippyPackageIdentity> {
-    // A content-addressed identity is sent across the mesh and used as a
-    // strict admission proof. Its first verification always hashes the bytes;
-    // only a hash-bound in-process fingerprint may be reused later. The
-    // persistent metadata-keyed cache remains a performance optimization for
-    // legacy path-local identities only.
-    let digest_cache = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => SidecarDigestCache::open_default(),
-        SyntheticIdentityMode::ContentAddressed => {
-            content_addressed::validate_source_set(model_path)?;
-            None
-        }
-    };
+fn synthetic_gguf_package(_model_id: &str, model_path: &Path) -> Result<SkippyPackageIdentity> {
+    // Direct local GGUF identity crosses the mesh and is therefore always
+    // content addressed. Absolute paths and filenames are node-local locators;
+    // they must never participate in model, package, or admission identity.
+    content_addressed::validate_source_set(model_path)?;
     let source_paths = direct_gguf_source_paths(model_path)?;
-    if matches!(identity_mode, SyntheticIdentityMode::ContentAddressed) {
-        for path in &source_paths {
-            anyhow::ensure!(
-                path.to_str().is_some(),
-                "canonical content-addressed GGUF path must be valid UTF-8: {}",
-                path.display()
-            );
-        }
+    for path in &source_paths {
+        anyhow::ensure!(
+            path.to_str().is_some(),
+            "canonical content-addressed GGUF path must be valid UTF-8: {}",
+            path.display()
+        );
     }
-    let verified_fingerprint = matches!(identity_mode, SyntheticIdentityMode::ContentAddressed)
-        .then(|| super::local_source::verified_path_fingerprint(&source_paths))
-        .flatten();
-    let source_files = direct_gguf_source_files_from_paths(source_paths, digest_cache.as_ref())?;
+    let verified_fingerprint = super::local_source::verified_path_fingerprint(&source_paths);
+    let source_files = direct_gguf_source_files_from_paths(source_paths, None)?;
     content_addressed::ensure_fingerprint_unchanged(
         &source_files,
         verified_fingerprint.as_deref(),
@@ -234,18 +619,21 @@ fn synthetic_gguf_package(
     let tensor_count = gguf_tensor_count(&source_model_path)
         .with_context(|| format!("read GGUF tensor count {}", source_model_path.display()))?;
 
-    anyhow::ensure!(
-        compact.layer_count > 0,
-        "GGUF metadata for {} does not contain a positive layer count",
-        source_model_path.display()
-    );
+    let layer_count = compact.executable_layer_count().with_context(|| {
+        format!(
+            "GGUF metadata for {} does not contain a positive executable layer count (block_count={}, nextn_predict_layers={})",
+            source_model_path.display(),
+            compact.layer_count,
+            compact.nextn_predict_layers
+        )
+    })?;
     anyhow::ensure!(
         compact.embedding_size > 0,
         "GGUF metadata for {} does not contain a positive embedding size",
         source_model_path.display()
     );
     let source_model_bytes = source_files.iter().map(|file| file.bytes).sum();
-    let layer_weight_bytes = direct_gguf_layer_weight_bytes(&source_files, compact.layer_count)
+    let layer_weight_bytes = direct_gguf_layer_weight_bytes(&source_files, layer_count)
         .with_context(|| {
             format!(
                 "inspect GGUF tensor weights {}",
@@ -257,50 +645,18 @@ fn synthetic_gguf_package(
         verified_fingerprint.as_deref(),
     )?;
 
-    let source_model_sha256 = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => {
-            legacy_identity::aggregate_source_sha256(&source_files)
-        }
-        SyntheticIdentityMode::ContentAddressed => {
-            content_addressed::aggregate_source_sha256(&source_files)
-        }
-    };
-
-    let (package_ref, manifest_sha256) = match identity_mode {
-        SyntheticIdentityMode::LegacyPath => {
-            let package_ref = format!("gguf://{}", source_model_path.display());
-            let manifest_sha256 = synthetic_manifest_sha256(SyntheticManifestInput {
-                model_id,
-                package_kind: "direct-gguf",
-                package_ref: &package_ref,
-                source_model_path: &source_model_path.to_string_lossy(),
-                source_model_sha256: &source_model_sha256,
-                source_model_bytes,
-                source_files: &source_files,
-                architecture: &compact.architecture,
-                context_length: compact.context_length,
-                layer_count: compact.layer_count,
-                activation_width: compact.embedding_size,
-                tensor_count,
-            })?;
-            (package_ref, manifest_sha256)
-        }
-        SyntheticIdentityMode::ContentAddressed => {
-            let package_ref =
-                super::local_source::content_addressed_package_ref(&source_model_sha256)?;
-            let manifest_sha256 = content_addressed::manifest_sha256(
-                &source_model_sha256,
-                source_model_bytes,
-                &source_files,
-                &compact.architecture,
-                compact.context_length,
-                compact.layer_count,
-                compact.embedding_size,
-                tensor_count,
-            )?;
-            (package_ref, manifest_sha256)
-        }
-    };
+    let source_model_sha256 = content_addressed::aggregate_source_sha256(&source_files);
+    let package_ref = super::local_source::content_addressed_package_ref(&source_model_sha256)?;
+    let manifest_sha256 = content_addressed::manifest_sha256(
+        &source_model_sha256,
+        source_model_bytes,
+        &source_files,
+        &compact.architecture,
+        compact.context_length,
+        layer_count,
+        compact.embedding_size,
+        tensor_count,
+    )?;
 
     let identity = SkippyPackageIdentity {
         package_ref,
@@ -310,14 +666,12 @@ fn synthetic_gguf_package(
         source_model_bytes,
         source_files,
         layer_weight_bytes,
-        layer_count: compact.layer_count,
+        layer_count,
         activation_width: compact.embedding_size,
         tensor_count,
         generation: None,
     };
-    if matches!(identity_mode, SyntheticIdentityMode::ContentAddressed) {
-        super::local_source::register_content_addressed_identity(&identity, verified_fingerprint);
-    }
+    super::local_source::register_content_addressed_identity(&identity, verified_fingerprint);
     Ok(identity)
 }
 
@@ -403,6 +757,243 @@ pub(crate) fn direct_gguf_source_paths(model_path: &Path) -> Result<Vec<PathBuf>
         })?);
     }
     Ok(files)
+}
+
+/// Build the source-complete metadata envelope required by generation-8
+/// planning directly from local GGUF shards. The envelope is in memory: the
+/// source files remain at their original paths and no package or layer shard
+/// is written.
+pub(crate) fn direct_gguf_planning_manifest_from_identity(
+    model_id: &str,
+    identity: &SkippyPackageIdentity,
+) -> Result<(PackageManifestV2, Vec<PathBuf>)> {
+    let shard_paths = identity
+        .source_files
+        .iter()
+        .map(|source| source.path.clone())
+        .collect::<Vec<_>>();
+    let mut artifacts = Vec::with_capacity(shard_paths.len());
+    let mut source_files = Vec::with_capacity(shard_paths.len());
+    let mut tensors = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut primary_metadata = None;
+    let mut shard_metadata = Vec::with_capacity(shard_paths.len());
+    let mut total_tensors = 0_usize;
+
+    for (index, (path, source)) in shard_paths.iter().zip(&identity.source_files).enumerate() {
+        let artifact_id = format!("source-{index:05}");
+        let logical_path = format!("source-{index:05}.gguf");
+        let directory = skippy_model::gguf_catalog::read_gguf_catalog(path)
+            .with_context(|| format!("read direct GGUF catalog {}", path.display()))?;
+        anyhow::ensure!(
+            directory.artifact_bytes == source.bytes,
+            "direct GGUF size changed while planning: {}",
+            path.display()
+        );
+        if index == 0 {
+            primary_metadata = Some(directory.metadata.clone());
+        }
+        let native = skippy_runtime::ModelInfo::open(path)
+            .with_context(|| format!("open direct GGUF metadata {}", path.display()))?
+            .tensors()
+            .with_context(|| format!("read direct GGUF tensors {}", path.display()))?;
+        let shard_tensors = direct_planning_tensor_catalog(&directory, &native, &artifact_id)?;
+        total_tensors = total_tensors
+            .checked_add(shard_tensors.entries.len())
+            .context("direct GGUF tensor count overflow")?;
+        shard_metadata.push(directory.metadata.clone());
+        for tensor in shard_tensors.entries {
+            anyhow::ensure!(
+                names.insert(tensor.name.clone()),
+                "duplicate direct GGUF tensor {:?}",
+                tensor.name
+            );
+            tensors.push(tensor);
+        }
+        source_files.push(SourceFile {
+            path: logical_path.clone(),
+            byte_size: source.bytes,
+            sha256: source.sha256.clone(),
+        });
+        artifacts.push(Artifact {
+            id: artifact_id,
+            path: logical_path,
+            byte_size: source.bytes,
+            sha256: source.sha256.clone(),
+        });
+    }
+    anyhow::ensure!(!tensors.is_empty(), "direct GGUF tensor inventory is empty");
+    validate_direct_gguf_shards(&shard_metadata, total_tensors)?;
+
+    let primary = source_files
+        .first()
+        .context("direct GGUF source file list is empty")?;
+    let mut manifest = PackageManifestV2 {
+        schema_version: PACKAGE_SCHEMA_VERSION,
+        package_id: String::new(),
+        model_id: model_id.to_string(),
+        source_model: SourceModel {
+            sha256: primary.sha256.clone(),
+            metadata_artifact_id: "source-00000".to_string(),
+            repo: None,
+            revision: None,
+            primary_file: Some(primary.path.clone()),
+            canonical_ref: None,
+            distribution_id: Some(content_addressed::aggregate_source_sha256(
+                &identity.source_files,
+            )),
+            files: source_files,
+        },
+        format: "gguf".to_string(),
+        layer_count: identity.layer_count,
+        model_metadata: primary_metadata.context("direct GGUF metadata is empty")?,
+        artifact_catalog: ArtifactCatalog { entries: artifacts },
+        tensor_catalog: TensorCatalog { entries: tensors },
+        sidecars: Vec::new(),
+        generation: None,
+        native_abi_version: format!(
+            "{}.{}.{}",
+            skippy_ffi::ABI_VERSION_MAJOR,
+            skippy_ffi::ABI_VERSION_MINOR,
+            skippy_ffi::ABI_VERSION_PATCH
+        ),
+        generator_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at_unix_secs: 0,
+    };
+    manifest.package_id = manifest
+        .computed_package_id()
+        .context("compute direct GGUF planning identity")?;
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("validate direct GGUF planning manifest")?;
+    Ok((manifest, shard_paths))
+}
+
+fn validate_direct_gguf_shards(
+    shard_metadata: &[std::collections::BTreeMap<String, serde_json::Value>],
+    total_tensors: usize,
+) -> Result<()> {
+    let first = shard_metadata
+        .first()
+        .context("direct GGUF shard inventory is empty")?;
+    for (index, metadata) in shard_metadata.iter().enumerate() {
+        if shard_metadata.len() > 1 || metadata.contains_key("split.count") {
+            anyhow::ensure!(
+                metadata
+                    .get("split.count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(shard_metadata.len() as u64),
+                "incomplete direct GGUF shard set: split.count mismatch"
+            );
+            anyhow::ensure!(
+                metadata.get("split.no").and_then(serde_json::Value::as_u64) == Some(index as u64),
+                "direct GGUF split.no mismatch"
+            );
+        }
+        for (key, value) in metadata {
+            if key != "split.no" && key != "split.count" && key != "split.tensors.count" {
+                anyhow::ensure!(
+                    first.get(key) == Some(value),
+                    "inconsistent direct GGUF metadata {key:?} across shards"
+                );
+            }
+        }
+    }
+    if shard_metadata.len() > 1 || first.contains_key("split.count") {
+        anyhow::ensure!(
+            first
+                .get("split.tensors.count")
+                .and_then(serde_json::Value::as_u64)
+                == Some(total_tensors as u64),
+            "incomplete direct GGUF tensor inventory: split.tensors.count mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn direct_planning_tensor_catalog(
+    directory: &skippy_model::gguf_catalog::GgufCatalog,
+    native: &[skippy_runtime::TensorInfo],
+    artifact_id: &str,
+) -> Result<TensorCatalog> {
+    let by_name = native
+        .iter()
+        .map(|tensor| (tensor.name.as_str(), tensor))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    anyhow::ensure!(
+        by_name.len() == native.len() && native.len() == directory.tensors.len(),
+        "native and direct GGUF tensor inventories disagree"
+    );
+    let mut source = directory.tensors.iter().collect::<Vec<_>>();
+    source.sort_by(|left, right| {
+        (left.data_offset, &left.name).cmp(&(right.data_offset, &right.name))
+    });
+    let mut entries: Vec<Tensor> = Vec::with_capacity(source.len());
+    let mut last_owned: Option<(u64, u64, usize)> = None;
+    for tensor in source {
+        let info = by_name
+            .get(tensor.name.as_str())
+            .context("direct GGUF tensor is missing from native inventory")?;
+        let elements = tensor
+            .dimensions
+            .iter()
+            .try_fold(1_u64, |count, dimension| count.checked_mul(*dimension))
+            .context("direct GGUF tensor element count overflow")?;
+        anyhow::ensure!(
+            info.ggml_type == tensor.ggml_type && info.element_count == elements,
+            "native and direct GGUF metadata disagree for {:?}",
+            tensor.name
+        );
+        anyhow::ensure!(
+            info.byte_size > 0,
+            "empty direct GGUF tensor storage for {:?}",
+            tensor.name
+        );
+        let end = tensor
+            .data_offset
+            .checked_add(info.byte_size)
+            .context("direct GGUF tensor extent overflow")?;
+        anyhow::ensure!(
+            end <= directory.artifact_bytes,
+            "direct GGUF tensor {:?} storage exceeds artifact bounds",
+            tensor.name
+        );
+        let storage = if let Some((start, previous_end, owner)) =
+            last_owned.filter(|(_, previous_end, _)| tensor.data_offset < *previous_end)
+        {
+            let target = &entries[owner];
+            anyhow::ensure!(
+                tensor.data_offset == start
+                    && end == previous_end
+                    && tensor.ggml_type == target.ggml_type
+                    && tensor.dimensions == target.dimensions,
+                "overlapping or mismatched direct GGUF alias storage for {:?}",
+                tensor.name
+            );
+            TensorStorage::Alias {
+                target_tensor_id: target.id.clone(),
+            }
+        } else {
+            last_owned = Some((tensor.data_offset, end, entries.len()));
+            TensorStorage::Owned {
+                artifact_id: artifact_id.to_string(),
+                data_offset: tensor.data_offset,
+                stored_length: info.byte_size,
+                alignment: directory.alignment,
+                integrity: TensorIntegrity::ArtifactSha256,
+            }
+        };
+        entries.push(Tensor {
+            id: tensor.name.clone(),
+            name: tensor.name.clone(),
+            ggml_type: tensor.ggml_type,
+            dimensions: tensor.dimensions.clone(),
+            layer_ordinal: None,
+            storage,
+        });
+    }
+    Ok(TensorCatalog { entries })
 }
 
 fn direct_gguf_source_files(
@@ -636,6 +1227,9 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
     // Resolve hf:// to a local package dir for lightweight package inspection.
     let local_ref =
         super::materialization::resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    if is_package_v2_ref(&local_ref) {
+        return identity_from_package_v2_metadata(package_ref, &local_ref);
+    }
     let info = skippy_runtime::package::inspect_layer_package(&local_ref)
         .with_context(|| format!("inspect layer package {package_ref}"))?;
 
@@ -661,6 +1255,113 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
         activation_width: 0,
         tensor_count: info.layers.iter().map(|l| l.tensor_count as u64).sum(),
         generation: info.generation,
+    })
+}
+
+fn identity_from_package_v2_metadata(
+    package_ref: &str,
+    local_ref: &str,
+) -> Result<SkippyPackageIdentity> {
+    let package_dir = PathBuf::from(local_ref);
+    let manifest_path = package_dir.join(PACKAGE_V2_MANIFEST);
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?;
+    let manifest: PackageManifestV2 =
+        serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    manifest
+        .validate()
+        .context("validate package-v2 manifest")?;
+    let computed_package_id = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed_package_id,
+        "package-v2 manifest package_id does not match its content"
+    );
+    let required_native_abi = format!(
+        "{}.{}.{}",
+        skippy_ffi::ABI_VERSION_MAJOR,
+        skippy_ffi::ABI_VERSION_MINOR,
+        skippy_ffi::ABI_VERSION_PATCH
+    );
+    anyhow::ensure!(
+        manifest.native_abi_version == required_native_abi,
+        "package-v2 native ABI {} differs from runtime ABI {required_native_abi}",
+        manifest.native_abi_version
+    );
+    let metadata_artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .context("package-v2 metadata artifact is absent")?;
+    let metadata_relative = Path::new(&metadata_artifact.path);
+    anyhow::ensure!(
+        !metadata_relative.as_os_str().is_empty()
+            && metadata_relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "package-v2 artifact path is not a safe relative path: {metadata_relative:?}"
+    );
+    let source_model_path = package_dir.join(metadata_relative);
+    let source_metadata = source_model_path
+        .metadata()
+        .with_context(|| format!("stat package-v2 source {}", source_model_path.display()))?;
+    anyhow::ensure!(
+        source_metadata.is_file() && source_metadata.len() == metadata_artifact.byte_size,
+        "package-v2 metadata artifact size differs from manifest"
+    );
+    let source_sha256 = source_file_sha256(
+        &source_model_path,
+        &source_metadata,
+        SidecarDigestCache::open_default().as_ref(),
+    )?;
+    anyhow::ensure!(
+        source_sha256 == metadata_artifact.sha256 && source_sha256 == manifest.source_model.sha256,
+        "package-v2 metadata artifact SHA-256 differs from manifest"
+    );
+    let architecture = manifest
+        .model_metadata
+        .get("general.architecture")
+        .and_then(serde_json::Value::as_str)
+        .context("package-v2 model metadata is missing general.architecture")?;
+    let activation_width_key = format!("{architecture}.embedding_length");
+    let activation_width = manifest
+        .model_metadata
+        .get(&activation_width_key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .with_context(|| {
+            format!("package-v2 model metadata is missing positive {activation_width_key}")
+        })?;
+    let source_model_bytes = manifest
+        .source_model
+        .files
+        .iter()
+        .try_fold(0_u64, |total, file| total.checked_add(file.byte_size))
+        .context("package-v2 source byte count overflow")?;
+    anyhow::ensure!(
+        source_model_bytes > 0,
+        "package-v2 source model byte count must be positive"
+    );
+    let layer_weight_bytes = package_v2_layer_weight_bytes(&manifest)?;
+    let tensor_count = u64::try_from(manifest.tensor_catalog.entries.len())
+        .context("package-v2 tensor count exceeds u64")?;
+    let manifest_sha256 = hex_lower(&Sha256::digest(&manifest_bytes));
+    let canonical_package_ref = canonical_layer_package_ref(package_ref, local_ref);
+    Ok(SkippyPackageIdentity {
+        package_ref: canonical_package_ref,
+        manifest_sha256,
+        source_model_path,
+        source_model_sha256: manifest.source_model.sha256,
+        source_model_bytes,
+        source_files: Vec::new(),
+        layer_weight_bytes,
+        layer_count: manifest.layer_count,
+        activation_width,
+        tensor_count,
+        generation: manifest.generation.as_ref().map(package_v2_generation_info),
     })
 }
 
@@ -738,7 +1439,152 @@ fn canonical_layer_package_ref(package_ref: &str, local_ref: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skippy_package_format::{
+        ArtifactCatalog, SourceModel, Tensor, TensorCatalog, TensorIntegrity,
+    };
     use skippy_runtime::TensorInfo;
+
+    fn split_metadata(
+        split_no: u64,
+        split_count: u64,
+        tensor_count: u64,
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        [
+            ("split.no".to_string(), split_no.into()),
+            ("split.count".to_string(), split_count.into()),
+            ("split.tensors.count".to_string(), tensor_count.into()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn direct_gguf_inventory_uses_primary_global_tensor_count() {
+        let metadata = vec![split_metadata(0, 2, 3), split_metadata(1, 2, 2)];
+
+        validate_direct_gguf_shards(&metadata, 3).unwrap();
+
+        let stale_primary = vec![split_metadata(0, 2, 2), split_metadata(1, 2, 3)];
+        let error = validate_direct_gguf_shards(&stale_primary, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("split.tensors.count mismatch"), "{error}");
+    }
+
+    #[test]
+    fn package_v2_identity_rejects_v1_without_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(PACKAGE_V2_MANIFEST),
+            br#"{"schema_version":1}"#,
+        )
+        .unwrap();
+
+        let error = identity_from_package_v2(root.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("requires package schema 2"), "{error}");
+    }
+
+    #[test]
+    fn package_v2_ref_requires_the_v2_schema_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join(PACKAGE_V2_MANIFEST);
+
+        std::fs::write(&manifest, br#"{"schema_version":1}"#).unwrap();
+        assert!(!is_package_v2_ref(&root.path().to_string_lossy()));
+
+        std::fs::write(&manifest, br#"{"schema_version":2}"#).unwrap();
+        assert!(is_package_v2_ref(&root.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn package_v2_layer_weights_fall_back_when_ordinals_are_unavailable() {
+        let tensor = |id: &str, layer_ordinal, stored_length| Tensor {
+            id: id.to_string(),
+            name: id.to_string(),
+            ggml_type: 0,
+            dimensions: vec![1],
+            layer_ordinal,
+            storage: TensorStorage::Owned {
+                artifact_id: "source".to_string(),
+                data_offset: 0,
+                stored_length,
+                alignment: 1,
+                integrity: TensorIntegrity::ArtifactSha256,
+            },
+        };
+        let mut manifest = PackageManifestV2 {
+            schema_version: skippy_package_format::PACKAGE_SCHEMA_VERSION,
+            package_id: String::new(),
+            model_id: "fixture/model".to_string(),
+            source_model: SourceModel {
+                sha256: String::new(),
+                metadata_artifact_id: "source".to_string(),
+                repo: None,
+                revision: None,
+                primary_file: None,
+                canonical_ref: None,
+                distribution_id: None,
+                files: Vec::new(),
+            },
+            format: "gguf".to_string(),
+            layer_count: 2,
+            model_metadata: Default::default(),
+            artifact_catalog: ArtifactCatalog {
+                entries: Vec::new(),
+            },
+            tensor_catalog: TensorCatalog {
+                entries: vec![tensor("first", None, 10), tensor("second", None, 20)],
+            },
+            sidecars: Vec::new(),
+            generation: None,
+            native_abi_version: String::new(),
+            generator_version: String::new(),
+            created_at_unix_secs: 0,
+        };
+
+        assert!(package_v2_layer_weight_bytes(&manifest).unwrap().is_empty());
+
+        manifest.tensor_catalog.entries[0].layer_ordinal = Some(0);
+        assert!(package_v2_layer_weight_bytes(&manifest).unwrap().is_empty());
+
+        manifest.tensor_catalog.entries[1].layer_ordinal = Some(1);
+        assert_eq!(
+            package_v2_layer_weight_bytes(&manifest).unwrap(),
+            vec![10, 20]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires SKIPPY_PACKAGE_V2_TEST_DIR"]
+    fn package_v2_identity_reads_a_real_package() {
+        let package_dir = std::env::var_os("SKIPPY_PACKAGE_V2_TEST_DIR")
+            .map(PathBuf::from)
+            .expect("SKIPPY_PACKAGE_V2_TEST_DIR is required");
+
+        let identity = identity_from_package_v2(&package_dir).unwrap();
+
+        assert_eq!(identity.layer_count, 32);
+        assert!(identity.activation_width > 0);
+        assert_eq!(identity.layer_weight_bytes.len(), 32);
+        assert!(identity.source_model_path.is_file());
+        assert_eq!(identity.manifest_sha256.len(), 64);
+
+        let expected_manifest_sha256 = identity.manifest_sha256.clone();
+        let expected_source_sha256 = identity.source_model_sha256.clone();
+        let strict = super::super::local_source::into_content_addressed_identity(identity)
+            .expect("index package-v2 source for strict-local loading");
+        let verified = super::super::local_source::verify_registered_content_source(
+            "granite-v2-test",
+            &strict.package_ref,
+            &expected_manifest_sha256,
+            &expected_source_sha256,
+        )
+        .expect("resolve indexed package-v2 source");
+        assert_eq!(verified, strict);
+    }
 
     #[test]
     fn synthetic_direct_identity_accepts_safetensors_checkpoint_directory() {

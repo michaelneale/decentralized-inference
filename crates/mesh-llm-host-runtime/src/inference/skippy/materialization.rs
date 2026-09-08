@@ -18,7 +18,10 @@ pub use cache_management::{
     MaterializedStagePin, materialized_stages_for_sources, prune_unpinned_materialized_stages,
     remove_materialized_stages_for_sources,
 };
-pub use package_download::{StagePackageRef, is_layer_package_ref, resolve_hf_package_to_local};
+pub use package_download::{
+    StagePackageRef, is_layer_package_ref, resolve_hf_package_to_local,
+    resolve_package_v2_stage_to_local,
+};
 
 pub fn configure_materialized_stage_cache() {
     if std::env::var_os("SKIPPY_MATERIALIZED_DIR").is_none() {
@@ -73,6 +76,8 @@ pub struct ResolvedStagePackage {
     pub source_model_path: String,
     pub source_model_sha256: String,
     pub source_model_bytes: Option<u64>,
+    pub model_part_paths: Vec<PathBuf>,
+    pub projector_path: Option<PathBuf>,
 }
 
 pub fn ensure_package_manifest_sha(package_ref: &str, expected_sha256: &str) -> Result<()> {
@@ -106,6 +111,54 @@ pub fn inspect_stage_package(package_ref: &str) -> Result<StagePackageInfo> {
 /// Returns the resolved local path if the package ref needed resolution, or `None`
 /// if it was already local / not a layer package.
 pub fn resolve_stage_load_package(load: &StageLoadRequest) -> Result<Option<ResolvedStagePackage>> {
+    if load.load_mode == LoadMode::RuntimeSlice && is_layer_package_ref(&load.package_ref) {
+        let descriptor = skippy_package_format::stage_admission::StageAdmissionDescriptor {
+            package_id: load.admission.package_id.clone(),
+            resident_tensor_ids: load.admission.resident_tensor_ids.clone(),
+            sidecars: load
+                .admission
+                .sidecars
+                .iter()
+                .map(|sidecar| skippy_package_format::Sidecar {
+                    kind: match sidecar.kind {
+                        skippy_protocol::StageAdmissionSidecarKind::Mmproj => {
+                            skippy_package_format::SidecarKind::Mmproj
+                        }
+                    },
+                    artifact_id: sidecar.artifact_id.clone(),
+                    name: sidecar.name.clone(),
+                })
+                .collect(),
+        };
+        let (local_ref, model_part_paths, projector_path) =
+            resolve_package_v2_stage_to_local(&load.package_ref, &descriptor)?;
+        ensure_package_manifest_sha(&local_ref, &load.manifest_sha256)?;
+        let manifest_path = Path::new(&local_ref).join("model-package.json");
+        let manifest: skippy_package_format::PackageManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).with_context(|| {
+                format!("read package-v2 manifest {}", manifest_path.display())
+            })?)
+            .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+        let source_model_bytes = manifest
+            .source_model
+            .files
+            .iter()
+            .try_fold(0_u64, |total, file| total.checked_add(file.byte_size))
+            .context("package-v2 source byte count overflow")?;
+        let source_model_path = model_part_paths
+            .first()
+            .context("package-v2 admission selected no model artifacts")?
+            .to_string_lossy()
+            .into_owned();
+        return Ok(Some(ResolvedStagePackage {
+            local_ref,
+            source_model_path,
+            source_model_sha256: manifest.source_model.sha256,
+            source_model_bytes: Some(source_model_bytes),
+            model_part_paths,
+            projector_path,
+        }));
+    }
     if load.load_mode != LoadMode::LayerPackage {
         return Ok(None);
     }
@@ -129,6 +182,8 @@ pub fn resolve_stage_load_package(load: &StageLoadRequest) -> Result<Option<Reso
         source_model_path: info.source_model_path,
         source_model_sha256: info.source_model_sha256,
         source_model_bytes: info.source_model_bytes,
+        model_part_paths: Vec::new(),
+        projector_path: None,
     }))
 }
 
@@ -314,6 +369,95 @@ mod tests {
         (root.to_path_buf(), manifest_sha)
     }
 
+    fn write_local_package_v2_fixture(root: &Path) -> (String, String) {
+        use skippy_package_format::{
+            Artifact, ArtifactCatalog, PackageManifest, SourceFile, SourceModel, Tensor,
+            TensorCatalog, TensorIntegrity, TensorStorage,
+        };
+        let primary = b"primary";
+        let resident = b"resident";
+        let unused = b"unused";
+        fs::create_dir_all(root.join("artifacts")).unwrap();
+        fs::write(root.join("artifacts/primary.gguf"), primary).unwrap();
+        fs::write(root.join("artifacts/resident.gguf"), resident).unwrap();
+        fs::write(root.join("artifacts/unused.gguf"), unused).unwrap();
+        let mut manifest = PackageManifest {
+            schema_version: skippy_package_format::PACKAGE_SCHEMA_VERSION,
+            package_id: String::new(),
+            model_id: "model-a".to_string(),
+            source_model: SourceModel {
+                sha256: sha256_hex(primary),
+                metadata_artifact_id: "primary".to_string(),
+                repo: None,
+                revision: None,
+                primary_file: Some("model.gguf".to_string()),
+                canonical_ref: None,
+                distribution_id: None,
+                files: vec![SourceFile {
+                    path: "model.gguf".to_string(),
+                    byte_size: primary.len() as u64,
+                    sha256: sha256_hex(primary),
+                }],
+            },
+            format: "gguf".to_string(),
+            layer_count: 1,
+            model_metadata: std::collections::BTreeMap::from([(
+                "general.architecture".to_string(),
+                serde_json::Value::String("llama".to_string()),
+            )]),
+            artifact_catalog: ArtifactCatalog {
+                entries: vec![
+                    Artifact {
+                        id: "primary".to_string(),
+                        path: "artifacts/primary.gguf".to_string(),
+                        byte_size: primary.len() as u64,
+                        sha256: sha256_hex(primary),
+                    },
+                    Artifact {
+                        id: "resident".to_string(),
+                        path: "artifacts/resident.gguf".to_string(),
+                        byte_size: resident.len() as u64,
+                        sha256: sha256_hex(resident),
+                    },
+                    Artifact {
+                        id: "unused".to_string(),
+                        path: "artifacts/unused.gguf".to_string(),
+                        byte_size: unused.len() as u64,
+                        sha256: sha256_hex(unused),
+                    },
+                ],
+            },
+            tensor_catalog: TensorCatalog {
+                entries: vec![Tensor {
+                    id: "resident-tensor".to_string(),
+                    name: "blk.0.weight".to_string(),
+                    ggml_type: 0,
+                    dimensions: vec![1],
+                    layer_ordinal: Some(0),
+                    storage: TensorStorage::Owned {
+                        artifact_id: "resident".to_string(),
+                        data_offset: 0,
+                        stored_length: resident.len() as u64,
+                        alignment: 1,
+                        integrity: TensorIntegrity::ArtifactSha256,
+                    },
+                }],
+            },
+            sidecars: Vec::new(),
+            generation: None,
+            native_abi_version: "test".to_string(),
+            generator_version: "test".to_string(),
+            created_at_unix_secs: 1,
+        };
+        manifest.package_id = manifest.computed_package_id().unwrap();
+        manifest.validate().unwrap();
+        let package_id = manifest.package_id.clone();
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let manifest_sha = sha256_hex(&bytes);
+        fs::write(root.join("model-package.json"), bytes).unwrap();
+        (manifest_sha, package_id)
+    }
+
     fn stage_load_request_for_package(
         package_dir: &Path,
         manifest_sha256: String,
@@ -330,6 +474,12 @@ mod tests {
             stage_index: 0,
             layer_start: 0,
             layer_end: 1,
+            admission: crate::inference::skippy::test_stage_admission(0, 1),
+            participant_set_hash: "participants".to_string(),
+            topology_hash: "topology".to_string(),
+            activation_codec: skippy_protocol::StageActivationCodec::default(),
+            activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::default(),
+            topology_stages: Vec::new(),
             model_path: Some(package_dir.to_string_lossy().to_string()),
             source_model_bytes: None,
             source_model_sha256: None,
@@ -454,6 +604,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_slice_package_v2_resolves_only_admitted_model_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest_sha, package_id) = write_local_package_v2_fixture(dir.path());
+        let mut load = stage_load_request_for_package(dir.path(), manifest_sha);
+        load.load_mode = LoadMode::RuntimeSlice;
+        load.admission.package_id = package_id;
+        load.admission.resident_tensor_ids = vec!["resident-tensor".to_string()];
+
+        let resolved = resolve_stage_load_package(&load).unwrap().unwrap();
+        assert_eq!(
+            resolved.model_part_paths,
+            vec![
+                dir.path().join("artifacts/primary.gguf"),
+                dir.path().join("artifacts/resident.gguf")
+            ]
+        );
+        assert!(
+            !resolved
+                .model_part_paths
+                .iter()
+                .any(|path| path.ends_with("unused.gguf"))
+        );
+    }
+
+    #[test]
     fn resolved_stage_load_package_keeps_local_path_out_of_source_identity() {
         let dir = tempfile::tempdir().unwrap();
         write_cached_package_snapshot(dir.path(), sha256_hex(b"layer"));
@@ -471,6 +646,12 @@ mod tests {
             stage_index: 0,
             layer_start: 0,
             layer_end: 1,
+            admission: crate::inference::skippy::test_stage_admission(0, 1),
+            participant_set_hash: "participants".to_string(),
+            topology_hash: "topology".to_string(),
+            activation_codec: skippy_protocol::StageActivationCodec::default(),
+            activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::default(),
+            topology_stages: Vec::new(),
             model_path: None,
             source_model_bytes: None,
             source_model_sha256: None,

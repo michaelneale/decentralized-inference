@@ -41,9 +41,12 @@ Activation payloads dominate the wire path. Protocol generation 7 fixes every
 activation frame to raw little-endian `f32`; there is no negotiated or
 per-request activation dtype.
 
-Generation 7 requires mesh-subprotocol control, list-valued status responses,
-and strict local-content identity as one fail-closed capability bundle. The
-dedicated `skippy-stage/2` ALPN accepts activation transport only.
+Generation 8 requires mesh-subprotocol control, list-valued status responses,
+strict local-content identity, and canonical stage-admission descriptors as one
+fail-closed capability bundle. Participants echo the descriptor on preparation
+and readiness; any package, plan, range, tensor, sidecar, profile, backend, or
+graph-configuration mismatch rejects the stage. The dedicated `skippy-stage/2`
+ALPN accepts activation transport only.
 
 ## Responsibilities
 

@@ -4,10 +4,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{
-    SkippyPackageIdentity, SkippyPackageSourceFile, SyntheticIdentityMode, hex_lower,
-    synthetic_gguf_package,
-};
+use super::{SkippyPackageIdentity, SkippyPackageSourceFile, hex_lower, synthetic_gguf_package};
 
 #[derive(Serialize)]
 struct ContentAddressedGgufManifest<'a> {
@@ -40,11 +37,7 @@ pub fn synthetic_content_addressed_gguf_package(
     model_id: &str,
     model_path: &Path,
 ) -> Result<SkippyPackageIdentity> {
-    synthetic_gguf_package(
-        model_id,
-        model_path,
-        SyntheticIdentityMode::ContentAddressed,
-    )
+    synthetic_gguf_package(model_id, model_path)
 }
 
 pub(super) fn validate_source_set(model_path: &Path) -> Result<()> {

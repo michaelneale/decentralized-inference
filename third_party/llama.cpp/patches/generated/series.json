@@ -1,0 +1,434 @@
+{
+  "full_patch_sha256": "c7e41937bb6310955a7ae28a5ff6ff21d45f13ede7ccdb9e311d0e5779dd9866",
+  "generator_version": "0.3.0",
+  "schema_version": 1,
+  "shards": [
+    {
+      "families": [
+        "cohere2"
+      ],
+      "file": "0001-family-cohere2.patch",
+      "sha256": "9bc7d74d6574a31cd9896420425003501543b7b09b6bff1735d4919dfc0a0bbf",
+      "sources": [
+        "src/models/cohere2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "deepseek2"
+      ],
+      "file": "0002-family-deepseek2.patch",
+      "sha256": "baa31d9664bfd7f36756cdf3f7c78879dbcce3ed4196b0f94f3dfb95c253ecd5",
+      "sources": [
+        "src/models/deepseek2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "falcon-dense"
+      ],
+      "file": "0003-family-falcon-dense.patch",
+      "sha256": "65a4fe45b09cbb896a202f402870a967fab90bc735ada39fb393674727d2a359",
+      "sources": [
+        "src/models/falcon.cpp"
+      ]
+    },
+    {
+      "families": [
+        "falcon-h1"
+      ],
+      "file": "0004-family-falcon-h1.patch",
+      "sha256": "cacaf717a84eace869018d5b91c4f7bd5897488f55f4054aa2f09501b1553d51",
+      "sources": [
+        "src/models/falcon-h1.cpp"
+      ]
+    },
+    {
+      "families": [
+        "gemma2"
+      ],
+      "file": "0005-family-gemma2.patch",
+      "sha256": "d2ec6e70cbd413adc38ca57544c67f9886ea4e205ffd91ff6f0feab37cea5fc4",
+      "sources": [
+        "src/models/gemma2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm4"
+      ],
+      "file": "0006-family-glm4.patch",
+      "sha256": "46f5c0ca66923c2be58c0869bbb67d6adcd803e9ce61c2557d45067e891ab565",
+      "sources": [
+        "src/models/glm4.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm45-air",
+        "glm47-flash"
+      ],
+      "file": "0007-family-glm45-air--glm47-flash.patch",
+      "sha256": "2fac8a6a19acb254a04a728baf355dc4ffb1d010c0f1c12c7d15b093fdb0f255",
+      "sources": [
+        "src/models/glm4-moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "glm47-flash",
+        "qwen4exp"
+      ],
+      "file": "0008-family-glm47-flash--qwen4exp.patch",
+      "sha256": "e1d660156a8158f5b306aa2ced27cf3645641606a485765b597110abfdbbcf6a",
+      "sources": [
+        "src/models/glm-dsa.cpp"
+      ]
+    },
+    {
+      "families": [
+        "gpt-oss"
+      ],
+      "file": "0009-family-gpt-oss.patch",
+      "sha256": "97a5d0e5e4a91c8432a4b6dbf105b72f470f6aaab579f34dbd5aa19984199d05",
+      "sources": [
+        "src/models/openai-moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "granite-dense"
+      ],
+      "file": "0010-family-granite-dense.patch",
+      "sha256": "e2f7616db20dbdfb58455af8007d4d886ef0d499e76a20cc578b832aea3552aa",
+      "sources": [
+        "src/models/granite.cpp"
+      ]
+    },
+    {
+      "families": [
+        "granite-hybrid"
+      ],
+      "file": "0011-family-granite-hybrid.patch",
+      "sha256": "ab454f776bc365e60a317961d5cf46e05644b9aa4025c21ef9a2564652bd1f13",
+      "sources": [
+        "src/models/granite-hybrid.cpp"
+      ]
+    },
+    {
+      "families": [
+        "internlm2"
+      ],
+      "file": "0012-family-internlm2.patch",
+      "sha256": "c7b241802053271ced649645b35de2158f2059e3a4faea85e40188d05511043a",
+      "sources": [
+        "src/models/internlm2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "jamba2"
+      ],
+      "file": "0013-family-jamba2.patch",
+      "sha256": "b12bf9e9779ecd3af2d0221e25234518f19875980dbad49e3a4ea59b1b40fa5e",
+      "sources": [
+        "src/models/jamba.cpp"
+      ]
+    },
+    {
+      "families": [
+        "kimi-linear"
+      ],
+      "file": "0014-family-kimi-linear.patch",
+      "sha256": "5c715acae2e032ccc0faa40282ea5954d24f7965896ece5f94bd1a139e477125",
+      "sources": [
+        "src/models/kimi-linear.cpp"
+      ]
+    },
+    {
+      "families": [
+        "laguna"
+      ],
+      "file": "0015-family-laguna.patch",
+      "sha256": "875f7c913a6508a5e80cf17bad79b48c5a791b36bb84061028f0fab42dce8e8a",
+      "sources": [
+        "src/models/laguna.cpp"
+      ]
+    },
+    {
+      "families": [
+        "lfm2",
+        "lfm2-vl"
+      ],
+      "file": "0016-family-lfm2--lfm2-vl.patch",
+      "sha256": "6016e2f4363475e2b1e8e6cc544391265250d181c68320b6d2d83f5af30b065d",
+      "sources": [
+        "src/models/lfm2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "llama"
+      ],
+      "file": "0017-family-llama.patch",
+      "sha256": "a2d099654d43061f7b4d75da8f524801dce11b11459d85acbb40161ee870c139",
+      "sources": [
+        "src/models/llama.cpp",
+        "src/models/olmo2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "mamba",
+        "mamba2"
+      ],
+      "file": "0018-family-mamba--mamba2.patch",
+      "sha256": "d2a882bf7271fc32466415f31a8561cd6d508352647381e4bba2ce340daec063",
+      "sources": [
+        "src/models/mamba.cpp"
+      ]
+    },
+    {
+      "families": [
+        "mistral-small"
+      ],
+      "file": "0019-family-mistral-small.patch",
+      "sha256": "ac996cf36fedfbf18af180da7069dc85fc95655585dccb6848a1d9bf462cd843",
+      "sources": [
+        "src/models/mistral3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "nemotron"
+      ],
+      "file": "0020-family-nemotron.patch",
+      "sha256": "2875d75c4c4d90ea441c44e273431c5088ef18e8b1559bfa9436614e530ac87e",
+      "sources": [
+        "src/models/nemotron-h.cpp"
+      ]
+    },
+    {
+      "families": [
+        "phi3",
+        "phi4"
+      ],
+      "file": "0021-family-phi3--phi4.patch",
+      "sha256": "eda7adf4961ba82f48b13ec000c923a4e54fbba3888b9deb2207bf884312d34b",
+      "sources": [
+        "src/models/phi3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen2-moe"
+      ],
+      "file": "0022-family-qwen2-moe.patch",
+      "sha256": "4730e12ccf28bf5f2441053c1e3dca8e2ae92a8d8ea0cdb0483fa9a80c382c8f",
+      "sources": [
+        "src/models/qwen2moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen2-vl"
+      ],
+      "file": "0023-family-qwen2-vl.patch",
+      "sha256": "bc49d269f746a3962da0f0f648cfd7b8fbdca01e492dcba05790a45a562c3a23",
+      "sources": [
+        "src/models/qwen2vl.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-dense"
+      ],
+      "file": "0024-family-qwen3-dense.patch",
+      "sha256": "81c22529ccd7f3ecf2203885822104bf4460ec9d7f66bebf3500f5452608090a",
+      "sources": [
+        "src/models/qwen3.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-moe"
+      ],
+      "file": "0025-family-qwen3-moe.patch",
+      "sha256": "49189e00a370a729db6374a4eff10a62675a8682192c2faba15edf2ae5d5dd88",
+      "sources": [
+        "src/models/qwen3moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-next"
+      ],
+      "file": "0026-family-qwen3-next.patch",
+      "sha256": "a2adb0a6963c01b83987a009b1a0eb2fe300c8bbe439c47c4ddebee22bb9a2fd",
+      "sources": [
+        "src/models/qwen3next.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen3-vl"
+      ],
+      "file": "0027-family-qwen3-vl.patch",
+      "sha256": "f052d29d7ecc97eeabd198aa0edc05b38d462b9f1f25928096fe556e9289311b",
+      "sources": [
+        "src/models/qwen3vl.cpp",
+        "src/models/qwen3vlmoe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen35"
+      ],
+      "file": "0028-family-qwen35.patch",
+      "sha256": "0ccf68fca46432e68e5fd86f73d26891f511272992e7e95552f05bbd0a44dbb7",
+      "sources": [
+        "src/models/qwen35.cpp",
+        "src/models/qwen35moe.cpp"
+      ]
+    },
+    {
+      "families": [
+        "qwen4exp"
+      ],
+      "file": "0029-family-qwen4exp.patch",
+      "sha256": "402f0f599f313977d88ea9633af8f74c7a9da387d1f1afbc8e35e31bc17201c4",
+      "sources": [
+        "src/models/qwen4exp.cpp"
+      ]
+    },
+    {
+      "families": [
+        "rwkv6"
+      ],
+      "file": "0030-family-rwkv6.patch",
+      "sha256": "ec5844784e4e780fc9d1f7fdf3011cb7fd75a8561834886a0b7e28e74119f4f3",
+      "sources": [
+        "src/models/rwkv6.cpp",
+        "src/models/rwkv6qwen2.cpp"
+      ]
+    },
+    {
+      "families": [
+        "rwkv7"
+      ],
+      "file": "0031-family-rwkv7.patch",
+      "sha256": "dd6119bef883cf646783f60a00af9e46ab3b7f297cddfba7eca4f45c9ec1cd98",
+      "sources": [
+        "src/models/arwkv7.cpp",
+        "src/models/rwkv7.cpp"
+      ]
+    },
+    {
+      "families": [
+        "smollm3"
+      ],
+      "file": "0032-family-smollm3.patch",
+      "sha256": "3b068f8deddd06507cb2945c13455a4879fdb144af319250fa941179e433da48",
+      "sources": [
+        "src/models/smollm3.cpp"
+      ]
+    },
+    {
+      "families": [],
+      "file": "0033-family-unmapped.patch",
+      "sha256": "084de9f6191a9b2358e1b9b1a9dbd76eb778e1764ace75beae159d36b24b64a5",
+      "sources": [
+        "src/models/afmoe.cpp",
+        "src/models/apertus.cpp",
+        "src/models/arcee.cpp",
+        "src/models/arctic.cpp",
+        "src/models/baichuan.cpp",
+        "src/models/bailingmoe.cpp",
+        "src/models/bailingmoe2.cpp",
+        "src/models/bailingmoe3.cpp",
+        "src/models/bert.cpp",
+        "src/models/bitnet.cpp",
+        "src/models/bloom.cpp",
+        "src/models/chameleon.cpp",
+        "src/models/chatglm.cpp",
+        "src/models/codeshell.cpp",
+        "src/models/cogvlm.cpp",
+        "src/models/cohere2moe.cpp",
+        "src/models/command-r.cpp",
+        "src/models/dbrx.cpp",
+        "src/models/deci.cpp",
+        "src/models/deepseek.cpp",
+        "src/models/deepseek32.cpp",
+        "src/models/deepseek4.cpp",
+        "src/models/dots1.cpp",
+        "src/models/dots3note.cpp",
+        "src/models/dream.cpp",
+        "src/models/ernie4-5-moe.cpp",
+        "src/models/ernie4-5.cpp",
+        "src/models/eurobert.cpp",
+        "src/models/exaone-moe.cpp",
+        "src/models/exaone.cpp",
+        "src/models/exaone4.cpp",
+        "src/models/gemma-embedding.cpp",
+        "src/models/gemma.cpp",
+        "src/models/gemma3.cpp",
+        "src/models/gemma3n.cpp",
+        "src/models/gemma4.cpp",
+        "src/models/gpt2.cpp",
+        "src/models/gptneox.cpp",
+        "src/models/granite-swa.cpp",
+        "src/models/granite-switch.cpp",
+        "src/models/grok.cpp",
+        "src/models/grovemoe.cpp",
+        "src/models/hunyuan-moe.cpp",
+        "src/models/hunyuan-vl.cpp",
+        "src/models/hy-v3.cpp",
+        "src/models/inkling.cpp",
+        "src/models/jais.cpp",
+        "src/models/jais2.cpp",
+        "src/models/kimi-k3.cpp",
+        "src/models/llada-moe.cpp",
+        "src/models/llada.cpp",
+        "src/models/llama4.cpp",
+        "src/models/maincoder.cpp",
+        "src/models/mellum.cpp",
+        "src/models/mimo2.cpp",
+        "src/models/minicpm3.cpp",
+        "src/models/minimax-01.cpp",
+        "src/models/minimax-m2.cpp",
+        "src/models/minimax-m3.cpp",
+        "src/models/modern-bert.cpp",
+        "src/models/mpt.cpp",
+        "src/models/muse-glimmer.cpp",
+        "src/models/nanbeige.cpp",
+        "src/models/nemotron.cpp",
+        "src/models/neo-bert.cpp",
+        "src/models/olmo.cpp",
+        "src/models/olmoe.cpp",
+        "src/models/openelm.cpp",
+        "src/models/orion.cpp",
+        "src/models/paddleocr.cpp",
+        "src/models/pangu-embed.cpp",
+        "src/models/phi2.cpp",
+        "src/models/plamo.cpp",
+        "src/models/plamo2.cpp",
+        "src/models/plamo3.cpp",
+        "src/models/plm.cpp",
+        "src/models/pockettts.cpp",
+        "src/models/qwen.cpp",
+        "src/models/qwen2.cpp",
+        "src/models/refact.cpp",
+        "src/models/rnd1.cpp",
+        "src/models/seed-oss.cpp",
+        "src/models/smallthinker.cpp",
+        "src/models/stablelm.cpp",
+        "src/models/starcoder.cpp",
+        "src/models/starcoder2.cpp",
+        "src/models/step35.cpp",
+        "src/models/t5.cpp",
+        "src/models/talkie.cpp",
+        "src/models/xverse.cpp"
+      ]
+    }
+  ]
+}

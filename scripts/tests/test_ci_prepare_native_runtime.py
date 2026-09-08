@@ -112,6 +112,8 @@ class CiPrepareNativeRuntimeTests(unittest.TestCase):
         runtime_id: str,
         backend: str,
         supported: bool,
+        *,
+        include_catalogs: bool = False,
     ) -> Path:
         binary = product / "mesh-llm"
         binary.parent.mkdir(parents=True, exist_ok=True)
@@ -128,8 +130,22 @@ class CiPrepareNativeRuntimeTests(unittest.TestCase):
                 "url": None,
             }
         ]
+        report = (
+            {
+                "catalogs": {
+                    "manifest_artifacts": 0,
+                    "bundle_dirs": [str(product / "native-runtimes")],
+                    "bundle_artifacts": len(rows),
+                    "bundle_duplicates_of_catalog": 0,
+                    "bundle_duplicates_of_bundles": 0,
+                },
+                "runtimes": rows,
+            }
+            if include_catalogs
+            else rows
+        )
         rows_path = product / "runtime-rows.json"
-        rows_path.write_text(json.dumps(rows), encoding="utf-8")
+        rows_path.write_text(json.dumps(report), encoding="utf-8")
         binary.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -183,6 +199,102 @@ cat "$(dirname "$0")/runtime-rows.json"
             self.assertEqual(Path(result.stdout.strip()), runtime.resolve())
             self.assertIn("verified native runtime artifact", result.stderr)
             self.assertIn("Reusing compatible native runtime", result.stderr)
+            self.assertFalse(out.exists())
+
+    def test_reuses_runtime_from_catalog_wrapped_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            product = Path(directory) / "product"
+            runtime = self.write_runtime(product / "native-runtimes")
+            binary = self.write_fake_binary(
+                product, runtime.name, "cpu", True, include_catalogs=True
+            )
+            out = Path(directory) / "fallback"
+
+            result = self.run_script(out, binary)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(Path(result.stdout.strip()), runtime.resolve())
+            self.assertIn("verified native runtime artifact", result.stderr)
+            self.assertFalse(out.exists())
+
+    def test_catalog_wrapped_report_preserves_runtime_rejection(self) -> None:
+        for supported, abi, error in (
+            (False, None, "expected exactly one compatible"),
+            (True, "99.99.99", "has Skippy ABI 99.99.99"),
+        ):
+            with self.subTest(supported=supported, abi=abi):
+                with tempfile.TemporaryDirectory() as directory:
+                    product = Path(directory) / "product"
+                    runtime = self.write_runtime(
+                        product / "native-runtimes", skippy_abi=abi
+                    )
+                    binary = self.write_fake_binary(
+                        product, runtime.name, "cpu", supported, include_catalogs=True
+                    )
+                    out = Path(directory) / "fallback"
+
+                    result = self.run_script(
+                        out,
+                        binary,
+                        extra_env={"MESH_SDK_NATIVE_RUNTIME_BUILD_FALLBACK": "1"},
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(error, result.stderr)
+                    self.assertFalse(out.exists())
+
+    def test_rejects_malformed_runtime_reports_without_building(self) -> None:
+        for report in (
+            None,
+            {},
+            {"runtimes": None},
+            {"runtimes": {}},
+            [None],
+            {"runtimes": [None]},
+        ):
+            with self.subTest(report=report):
+                with tempfile.TemporaryDirectory() as directory:
+                    product = Path(directory) / "product"
+                    runtime = self.write_runtime(product / "native-runtimes")
+                    binary = self.write_fake_binary(product, runtime.name, "cpu", True)
+                    (product / "runtime-rows.json").write_text(
+                        json.dumps(report), encoding="utf-8"
+                    )
+                    out = Path(directory) / "fallback"
+
+                    result = self.run_script(
+                        out,
+                        binary,
+                        extra_env={"MESH_SDK_NATIVE_RUNTIME_BUILD_FALLBACK": "1"},
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("native runtime compatibility", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertFalse(out.exists())
+
+    def test_rejects_ambiguous_catalog_wrapped_report_without_building(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            product = Path(directory) / "product"
+            runtime = self.write_runtime(product / "native-runtimes")
+            binary = self.write_fake_binary(
+                product, runtime.name, "cpu", True, include_catalogs=True
+            )
+            report_path = product / "runtime-rows.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["runtimes"].append({**report["runtimes"][0], "id": "another-runtime"})
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            out = Path(directory) / "fallback"
+
+            result = self.run_script(
+                out,
+                binary,
+                extra_env={"MESH_SDK_NATIVE_RUNTIME_BUILD_FALLBACK": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("expected exactly one compatible", result.stderr)
+            self.assertIn("another-runtime:cpu", result.stderr)
             self.assertFalse(out.exists())
 
     def test_reuses_sole_compatible_product_backend_before_cpu_fallback(self) -> None:

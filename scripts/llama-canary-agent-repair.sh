@@ -447,12 +447,38 @@ run_battery() {
   # live in run 33140672269). An arm64 sanity check follows the build so a
   # misconfigured toolchain fails loudly instead of as symbol errors.
   prepare_repair_target || return 1
-  arch -arm64 scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64 || return 1
+  # Battery-mode repairs still prove the complete pinned live matrix. New
+  # conventional model builders are handled by the source rewriter and the
+  # single generated family patch; the repair loop no longer selects one
+  # missing boundary-registration family or grows the model manifest.
+  if [[ "$MODE" == "battery" ]]; then
+    if ! python3 scripts/skippy-llama-parity.py --llama-src .deps/llama.cpp \
+        validate >>"$BATTERY_LOG" 2>&1; then
+      tail -n 2 "$BATTERY_LOG"
+      echo "parity manifest validation failed; repair cannot certify" >&2
+      return 1
+    fi
+    export SKIPPY_CANARY_LIVE_MATRIX_BACKEND="${SKIPPY_CANARY_LIVE_MATRIX_BACKEND:-metal}"
+    if ! arch -arm64 scripts/skippy-canary-live-matrix.sh --prepare \
+        >>"$BATTERY_LOG" 2>&1; then
+      tail -n 2 "$BATTERY_LOG"
+      echo "live package-v2 matrix failed; repair cannot certify" >&2
+      return 1
+    fi
+  fi
+  LLAMA_STAGE_UPSTREAM_TESTS=ON uv run --no-project --with jinja2==3.1.6 -- \
+    arch -arm64 scripts/build-llama.sh \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 || return 1
   local archive
   archive="${LLAMA_STAGE_BUILD_DIR:-}/src/libllama.a"
   if [[ -n "${LLAMA_STAGE_BUILD_DIR:-}" && -f "$archive" ]] \
      && [[ "$(lipo -archs "$archive" 2>/dev/null)" != "arm64" ]]; then
     echo "refusing to certify: native archive is not arm64: $(lipo -archs "$archive" 2>/dev/null)" >&2
+    return 1
+  fi
+  if ! scripts/check-skippy-generated-family-patch.sh >>"$BATTERY_LOG" 2>&1; then
+    tail -n 5 "$BATTERY_LOG"
+    echo "generated model-family patch is stale or invalid; repair cannot certify" >&2
     return 1
   fi
   if scripts/skippy-family-battery.sh >"$BATTERY_LOG" 2>&1; then

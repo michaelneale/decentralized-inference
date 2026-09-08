@@ -33,6 +33,7 @@ pub(crate) fn p0_p1_manifest_rows() -> BTreeSet<(String, String, String)> {
     manifest
         .rows_by_priority(["p0", "p1"])
         .into_iter()
+        .filter(|row| is_parity_artifact_status(&row.status))
         .map(|row| {
             (
                 manifest.priority_for(row).to_string(),
@@ -45,9 +46,9 @@ pub(crate) fn p0_p1_manifest_rows() -> BTreeSet<(String, String, String)> {
 
 pub(crate) fn assert_manifest_row_complete(spec: FamilySpec) -> Result<()> {
     let row = manifest_row(spec)?;
-    if !matches!(row.status.as_str(), "certified" | "certified_package_only") {
+    if !is_parity_artifact_status(&row.status) {
         bail!(
-            "{} / {} is {}, but P0/P1 rows must be certified before getting a parity module",
+            "{} / {} is {}, but P0/P1 parity modules require a certified artifact row",
             row.llama_model,
             row.family,
             row.status
@@ -710,6 +711,7 @@ struct StagePath {
     path: PathBuf,
     load_mode: RuntimeLoadMode,
     filter_tensors_on_load: bool,
+    resident_tensor_names: Vec<String>,
 }
 
 impl ResolvedCase {
@@ -754,6 +756,7 @@ impl ResolvedCase {
                         path: path.clone(),
                         load_mode: RuntimeLoadMode::RuntimeSlice,
                         filter_tensors_on_load: false,
+                        resident_tensor_names: Vec::new(),
                     },
                     package_dir: None,
                 })
@@ -768,6 +771,7 @@ impl ResolvedCase {
                         path: package_dir.clone(),
                         load_mode: RuntimeLoadMode::LayerPackage,
                         filter_tensors_on_load: true,
+                        resident_tensor_names: Vec::new(),
                     },
                     package_dir: Some(package_dir.clone()),
                 })
@@ -1031,6 +1035,103 @@ fn parse_reviewed_splits(row: &CandidateRow, splits: &str, layer_count: u32) -> 
     }
 }
 
+/// Cut-selection lane for the representative lattice fixture (see
+/// `docs/skippy/LLAMA_PARITY.md`, "representative cut lattice").
+///
+/// For `layer_count <= FULL_LATTICE_MAX_LAYERS` every ordered pair is returned.
+/// Above that the set is the deterministic, deduplicated union of: all adjacent
+/// pairs `(s, s+1)`, all first-edge pairs `(1, s2)`, all final-edge pairs
+/// `(s1, layer_count - 1)`, plus the reviewed manifest pair when it exists.
+/// Boundary-adjacent cuts are where the hand-copied per-model split snippets
+/// in the native builders diverge, which is how a single reviewed cut can hide
+/// a Granite-class null-weight failure.
+pub(crate) const FULL_LATTICE_MAX_LAYERS: u32 = 12;
+
+pub(crate) fn representative_cut_lattice(
+    layer_count: u32,
+    reviewed: Option<(u32, u32)>,
+) -> Result<Vec<(u32, u32)>> {
+    if layer_count < 3 {
+        bail!("cut lattice requires at least three layers, got {layer_count}");
+    }
+    let last = layer_count - 1;
+    let mut cuts: BTreeSet<(u32, u32)> = BTreeSet::new();
+    if layer_count <= FULL_LATTICE_MAX_LAYERS {
+        for s1 in 1..last {
+            for s2 in (s1 + 1)..layer_count {
+                cuts.insert((s1, s2));
+            }
+        }
+    } else {
+        for s in 1..last {
+            cuts.insert((s, s + 1));
+            cuts.insert((1, s + 1));
+            cuts.insert((s, last));
+        }
+    }
+    if let Some(pair) = reviewed.filter(|p| p.0 > 0 && p.0 < p.1 && p.1 < layer_count) {
+        cuts.insert(pair);
+    }
+    if cuts.is_empty() {
+        bail!("cut lattice for {layer_count} layers is empty");
+    }
+    Ok(cuts.into_iter().collect())
+}
+
+/// Runs the representative cut lattice for one family. Coverage mode and pair
+/// count are printed so a green run states exactly which cuts were exercised.
+pub(crate) fn representative_cut_lattice_matches_full_model(spec: FamilySpec) -> Result<()> {
+    prepare_native_logs()?;
+    let Some(case) = resolve_case_for_ignored_test(spec)? else {
+        return Ok(());
+    };
+    let layout = case.layout()?;
+    if case.row.is_package_only() {
+        bail!(
+            "{} / {} cut-lattice coverage requires a full-model artifact",
+            spec.llama_model,
+            spec.family
+        );
+    }
+    let reviewed = case
+        .row
+        .splits
+        .as_deref()
+        .map(|splits| parse_reviewed_splits(case.row, splits, layout.layer_count))
+        .transpose()?;
+    let cuts = representative_cut_lattice(layout.layer_count, reviewed)?;
+    let coverage_mode = if layout.layer_count <= FULL_LATTICE_MAX_LAYERS {
+        "full-lattice"
+    } else {
+        "representative-union"
+    };
+    println!(
+        "{} / {}: coverage mode {coverage_mode}, {} cuts over {} layers",
+        spec.llama_model,
+        spec.family,
+        cuts.len(),
+        layout.layer_count
+    );
+    for (index, (split_1, split_2)) in cuts.iter().enumerate() {
+        run_correctness_chain(&layout, spec, (*split_1, *split_2)).with_context(|| {
+            format!(
+                "{} / {} cut {}/{} failed: splits=({},{}), layer_count={}, stages=0..{s1} / {s1}..{s2} / {s2}..{L}",
+                spec.llama_model,
+                spec.family,
+                index + 1,
+                cuts.len(),
+                split_1,
+                split_2,
+                layout.layer_count,
+                s1 = split_1,
+                s2 = split_2,
+                L = layout.layer_count,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn split_layers(layer_count: u32) -> Result<(u32, u32)> {
     if layer_count < 3 {
         bail!("parity activation handoff requires at least three layers, got {layer_count}");
@@ -1197,6 +1298,7 @@ fn stage_path(layout: &TestLayout, spec: FamilySpec, shape: StageShape) -> Resul
             path: layout.full_model.path.clone(),
             load_mode: RuntimeLoadMode::RuntimeSlice,
             filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
         });
     }
     let package_dir = layout
@@ -1235,6 +1337,7 @@ fn materialize_stage(
         path: materialized.output_path,
         load_mode: RuntimeLoadMode::LayerPackage,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
     })
 }
 
@@ -1557,6 +1660,7 @@ fn open_stage_model(path: &StagePath, shape: StageShape, n_gpu_layers: i32) -> R
             include_output: shape.include_output,
             mtp_source: MtpSource::Disabled,
             filter_tensors_on_load: path.filter_tensors_on_load,
+            resident_tensor_names: path.resident_tensor_names.clone(),
             checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
@@ -1603,4 +1707,11 @@ fn env_i32(name: &str) -> Option<i32> {
 
 fn parity_n_gpu_layers() -> i32 {
     env_i32("SKIPPY_PARITY_N_GPU_LAYERS").unwrap_or(999)
+}
+
+fn is_parity_artifact_status(status: &str) -> bool {
+    matches!(
+        status,
+        "certified" | "certified_package_only" | "needs_boundary_registration"
+    )
 }

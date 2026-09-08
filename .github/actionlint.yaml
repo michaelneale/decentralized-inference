@@ -5,6 +5,7 @@ self-hosted-runner:
     - X64
     - amd64
     - gpu-nvidia
+    - gpu-amd
     - cuda
     - family-certify
     - mesh-llm-amd64

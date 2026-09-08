@@ -51,6 +51,7 @@ class ModelArtifactRegistryTests(unittest.TestCase):
     def test_suite_manifests_allow_every_executable_cadence(self) -> None:
         required = {
             "product-smoke": {"pull-request", "main", "release"},
+            "product-integration-smoke": {"pull-request", "main", "release"},
             "scripted-binary-smoke": {"pull-request", "main", "release"},
             "sdk-smoke": {"pull-request", "main", "release"},
             "hf-download-smoke": {"pull-request", "main", "manual"},
@@ -69,6 +70,32 @@ class ModelArtifactRegistryTests(unittest.TestCase):
             for artifact in manifest["artifacts"]:
                 with self.subTest(suite=suite, artifact=artifact["id"]):
                     self.assertTrue(required_cadences.issubset(artifact["cadences"]))
+
+    def test_product_integration_manifest_is_the_pinned_dense_recurrent_pair(self) -> None:
+        manifest = json.loads(
+            (MANIFESTS / "product-integration-smoke.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        artifacts = {row["id"]: row for row in manifest["artifacts"]}
+
+        self.assertEqual(
+            set(artifacts),
+            {"smollm2-q8-inference", "family-granite-hybrid"},
+        )
+        self.assertEqual(
+            artifacts["smollm2-q8-inference"]["model_ref"],
+            "unsloth/SmolLM2-135M-Instruct-GGUF:Q8_0",
+        )
+        self.assertEqual(
+            artifacts["family-granite-hybrid"]["model_ref"],
+            "ibm-granite/granite-4.0-h-350m-GGUF:Q4_K_M",
+        )
+        for artifact in artifacts.values():
+            self.assertEqual(len(artifact["files"]), 1)
+            self.assertEqual(
+                artifact["sha256"], artifact["file_integrity"][artifact["file"]]["blob_id"]
+            )
 
     def test_family_manifest_is_generated_from_registry(self) -> None:
         registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
@@ -138,6 +165,7 @@ class ModelArtifactRegistryTests(unittest.TestCase):
     def test_executable_manifest_consumers_declare_cadence(self) -> None:
         consumers = (
             ".github/actions/restore-smoke-inputs/action.yml",
+            ".github/actions/restore-product-integration-inputs/action.yml",
             ".github/workflows/ci-rust-tests-slice.yml",
             "scripts/ci-hf-download-smoke.sh",
             "scripts/materialize-competitive-inputs.sh",
@@ -157,6 +185,27 @@ class ModelArtifactRegistryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"manual" not in artifact.get("cadences", [])', parity)
+
+    def test_resolver_prefixes_github_outputs_for_multi_fixture_consumers(self) -> None:
+        manifest = MANIFESTS / "product-integration-smoke.json"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            result = subprocess.run(
+                [
+                    "python3", str(RESOLVER), str(manifest),
+                    "--artifact-id", "smollm2-q8-inference",
+                    "--cadence", "pull-request",
+                    "--require-single-file",
+                    "--github-output", str(output),
+                    "--github-output-prefix", "dense_",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(result.stderr, "")
+            self.assertIn("dense_file=SmolLM2-135M-Instruct-Q8_0.gguf", output.read_text())
 
     def test_smoke_identity_overrides_require_nonempty_values(self) -> None:
         skippy = (ROOT / "scripts" / "skippy-ci-smoke.sh").read_text(

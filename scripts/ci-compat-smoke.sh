@@ -8,6 +8,7 @@ set -euo pipefail
 MESH_LLM="${1:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
 BIN_DIR="${2:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
 MODEL="${3:?Usage: $0 <mesh-llm-binary> <bin-dir> <model-path>}"
+DEVICE="${MESH_COMPAT_DEVICE:-CPU}"
 API_PORT="${MESH_COMPAT_API_PORT:-9348}"
 CONSOLE_PORT="${MESH_COMPAT_CONSOLE_PORT:-3142}"
 MAX_WAIT="${MESH_COMPAT_MAX_WAIT:-180}"
@@ -41,6 +42,7 @@ echo "  bin-dir:   $BIN_DIR (compatibility placeholder)"
 echo "  model:     $MODEL"
 echo "  api port:  $API_PORT"
 echo "  console:   $CONSOLE_PORT"
+echo "  device:    $DEVICE"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -67,7 +69,7 @@ env MESH_LLM_CONFIG="$SMOKE_CONFIG_PATH" MESH_LLM_RUNTIME_ROOT="$SMOKE_RUNTIME_R
     serve \
     --model "$MODEL" \
     --no-draft \
-    --device CPU \
+    --device "$DEVICE" \
     --ctx-size "${MESH_COMPAT_CTX_SIZE:-256}" \
     --port "$API_PORT" \
     --console "$CONSOLE_PORT" \

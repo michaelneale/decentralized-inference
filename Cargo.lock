@@ -4002,6 +4002,7 @@ dependencies = [
  "skippy-coordinator",
  "skippy-ffi",
  "skippy-model",
+ "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
  "skippy-server",
@@ -7449,14 +7450,26 @@ dependencies = [
  "model-hf",
  "model-ref",
  "ratatui",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "skippy-ffi",
+ "skippy-model",
+ "skippy-package-format",
  "skippy-protocol",
  "skippy-runtime",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "skippy-package-format"
+version = "0.76.0-rc9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
