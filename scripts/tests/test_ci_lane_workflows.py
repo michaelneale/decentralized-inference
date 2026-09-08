@@ -315,6 +315,9 @@ class CiLaneWorkflowTests(unittest.TestCase):
     def test_product_smoke_jobs_parse_formatted_matrix_json(self) -> None:
         smoke_workflows = {
             "ci-linux-product-smoke-slice.yml": (
+                "core",
+                "two-node-client",
+                "two-node-split",
                 "product-integration-cpu",
                 "product-integration-cuda",
                 "qwen-recurrent-gate",
