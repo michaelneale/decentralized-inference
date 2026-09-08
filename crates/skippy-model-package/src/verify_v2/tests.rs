@@ -54,7 +54,7 @@ impl Case {
         verify_package(&self.package, &self.source, None, &[])
     }
     fn artifact(&self) -> PathBuf {
-        self.package.join("artifacts/source-00000.gguf")
+        self.package.join("shared/common.gguf")
     }
 }
 
@@ -71,7 +71,7 @@ fn verifies_whole_shard_package_read_only_and_accepts_catalog_reordering() {
             report.checked_artifacts,
             report.checked_tensors
         ),
-        (1, 1, 2)
+        (1, 3, 2)
     );
     assert_eq!(
         before,
@@ -79,15 +79,37 @@ fn verifies_whole_shard_package_read_only_and_accepts_catalog_reordering() {
     );
     let mut manifest = case.manifest();
     manifest.tensor_catalog.entries.reverse();
-    manifest.artifact_catalog.entries[0].id = "renamed-container".into();
-    manifest.source_model.metadata_artifact_id = "renamed-container".into();
-    for t in &mut manifest.tensor_catalog.entries {
-        if let TensorStorage::Owned { artifact_id, .. } = &mut t.storage {
-            *artifact_id = "renamed-container".into();
-        }
-    }
+    manifest.artifact_catalog.entries.reverse();
     case.save(manifest);
     case.verify().unwrap();
+}
+
+#[test]
+fn verifies_repacked_tensor_artifacts_against_source_payloads() {
+    let case = Case::new();
+    case.write(vec![]);
+    let layer_path = case.package.join("layers/layer-00001.gguf");
+
+    assert_eq!(case.verify().unwrap().checked_tensors, 2);
+
+    let mut bytes = fs::read(&layer_path).unwrap();
+    let (_, layer_catalog) = inspect(&layer_path, "layer-00001").unwrap();
+    let TensorStorage::Owned { data_offset, .. } = layer_catalog.entries[0].storage else {
+        panic!("fixture tensor must own storage");
+    };
+    bytes[data_offset as usize] ^= 0xff;
+    fs::write(&layer_path, bytes).unwrap();
+    let mut manifest = case.manifest();
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter_mut()
+        .find(|artifact| artifact.id == "layer-00001")
+        .unwrap();
+    artifact.sha256 = file_sha256(&layer_path).unwrap();
+    case.save(manifest);
+
+    assert!(case.verify().is_err());
 }
 
 #[test]
@@ -202,9 +224,15 @@ fn rejects_corrupt_truncated_missing_and_rehashed_substituted_artifacts() {
     );
     fixture(&case.artifact(), &[tensor("omission", 0)], None);
     let mut manifest = case.manifest();
-    manifest.artifact_catalog.entries[0].sha256 = file_sha256(&case.artifact()).unwrap();
-    manifest.artifact_catalog.entries[0].byte_size = fs::metadata(case.artifact()).unwrap().len();
-    manifest.tensor_catalog.entries = inspect(&case.artifact(), "source-00000").unwrap().1.entries;
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter_mut()
+        .find(|artifact| artifact.id == "common")
+        .unwrap();
+    artifact.sha256 = file_sha256(&case.artifact()).unwrap();
+    artifact.byte_size = fs::metadata(case.artifact()).unwrap().len();
+    manifest.tensor_catalog.entries = inspect(&case.artifact(), "common").unwrap().1.entries;
     case.save(manifest);
     assert!(
         case.verify().is_err(),

@@ -675,7 +675,7 @@ mod tests {
         );
         assert!(report.valid, "{:?}", report.issues);
         assert_eq!(report.schema_version, PACKAGE_SCHEMA_VERSION);
-        assert_eq!(report.checked_artifact_count, 1);
+        assert_eq!(report.checked_artifact_count, 3);
         assert_eq!(report.stages.len(), 2);
         assert!(report.stages.iter().all(|stage| !stage.parts.is_empty()));
     }

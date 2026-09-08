@@ -126,16 +126,6 @@ impl SourceInventory {
             layer_count,
         })
     }
-
-    pub(crate) fn tensor_catalog(&self) -> TensorCatalog {
-        TensorCatalog {
-            entries: self
-                .shards
-                .iter()
-                .flat_map(|s| s.tensors.entries.clone())
-                .collect(),
-        }
-    }
 }
 
 fn validate_shards(shards: &[SourceShard]) -> Result<()> {
