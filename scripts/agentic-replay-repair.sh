@@ -45,6 +45,7 @@ fi
 # 3. Always open a PR with the evidence; flag resolution status.
 LABELS="agentic-replay,nightly"
 TITLE="Agentic replay nightly regression — run ${GITHUB_RUN_ID:-local}"
+TEMPLATE_FILE="$(git rev-parse --show-toplevel)/.github/AGENTIC_REPLAY_REPAIR_PR_TEMPLATE.md"
 if [[ "$RESOLVED" == "1" ]]; then
   TITLE="$TITLE (fix verified)"
   BODY=$'The nightly agentic replay regressed; opencode analyzed the evidence and this fix passes the re-run benchmark.\n\nResults (HF card format) are linked in the run report artifact and the dataset shard.'
@@ -54,6 +55,22 @@ else
   BODY=$'The nightly agentic replay regressed and the automated repair did not clear it. Review the evidence: history.jsonl, per-model artifacts, and the HF dataset shard for this run.'
 fi
 
-gh pr create --title "$TITLE" --body "$BODY" --label "$LABELS" --base main || \
+# Fill the PR template from the run evidence where available; fall back to
+# the short body if the template or fill data is missing.
+BODY_FILE=$(mktemp)
+if [[ -f "$TEMPLATE_FILE" ]]; then
+  sed -e "s|{{RESOLUTION_STATUS}}|$( [[ $RESOLVED == 1 ]] && echo 'fix verified' || echo 'NEEDS ATTENTION' )|" \
+      -e "s|{{RUN_URL}}|${GITHUB_SERVER_URL:-}/Mesh-LLM/mesh-llm/actions/runs/${GITHUB_RUN_ID:-local}|g" \
+      -e "s|{{RUN_DATE}}|$(date -u +%F)|g" \
+      -e "s|{{RUN_ID}}|${GITHUB_RUN_ID:-local}|g" \
+      -e "s|{{SOURCE_SHA}}|$(git rev-parse HEAD)|g" \
+      -e "s|{{DATASET_REPO}}|${MESH_AGENTIC_REPLAY_DATASET:-meshllm/agentic-replay-nightly}|g" \
+      "$TEMPLATE_FILE" >> "$BODY_FILE"
+  printf '\n---\n%s\n' "$BODY" >> "$BODY_FILE"
+else
+  printf '%s\n' "$BODY" > "$BODY_FILE"
+fi
+gh pr create --title "$TITLE" --body-file "$BODY_FILE" --label "$LABELS" --base main || \
   echo "PR creation failed — evidence retained in run artifacts" >&2
+rm -f "$BODY_FILE"
 exit 0 # the nightly is red; the PR is the actionable output
