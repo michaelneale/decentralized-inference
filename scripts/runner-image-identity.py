@@ -332,6 +332,21 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
         for binding in roles[role_id]["bindings"]:
             expected_seed_jobs.append((binding["workflow"], binding["job"]))
     expected_seed_jobs.append((runtime["workflow"], runtime["job"]))
+    canary = roles.get("runtime-seed-canary")
+    canary_id = ("depot-canary.yml", "runtime_seed")
+    if canary is not None:
+        require(canary["image_id"] == seed["image_id"] and canary["scope"] == "ordinary" and
+                len(canary["bindings"]) == 1 and
+                (canary["bindings"][0]["workflow"], canary["bindings"][0]["job"]) == canary_id,
+                "runtime seed canary binding drift")
+        canary_job = workflows[canary_id[0]][canary_id[1]]
+        key_steps = [step for step in job_steps(canary_job) if re.search(r"^ +id: seed_key$", step, re.MULTILINE)]
+        require(len(key_steps) == 1 and one_field(key_steps[0], "CANARY_KEY", "runtime seed canary") == expression and
+                one_field(key_steps[0], "run", "runtime seed canary") ==
+                "python3 scripts/runtime-seed-canary.py preflight runtime-seed-evidence",
+                "runtime seed canary key resolver drift")
+        expected_seed_jobs.append(canary_id)
+
     observed_seed_jobs = []
     observed_restore_jobs = []
     for workflow, jobs in workflows.items():
@@ -342,7 +357,8 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
                 observed_seed_jobs.append((workflow, job_id))
             for step in job_steps(job):
                 if re.search(r"^ *(?:- )?uses: \./\.github/actions/restore-sccache-seed\s*$", step, re.MULTILINE):
-                    require(one_field(step, "cache_key", f"{workflow}:{job_id}") == expression,
+                    expected_key = "${{ steps.seed_key.outputs.key }}" if canary is not None and (workflow, job_id) == canary_id else expression
+                    require(one_field(step, "cache_key", f"{workflow}:{job_id}") == expected_key,
                             f"{workflow}:{job_id}: compiler seed restore key drift")
                     observed_restore_jobs.append((workflow, job_id))
     require(Counter(expected_seed_jobs) == Counter(observed_seed_jobs), "compiler seed producer/consumer census drift")

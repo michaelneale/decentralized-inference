@@ -709,7 +709,7 @@ Current image references and historical null evidence remain unchanged.
 The `product-smoke` catalog role covers both the legacy `smoke.yml` job and
 the typed `product-integration-smoke.yml` job. The latter uses the same pinned
 CPU image only for Linux CPU; accelerator and macOS paths retain their existing
-container opt-outs. The inventory has 9 images, 31 roles and 32 literal workflow image bindings.
+container opt-outs. The inventory has 9 images, 32 roles and 33 literal workflow image bindings.
 
 ### Qualified lean UI consumers
 
@@ -719,3 +719,12 @@ The catalog retains the admitted run `34256062098` attempt 1 cohort for UI/brows
 other historical receipts and CPU seed workload coverage remain unknown.
 See [CI topology](../../../../ci/ci.md#qualified-lean-ui-consumers) for admission
 scope and the required candidate-branch lane execution before merge.
+
+### Existing-seed CPU runtime canary
+
+`depot-canary.yml` has an isolated manual `runtime-seed` mode with three cold/warm
+pairs on fresh GitHub-hosted CPU jobs. It restores only the admitted main seed,
+never saves caches or changes production eligibility, and retains negative or
+inconclusive results. The catalog tracks this qualification restore separately
+from the five production seed consumers. See [CI topology](../../../../ci/ci.md#existing-seed-cpu-runtime-canary)
+for identity, measurements and qualification limits. Live execution is pending.

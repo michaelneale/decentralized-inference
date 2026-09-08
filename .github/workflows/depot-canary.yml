@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Run the resource audit or one bounded cache-authority sentinel phase.
+        description: Run the resource audit, cache-authority sentinel, or CPU runtime-seed qualification.
         required: true
         default: audit
         type: choice
@@ -12,6 +12,7 @@ on:
           - audit
           - seed
           - verify-pr-write
+          - runtime-seed
       sentinel_id:
         description: Lowercase 32-hex identifier used only in the fixed sentinel key grammar.
         required: false
@@ -672,3 +673,125 @@ jobs:
             echo "PR poison marker was visible to trusted main (cache isolation failure)" >&2
             exit 1
           fi
+
+
+  runtime_seed:
+    name: CPU runtime seed (${{ matrix.pair }} / ${{ matrix.arm }})
+    if: github.repository == 'Mesh-LLM/mesh-llm' && github.event_name == 'workflow_dispatch' && inputs.mode == 'runtime-seed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        pair: [1, 2, 3]
+        arm: [cold, warm]
+    container:
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
+    env:
+      LLAMA_STAGE_BACKEND: cpu
+      LLAMA_STAGE_BUILD_DIR: .deps/llama.cpp/build-stage-abi-dynamic-cpu
+      MESH_LLM_REQUIRE_SCCACHE: "1"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
+      CACHE_NAMESPACE: mesh-llm
+      GGML_CUDA_NO_VMM: "1"
+      LLAMA_STAGE_SKIP_NCCL: "1"
+      SCCACHE_CACHE_SIZE: 2G
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_MULTILEVEL_CHAIN: disk
+      CANARY_PAIR: ${{ matrix.pair }}
+      CANARY_ARM: ${{ matrix.arm }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify existing CPU image
+        run: verify-runner-image public cpu
+      - uses: ./.github/actions/resolve-native-toolchain-epoch
+        with:
+          pinned_epoch: mesh-llm-cuda-runner-sha256-8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
+      - name: Admit exact seed and observe fresh filesystem
+        id: seed_key
+        env:
+          SCCACHE_DIR: ${{ runner.temp }}/mesh-llm-sccache
+          GH_TOKEN: ${{ github.token }}
+          CANARY_KEY: mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-${{ hashFiles('Cargo.lock', '.github/cache-version.txt', 'Justfile', 'just/**') }}
+        run: python3 scripts/runtime-seed-canary.py preflight runtime-seed-evidence
+      - name: Start restore timer
+        run: python3 scripts/runtime-seed-canary.py restore_start runtime-seed-evidence
+      - id: seed
+        uses: ./.github/actions/restore-sccache-seed
+        with:
+          allow_trusted_seed: ${{ matrix.arm == 'warm' && 'true' || 'false' }}
+          cache_key: ${{ steps.seed_key.outputs.key }}
+      - name: Require exact restore and start measurement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANARY_CACHE_HIT: ${{ steps.seed.outputs.cache_hit }}
+        run: python3 scripts/runtime-seed-canary.py restored runtime-seed-evidence
+      - uses: ./.github/actions/configure-sccache-gha
+        with:
+          allow_depot_remote_cache: "false"
+          allow_native_github_cache: "false"
+      - name: Reset counters and start build measurement
+        run: python3 scripts/runtime-seed-canary.py start runtime-seed-evidence
+      - name: Build and verify real CPU runtime
+        id: runtime
+        uses: ./.github/actions/prepare-native-runtime-input
+        with:
+          backend: cpu
+          target: x86_64-unknown-linux-gnu
+          output_dir: runtime-input
+          build: "true"
+      - name: Finish measured evidence
+        if: ${{ !cancelled() && steps.runtime.outcome != 'skipped' }}
+        env:
+          CANARY_BUILD_OUTCOME: ${{ steps.runtime.outcome }}
+        run: python3 scripts/runtime-seed-canary.py finish runtime-seed-evidence
+      - name: Capture existing cache assessment
+        if: ${{ !cancelled() && steps.runtime.outcome != 'skipped' }}
+        uses: ./.github/actions/capture-sccache-stats
+        with:
+          artifact_name: runtime-seed-stats-${{ matrix.pair }}-${{ matrix.arm }}-${{ github.run_attempt }}
+          cache_expectation: ${{ matrix.arm == 'warm' && 'warm' || 'cold' }}
+          minimum_hit_rate: "0.01"
+      - name: Retain canary evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: runtime-seed-evidence-${{ matrix.pair }}-${{ matrix.arm }}-${{ github.run_attempt }}
+          path: runtime-seed-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  runtime_seed_summary:
+    if: ${{ !cancelled() && inputs.mode == 'runtime-seed' }}
+    needs: runtime_seed
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: runtime-seed-evidence-*
+          path: runtime-seed-results
+      - name: Compare all three complete pairs
+        run: python3 scripts/runtime-seed-canary.py summarize runtime-seed-results
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: ${{ !cancelled() }}
+        with:
+          name: runtime-seed-summary-${{ github.run_attempt }}
+          path: runtime-seed-results/summary.json
+          if-no-files-found: error
+          retention-days: 14
