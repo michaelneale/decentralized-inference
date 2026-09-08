@@ -214,9 +214,21 @@ jobs:
           depot_pr_enabled: 'false'
           manual_use_depot: ${{ inputs.use_depot == true }}
 
+  release_ui:
+    name: Prepare shared release console
+    needs: metadata
+    uses: ./.github/workflows/ci-ui-artifact-slice.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.source_sha }}
+      original_event_name: ${{ github.event_name }}
+      force_hosted: true
+      artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
+      release_tag: ${{ needs.metadata.outputs.tag }}
+      retention_days: 90
+
   build:
     name: Build immutable host ${{ matrix.name }}
-    needs: metadata
+    needs: [metadata, release_ui]
     # Host attestation consumes the signing key. Keep this producer on GitHub
     # until compilation and signing are split into separate jobs.
     runs-on: ${{ matrix.os }}
@@ -233,19 +245,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
           persist-credentials: false
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 10.34.5
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.20.0
-          cache: pnpm
-          cache-dependency-path: |
-            .github/cache-version.txt
-            crates/mesh-llm-ui/pnpm-lock.yaml
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-20
 
@@ -275,6 +281,13 @@ jobs:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: scripts/release-version.sh "$RELEASE_TAG"
 
+      - name: Restore shared release UI
+        uses: ./.github/actions/restore-release-ui
+        with:
+          artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
+          source_sha: ${{ needs.metadata.outputs.source_sha }}
+          release_tag: ${{ needs.metadata.outputs.tag }}
+
       - name: Prepare release attestation keys
         env:
           MESH_RELEASE_ATTESTATION_SIGNING_KEY_FILE: ${{ runner.temp }}/mesh-release-attestation-private-key.json
@@ -289,6 +302,7 @@ jobs:
         uses: ./.github/actions/prepare-host-input
         with:
           profile: release
+          skip_ui: "true"
           output_dir: host-input
           attestation_signing_key_file: ${{ runner.temp }}/mesh-release-attestation-private-key.json
           attestation_public_key_file: ${{ runner.temp }}/mesh-release-attestation-public-key.json
@@ -805,11 +819,13 @@ jobs:
 
   build_swift_sdk_artifact:
     name: Build Swift SDK XCFramework
-    needs: metadata
+    needs: [metadata, release_ui]
     permissions:
       contents: read
     uses: ./.github/workflows/swift-sdk-artifact.yml
     with:
+      source_sha: ${{ needs.metadata.outputs.source_sha }}
+      ui_artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
       original_event_name: ${{ github.event_name }}
       force_hosted: false
       mode: full
@@ -825,7 +841,7 @@ jobs:
 
   build_linux_arm64:
     name: Build immutable host Linux ARM64
-    needs: metadata
+    needs: [metadata, release_ui]
     # Host attestation consumes the signing key. Keep this producer on GitHub
     # until compilation and signing are split into separate jobs.
     runs-on: ubuntu-24.04-arm
@@ -835,17 +851,12 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 10.34.5
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.20.0
-          cache: pnpm
-          cache-dependency-path: |
-            .github/cache-version.txt
-            crates/mesh-llm-ui/pnpm-lock.yaml
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-20
       - uses: taiki-e/install-action@3d23c1bbdafe696dfccad2664945a04f47d03dc3 # just
       - name: Install dependencies
@@ -855,6 +866,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: scripts/release-version.sh "$RELEASE_TAG"
+      - name: Restore shared release UI
+        uses: ./.github/actions/restore-release-ui
+        with:
+          artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
+          source_sha: ${{ needs.metadata.outputs.source_sha }}
+          release_tag: ${{ needs.metadata.outputs.tag }}
+
       - name: Prepare release attestation keys
         env:
           MESH_RELEASE_ATTESTATION_SIGNING_KEY_FILE: ${{ runner.temp }}/mesh-release-attestation-private-key.json
@@ -869,6 +887,7 @@ jobs:
         uses: ./.github/actions/prepare-host-input
         with:
           profile: release
+          skip_ui: "true"
           output_dir: host-input
           attestation_signing_key_file: ${{ runner.temp }}/mesh-release-attestation-private-key.json
           attestation_public_key_file: ${{ runner.temp }}/mesh-release-attestation-public-key.json
@@ -984,11 +1003,9 @@ jobs:
       matrix:
         include:
           - cuda_version: '12.9.2'
-            runner_image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:c5b85ef527230f77cf9933ef40bcb44316f9bbcb8fd2ce0651b58acda5143dfd
           - cuda_version: '13.1.2'
-            runner_image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:6b87598605f5d8deeafecfb1a55027e0ca9e47f4fc6f230d030487c450c31aa6
     container:
-      image: ${{ matrix.runner_image }}
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1001,7 +1018,7 @@ jobs:
       - name: Trust checkout directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify prebuilt backend environment
-        run: verify-runner-image public cuda
+        run: verify-runner-image public cpu
       - name: Download immutable host input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1067,12 +1084,10 @@ jobs:
         include:
           - cuda_version: '12.9.2'
             cuda_major: '12'
-            runner_image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:c5b85ef527230f77cf9933ef40bcb44316f9bbcb8fd2ce0651b58acda5143dfd
           - cuda_version: '13.1.2'
             cuda_major: '13'
-            runner_image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:6b87598605f5d8deeafecfb1a55027e0ca9e47f4fc6f230d030487c450c31aa6
     container:
-      image: ${{ matrix.runner_image }}
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1085,7 +1100,7 @@ jobs:
       - name: Trust checkout directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify prebuilt backend environment
-        run: verify-runner-image public cuda
+        run: verify-runner-image public cpu
       - name: Download immutable host input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1147,7 +1162,7 @@ jobs:
     if: ${{ needs.metadata.outputs.skip_gpu_bundles != 'true' }}
     runs-on: ${{ needs.metadata.outputs.runner_4 }}
     container:
-      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:0e13e5d2d2c121df265ff6c69be81e468989e09f81d6b7ff049b110cc0bb0d2b
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1158,7 +1173,7 @@ jobs:
       - name: Trust checkout directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify prebuilt backend environment
-        run: verify-runner-image public rocm
+        run: verify-runner-image public cpu
       - name: Download immutable host input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1218,7 +1233,7 @@ jobs:
     if: ${{ needs.metadata.outputs.skip_gpu_bundles != 'true' }}
     runs-on: ${{ needs.metadata.outputs.runner_4 }}
     container:
-      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:ce55fed5c680cd3184b5d4770d9a77c43a702687690906e5753efd2cea27ed80
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -1229,7 +1244,7 @@ jobs:
       - name: Trust checkout directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Verify prebuilt backend environment
-        run: verify-runner-image public vulkan
+        run: verify-runner-image public cpu
       - name: Download immutable host input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1285,7 +1300,7 @@ jobs:
 
   windows_host_input:
     name: Build immutable host Windows x86_64
-    needs: metadata
+    needs: [metadata, release_ui]
     runs-on: windows-2022
     env:
       MESH_LLM_REQUIRE_SCCACHE: "1"
@@ -1293,17 +1308,12 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 10.34.5
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.20.0
-          cache: pnpm
-          cache-dependency-path: |
-            .github/cache-version.txt
-            crates/mesh-llm-ui/pnpm-lock.yaml
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-20
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -1315,6 +1325,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: scripts/release-version.sh "$RELEASE_TAG"
+      - name: Restore shared release UI
+        uses: ./.github/actions/restore-release-ui
+        with:
+          artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
+          source_sha: ${{ needs.metadata.outputs.source_sha }}
+          release_tag: ${{ needs.metadata.outputs.tag }}
+
       - name: Prepare release attestation keys
         shell: pwsh
         env:
@@ -1329,6 +1346,7 @@ jobs:
         uses: ./.github/actions/prepare-windows-host-input
         with:
           profile: release
+          skip_ui: "true"
           attestation_signing_key_file: ${{ runner.temp }}/mesh-release-attestation-private-key.json
           attestation_public_key_file: ${{ runner.temp }}/mesh-release-attestation-public-key.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -1657,6 +1675,7 @@ jobs:
     name: Publish GitHub release
     needs:
       - metadata
+      - release_ui
       - build
       - compose_cpu_products
       - inference_smoke_tests
@@ -1693,22 +1712,21 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          version: 10.34.5
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: github.event_name == 'workflow_dispatch'
         with:
           node-version: 24.20.0
-          cache: pnpm
-          cache-dependency-path: |
-            .github/cache-version.txt
-            crates/mesh-llm-ui/pnpm-lock.yaml
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-20
         if: github.event_name == 'workflow_dispatch'
+
+      - name: Restore shared release UI
+        uses: ./.github/actions/restore-release-ui
+        with:
+          artifact_name: prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}
+          source_sha: ${{ needs.metadata.outputs.source_sha }}
+          release_tag: ${{ needs.metadata.outputs.tag }}
 
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1792,7 +1810,7 @@ jobs:
           fi
           install -m 0644 "$generated_binding" "$tracked_binding"
           cmp "$generated_binding" "$tracked_binding"
-          scripts/package-sdk-console-assets.sh --sdk all
+          scripts/package-sdk-console-assets.sh --sdk all --skip-build
           scripts/verify-sdk-console-assets.sh --sdk all
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

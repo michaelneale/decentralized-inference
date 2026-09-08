@@ -9,19 +9,10 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/rwkv6.cpp b/src/models/rwkv6.cpp
-index 0b5013dc7585f6beb1e7f1e985e286a5c8dc70ba..a3e5ab5e1ec9ddd91bc45f80b95cd3dc1726fdfe 100644
+index ef58f3e470e9cda2d0a190dbd58b033f04b38ea4..414068904f4c47584947b50e9bf9d165bb1663d9 100644
 --- a/src/models/rwkv6.cpp
 +++ b/src/models/rwkv6.cpp
-@@ -62,7 +62,7 @@ void llama_model_rwkv6::load_arch_tensors(llama_model_loader &) {
-         layer.time_mix_lerp_r = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_R, "weight", i), {n_embd, 1, 1}, TENSOR_NOT_REQUIRED);
-         layer.time_mix_lerp_g = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_G, "weight", i), {n_embd, 1, 1}, TENSOR_NOT_REQUIRED);
-         layer.time_mix_lerp_fused = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_FUSED, "weight", i), {n_embd, 1, 1, 5}, TENSOR_NOT_REQUIRED);
--        GGML_ASSERT(!(layer.time_mix_lerp_fused == NULL && layer.time_mix_lerp_w == NULL));
-+        GGML_ASSERT(layer.time_mix_lerp_x == NULL || !(layer.time_mix_lerp_fused == NULL && layer.time_mix_lerp_w == NULL));
- 
-         layer.time_mix_first = create_tensor(tn(LLM_TENSOR_TIME_MIX_FIRST, "weight", i), {head_size, n_embd / head_size}, 0);
-         layer.time_mix_decay = create_tensor(tn(LLM_TENSOR_TIME_MIX_DECAY, "weight", i), {n_embd}, 0);
-@@ -98,8 +98,15 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
+@@ -98,8 +98,13 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
      ggml_tensor * cur;
      ggml_tensor * inpL;
  
@@ -33,13 +24,11 @@ index 0b5013dc7585f6beb1e7f1e985e286a5c8dc70ba..a3e5ab5e1ec9ddd91bc45f80b95cd3dc
 +    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
 +
 +    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
-+    if (il_start == 0) {
-+        inpL = build_norm(inpL, model.tok_norm, model.tok_norm_b, LLM_NORM, 0);
-+    }
++    inpL = stage_filtered && il_start > 0 ? inpL : build_norm(inpL, model.tok_norm, model.tok_norm_b, LLM_NORM, 0);
  
      auto * rs_inp = build_rs_inp();
  
-@@ -107,9 +114,11 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
+@@ -107,9 +112,11 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
      const auto n_seq_tokens = ubatch.n_seq_tokens;
      const auto n_seqs       = ubatch.n_seqs;
  
@@ -53,7 +42,7 @@ index 0b5013dc7585f6beb1e7f1e985e286a5c8dc70ba..a3e5ab5e1ec9ddd91bc45f80b95cd3dc
          const llama_layer * layer = &model.layers[il];
          inpL                      = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
  
-@@ -152,7 +161,7 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
+@@ -152,7 +159,7 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
          x_prev   = ggml_reshape_2d(ctx0, x_prev, n_embd, n_tokens);
          cur      = ggml_reshape_2d(ctx0, cur, n_embd, n_tokens);
  
@@ -62,13 +51,11 @@ index 0b5013dc7585f6beb1e7f1e985e286a5c8dc70ba..a3e5ab5e1ec9ddd91bc45f80b95cd3dc
              ffn_inp  = ggml_get_rows(ctx0, ffn_inp, inp_out_ids);
              ffn_norm = ggml_get_rows(ctx0, ffn_norm, inp_out_ids);
              x_prev   = ggml_get_rows(ctx0, x_prev, inp_out_ids);
-@@ -168,8 +177,16 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
-         cb(cur, "l_out", il);
+@@ -169,7 +176,15 @@ llama_model_rwkv6::graph::graph(const llama_model & model, const llm_graph_param
  
          // input for next layer
-+        end_block(cur, il);
-+
          inpL = cur;
++        end_block(inpL, il);
      }
 +    if (stage_filtered && !stage_filter.include_output) {
 +        cb(inpL, "stage_boundary", il_end - 1);
@@ -76,11 +63,12 @@ index 0b5013dc7585f6beb1e7f1e985e286a5c8dc70ba..a3e5ab5e1ec9ddd91bc45f80b95cd3dc
 +        ggml_build_forward_expand(gf, inpL);
 +        return;
 +    }
++
      cur = inpL;
      cur = build_norm(cur, model.output_norm, model.output_norm_b, LLM_NORM, -1);
  
 diff --git a/src/models/rwkv6qwen2.cpp b/src/models/rwkv6qwen2.cpp
-index 6c7db514435e72f794ec07859231df80607e03d1..edfad425deb4ad7d09dfda360e0ecaf8c017d087 100644
+index 6c7db514435e72f794ec07859231df80607e03d1..1656b459eb63cdd9ad62855455d30c8a93cf4cf7 100644
 --- a/src/models/rwkv6qwen2.cpp
 +++ b/src/models/rwkv6qwen2.cpp
 @@ -87,7 +87,12 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
@@ -120,26 +108,22 @@ index 6c7db514435e72f794ec07859231df80607e03d1..edfad425deb4ad7d09dfda360e0ecaf8
              cur     = ggml_get_rows(ctx0, cur,     inp_out_ids);
              ffn_inp = ggml_get_rows(ctx0, ffn_inp, inp_out_ids);
          }
-@@ -149,10 +156,19 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
-         cb(cur, "l_out", il);
+@@ -150,7 +157,15 @@ llama_model_rwkv6qwen2::graph::graph(const llama_model & model, const llm_graph_
  
          // input for next layer
-+        end_block(cur, il);
-+
          inpL = cur;
++        end_block(inpL, il);
      }
- 
-     cur = inpL;
-+
 +    if (stage_filtered && !stage_filter.include_output) {
-+        cb(cur, "stage_boundary", il_end - 1);
-+        res->t_embd = cur;
-+        ggml_build_forward_expand(gf, cur);
++        cb(inpL, "stage_boundary", il_end - 1);
++        res->t_embd = inpL;
++        ggml_build_forward_expand(gf, inpL);
 +        return;
 +    }
-     cur = build_norm(cur, model.output_norm, model.output_norm_b, LLM_NORM_RMS, -1);
++
  
-     cb(cur, "result_norm", -1);
+     cur = inpL;
+     cur = build_norm(cur, model.output_norm, model.output_norm_b, LLM_NORM_RMS, -1);
 -- 
 2.54.0
 

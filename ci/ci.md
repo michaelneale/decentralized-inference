@@ -117,6 +117,26 @@ main.
 
 ### Release source and version ownership
 
+Release efficiency TODOs:
+
+- [x] Prepare release UI versions in container checkouts with different owners.
+  QA: execute the workflow step with Git's ownership check enabled, verify
+  workspace-only trust and source rejection, then shellcheck the extracted step.
+- [x] Build one version-bound console distribution and verify its complete file
+  checksums before each host embeds it or an SDK packages it. QA: run the UI
+  identity/tampering tests and release artifact graph tests.
+- [x] Use the existing CPU image for composition-only Linux release jobs while
+  keeping compiler images and ARC CUDA placement unchanged. QA: compare the
+  CUDA compiler job with the baseline and run `just check-release` and
+  `just ci-validate`.
+- [x] Accept current catalog-wrapped runtime diagnostics in the shared SDK
+  smoke helper while preserving legacy list support. QA: exercise both JSON
+  forms, malformed reports, incompatible/ambiguous runtimes and ABI checks in
+  `test_ci_prepare_native_runtime`, then run shellcheck and `just ci-validate`.
+- [ ] Validate the shared UI and CPU-image composers in a non-publishing release
+  canary. QA: verify all host/runtime hashes, no-driver readiness, SDK resources,
+  and per-phase timings on Linux amd64/arm64, macOS, and Windows.
+
 `scripts/release-version.sh` is the single owner of the tracked release-version
 surface. On a non-canary `release.yml` dispatch, the metadata job applies that
 script, creates a linear release-source commit when needed, and fast-forwards
@@ -125,6 +145,27 @@ preflight, dispatches that workflow, and waits for its result. A tag push must
 already be reachable from `main` and version-complete; the metadata job applies
 the same script and rejects any tracked diff. Canary dispatches do not mutate
 `main` or publish.
+
+Release calls the existing UI producer once with the immutable source SHA and
+release tag. It prepares that version, builds the TypeScript console in release
+mode, and records every output checksum in `.mesh-llm-ui-release.json`. The
+version step registers only `GITHUB_WORKSPACE` as a safe Git directory in the
+container's active home before checking the source SHA or running the version
+script; checkout's temporary home configuration does not reach these commands.
+The Linux amd64/arm64, macOS and Windows host producers restore and verify this same
+distribution before compiling their own target-specific Rust embedding crate
+and host. Swift resource assembly and the release-tag SDK resources consume the
+same bytes with `--skip-build`. Missing manifests, mismatched source/version,
+changed files and placeholder HTML fail before host compilation. UI artifacts
+use `prepared-release-ui-*`, outside the published `release-*` asset namespace.
+
+Linux CUDA, ROCm and Vulkan release composition jobs use the pinned `public
+cpu` image, retaining producer checksum/import checks, attestation verification,
+and no-driver readiness. Native compiler images, CUDA architecture lists and
+the intentional ARC self-hosted amd64 CUDA placement remain unchanged. The
+shared UI producer introduces one dependency before host and Swift production;
+the release canary must compare total execution and phase timings before
+claiming a wall-time improvement.
 
 The later publish job checks out the canonical source commit, adds only the
 generated SwiftPM/binding and SDK console resources needed by the immutable

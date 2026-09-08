@@ -12,6 +12,14 @@ diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
 index 1d1987309..499832ec1 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
+@@ -15,6 +15,7 @@
+ #include "llama-memory-hybrid-iswa.h"
+ #include "llama-memory-recurrent.h"
+ 
++#include <algorithm>
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
 @@ -1657,6 +1657,29 @@ bool llm_graph_result::can_reuse(const llm_graph_params & params) {
  }
  
@@ -86,4 +94,3 @@ index b6007e395..9da60aba5 100644
      if (rc == 0) {
 -- 
 2.54.0 (Apple Git-157)
-

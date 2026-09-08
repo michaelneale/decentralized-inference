@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
+import tempfile
 import unittest
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +20,139 @@ def job_block(workflow: str, job_name: str, next_job_name: str) -> str:
 
 
 class ReleaseWorkflowArtifactTests(unittest.TestCase):
+    def test_release_ui_version_preparation_handles_container_ownership(self) -> None:
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
+        )
+        step = next(
+            step for step in workflow["jobs"]["ui_artifact"]["steps"]
+            if step.get("name") == "Prepare release UI version"
+        )
+        for source in ("matching", "mismatching", "malformed"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                repo = root / "container checkout"
+                repo.mkdir()
+                home = root / "home"
+                home.mkdir()
+                env = {
+                    key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                }
+                env.update(
+                    HOME=str(home), XDG_CONFIG_HOME=str(home),
+                    GIT_CONFIG_GLOBAL=str(home / ".gitconfig"),
+                    GIT_CONFIG_NOSYSTEM="1",
+                )
+
+                def git(*args: str) -> subprocess.CompletedProcess[str]:
+                    return subprocess.run(
+                        ["git", *args], cwd=repo, env=env,
+                        text=True, capture_output=True,
+                    )
+
+                self.assertEqual(git("init", "--quiet").returncode, 0)
+                commit = git(
+                    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture",
+                )
+                self.assertEqual(commit.returncode, 0, commit.stderr)
+                sha = git("rev-parse", "HEAD").stdout.strip()
+                scripts = repo / "scripts"
+                scripts.mkdir()
+                version = scripts / "release-version.sh"
+                version.write_text(
+                    '#!/usr/bin/env bash\nset -euo pipefail\n'
+                    'git rev-parse HEAD > version-source\nprintf "%s\\n" "$1" > version-tag\n'
+                )
+                version.chmod(0o755)
+                env.update(
+                    GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+                    GITHUB_WORKSPACE=str(repo), GITHUB_ENV=str(root / "github-env"),
+                    UI_SOURCE_SHA=sha if source == "matching" else (
+                        "0" * 40 if source == "mismatching" else "invalid"
+                    ),
+                    RELEASE_TAG="v0.76.0-rc9",
+                )
+                untrusted = git("rev-parse", "HEAD")
+                self.assertNotEqual(untrusted.returncode, 0)
+                self.assertIn("dubious ownership", untrusted.stderr)
+                result = subprocess.run(
+                    ["bash", "-c", step["run"]], cwd=repo, env=env,
+                    text=True, capture_output=True,
+                )
+                if source != "matching":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((repo / "version-tag").exists())
+                    self.assertFalse((root / "github-env").exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((repo / "version-source").read_text().strip(), sha)
+                self.assertEqual((repo / "version-tag").read_text().strip(), env["RELEASE_TAG"])
+                self.assertEqual(
+                    (root / "github-env").read_text(), "VITE_MESH_LLM_DEBUG_UI=false\n"
+                )
+                self.assertEqual(
+                    git("config", "--global", "--get-all", "safe.directory").stdout.splitlines(),
+                    [str(repo)],
+                )
+
+    def test_release_ui_is_one_verified_producer_for_hosts_and_sdks(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        producer = job_block(workflow, "release_ui", "build")
+        self.assertIn("uses: ./.github/workflows/ci-ui-artifact-slice.yml", producer)
+        self.assertIn("source_sha: ${{ needs.metadata.outputs.source_sha }}", producer)
+        self.assertIn("release_tag: ${{ needs.metadata.outputs.tag }}", producer)
+        artifact = "prepared-release-ui-${{ needs.metadata.outputs.tag }}-${{ needs.metadata.outputs.source_sha }}"
+        self.assertIn(f"artifact_name: {artifact}", producer)
+        ui_workflow = (ROOT / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
+        self.assertIn('echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"', ui_workflow)
+        self.assertLess(ui_workflow.index("Prepare release UI version"), ui_workflow.index("Install UI dependencies"))
+        self.assertIn("python3 scripts/ui-distribution.py stamp", ui_workflow)
+        restore = (ROOT / ".github/actions/restore-release-ui/action.yml").read_text()
+        self.assertIn('"$python_bin" scripts/ui-distribution.py verify', restore)
+        for name, next_name in (("build", "compose_cpu_products"),
+                                ("build_linux_arm64", "compose_linux_arm64_cpu"),
+                                ("windows_host_input", "compose_windows_gpu")):
+            host = job_block(workflow, name, next_name)
+            with self.subTest(host=name):
+                self.assertIn("needs: [metadata, release_ui]", host)
+                self.assertIn(f"artifact_name: {artifact}", host)
+                self.assertIn('skip_ui: "true"', host)
+                self.assertNotIn("pnpm/action-setup", host)
+                self.assertLess(host.index("restore-release-ui"), host.index("Build and attest"))
+        swift = job_block(workflow, "build_swift_sdk_artifact", "build_linux_arm64")
+        self.assertIn("needs: [metadata, release_ui]", swift)
+        self.assertIn(f"ui_artifact_name: {artifact}", swift)
+        swift_workflow = (ROOT / ".github/workflows/swift-sdk-artifact.yml").read_text()
+        self.assertIn("if: ${{ inputs.ui_artifact_name == '' }}", swift_workflow)
+        self.assertIn("scripts/package-sdk-console-assets.sh --sdk swift --skip-build", swift_workflow)
+        publish = job_block(workflow, "publish", "dispatch_packaging_release")
+        self.assertIn("      - release_ui", publish)
+        self.assertIn("--sdk all --skip-build", publish)
+        self.assertNotIn("pnpm/action-setup", publish)
+        self.assertFalse(artifact.startswith("release-"), "UI must not match published release-* assets")
+
+    def test_linux_release_composers_use_cpu_tools_and_keep_readiness(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cpu = "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d"
+        for name, next_name in (("compose_linux_aarch64_cuda", "compose_linux_cuda"),
+                                ("compose_linux_cuda", "compose_linux_rocm"),
+                                ("compose_linux_rocm", "compose_linux_vulkan"),
+                                ("compose_linux_vulkan", "windows_host_input")):
+            compose = job_block(workflow, name, next_name)
+            with self.subTest(composer=name):
+                self.assertIn(f"image: {cpu}", compose)
+                self.assertIn("verify-runner-image public cpu", compose)
+                self.assertIn('readiness_smoke: "true"', compose)
+                self.assertIn("MESH_RELEASE_HOST_PRESTAMPED", compose)
+                self.assertNotIn("prepare-native-runtime-input", compose)
+        cuda = job_block(workflow, "build_native_runtime_linux_x86_64_cuda", "build_native_runtime_linux_x86_64_rocm")
+        self.assertIn("vars.USE_SELF_HOSTED == 'true'", cuda)
+        self.assertIn('"amd64","gpu-nvidia"', cuda)
+        self.assertIn("image: ${{ matrix.runner_image }}", cuda)
+        self.assertIn("verify-runner-image public cuda", cuda)
+
     def test_release_entrypoint_rejects_untrusted_refs(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         metadata = job_block(workflow, "metadata", "build")

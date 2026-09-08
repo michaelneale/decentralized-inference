@@ -90,7 +90,7 @@ python3 "$ROOT/scripts/generate-skippy-family-patch.py" \
   --build-dir "$LLAMA_BUILD_DIR" \
   --rewriter "$TOOL_BUILD/skippy-stage-rewriter" \
   --report "$FIRST_REPORT" \
-  --diff-base "$(tr -d '[:space:]' < "$SOURCE_ROOT/.mesh-llm-upstream-sha")" \
+  --diff-base "$CORE_SOURCE_HEAD" \
   --output "$GENERATED_PATCH" \
   --shard-output-dir "$GENERATED_PATCH_DIR" \
   --family-source-map "$FAMILY_SOURCE_MAP" \

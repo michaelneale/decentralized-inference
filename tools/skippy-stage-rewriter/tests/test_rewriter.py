@@ -180,6 +180,35 @@ def main() -> int:
         assert auxiliary["proof"]["scope_evidence"] == ["typed_mtp_builder"]
         assert auxiliary["edits"] == []
 
+        combined_context = run(
+            tool,
+            source_root,
+            Path(temporary) / "combined-context.json",
+            source_name="combined-context.cpp",
+            apply=False,
+        )["builders"][0]
+        assert combined_context["verdict"] == "transformable"
+        assert combined_context["proof"]["execution_scope"] == "partitioned_decoder"
+        assert combined_context["proof"]["activation_in"] == "inpL"
+        assert combined_context["proof"]["scope_evidence"] == [
+            "sidecar_output_excluded"
+        ]
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "combined-context-applied.json",
+            source_name="combined-context.cpp",
+            apply=True,
+        )
+        combined_context_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "combined-context-second.json",
+            source_name="combined-context.cpp",
+            apply=False,
+        )["builders"][0]
+        assert combined_context_second["verdict"] == "already_transformed"
+
         multiple_domains = run(
             tool,
             source_root,
@@ -355,6 +384,7 @@ def main() -> int:
         ).read_text(encoding="utf-8")
         assert "std::make_unique<llm_graph_input_hyperconnection>" in hyperconnection_source
         assert "res->t_skippy_activation_input = inpL;" in hyperconnection_source
+        assert "res->t_skippy_activation_output = inpL;" in hyperconnection_source
         hyperconnection_second = run(
             tool,
             source_root,
@@ -402,6 +432,241 @@ def main() -> int:
             apply=False,
         )["builders"][0]
         assert hyperconnection_initializer_second["verdict"] == "already_transformed"
+
+        altup_sideband = run(
+            tool,
+            source_root,
+            Path(temporary) / "altup-sideband.json",
+            source_name="altup-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert altup_sideband["verdict"] == "transformable"
+        assert altup_sideband["proof"]["activation_in"] == "inpL"
+        assert altup_sideband["proof"]["scope_evidence"] == [
+            "altup_activation_frontier",
+            "per_layer_token_projection_sideband",
+            "guarded_embedding_prelude",
+        ]
+        altup_edit_kinds = {edit["kind"] for edit in altup_sideband["edits"]}
+        assert {
+            "rewrite_altup_embedding_owner",
+            "guard_altup_prelude",
+            "insert_per_layer_token_sideband",
+            "rewrite_per_layer_token_input",
+            "rewrite_per_layer_projection_source",
+        }.issubset(altup_edit_kinds)
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "altup-sideband-applied.json",
+            source_name="altup-sideband.cpp",
+            apply=True,
+        )
+        altup_source = (
+            source_root / "src/models/altup-sideband.cpp"
+        ).read_text(encoding="utf-8")
+        assert "std::make_unique<llm_graph_input_gemma3n_altup>" in altup_source
+        assert "res->t_skippy_gemma3n_altup = stage_boundary;" in altup_source
+        assert "if (!stage_filtered || il_start == 0)" in altup_source
+        altup_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "altup-sideband-second.json",
+            source_name="altup-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert altup_second["verdict"] == "already_transformed"
+
+        per_layer_sideband = run(
+            tool,
+            source_root,
+            Path(temporary) / "per-layer-sideband.json",
+            source_name="per-layer-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert per_layer_sideband["verdict"] == "transformable"
+        assert "per_layer_token_projection_sideband" in (
+            per_layer_sideband["proof"]["scope_evidence"]
+        )
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "per-layer-sideband-applied.json",
+            source_name="per-layer-sideband.cpp",
+            apply=True,
+        )
+        per_layer_source = (
+            source_root / "src/models/per-layer-sideband.cpp"
+        ).read_text(encoding="utf-8")
+        assert "std::make_unique<llm_graph_input_stage_tokens>" in per_layer_source
+        assert "project_per_layer_inputs(inp_per_layer_proj" in per_layer_source
+        per_layer_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "per-layer-sideband-second.json",
+            source_name="per-layer-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert per_layer_second["verdict"] == "already_transformed"
+
+        range_owned_inputs = run(
+            tool,
+            source_root,
+            Path(temporary) / "range-owned-inputs.json",
+            source_name="range-owned-inputs.cpp",
+            apply=False,
+        )["builders"][0]
+        assert range_owned_inputs["verdict"] == "transformable"
+        assert {
+            "range_owned_attention_positions",
+            "range_owned_attention_scale",
+            "range_owned_ple_input",
+        }.issubset(range_owned_inputs["proof"]["scope_evidence"])
+        assert {
+            "insert_attention_range_scan",
+            "guard_attention_position_input",
+            "insert_attention_scale_range_scan",
+            "guard_attention_scale_input",
+            "insert_ple_range_scan",
+            "guard_ple_input",
+        }.issubset({edit["kind"] for edit in range_owned_inputs["edits"]})
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "range-owned-inputs-applied.json",
+            source_name="range-owned-inputs.cpp",
+            apply=True,
+        )
+        range_owned_source = (
+            source_root / "src/models/range-owned-inputs.cpp"
+        ).read_text(encoding="utf-8")
+        assert "skippy_has_attention_layer ? build_inp_pos() : nullptr" in (
+            range_owned_source
+        )
+        assert (
+            "skippy_uses_attention_scale ? build_inp_attn_scale() : nullptr"
+            in range_owned_source
+        )
+        assert "&& skippy_stage_contains_ple" in range_owned_source
+        range_owned_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "range-owned-inputs-second.json",
+            source_name="range-owned-inputs.cpp",
+            apply=False,
+        )["builders"][0]
+        assert range_owned_second["verdict"] == "already_transformed"
+
+        stage_zero_sideband = run(
+            tool,
+            source_root,
+            Path(temporary) / "stage-zero-sideband.json",
+            source_name="stage-zero-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert stage_zero_sideband["verdict"] == "transformable"
+        assert "stage_zero_loop_sideband" in (
+            stage_zero_sideband["proof"]["scope_evidence"]
+        )
+        assert "guard_stage_zero_loop_sideband" in {
+            edit["kind"] for edit in stage_zero_sideband["edits"]
+        }
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "stage-zero-sideband-applied.json",
+            source_name="stage-zero-sideband.cpp",
+            apply=True,
+        )
+        stage_zero_source = (
+            source_root / "src/models/stage-zero-sideband.cpp"
+        ).read_text(encoding="utf-8")
+        assert (
+            "if ((!stage_filtered || il_start == 0) && "
+            "(il < n_deepstack_layers))"
+            in stage_zero_source
+        )
+        stage_zero_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "stage-zero-sideband-second.json",
+            source_name="stage-zero-sideband.cpp",
+            apply=False,
+        )["builders"][0]
+        assert stage_zero_second["verdict"] == "already_transformed"
+
+        rwkv_first_value = run(
+            tool,
+            source_root,
+            Path(temporary) / "rwkv-first-value.json",
+            source_name="rwkv-first-value.cpp",
+            apply=False,
+        )["builders"][0]
+        assert rwkv_first_value["verdict"] == "transformable"
+        assert "rwkv_first_value_sideband" in (
+            rwkv_first_value["proof"]["scope_evidence"]
+        )
+        assert {"insert_rwkv_first_input", "insert_rwkv_first_output"}.issubset(
+            {edit["kind"] for edit in rwkv_first_value["edits"]}
+        )
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "rwkv-first-value-applied.json",
+            source_name="rwkv-first-value.cpp",
+            apply=True,
+        )
+        rwkv_source = (
+            source_root / "src/models/rwkv-first-value.cpp"
+        ).read_text(encoding="utf-8")
+        assert "std::make_unique<llm_graph_input_rwkv7_v_first>" in rwkv_source
+        assert "res->t_skippy_rwkv7_v_first = v_first;" in rwkv_source
+        rwkv_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "rwkv-first-value-second.json",
+            source_name="rwkv-first-value.cpp",
+            apply=False,
+        )["builders"][0]
+        assert rwkv_second["verdict"] == "already_transformed"
+
+        embedding_mode = run(
+            tool,
+            source_root,
+            Path(temporary) / "preloop-embedding-mode.json",
+            source_name="preloop-embedding-mode.cpp",
+            apply=False,
+        )["builders"][0]
+        assert embedding_mode["verdict"] == "transformable"
+        assert "stage_zero_embedding_mode_check" in (
+            embedding_mode["proof"]["scope_evidence"]
+        )
+        assert "guard_stage_zero_embedding_mode_check" in {
+            edit["kind"] for edit in embedding_mode["edits"]
+        }
+        run(
+            tool,
+            source_root,
+            Path(temporary) / "preloop-embedding-mode-applied.json",
+            source_name="preloop-embedding-mode.cpp",
+            apply=True,
+        )
+        embedding_mode_source = (
+            source_root / "src/models/preloop-embedding-mode.cpp"
+        ).read_text(encoding="utf-8")
+        assert (
+            "if ((!stage_filtered || il_start == 0) && "
+            "(ubatch.embd && !use_mrope))"
+            in embedding_mode_source
+        )
+        embedding_mode_second = run(
+            tool,
+            source_root,
+            Path(temporary) / "preloop-embedding-mode-second.json",
+            source_name="preloop-embedding-mode.cpp",
+            apply=False,
+        )["builders"][0]
+        assert embedding_mode_second["verdict"] == "already_transformed"
 
         embedding_prelude = run(
             tool,

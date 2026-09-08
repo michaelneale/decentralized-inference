@@ -73,6 +73,15 @@ fn should_prefer_cached_snapshot_for_request(
     _include_embeddings: bool,
     _include_output: bool,
 ) -> Result<bool> {
+    let manifest_contents =
+        fs::read(package_dir.join("model-package.json")).context("read cached package manifest")?;
+    let schema_version = serde_json::from_slice::<serde_json::Value>(&manifest_contents)
+        .context("parse cached package manifest")?
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if schema_version == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)) {
+        return Ok(layer_start == layer_end);
+    }
     // Metadata-only probes (layer_start == layer_end == 0) need at least one
     // layer artifact on disk so the snapshot hash that gets baked into the
     // canonical package_ref is not a skeleton.  Real stage loads only need

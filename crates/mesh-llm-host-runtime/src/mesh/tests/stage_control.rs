@@ -686,6 +686,7 @@ fn stage_status_updates_materialized_topology_endpoint() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![StageAssignment {
             stage_id: "stage-1".to_string(),
             stage_index: 1,
@@ -720,6 +721,7 @@ fn public_stage_topologies_hide_worker_only_load_fragments() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![StageAssignment {
             stage_id: "stage-1".to_string(),
             stage_index: 1,
@@ -754,6 +756,7 @@ fn full_stage_topology_remains_visible_after_status_updates() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -802,6 +805,7 @@ fn active_stage_topology_replaces_previous_generation_for_model() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -839,6 +843,7 @@ fn active_stage_topology_replaces_previous_generation_for_model() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -880,6 +885,7 @@ fn stage_topology_withdraw_removes_active_topology_and_statuses() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),

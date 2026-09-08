@@ -876,7 +876,20 @@ fn stage_config(
         materialized_path: materialized.map(|artifact| artifact.path.to_string_lossy().to_string()),
         materialized_pinned: materialized.is_some(),
         model_path: load.model_path.clone(),
-        projector_path: load.projector_path.clone(),
+        model_part_paths: package
+            .map(|package| {
+                package
+                    .model_part_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        projector_path: load.projector_path.clone().or_else(|| {
+            package
+                .and_then(|package| package.projector_path.as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+        }),
         projector_use_gpu: load.projector_use_gpu,
         media_marker: load.media_marker.clone(),
         image_min_tokens: load.image_min_tokens,

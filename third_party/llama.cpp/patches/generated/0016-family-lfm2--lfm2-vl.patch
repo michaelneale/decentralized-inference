@@ -9,10 +9,10 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/lfm2.cpp b/src/models/lfm2.cpp
-index 9a4295557053862f2aa768f906d4994532563994..04c8d9e2736f4aa9560de44ae92a7d29b68899ed 100644
+index 9a4295557053862f2aa768f906d4994532563994..d3ab714440f3d8ebcf47dccd0f0fe5ec3f5fb081 100644
 --- a/src/models/lfm2.cpp
 +++ b/src/models/lfm2.cpp
-@@ -233,7 +233,20 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+@@ -233,7 +233,12 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
      };
  
      // actual graph construction starts here
@@ -22,37 +22,35 @@ index 9a4295557053862f2aa768f906d4994532563994..04c8d9e2736f4aa9560de44ae92a7d29
 +    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
 +    const int il_end   = stage_filtered ? stage_filter.layer_end   : n_layer;
 +
-+    bool has_attention_layer = false;
-+    for (int il = il_start; il < il_end; ++il) {
-+        if (!hparams.is_recr(il)) {
-+            has_attention_layer = true;
-+            break;
-+        }
-+    }
-+
 +    ggml_tensor * cur = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
      cb(cur, "model.embed_tokens", -1);
  
      ggml_build_forward_expand(gf, cur);
-@@ -245,12 +258,13 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+@@ -245,10 +250,20 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
          inp_hybrid = build_inp_mem_hybrid();
      }
  
 -    ggml_tensor * inp_pos     = build_inp_pos();
 -    ggml_tensor * inp_out_ids = build_inp_out_ids();
-+    ggml_tensor * inp_pos     = has_attention_layer ? build_inp_pos() : nullptr;
++    bool skippy_has_attention_layer = false;
++    for (int skippy_il = il_start; skippy_il < il_end; ++skippy_il) {
++        if (!hparams.is_recr(skippy_il)) {
++            skippy_has_attention_layer = true;
++            break;
++        }
++    }
++
++    ggml_tensor * inp_pos     = skippy_has_attention_layer ? build_inp_pos() : nullptr;
 +    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
- 
--    for (int il = 0; il < n_layer; ++il) {
--        res->t_layer_inp[il] = cur;
++
 +    for (int il = il_start; il < il_end; ++il) {
 +        begin_block(cur, il);
  
-+        res->t_layer_inp[il] = cur;
-         const bool is_moe_layer = il >= static_cast<int>(hparams.n_layer_dense_lead);
+-    for (int il = 0; il < n_layer; ++il) {
+         res->t_layer_inp[il] = cur;
  
-         auto * prev_cur = cur;
-@@ -260,7 +274,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+         const bool is_moe_layer = il >= static_cast<int>(hparams.n_layer_dense_lead);
+@@ -260,7 +275,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
          cur = hparams.is_recr(il) ? build_shortconv_block(cur, inp_hybrid->get_recr(), il) :
                                      build_attn_block(cur, inp_pos, inp_hybrid->get_attn(), il);
  
@@ -61,13 +59,12 @@ index 9a4295557053862f2aa768f906d4994532563994..04c8d9e2736f4aa9560de44ae92a7d29
              cur      = ggml_get_rows(ctx0, cur, inp_out_ids);
              prev_cur = ggml_get_rows(ctx0, prev_cur, inp_out_ids);
          }
-@@ -278,6 +292,14 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
+@@ -278,8 +293,16 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
  
          cur = build_cvec(cur, il);
          cb(cur, "l_out", il);
 +        end_block(cur, il);
 +    }
-+
 +    if (stage_filtered && !stage_filter.include_output) {
 +        cb(cur, "stage_boundary", il_end - 1);
 +        res->t_embd = cur;
@@ -75,7 +72,10 @@ index 9a4295557053862f2aa768f906d4994532563994..04c8d9e2736f4aa9560de44ae92a7d29
 +        return;
      }
  
++
      cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
+     cb(cur, "result_norm", -1);
+     res->t_embd = cur;
 -- 
 2.54.0
 

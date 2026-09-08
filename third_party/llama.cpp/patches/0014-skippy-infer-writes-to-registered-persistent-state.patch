@@ -1,4 +1,4 @@
-From 09913cdd6e9d145e98179e65308f890e3e0a8349 Mon Sep 17 00:00:00 2001
+From be6a72ffd21024169f748236ae330b3868588667 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 22:48:55 +1000
 Subject: [PATCH] skippy: infer writes to registered persistent state
@@ -11,12 +11,12 @@ Subject: [PATCH] skippy: infer writes to registered persistent state
  4 files changed, 148 insertions(+), 10 deletions(-)
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 6a35c3c43..8e33bf974 100644
+index e44bba157..320b5419e 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -283,6 +283,24 @@ if (LLAMA_STAGE_BUILD_TESTS)
-     set_tests_properties(skippy_noalloc_graph_planning_iswa PROPERTIES
-         FIXTURES_REQUIRED skippy-noalloc-gemma2-fixture)
+@@ -301,6 +301,24 @@ if (LLAMA_STAGE_BUILD_TESTS)
+     set_tests_properties(skippy_noalloc_graph_planning_msa PROPERTIES
+         FIXTURES_REQUIRED skippy-noalloc-minimax-m3-fixture)
  
 +    add_test(
 +        NAME skippy_generate_kimi_linear_fixture
@@ -150,10 +150,10 @@ index 69db4f530..755b40560 100644
          const auto & owner = inferred.at(storage);
          effects.push_back({skippy_state_kind::derived_persistent,
 diff --git a/src/skippy/tests/noalloc_graph_planning.cpp b/src/skippy/tests/noalloc_graph_planning.cpp
-index 20d55631d..7aed9b2b7 100644
+index 2ea650314..01bb47f6e 100644
 --- a/src/skippy/tests/noalloc_graph_planning.cpp
 +++ b/src/skippy/tests/noalloc_graph_planning.cpp
-@@ -445,7 +445,9 @@ static bool check_stage_slices(
+@@ -450,7 +450,9 @@ static bool check_stage_slices(
              }
          }
          if (model->hparams.is_recr(layer)) {
@@ -164,7 +164,7 @@ index 20d55631d..7aed9b2b7 100644
                  has_downstream_recurrent_layer = true;
                  const ggml_tensor * entry = graph_result->get_block_boundaries()[2 * layer].tensor;
                  int32_t entry_index = -1;
-@@ -567,7 +569,9 @@ static bool layer_has_state(
+@@ -572,7 +574,9 @@ static bool layer_has_state(
  
  enum class layer_state_class {
      kv,
@@ -174,7 +174,7 @@ index 20d55631d..7aed9b2b7 100644
      none,
  };
  
-@@ -577,8 +581,12 @@ static bool parse_layer_classes(const char * spec, std::vector<layer_state_class
+@@ -582,8 +586,12 @@ static bool parse_layer_classes(const char * spec, std::vector<layer_state_class
          if (*c == ',' || *c == '\0') {
              if (token == "kv") {
                  classes.push_back(layer_state_class::kv);
@@ -187,7 +187,7 @@ index 20d55631d..7aed9b2b7 100644
              } else if (token == "none") {
                  classes.push_back(layer_state_class::none);
              } else {
-@@ -601,9 +609,10 @@ static bool check_state_effects(
+@@ -606,9 +614,10 @@ static bool check_state_effects(
          const char * profile_name,
          const std::vector<layer_state_class> & layer_classes,
          size_t expected_conv_writes) {
@@ -200,7 +200,7 @@ index 20d55631d..7aed9b2b7 100644
          std::fprintf(stderr, "metadata-only %s state effects invalid: %s\n",
                  profile_name, effect_error.c_str());
          return false;
-@@ -639,6 +648,11 @@ static bool check_state_effects(
+@@ -644,6 +653,11 @@ static bool check_state_effects(
                       kv_value_reads == 1 && kv_value_writes == 1 &&
                       recr_total == 0;
                  break;
@@ -212,7 +212,7 @@ index 20d55631d..7aed9b2b7 100644
              case layer_state_class::recurrent:
                  ok = conv_reads == 1 && ssm_reads == 1 && ssm_writes == 3 &&
                       conv_writes == expected_conv_writes + 2 &&
-@@ -650,14 +664,21 @@ static bool check_state_effects(
+@@ -655,14 +669,21 @@ static bool check_state_effects(
                      return false;
                  }
                  break;
@@ -236,7 +236,7 @@ index 20d55631d..7aed9b2b7 100644
              return false;
          }
      }
-@@ -681,7 +702,10 @@ static bool check_state_effects(
+@@ -686,7 +707,10 @@ static bool check_state_effects(
                  if (effect.write_ordinal == 1) { copy_position = i; extra_read = node->src[0]; }
              }
          }

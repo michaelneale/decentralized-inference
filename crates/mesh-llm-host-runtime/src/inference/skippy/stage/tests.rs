@@ -371,6 +371,8 @@ fn stage_config_prefers_package_source_identity_over_local_ref() {
         source_model_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .to_string(),
         source_model_bytes: Some(456),
+        model_part_paths: Vec::new(),
+        projector_path: None,
     };
 
     let config = stage_config(&request, None, Some(&package)).unwrap();

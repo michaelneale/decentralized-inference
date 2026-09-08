@@ -6,9 +6,10 @@ set -euo pipefail
 # Every row of the single manifest gets core certification: single-step,
 # chain, and state-handoff lanes. Models with MTP/NextN tensors require the
 # native draft sideband and verify it against the target in the correctness
-# lanes. Hybrid/recurrent rows (sweep_period > 0) also run a
-# boundary sweep — one representative split layer for every cut offset modulo
-# the family's interleaving period.
+# lanes. Dense rows run them at the first, midpoint, and last interior cuts.
+# Hybrid/recurrent rows (sweep_period > 0) run a boundary sweep — one
+# representative split layer for every cut offset modulo the family's
+# interleaving period.
 #
 # Models are NEVER cached through GitHub Actions cache. The family-certify
 # runner ships a large pre-warmed, read-only HF cache. When HF_CACHE is set,
@@ -722,8 +723,17 @@ planned_certification_count() {
   while IFS='|' read -r family _repo _source_revision _file _selector sweep_period layer_end _rest; do
     [[ "$family" == "family" ]] && continue
     local base_split=$(( layer_end / 2 ))
+    local first_split=1
+    local last_split=$(( layer_end - 1 ))
     planned=$((planned + 1))
-    if [[ "$sweep_period" != "0" ]]; then
+    if [[ "$sweep_period" == "0" ]]; then
+      if (( first_split != base_split )); then
+        planned=$((planned + 1))
+      fi
+      if (( last_split != base_split && last_split != first_split )); then
+        planned=$((planned + 1))
+      fi
+    else
       local offset cut cuts
       for (( offset = 1; offset <= sweep_period; offset++ )); do
         cuts=0
@@ -792,11 +802,20 @@ run_resolved_manifest() {
     [[ "$family" == "family" ]] && continue
     local model_id="$repo:$selector"
 
-    # Fixed mid-range split for the base parity lanes.
+    # Dense families exercise both endpoint ownership cases plus an ordinary
+    # interior handoff. Collapse duplicates for tiny models.
     local base_split=$(( layer_end / 2 ))
+    local first_split=1
+    local last_split=$(( layer_end - 1 ))
     run_certify "$family" "$target" "$model_id" "$source_revision" "$base_split" "$layer_end" "$native_mtp" "$startup_timeout" "$model_size_bytes" "$activation_width"
-
-    if [[ "$sweep_period" != "0" ]]; then
+    if [[ "$sweep_period" == "0" ]]; then
+      if (( first_split != base_split )); then
+        run_certify "$family" "$target" "$model_id" "$source_revision" "$first_split" "$layer_end" "$native_mtp" "$startup_timeout" "$model_size_bytes" "$activation_width"
+      fi
+      if (( last_split != base_split && last_split != first_split )); then
+        run_certify "$family" "$target" "$model_id" "$source_revision" "$last_split" "$layer_end" "$native_mtp" "$startup_timeout" "$model_size_bytes" "$activation_width"
+      fi
+    else
       # Boundary sweep: every cut offset mod the interleaving period, one
       # representative cut each (then every period up to SWEEP_MAX_CUTS cuts),
       # so planner-cut dependence (the B1 bug class) cannot hide.

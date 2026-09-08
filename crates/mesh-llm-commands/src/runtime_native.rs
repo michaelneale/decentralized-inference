@@ -10,7 +10,7 @@ use mesh_llm_runtime_install::{
     CURRENT_MESH_VERSION, NativeRuntimeBundleInstallPolicy, NativeRuntimeDownloadProgressCallback,
     NativeRuntimeInstallOptions, NativeRuntimeManifestOptions, discover_local_native_runtimes,
     discover_native_runtime_bundle_dirs, host_runtime_profile, install_native_runtime,
-    load_release_manifest, native_runtime_cache,
+    load_release_manifest_with_sources, native_runtime_cache,
 };
 use mesh_llm_tui::terminal_progress::{
     ratio_complete_u64, render_inline_gauge_with_reserved_width,
@@ -64,27 +64,28 @@ pub async fn run_native_runtime_list(
     if available {
         let discovered_bundle_dirs = discover_native_runtime_bundle_dirs(bundle_dirs)?;
         print_configured_selector(configured, json_output);
-        if !json_output && manifest_path.is_none() && discovered_bundle_dirs.is_empty() {
+        if !json_output && manifest_path.is_none() {
             eprintln!("🔎 Loading native runtime release manifest");
         }
-        let manifest = load_release_manifest(NativeRuntimeManifestOptions {
-            mesh_version: mesh_version.to_string(),
-            manifest_path: manifest_path.map(Path::to_path_buf),
-            bundle_dirs: discovered_bundle_dirs.clone(),
-            ..Default::default()
-        })
-        .await?;
+        let (manifest, sources) =
+            load_release_manifest_with_sources(NativeRuntimeManifestOptions {
+                mesh_version: mesh_version.to_string(),
+                manifest_path: manifest_path.map(Path::to_path_buf),
+                bundle_dirs: discovered_bundle_dirs.clone(),
+                ..Default::default()
+            })
+            .await?;
         let profile = host_runtime_profile();
         let cache = native_runtime_cache(cache_dir)?;
         let mut resolver =
             NativeRuntimeResolver::new(mesh_version, profile.clone(), manifest.clone(), cache)
-                .with_bundle_dirs(discovered_bundle_dirs);
+                .with_bundle_dirs(sources.bundle_dirs.clone());
         if let Some(skippy_abi_version) = configured.skippy_abi_version {
             resolver = resolver.with_skippy_abi_version(skippy_abi_version);
         }
         let evaluated = resolver.evaluate(&selection)?;
         let rows = available_runtime_rows(&manifest, &evaluated);
-        return formatter.render_available(&rows);
+        return formatter.render_available(&rows, &sources);
     }
 
     let installed = discover_local_native_runtimes(bundle_dirs, &cache)?;
@@ -143,7 +144,7 @@ pub async fn run_native_runtime_install(
     json_output: bool,
 ) -> Result<()> {
     let resolved_selection = resolve_runtime_selection(requested_runtime, configured)?;
-    if !json_output && manifest_path.is_none() && bundle_dirs.is_empty() {
+    if !json_output && manifest_path.is_none() {
         eprintln!("🔎 Loading native runtime release manifest");
     }
     if !json_output {

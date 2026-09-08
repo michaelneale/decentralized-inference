@@ -370,7 +370,11 @@ impl Node {
         prepare: &crate::inference::skippy::StagePrepareRequest,
     ) -> Result<()> {
         let load = &prepare.load;
-        if load.load_mode != skippy_protocol::LoadMode::LayerPackage {
+        if !matches!(
+            load.load_mode,
+            skippy_protocol::LoadMode::LayerPackage | skippy_protocol::LoadMode::RuntimeSlice
+        ) || !crate::inference::skippy::is_layer_package_ref(&load.package_ref)
+        {
             return Ok(());
         }
         if !crate::models::artifact_transfer::artifact_transfer_enabled() {
@@ -461,18 +465,30 @@ impl Node {
                 .context("fetch package manifest from peer")?;
         }
 
-        let artifacts = crate::models::artifact_transfer::required_stage_package_artifacts(
-            &package_dir,
-            &load.package_ref,
-            &load.manifest_sha256,
-            crate::models::artifact_transfer::StageArtifactSelection {
-                layer_start: load.layer_start,
-                layer_end: load.layer_end,
-                include_embeddings: load.layer_start == 0,
-                include_output: load.downstream.is_none(),
-                include_projectors: load.layer_start == 0,
-            },
-        )?;
+        let artifacts =
+            if crate::models::artifact_transfer::package_manifest_schema_version(&package_dir)?
+                == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)
+            {
+                crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
+                    &package_dir,
+                    &load.package_ref,
+                    &load.manifest_sha256,
+                    &load.admission,
+                )?
+            } else {
+                crate::models::artifact_transfer::required_stage_package_artifacts(
+                    &package_dir,
+                    &load.package_ref,
+                    &load.manifest_sha256,
+                    crate::models::artifact_transfer::StageArtifactSelection {
+                        layer_start: load.layer_start,
+                        layer_end: load.layer_end,
+                        include_embeddings: load.layer_start == 0,
+                        include_output: load.downstream.is_none(),
+                        include_projectors: load.layer_start == 0,
+                    },
+                )?
+            };
         for artifact in artifacts {
             if crate::models::artifact_transfer::local_artifact_satisfies(
                 &package_dir,

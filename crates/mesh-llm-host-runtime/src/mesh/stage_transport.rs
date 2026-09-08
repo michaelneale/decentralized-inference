@@ -330,18 +330,34 @@ pub(crate) fn artifact_transfer_allowed_by_topology(
                 return Ok(true);
             }
             let include_output = final_stage_index == Some(assignment.stage_index);
-            let allowed = crate::models::artifact_transfer::required_stage_package_artifacts(
-                package_dir,
-                &topology.package_ref,
-                &topology.manifest_sha256,
-                crate::models::artifact_transfer::StageArtifactSelection {
-                    layer_start: assignment.layer_start,
-                    layer_end: assignment.layer_end,
-                    include_embeddings: assignment.layer_start == 0,
-                    include_output,
-                    include_projectors: assignment.layer_start == 0,
-                },
-            )?;
+            let allowed =
+                if crate::models::artifact_transfer::package_manifest_schema_version(package_dir)?
+                    == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)
+                {
+                    let admission = topology
+                        .admissions
+                        .get(&assignment.stage_id)
+                        .context("package-v2 topology is missing stage admission")?;
+                    crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
+                        package_dir,
+                        &topology.package_ref,
+                        &topology.manifest_sha256,
+                        admission,
+                    )?
+                } else {
+                    crate::models::artifact_transfer::required_stage_package_artifacts(
+                        package_dir,
+                        &topology.package_ref,
+                        &topology.manifest_sha256,
+                        crate::models::artifact_transfer::StageArtifactSelection {
+                            layer_start: assignment.layer_start,
+                            layer_end: assignment.layer_end,
+                            include_embeddings: assignment.layer_start == 0,
+                            include_output,
+                            include_projectors: assignment.layer_start == 0,
+                        },
+                    )?
+                };
             if allowed.iter().any(|artifact| {
                 artifact.relative_path == relative_path
                     && request
@@ -386,6 +402,7 @@ pub struct StageTopologyInstance {
     pub model_id: String,
     pub package_ref: String,
     pub manifest_sha256: String,
+    pub admissions: std::collections::BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
     pub stages: Vec<StageAssignment>,
 }
 

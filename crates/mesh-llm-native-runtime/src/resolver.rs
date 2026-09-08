@@ -37,6 +37,102 @@ pub enum CandidateRejection {
     SelectionMismatch { selection: String },
 }
 
+impl std::fmt::Display for CandidateRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MeshVersionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "MeshLLM version mismatch: expected {expected}, found {actual}"
+                )
+            }
+            Self::SkippyAbiMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "Skippy ABI mismatch: expected {expected}, found {actual}"
+                )
+            }
+            Self::OsMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "OS mismatch: expected {expected}, artifact is for {actual}"
+                )
+            }
+            Self::ArchMismatch { expected, actual } => write!(
+                f,
+                "CPU architecture mismatch: expected {expected}, artifact is for {actual}"
+            ),
+            Self::TargetTripleMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "target triple mismatch: expected {expected}, host is {actual}"
+                )
+            }
+            Self::BackendNotSupported { backend } => {
+                write!(f, "backend {backend} is not supported on this host")
+            }
+            Self::CudaProfileMissing => {
+                write!(
+                    f,
+                    "CUDA runtime requires CUDA, but no CUDA profile was detected"
+                )
+            }
+            Self::CudaToolkitMajorMismatch {
+                required,
+                installed,
+            } => {
+                let installed = installed
+                    .iter()
+                    .map(|major| major.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "CUDA toolkit mismatch: runtime requires CUDA {required}, host has CUDA {installed} installed"
+                )
+            }
+            Self::CudaToolkitMajorAboveDriver {
+                required,
+                driver_max,
+            } => write!(
+                f,
+                "CUDA driver too old: runtime requires CUDA {required}, driver supports up to CUDA {driver_max}"
+            ),
+            Self::CudaToolkitNotDetected { required } => write!(
+                f,
+                "no CUDA toolkit detected: runtime requires CUDA {required} libraries \
+                 (libcudart, libcublas, libcublasLt) on the loader path; \
+                 set MESH_LLM_CUDA_TOOLKIT_MAJORS if the toolkit is installed elsewhere"
+            ),
+            Self::CudaGpuArchUnsupported { supported } => write!(
+                f,
+                "CUDA GPU architecture unsupported: runtime supports {}",
+                supported.join(", ")
+            ),
+            Self::RocmProfileMissing => {
+                write!(
+                    f,
+                    "ROCm runtime requires ROCm, but no ROCm profile was detected"
+                )
+            }
+            Self::RocmGpuArchUnsupported { supported } => write!(
+                f,
+                "ROCm GPU architecture unsupported: runtime supports {}",
+                supported.join(", ")
+            ),
+            Self::VulkanProfileMissing => {
+                write!(
+                    f,
+                    "Vulkan runtime requires Vulkan, but no Vulkan profile was detected"
+                )
+            }
+            Self::SelectionMismatch { selection } => {
+                write!(f, "selection mismatch: requested {selection}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CandidateEvaluation {
     pub artifact: NativeRuntimeArtifact,

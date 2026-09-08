@@ -714,6 +714,32 @@ fn runtime_slice_stage_source_accepts_inventory_availability() {
 }
 
 #[test]
+fn remote_package_v2_runtime_slice_accepts_inventory_availability() {
+    let mut load = stage_load_request(LoadMode::RuntimeSlice);
+    load.package_ref = "hf://meshllm/package-v2@abc123".to_string();
+    let inventory = skippy::StageLayerInventory {
+        model_id: load.model_id.clone(),
+        package_ref: load.package_ref.clone(),
+        manifest_sha256: load.manifest_sha256.clone(),
+        layer_count: 36,
+        ready_ranges: Vec::new(),
+        available_ranges: vec![skippy::LayerRange {
+            layer_start: 0,
+            layer_end: 36,
+        }],
+        missing_ranges: Vec::new(),
+        preparing_ranges: Vec::new(),
+        source_model_path: Some("/cache/package-v2/model-metadata.gguf".to_string()),
+        source_model_bytes: Some(4_900_000_000),
+        source_model_sha256: None,
+        content_addressed_local_source: None,
+        source_model_kind: skippy::SourceModelKind::PlainGguf,
+    };
+
+    assert!(split_stage_source_is_ready(&inventory, &load));
+}
+
+#[test]
 fn split_inventory_package_signal_treats_unknown_inventory_as_missing_package() {
     let package = skippy::SkippyPackageIdentity {
         source_model_bytes: 1_000,
@@ -940,6 +966,7 @@ fn split_stage_topology_instance_populates_stage_zero_endpoint() {
         "model-a",
         &package(24),
         &stages,
+        &std::collections::BTreeMap::new(),
         None,
         &std::collections::HashMap::new(),
     );
@@ -958,6 +985,7 @@ fn split_stage_topology_instance_populates_stage_zero_endpoint() {
         "model-a",
         &package(24),
         &stages,
+        &std::collections::BTreeMap::new(),
         Some("127.0.0.1:5501"),
         &ready_by_stage,
     );
