@@ -62,24 +62,25 @@ pub(crate) use local_source::{
     verify_registered_content_source,
 };
 pub use materialization::{
-    configure_materialized_stage_cache, is_layer_package_ref, materialize_stage_config,
-    materialized_stage_cache_dir, materialized_stages_for_sources,
-    prune_unpinned_materialized_stages, remove_materialized_stages_for_sources,
-    resolve_hf_package_to_local, resolve_stage_load_package,
+    configure_materialized_stage_cache, is_layer_package_ref, materialized_stage_cache_dir,
+    materialized_stages_for_sources, prune_unpinned_materialized_stages,
+    remove_materialized_stages_for_sources, resolve_hf_package_to_local,
+    resolve_stage_load_package,
 };
 pub use package::{
     SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,
     synthetic_direct_gguf_package,
 };
 pub(crate) use package::{
-    direct_gguf_planning_manifest_from_identity, direct_gguf_source_paths, is_package_v2_identity,
-    is_package_v2_ref, synthetic_content_addressed_gguf_package,
+    direct_gguf_planning_manifest_from_identity, direct_gguf_source_paths, is_package_v2_ref,
+    synthetic_content_addressed_gguf_package,
 };
 pub(crate) use resolver::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
     resolve_skippy_config_for_selector,
 };
 pub(crate) use skippy_server::OpenAiGuardrailsStatus as SkippyOpenAiGuardrailsStatus;
+pub(crate) use stage::admitted_resident_tensor_names;
 #[cfg(test)]
 pub(crate) use stage::test_stage_admission;
 pub(crate) use stage::{
@@ -482,7 +483,6 @@ pub(crate) struct SkippyModelHandle {
     config: StageConfig,
     started_at_unix_nanos: i64,
     status: Arc<Mutex<HandleState>>,
-    _materialized_pin: Option<materialization::MaterializedStagePin>,
     _prediction_return_listener: Option<PredictionReturnListener>,
 }
 
@@ -729,7 +729,6 @@ impl SkippyModelHandle {
                 stopped_at_unix_nanos: None,
                 last_error: None,
             })),
-            _materialized_pin: None,
             _prediction_return_listener: None,
         })
     }
@@ -814,7 +813,6 @@ impl SkippyModelHandle {
                 stopped_at_unix_nanos: None,
                 last_error: None,
             })),
-            _materialized_pin: None,
             _prediction_return_listener: None,
         })
     }
@@ -886,36 +884,10 @@ impl SkippyModelHandle {
         let mut lifecycle_audit = NativeSkippyStartupAudit::new();
         configure_materialized_stage_cache();
         let config = &mut runtime_options.config;
-        let materialized_pin = if config.load_mode == LoadMode::LayerPackage {
-            if let Some(model_path) = config.model_path.as_deref() {
-                let local_ref = materialization::resolve_hf_package_to_local(
-                    model_path,
-                    config.layer_start,
-                    config.layer_end,
-                    config.layer_start == 0,
-                    config.downstream.is_none(),
-                )?;
-                if let Some(expected_manifest_sha) = config.manifest_sha256.as_deref() {
-                    materialization::ensure_package_manifest_sha(
-                        &local_ref,
-                        expected_manifest_sha,
-                    )?;
-                }
-                config.model_path = Some(local_ref);
-            }
-            None
-        } else {
-            let materialized = materialize_stage_config(config)?;
-            materialized.map(|(artifact, pin)| {
-                config.manifest_sha256 = Some(artifact.manifest_sha256);
-                config.source_model_path = Some(artifact.source_model_path);
-                config.source_model_sha256 = Some(artifact.source_model_sha256);
-                config.source_model_bytes = artifact.source_model_bytes;
-                config.materialized_path = Some(artifact.path.to_string_lossy().to_string());
-                config.materialized_pinned = true;
-                pin
-            })
-        };
+        anyhow::ensure!(
+            config.load_mode != LoadMode::LayerPackage,
+            "layer-package schema v1 is offline-only; split serving requires package-v2 graph admission"
+        );
         if config.kv_cache.is_none() {
             let family_policy = family_policy_for_stage_config(config);
             config.kv_cache = family_policy.stage_kv_cache_config_for_stage(config);
@@ -980,7 +952,6 @@ impl SkippyModelHandle {
                 stopped_at_unix_nanos: None,
                 last_error: None,
             })),
-            _materialized_pin: materialized_pin,
             _prediction_return_listener: prediction_return_listener,
         })
     }
@@ -997,36 +968,10 @@ impl SkippyModelHandle {
         let mut lifecycle_audit = NativeSkippyStartupAudit::new();
         configure_materialized_stage_cache();
         let config = &mut runtime_options.config;
-        let materialized_pin = if config.load_mode == LoadMode::LayerPackage {
-            if let Some(model_path) = config.model_path.as_deref() {
-                let local_ref = materialization::resolve_hf_package_to_local(
-                    model_path,
-                    config.layer_start,
-                    config.layer_end,
-                    config.layer_start == 0,
-                    config.downstream.is_none(),
-                )?;
-                if let Some(expected_manifest_sha) = config.manifest_sha256.as_deref() {
-                    materialization::ensure_package_manifest_sha(
-                        &local_ref,
-                        expected_manifest_sha,
-                    )?;
-                }
-                config.model_path = Some(local_ref);
-            }
-            None
-        } else {
-            let materialized = materialize_stage_config(config)?;
-            materialized.map(|(artifact, pin)| {
-                config.manifest_sha256 = Some(artifact.manifest_sha256);
-                config.source_model_path = Some(artifact.source_model_path);
-                config.source_model_sha256 = Some(artifact.source_model_sha256);
-                config.source_model_bytes = artifact.source_model_bytes;
-                config.materialized_path = Some(artifact.path.to_string_lossy().to_string());
-                config.materialized_pinned = true;
-                pin
-            })
-        };
+        anyhow::ensure!(
+            config.load_mode != LoadMode::LayerPackage,
+            "layer-package schema v1 is offline-only; split serving requires package-v2 graph admission"
+        );
         if config.kv_cache.is_none() {
             let family_policy = family_policy_for_stage_config(config);
             config.kv_cache = family_policy.stage_kv_cache_config_for_stage(config);
@@ -1093,7 +1038,6 @@ impl SkippyModelHandle {
                 stopped_at_unix_nanos: None,
                 last_error: None,
             })),
-            _materialized_pin: materialized_pin,
             _prediction_return_listener: prediction_return_listener,
         })
     }

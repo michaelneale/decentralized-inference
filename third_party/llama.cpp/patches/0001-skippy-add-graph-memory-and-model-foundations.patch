@@ -4434,7 +4434,7 @@ index 1b1f852a0..ce4325bdf 100644
      n_kv      = gguf_get_n_kv(metadata);
      n_tensors = weights_map.size();
  
-+    if (g_skippy_filter.enabled && !g_skippy_filter.resident_tensor_names.empty()) {
++    if (g_skippy_filter.enabled) {
 +        for (const std::string & name : g_skippy_filter.resident_tensor_names) {
 +            if (weights_map.find(name) == weights_map.end() && gguf_find_tensor(metadata, name.c_str()) < 0) {
 +                throw std::runtime_error(format(
@@ -4447,27 +4447,7 @@ index 1b1f852a0..ce4325bdf 100644
      fver = (enum llama_fver) gguf_get_version(metadata);
  
      LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
-@@ -1057,6 +1127,19 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
- }
- 
- // find the first buffer type in the list that can use the tensor
-+static bool skippy_stage_contains_ple(
-+        const llama_hparams & hparams,
-+        const llama_model_loader_stage_filter & filter) {
-+    const int32_t layer_start = std::max<int32_t>(filter.layer_start, 0);
-+    const int32_t layer_end = std::min<int32_t>(filter.layer_end, hparams.n_layer());
-+    for (int32_t il = layer_start; il < layer_end; ++il) {
-+        if (hparams.is_ple(static_cast<uint32_t>(il))) {
-+            return true;
-+        }
-+    }
-+    return false;
-+}
-+
- static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hparams, ggml_tensor * tensor, ggml_op op, const buft_list_t * buft_list) {
-     GGML_ASSERT(!buft_list->empty());
-     for (const auto & cur : *buft_list) {
-@@ -1103,14 +1186,148 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1103,14 +1186,62 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          return it->second.get();
      };
  
@@ -4494,7 +4474,10 @@ index 1b1f852a0..ce4325bdf 100644
 +            return false;
 +        }
 +
-+        if (!g_skippy_filter.resident_tensor_names.empty()) {
++        if (g_skippy_filter.resident_tensor_names.empty()) {
++            throw std::runtime_error("filtered stage loading requires explicit resident tensor names");
++        }
++        {
 +            const std::string tensor_name = tn.str();
 +            const bool keep = g_skippy_filter.resident_tensor_names.find(tensor_name) !=
 +                    g_skippy_filter.resident_tensor_names.end();
@@ -4525,95 +4508,6 @@ index 1b1f852a0..ce4325bdf 100644
 +            return false;
          }
  
-+        llm_tensor tn_tensor = tn.tensor;
-+        if (tn.tensor == LLM_TENSOR_TOKEN_EMBD && (flags & TENSOR_DUPLICATED)) {
-+            tn_tensor = LLM_TENSOR_OUTPUT;
-+        }
-+
-+        llm_tensor_info info;
-+        try {
-+            info = llm_tensor_info_for(tn_tensor);
-+        } catch (const std::out_of_range & e) {
-+            // Leave the diagnostic to buft_for_tensor, which reports it with context.
-+            return false;
-+        }
-+
-+        const bool stage_contains_ple = llm_kv.arch == LLM_ARCH_QWEN4EXP &&
-+                hparams.ple_n_heads > 0 && skippy_stage_contains_ple(hparams, g_skippy_filter);
-+
-+        bool keep = true;
-+        switch (info.layer) {
-+            case LLM_TENSOR_LAYER_INPUT:
-+                keep = g_skippy_filter.include_embeddings;
-+                break;
-+            case LLM_TENSOR_LAYER_OUTPUT:
-+                keep = g_skippy_filter.include_output;
-+                break;
-+            case LLM_TENSOR_LAYER_REPEATING:
-+                keep = tn.bid >= g_skippy_filter.layer_start &&
-+                       tn.bid <  g_skippy_filter.layer_end;
-+                break;
-+            default:
-+                keep = true;
-+                break;
-+        }
-+
-+        if (!keep && llm_kv.arch == LLM_ARCH_GEMMA4 && hparams.n_embd_per_layer > 0) {
-+            keep = tn.tensor == LLM_TENSOR_TOKEN_EMBD ||
-+                   tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD ||
-+                   tn.tensor == LLM_TENSOR_PER_LAYER_MODEL_PROJ ||
-+                   tn.tensor == LLM_TENSOR_PER_LAYER_PROJ_NORM;
-+        }
-+        if (!keep && llm_kv.arch == LLM_ARCH_GEMMA3N) {
-+            keep = tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD ||
-+                   tn.tensor == LLM_TENSOR_PER_LAYER_MODEL_PROJ ||
-+                   tn.tensor == LLM_TENSOR_PER_LAYER_PROJ_NORM ||
-+                   (tn.tensor == LLM_TENSOR_ALTUP_PROJ && g_skippy_filter.include_embeddings) ||
-+                   (tn.tensor == LLM_TENSOR_ALTUP_UNEMBD_PROJ && g_skippy_filter.include_output);
-+        }
-+        if (!keep && stage_contains_ple) {
-+            // QWEN4EXP's PLE n-gram table is classified as an input tensor, but it is
-+            // read by a retained PLE layer independently of the token embeddings.
-+            keep = tn.tensor == LLM_TENSOR_PER_LAYER_TOKEN_EMBD;
-+        }
-+        if (!keep &&
-+            llm_kv.arch == LLM_ARCH_NEMOTRON_H_MOE &&
-+            hparams.n_layer_nextn > 0 &&
-+            g_skippy_filter.layer_end > static_cast<int>(hparams.n_layer()) &&
-+            g_skippy_filter.include_output) {
-+            // Nemotron-H MoE MTP heads reuse the trunk token embeddings when the
-+            // artifact does not provide a dedicated nextn embedding tensor.
-+            keep = tn.tensor == LLM_TENSOR_TOKEN_EMBD;
-+        }
-+
-+        if (!keep) {
-+            if (t_meta) {
-+                const bool requested_tensor_exists =
-+                        !(flags & TENSOR_NOT_REQUIRED) || requested_shape_matches(t_meta);
-+                const std::string tensor_name = tn.str();
-+                bool first_filtered_request = true;
-+                if (requested_tensor_exists && !(flags & TENSOR_DUPLICATED)) {
-+                    first_filtered_request = skippy_counted_filtered_tensors.insert(tensor_name).second;
-+                }
-+                const size_t nbytes = ggml_nbytes(t_meta);
-+                LLAMA_LOG_DEBUG(
-+                        "llama_model_loader: stage filter skipping tensor %s (size = %zu bytes)\n",
-+                        tensor_name.c_str(),
-+                        nbytes);
-+
-+                if (requested_tensor_exists && first_filtered_request) {
-+                    if (!(flags & TENSOR_DUPLICATED)) {
-+                        n_created++;
-+                    }
-+                }
-+                g_skippy_last_tensor_filtered = true;
-+            } else {
-+                g_skippy_last_tensor_filtered = false;
-+            }
-+
-+            return true;
-+        }
-+
 +        return false;
 +    };
 +
@@ -4708,7 +4602,7 @@ index 1b1f852a0..ce4325bdf 100644
  }
  
  void llama_model_loader::done_getting_tensors(bool partial) const {
-+    if (g_skippy_filter.enabled && !g_skippy_filter.resident_tensor_names.empty() &&
++    if (g_skippy_filter.enabled &&
 +            skippy_requested_resident_tensors != g_skippy_filter.resident_tensor_names) {
 +        for (const std::string & name : g_skippy_filter.resident_tensor_names) {
 +            if (skippy_requested_resident_tensors.find(name) == skippy_requested_resident_tensors.end()) {

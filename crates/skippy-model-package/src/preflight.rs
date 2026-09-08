@@ -1,23 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH;
+use serde::Serialize;
+use skippy_package_format::{
+    Artifact, Generation, PACKAGE_SCHEMA_VERSION, PackageManifest, TensorStorage,
+};
+
+use crate::hash::file_sha256;
 
 mod artifact_io;
-mod artifacts;
 
-use crate::generation_manifest::{
-    PackageGeneration, PackageGenerationExperimentalPolicy, PackageGenerationPolicy,
-    PackageGenerationThresholds,
-};
-use artifact_io::{file_sha256, safe_relative_path, sha256_bytes};
-#[cfg(test)]
-use artifacts::validate_artifact_sha;
-use artifacts::{
-    build_stage_reports, collect_artifacts, validate_artifacts, validate_layer_coverage,
-};
+use artifact_io::{safe_relative_path, sha256_bytes};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PackagePreflightOptions {
@@ -30,10 +24,11 @@ pub(crate) struct PackagePreflightReport {
     pub schema_version: u32,
     pub package_path: String,
     pub valid: bool,
+    pub package_id: Option<String>,
     pub model_id: Option<String>,
     pub layer_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<PreflightGeneration>,
+    pub generation: Option<Generation>,
     pub manifest_sha256: Option<String>,
     pub checked_artifact_count: usize,
     pub missing_artifact_count: usize,
@@ -59,11 +54,10 @@ pub(crate) struct PreflightIssue {
     pub remediation: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PreflightArtifact {
+    pub id: String,
     pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layer_index: Option<u32>,
     pub path: String,
     pub present: bool,
     pub declared_artifact_bytes: u64,
@@ -82,245 +76,11 @@ pub(crate) struct PreflightStage {
     pub layer_end: u32,
     pub includes_embeddings: bool,
     pub includes_output: bool,
+    pub selection_basis: &'static str,
     pub part_count: usize,
     pub artifact_bytes: u64,
     pub parts: Vec<String>,
     pub missing_parts: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightGeneration {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy: Option<PreflightGenerationPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thresholds: Option<PreflightGenerationThresholds>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speculative_decoding: Option<PreflightSpeculativeDecoding>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightGenerationPolicy {
-    pub profile: String,
-    pub decode: String,
-    pub short_prefill: String,
-    pub long_prefill: String,
-    pub verify: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexshare: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub experimental: Option<PreflightGenerationExperimentalPolicy>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightGenerationExperimentalPolicy {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_row_flash: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightGenerationThresholds {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub short_prefill_max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_sparse_decode_max_top_k: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compact_flash_min_kv: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dense_mask_max_bytes: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightSpeculativeDecoding {
-    pub default: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub proposers: Vec<PreflightSpeculativeProposer>,
-    pub strategies: Vec<PreflightSpeculativeStrategy>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightSpeculativeProposer {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub proposer_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prediction_depth: Option<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub layer_indices: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ngram_min: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ngram_max: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_proposal_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub history_scope: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightSpeculativeStrategy {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub strategy_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prediction_depth: Option<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub layer_indices: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub window_policy: Option<PreflightWindowPolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proposer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub primary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extender: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_policy: Option<PreflightExtensionPolicy>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightExtensionPolicy {
-    pub max_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct PreflightWindowPolicy {
-    pub default: String,
-    pub initial_window: u32,
-    pub min_window: u32,
-    pub max_window: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pipeline_depth: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageManifest {
-    schema_version: u32,
-    model_id: String,
-    source_model: PackageSourceModel,
-    format: String,
-    layer_count: u32,
-    #[serde(default)]
-    generation: Option<PackageGeneration<PackageSpeculativeDecoding>>,
-    shared: PackageShared,
-    #[serde(default)]
-    projectors: Vec<PackageProjector>,
-    layers: Vec<PackageLayer>,
-    skippy_abi_version: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageSourceModel {
-    path: String,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageShared {
-    metadata: PackageArtifact,
-    embeddings: PackageArtifact,
-    output: PackageArtifact,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageSpeculativeDecoding {
-    default: String,
-    #[serde(default)]
-    proposers: BTreeMap<String, PackageSpeculativeProposer>,
-    #[serde(default)]
-    strategies: BTreeMap<String, PackageSpeculativeStrategy>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageSpeculativeProposer {
-    #[serde(rename = "type")]
-    proposer_type: String,
-    #[serde(default)]
-    prediction_depth: Option<u32>,
-    #[serde(default)]
-    layer_indices: Vec<u32>,
-    #[serde(default)]
-    ngram_min: Option<u32>,
-    #[serde(default)]
-    ngram_max: Option<u32>,
-    #[serde(default)]
-    max_proposal_tokens: Option<u32>,
-    #[serde(default)]
-    history_scope: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageSpeculativeStrategy {
-    #[serde(rename = "type")]
-    strategy_type: String,
-    #[serde(default)]
-    prediction_depth: Option<u32>,
-    #[serde(default)]
-    layer_indices: Vec<u32>,
-    #[serde(default)]
-    window_policy: Option<PackageWindowPolicy>,
-    #[serde(default)]
-    proposer: Option<String>,
-    #[serde(default)]
-    primary: Option<String>,
-    #[serde(default)]
-    extender: Option<String>,
-    #[serde(default)]
-    extension_policy: Option<PackageExtensionPolicy>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageExtensionPolicy {
-    max_tokens: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageWindowPolicy {
-    default: String,
-    initial_window: u32,
-    min_window: u32,
-    max_window: u32,
-    #[serde(default)]
-    pipeline_depth: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageArtifact {
-    path: String,
-    tensor_count: usize,
-    tensor_bytes: u64,
-    artifact_bytes: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageProjector {
-    kind: String,
-    path: String,
-    tensor_count: usize,
-    tensor_bytes: u64,
-    artifact_bytes: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageLayer {
-    layer_index: u32,
-    path: String,
-    tensor_count: usize,
-    tensor_bytes: u64,
-    artifact_bytes: u64,
-    sha256: String,
-}
-
-#[derive(Debug, Clone)]
-struct ArtifactSpec {
-    role: &'static str,
-    layer_index: Option<u32>,
-    path: String,
-    tensor_count: usize,
-    tensor_bytes: u64,
-    artifact_bytes: u64,
-    sha256: String,
 }
 
 pub(crate) fn preflight_package(
@@ -328,8 +88,7 @@ pub(crate) fn preflight_package(
     options: &PackagePreflightOptions,
 ) -> PackagePreflightReport {
     let mut report = PackagePreflightReport::new(package);
-    let manifest_path = package.join("model-package.json");
-    let manifest_contents = match fs::read(&manifest_path) {
+    let manifest_contents = match fs::read(package.join("model-package.json")) {
         Ok(contents) => contents,
         Err(error) => {
             report.error(
@@ -342,31 +101,74 @@ pub(crate) fn preflight_package(
         }
     };
     report.manifest_sha256 = Some(sha256_bytes(&manifest_contents));
-    let manifest = match serde_json::from_slice::<PackageManifest>(&manifest_contents) {
-        Ok(manifest) => manifest,
+
+    let envelope = match serde_json::from_slice::<serde_json::Value>(&manifest_contents) {
+        Ok(envelope) => envelope,
         Err(error) => {
             report.error(
                 "invalid_manifest_json",
-                format!("cannot parse package manifest: {error}"),
+                format!("cannot parse package manifest JSON: {error}"),
                 Some("model-package.json".to_string()),
-                "rebuild the layer package manifest with skippy-model-package write-package",
+                "rebuild the package with skippy-model-package write-package",
+            );
+            return report.finalize();
+        }
+    };
+    let schema_version = envelope
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    if let Some(schema_version) = schema_version {
+        report.schema_version = schema_version;
+    }
+    if schema_version != Some(PACKAGE_SCHEMA_VERSION) {
+        report.error(
+            "unsupported_schema_version",
+            format!(
+                "split package preflight requires schema version {PACKAGE_SCHEMA_VERSION}; found {}",
+                schema_version
+                    .map(|version| version.to_string())
+                    .unwrap_or_else(|| "a missing or non-integer value".to_string())
+            ),
+            Some("model-package.json".to_string()),
+            "rebuild the package with the current skippy-model-package write-package command",
+        );
+        return report.finalize();
+    }
+
+    let manifest = match serde_json::from_value::<PackageManifest>(envelope) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            report.error(
+                "invalid_manifest_shape",
+                format!("cannot parse package-v2 manifest: {error}"),
+                Some("model-package.json".to_string()),
+                "rebuild the package with the current skippy-model-package write-package command",
             );
             return report.finalize();
         }
     };
 
+    report.package_id = Some(manifest.package_id.clone());
     report.model_id = Some(manifest.model_id.clone());
     report.layer_count = Some(manifest.layer_count);
-    report.generation = manifest.generation.as_ref().map(preflight_generation);
-    validate_manifest_header(&manifest, &mut report);
-    validate_generation(
-        manifest.generation.as_ref(),
-        manifest.layer_count,
-        &mut report,
-    );
-    let artifacts = collect_artifacts(&manifest);
-    validate_layer_coverage(&manifest, &mut report);
-    validate_artifacts(package, &artifacts, options.verify_sha256, &mut report);
+    report.generation = manifest.generation.clone();
+    if let Err(errors) = manifest.validate() {
+        for issue in errors.issues() {
+            let code = serde_json::to_value(issue.code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "invalid_manifest".to_string());
+            report.error(
+                code,
+                issue.message.clone(),
+                Some(format!("model-package.json: {}", issue.path)),
+                "rebuild the package from an independent, complete source model",
+            );
+        }
+    }
+
+    validate_artifacts(package, &manifest, options.verify_sha256, &mut report);
     build_stage_reports(&manifest, options.stages, &mut report);
     report.finalize()
 }
@@ -374,9 +176,10 @@ pub(crate) fn preflight_package(
 impl PackagePreflightReport {
     fn new(package: &Path) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 0,
             package_path: package.display().to_string(),
             valid: true,
+            package_id: None,
             model_id: None,
             layer_count: None,
             generation: None,
@@ -414,1437 +217,409 @@ impl PackagePreflightReport {
             .iter()
             .filter(|artifact| !artifact.present)
             .count();
-        self.valid = !self
-            .issues
-            .iter()
-            .any(|issue| issue.severity == PreflightSeverity::Error);
+        self.valid = self.issues.is_empty();
         self
     }
 }
 
-fn validate_manifest_header(manifest: &PackageManifest, report: &mut PackagePreflightReport) {
-    if manifest.schema_version != 1 {
-        report.error(
-            "unsupported_schema_version",
-            format!(
-                "unsupported package manifest schema_version {}",
-                manifest.schema_version
-            ),
-            Some("model-package.json".to_string()),
-            "rebuild the package with a compatible skippy-model-package binary",
-        );
-    }
-    if manifest.format != "layer-package" {
-        report.error(
-            "invalid_format",
-            "package manifest format must be layer-package",
-            Some("model-package.json".to_string()),
-            "rebuild the package with skippy-model-package write-package",
-        );
-    }
-    if manifest.model_id.trim().is_empty() {
-        report.error(
-            "empty_model_id",
-            "package manifest model_id must not be empty",
-            Some("model-package.json".to_string()),
-            "rebuild the package with a real model coordinate",
-        );
-    }
-    if manifest.source_model.path.trim().is_empty() {
-        report.error(
-            "empty_source_model_path",
-            "package manifest source_model.path must not be empty",
-            Some("model-package.json".to_string()),
-            "rebuild the package manifest with source model provenance",
-        );
-    }
-    if !is_sha256(&manifest.source_model.sha256) {
-        report.error(
-            "invalid_source_model_sha256",
-            "package manifest source_model.sha256 must be a 64-character hex digest",
-            Some("model-package.json".to_string()),
-            "rebuild the package manifest from the source GGUF",
-        );
-    }
-    if manifest.skippy_abi_version.trim().is_empty() {
-        report.error(
-            "missing_skippy_abi_version",
-            "package manifest skippy_abi_version is empty",
-            Some("model-package.json".to_string()),
-            "rebuild the package so runtime compatibility can be checked before serving",
-        );
-    }
-    for projector in &manifest.projectors {
-        if projector.kind.trim().is_empty() {
+fn validate_artifacts(
+    package: &Path,
+    manifest: &PackageManifest,
+    verify_sha256: bool,
+    report: &mut PackagePreflightReport,
+) {
+    for artifact in &manifest.artifact_catalog.entries {
+        let role = artifact_role(manifest, artifact);
+        let relative = match safe_relative_path(&artifact.path) {
+            Ok(path) => path,
+            Err(message) => {
+                report.error(
+                    "unsafe_artifact_path",
+                    format!("artifact {} path is unsafe: {message}", artifact.id),
+                    Some(artifact.path.clone()),
+                    "rebuild the package so artifact paths stay inside the package directory",
+                );
+                report
+                    .artifacts
+                    .push(artifact_report(artifact, role, false, None, None, None));
+                continue;
+            }
+        };
+        let path = package.join(relative);
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                report.error(
+                    "artifact_not_file",
+                    format!("package artifact {} is not a regular file", artifact.path),
+                    Some(artifact.path.clone()),
+                    "replace the artifact with the immutable file declared by the manifest",
+                );
+                report
+                    .artifacts
+                    .push(artifact_report(artifact, role, false, None, None, None));
+                continue;
+            }
+            Err(error) => {
+                report.error(
+                    "missing_artifact",
+                    format!("package artifact {} is missing: {error}", artifact.path),
+                    Some(artifact.path.clone()),
+                    "download or rebuild the package artifact before split serving",
+                );
+                report
+                    .artifacts
+                    .push(artifact_report(artifact, role, false, None, None, None));
+                continue;
+            }
+        };
+        let actual_bytes = metadata.len();
+        let size_matches = actual_bytes == artifact.byte_size;
+        if !size_matches {
             report.error(
-                "empty_projector_kind",
-                "package projector kind must not be empty",
-                Some(projector.path.clone()),
-                "rebuild the package manifest so projector sidecars have a supported kind",
-            );
-        } else if projector.kind != "mmproj" {
-            report.error(
-                "unsupported_projector_kind",
-                format!("unsupported package projector kind {}", projector.kind),
-                Some(projector.path.clone()),
-                "rebuild the package with supported mmproj projector sidecars only",
-            );
-        }
-    }
-}
-
-fn validate_generation(
-    generation: Option<&PackageGeneration<PackageSpeculativeDecoding>>,
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    if let Some(generation) = generation {
-        if let Some(policy) = generation.policy.as_ref() {
-            validate_generation_policy(policy, report);
-        }
-        if let Some(thresholds) = generation.thresholds.as_ref() {
-            validate_generation_thresholds(thresholds, report);
-        }
-    }
-    let Some(speculative) =
-        generation.and_then(|generation| generation.speculative_decoding.as_ref())
-    else {
-        return;
-    };
-    if speculative.default.trim().is_empty() {
-        report.error(
-            "empty_speculative_default",
-            "generation.speculative_decoding.default must not be empty",
-            Some("model-package.json".to_string()),
-            "set the default speculative decoding strategy name or remove the generation block",
-        );
-    } else if !speculative.strategies.contains_key(&speculative.default) {
-        report.error(
-            "missing_speculative_default_strategy",
-            format!(
-                "generation.speculative_decoding.default {} is not present in strategies",
-                speculative.default
-            ),
-            Some("model-package.json".to_string()),
-            "add the default strategy entry or point default at an existing strategy",
-        );
-    }
-    for (name, proposer) in &speculative.proposers {
-        validate_speculative_proposer(name, proposer, layer_count, report);
-    }
-    for (name, strategy) in &speculative.strategies {
-        validate_speculative_strategy(name, strategy, &speculative.proposers, layer_count, report);
-    }
-}
-
-fn validate_speculative_proposer(
-    name: &str,
-    proposer: &PackageSpeculativeProposer,
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    if name.trim().is_empty() {
-        report.error(
-            "empty_speculative_proposer_name",
-            "generation.speculative_decoding proposer names must not be empty",
-            Some("model-package.json".to_string()),
-            "use a stable non-empty proposer id such as mtp or ngram-cache",
-        );
-    }
-    match proposer.proposer_type.as_str() {
-        "native-mtp" => validate_native_mtp_parts(
-            name,
-            proposer.prediction_depth,
-            &proposer.layer_indices,
-            layer_count,
-            report,
-        ),
-        "ngram-cache" | "ngram-suffix" => {
-            validate_ngram_proposer(name, proposer, report);
-        }
-        _ => report.error(
-            "unsupported_speculative_proposer_type",
-            format!(
-                "speculative proposer {name} has unsupported type {}",
-                proposer.proposer_type
-            ),
-            Some("model-package.json".to_string()),
-            "use native-mtp, ngram-cache, or ngram-suffix",
-        ),
-    }
-}
-
-fn validate_generation_policy(
-    policy: &PackageGenerationPolicy,
-    report: &mut PackagePreflightReport,
-) {
-    for (field, value) in [
-        ("profile", &policy.profile),
-        ("decode", &policy.decode),
-        ("short_prefill", &policy.short_prefill),
-        ("long_prefill", &policy.long_prefill),
-        ("verify", &policy.verify),
-    ] {
-        if value.trim().is_empty() {
-            report.error(
-                "empty_generation_policy_field",
-                format!("generation.policy.{field} must not be empty"),
-                Some("model-package.json".to_string()),
-                "set a stable package execution policy value or remove generation.policy",
-            );
-        }
-    }
-    if let Some(indexshare) = &policy.indexshare
-        && indexshare.trim().is_empty()
-    {
-        report.error(
-            "empty_generation_policy_field",
-            "generation.policy.indexshare must not be empty when present",
-            Some("model-package.json".to_string()),
-            "set indexshare to a stable value such as required or remove the field",
-        );
-    }
-    if let Some(selected_row_flash) = policy
-        .experimental
-        .as_ref()
-        .and_then(|experimental| experimental.selected_row_flash.as_ref())
-        && selected_row_flash.trim().is_empty()
-    {
-        report.error(
-            "empty_generation_policy_field",
-            "generation.policy.experimental.selected_row_flash must not be empty when present",
-            Some("model-package.json".to_string()),
-            "set selected_row_flash to a stable value such as evidence-gated or remove the field",
-        );
-    }
-}
-
-fn validate_generation_thresholds(
-    thresholds: &PackageGenerationThresholds,
-    report: &mut PackagePreflightReport,
-) {
-    if thresholds.short_prefill_max_tokens == Some(0) {
-        report.error(
-            "invalid_generation_threshold_zero",
-            "generation.thresholds.short_prefill_max_tokens must be greater than zero",
-            Some("model-package.json".to_string()),
-            "set a positive token threshold or remove the field",
-        );
-    }
-    if thresholds.direct_sparse_decode_max_top_k == Some(0) {
-        report.error(
-            "invalid_generation_threshold_zero",
-            "generation.thresholds.direct_sparse_decode_max_top_k must be greater than zero",
-            Some("model-package.json".to_string()),
-            "set a positive top-k threshold or remove the field",
-        );
-    }
-    if thresholds.compact_flash_min_kv == Some(0) {
-        report.error(
-            "invalid_generation_threshold_zero",
-            "generation.thresholds.compact_flash_min_kv must be greater than zero",
-            Some("model-package.json".to_string()),
-            "set a positive KV threshold or remove the field",
-        );
-    }
-    if thresholds.dense_mask_max_bytes == Some(0) {
-        report.error(
-            "invalid_generation_threshold_zero",
-            "generation.thresholds.dense_mask_max_bytes must be greater than zero",
-            Some("model-package.json".to_string()),
-            "set a positive byte threshold or remove the field",
-        );
-    }
-}
-
-fn validate_speculative_strategy(
-    name: &str,
-    strategy: &PackageSpeculativeStrategy,
-    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    if name.trim().is_empty() {
-        report.error(
-            "empty_speculative_strategy_name",
-            "generation.speculative_decoding strategy names must not be empty",
-            Some("model-package.json".to_string()),
-            "use a stable non-empty strategy id such as mtp",
-        );
-    }
-    if strategy.strategy_type.trim().is_empty() {
-        report.error(
-            "empty_speculative_strategy_type",
-            format!("speculative strategy {name} type must not be empty"),
-            Some("model-package.json".to_string()),
-            "set a supported strategy type such as native-mtp",
-        );
-    }
-    if let Some(proposer) = &strategy.proposer {
-        validate_proposer_reference(name, "proposer", proposer, proposers, report);
-    }
-    match strategy.strategy_type.as_str() {
-        "native-mtp" => validate_native_mtp_strategy_proposer_or_inline(
-            name,
-            strategy,
-            proposers,
-            layer_count,
-            report,
-        ),
-        "ngram-cache" | "ngram-suffix" => {
-            validate_ngram_strategy_proposer_type(name, strategy, proposers, report)
-        }
-        "composite" => validate_composite_strategy(name, strategy, proposers, report),
-        _ => report.error(
-            "unsupported_speculative_strategy_type",
-            format!(
-                "speculative strategy {name} has unsupported type {}",
-                strategy.strategy_type
-            ),
-            Some("model-package.json".to_string()),
-            "use native-mtp, ngram-cache, ngram-suffix, or composite",
-        ),
-    }
-    if let Some(policy) = &strategy.extension_policy {
-        validate_extension_policy(name, policy, report);
-    }
-    if let Some(window) = &strategy.window_policy {
-        validate_window_policy(name, window, report);
-    }
-}
-
-fn validate_native_mtp_strategy_proposer_or_inline(
-    strategy_name: &str,
-    strategy: &PackageSpeculativeStrategy,
-    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    let Some(proposer_name) = strategy.proposer.as_deref() else {
-        validate_native_mtp_strategy(strategy_name, strategy, layer_count, report);
-        return;
-    };
-    let Some(proposer) = proposers.get(proposer_name) else {
-        return;
-    };
-    if proposer.proposer_type != "native-mtp" {
-        report.error(
-            "native_mtp_strategy_proposer_type_mismatch",
-            format!(
-                "native MTP speculative strategy {strategy_name} references proposer {proposer_name} with type {}",
-                proposer.proposer_type
-            ),
-            Some("model-package.json".to_string()),
-            "set proposer to a declared native-mtp proposer",
-        );
-    }
-}
-
-fn validate_ngram_strategy_proposer_type(
-    strategy_name: &str,
-    strategy: &PackageSpeculativeStrategy,
-    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
-    report: &mut PackagePreflightReport,
-) {
-    let Some(proposer_name) = strategy.proposer.as_deref() else {
-        report.error(
-            "missing_ngram_strategy_proposer",
-            format!("N-gram speculative strategy {strategy_name} must declare a proposer"),
-            Some("model-package.json".to_string()),
-            "set proposer to a declared ngram-cache or ngram-suffix proposer",
-        );
-        return;
-    };
-    let Some(proposer) = proposers.get(proposer_name) else {
-        return;
-    };
-    if proposer.proposer_type != strategy.strategy_type {
-        report.error(
-            "ngram_strategy_proposer_type_mismatch",
-            format!(
-                "N-gram speculative strategy {strategy_name} type {} does not match proposer {proposer_name} type {}",
-                strategy.strategy_type, proposer.proposer_type
-            ),
-            Some("model-package.json".to_string()),
-            "make the strategy type match its referenced N-gram proposer",
-        );
-    }
-}
-
-fn validate_proposer_reference(
-    strategy_name: &str,
-    field: &str,
-    proposer_name: &str,
-    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
-    report: &mut PackagePreflightReport,
-) {
-    if !proposers.contains_key(proposer_name) {
-        report.error(
-            "missing_speculative_proposer",
-            format!("speculative strategy {strategy_name} references missing {field} proposer {proposer_name}"),
-            Some("model-package.json".to_string()),
-            "declare the referenced proposer under generation.speculative_decoding.proposers",
-        );
-    }
-}
-
-fn validate_composite_strategy(
-    name: &str,
-    strategy: &PackageSpeculativeStrategy,
-    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
-    report: &mut PackagePreflightReport,
-) {
-    if strategy.extension_policy.is_none() {
-        report.error(
-            "missing_composite_extension_policy",
-            format!("composite speculative strategy {name} must declare extension_policy"),
-            Some("model-package.json".to_string()),
-            "configure the cache N-gram extension width and backoff policy",
-        );
-    }
-    let Some(primary) = strategy.primary.as_deref() else {
-        report.error(
-            "missing_composite_primary",
-            format!("composite speculative strategy {name} must declare primary"),
-            Some("model-package.json".to_string()),
-            "set primary to a declared native-mtp proposer",
-        );
-        return;
-    };
-    let Some(extender) = strategy.extender.as_deref() else {
-        report.error(
-            "missing_composite_extender",
-            format!("composite speculative strategy {name} must declare extender"),
-            Some("model-package.json".to_string()),
-            "set extender to a declared ngram-cache or ngram-suffix proposer",
-        );
-        return;
-    };
-    validate_proposer_reference(name, "primary", primary, proposers, report);
-    validate_proposer_reference(name, "extender", extender, proposers, report);
-    if proposers
-        .get(primary)
-        .is_some_and(|proposer| proposer.proposer_type != "native-mtp")
-    {
-        report.error(
-            "invalid_composite_primary_type",
-            format!("composite speculative strategy {name} primary {primary} must be native-mtp"),
-            Some("model-package.json".to_string()),
-            "set primary to a native-mtp proposer",
-        );
-    }
-    if proposers.get(extender).is_some_and(|proposer| {
-        !matches!(
-            proposer.proposer_type.as_str(),
-            "ngram-cache" | "ngram-suffix"
-        )
-    }) {
-        report.error(
-            "invalid_composite_extender_type",
-            format!("composite speculative strategy {name} extender {extender} must be an N-gram proposer"),
-            Some("model-package.json".to_string()),
-            "set extender to an ngram-cache or ngram-suffix proposer",
-        );
-    }
-}
-
-fn validate_native_mtp_strategy(
-    name: &str,
-    strategy: &PackageSpeculativeStrategy,
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    validate_native_mtp_parts(
-        name,
-        strategy.prediction_depth,
-        &strategy.layer_indices,
-        layer_count,
-        report,
-    );
-}
-
-fn validate_native_mtp_parts(
-    name: &str,
-    prediction_depth: Option<u32>,
-    layer_indices: &[u32],
-    layer_count: u32,
-    report: &mut PackagePreflightReport,
-) {
-    if prediction_depth != Some(1) {
-        report.error(
-            "unsupported_native_mtp_prediction_depth",
-            format!("native MTP strategy {name} must use prediction_depth 1"),
-            Some("model-package.json".to_string()),
-            "rebuild the package with the mtp policy supported by this runtime",
-        );
-    }
-    if layer_indices.is_empty() {
-        report.error(
-            "missing_native_mtp_layers",
-            format!("native MTP strategy {name} must declare MTP layer_indices"),
-            Some("model-package.json".to_string()),
-            "rebuild the package from a GGUF with native MTP tensors",
-        );
-    }
-    for layer_index in layer_indices {
-        if *layer_index >= layer_count {
-            report.error(
-                "native_mtp_layer_out_of_range",
+                "artifact_size_mismatch",
                 format!(
-                    "native MTP strategy {name} references layer {layer_index}, but layer_count is {layer_count}"
+                    "package artifact {} has {actual_bytes} bytes; manifest declares {}",
+                    artifact.path, artifact.byte_size
                 ),
-                Some("model-package.json".to_string()),
-                "rebuild the package manifest so MTP layer indices are within the package layer range",
+                Some(artifact.path.clone()),
+                "redownload or rebuild the package artifact",
             );
         }
+        let sha_matches = verify_sha256.then(|| match file_sha256(&path) {
+            Ok(actual) if actual.eq_ignore_ascii_case(&artifact.sha256) => true,
+            Ok(actual) => {
+                report.error(
+                    "artifact_sha256_mismatch",
+                    format!(
+                        "package artifact {} checksum mismatch: expected {}, got {actual}",
+                        artifact.path, artifact.sha256
+                    ),
+                    Some(artifact.path.clone()),
+                    "redownload or rebuild the package artifact",
+                );
+                false
+            }
+            Err(error) => {
+                report.error(
+                    "artifact_sha256_unreadable",
+                    format!("cannot hash package artifact {}: {error}", artifact.path),
+                    Some(artifact.path.clone()),
+                    "ensure the artifact is readable before checksum verification",
+                );
+                false
+            }
+        });
+        report.artifacts.push(artifact_report(
+            artifact,
+            role,
+            true,
+            Some(actual_bytes),
+            Some(size_matches),
+            sha_matches,
+        ));
     }
 }
 
-fn validate_ngram_proposer(
-    name: &str,
-    proposer: &PackageSpeculativeProposer,
+fn artifact_role(manifest: &PackageManifest, artifact: &Artifact) -> String {
+    if manifest.source_model.metadata_artifact_id == artifact.id {
+        "model_metadata".to_string()
+    } else if let Some(sidecar) = manifest
+        .sidecars
+        .iter()
+        .find(|sidecar| sidecar.artifact_id == artifact.id)
+    {
+        format!("sidecar:{:?}", sidecar.kind).to_ascii_lowercase()
+    } else {
+        "model".to_string()
+    }
+}
+
+fn artifact_report(
+    artifact: &Artifact,
+    role: String,
+    present: bool,
+    actual_artifact_bytes: Option<u64>,
+    size_matches_manifest: Option<bool>,
+    sha256_matches_manifest: Option<bool>,
+) -> PreflightArtifact {
+    PreflightArtifact {
+        id: artifact.id.clone(),
+        role,
+        path: artifact.path.clone(),
+        present,
+        declared_artifact_bytes: artifact.byte_size,
+        actual_artifact_bytes,
+        size_matches_manifest,
+        sha256_matches_manifest,
+    }
+}
+
+fn build_stage_reports(
+    manifest: &PackageManifest,
+    stages: Option<usize>,
     report: &mut PackagePreflightReport,
 ) {
-    let min = proposer.ngram_min.unwrap_or_default();
-    let max = proposer.ngram_max.unwrap_or_default();
-    if min == 0 || max == 0 || min > max {
+    let Some(stage_count) = stages else {
+        return;
+    };
+    if stage_count == 0 {
         report.error(
-            "invalid_ngram_proposer_window",
-            format!("N-gram proposer {name} must set ngram_min and ngram_max with 1 <= min <= max"),
+            "invalid_stage_count",
+            "--stages must be greater than zero",
             Some("model-package.json".to_string()),
-            "set positive ngram_min and ngram_max values with min less than or equal to max",
+            "choose a positive diagnostic stage count",
         );
+        return;
     }
-    if proposer.max_proposal_tokens.unwrap_or_default() == 0 {
+    let Ok(stage_count_u32) = u32::try_from(stage_count) else {
         report.error(
-            "invalid_ngram_proposer_max_tokens",
-            format!("N-gram proposer {name} must set max_proposal_tokens greater than zero"),
+            "stage_count_exceeds_layer_count",
+            format!(
+                "--stages {stage_count} exceeds package layer_count {}",
+                manifest.layer_count
+            ),
             Some("model-package.json".to_string()),
-            "set max_proposal_tokens to a positive value",
+            "use at most one diagnostic stage per transformer layer",
         );
+        return;
+    };
+    if stage_count_u32 > manifest.layer_count {
+        report.error(
+            "stage_count_exceeds_layer_count",
+            format!(
+                "--stages {stage_count} exceeds package layer_count {}",
+                manifest.layer_count
+            ),
+            Some("model-package.json".to_string()),
+            "use at most one diagnostic stage per transformer layer",
+        );
+        return;
     }
-    if proposer.proposer_type == "ngram-cache"
-        && max as usize > skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+
+    let artifacts = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .map(|artifact| (artifact.id.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let tensors = manifest
+        .tensor_catalog
+        .entries
+        .iter()
+        .map(|tensor| (tensor.id.as_str(), tensor))
+        .collect::<BTreeMap<_, _>>();
+    let presence = report
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.id.as_str(), artifact.present))
+        .collect::<BTreeMap<_, _>>();
+
+    for (stage_index, (layer_start, layer_end)) in
+        partition_layers(manifest.layer_count, stage_count_u32)
+            .into_iter()
+            .enumerate()
     {
-        report.error(
-            "unsupported_ngram_cache_max_window",
-            format!(
-                "N-gram cache proposer {name} ngram_max {max} exceeds llama.cpp limit {}",
-                skippy_runtime::NGRAM_CACHE_MAX_NGRAM
-            ),
-            Some("model-package.json".to_string()),
-            format!(
-                "set ngram_max to at most {} while keeping max_proposal_tokens independent",
-                skippy_runtime::NGRAM_CACHE_MAX_NGRAM
-            ),
-        );
-    }
-    if proposer.proposer_type == "ngram-cache"
-        && proposer.history_scope.as_deref() != Some("request")
-    {
-        report.error(
-            "invalid_ngram_cache_history_scope",
-            format!("N-gram cache proposer {name} must set history_scope to request"),
-            Some("model-package.json".to_string()),
-            "set history_scope to request; shared cache history is not supported",
-        );
-    }
-    if proposer.proposer_type == "ngram-suffix" && (min < 3 || max > 64) {
-        report.error(
-            "unsupported_ngram_suffix_window",
-            format!("N-gram suffix proposer {name} must satisfy 3 <= ngram_min <= ngram_max <= 64"),
-            Some("model-package.json".to_string()),
-            "use at least the three-token exact seed and cap backward comparison at 64 tokens",
-        );
-    }
-    if proposer.proposer_type == "ngram-suffix"
-        && proposer.history_scope.as_deref() != Some("request")
-    {
-        report.error(
-            "invalid_ngram_suffix_history_scope",
-            format!("N-gram suffix proposer {name} must set history_scope to request"),
-            Some("model-package.json".to_string()),
-            "set history_scope to request; suffix indexes are request-local",
-        );
-    }
-}
-
-fn validate_extension_policy(
-    name: &str,
-    policy: &PackageExtensionPolicy,
-    report: &mut PackagePreflightReport,
-) {
-    if policy.max_tokens == 0 {
-        report.error(
-            "invalid_extension_policy_tokens",
-            format!("speculative strategy {name} extension_policy must set max_tokens > 0"),
-            Some("model-package.json".to_string()),
-            "set max_tokens to a positive verification horizon",
-        );
-    }
-}
-
-fn validate_window_policy(
-    name: &str,
-    window: &PackageWindowPolicy,
-    report: &mut PackagePreflightReport,
-) {
-    if window.default.trim().is_empty() {
-        report.error(
-            "empty_window_policy_default",
-            format!("speculative strategy {name} window_policy.default must not be empty"),
-            Some("model-package.json".to_string()),
-            "set the window policy default to fixed or adaptive",
-        );
-    }
-    if window.min_window == 0 || window.max_window == 0 || window.initial_window == 0 {
-        report.error(
-            "invalid_window_policy_zero",
-            format!("speculative strategy {name} window_policy values must be greater than zero"),
-            Some("model-package.json".to_string()),
-            "use positive window sizes",
-        );
-    }
-    if window.pipeline_depth.is_some_and(|depth| {
-        depth == 0
-            || usize::try_from(depth)
-                .map(|depth| depth > MAX_VERIFY_WINDOW_PIPELINE_DEPTH)
-                .unwrap_or(true)
-    }) {
-        report.error(
-            "invalid_window_policy_pipeline_depth",
-            format!(
-                "speculative strategy {name} window_policy.pipeline_depth must be between 1 and {MAX_VERIFY_WINDOW_PIPELINE_DEPTH}"
-            ),
-            Some("model-package.json".to_string()),
-            format!(
-                "set pipeline_depth to an in-flight verification-window capacity no greater than {MAX_VERIFY_WINDOW_PIPELINE_DEPTH}"
-            ),
-        );
-    }
-    if window.min_window > window.max_window {
-        report.error(
-            "invalid_window_policy_bounds",
-            format!(
-                "speculative strategy {name} window_policy min_window {} exceeds max_window {}",
-                window.min_window, window.max_window
-            ),
-            Some("model-package.json".to_string()),
-            "set min_window less than or equal to max_window",
-        );
-    }
-    if window.initial_window < window.min_window || window.initial_window > window.max_window {
-        report.error(
-            "invalid_window_policy_initial",
-            format!(
-                "speculative strategy {name} window_policy initial_window {} is outside {}..{}",
-                window.initial_window, window.min_window, window.max_window
-            ),
-            Some("model-package.json".to_string()),
-            "set initial_window inside the declared min/max range",
-        );
-    }
-}
-
-fn preflight_generation(
-    generation: &PackageGeneration<PackageSpeculativeDecoding>,
-) -> PreflightGeneration {
-    PreflightGeneration {
-        policy: generation.policy.as_ref().map(preflight_generation_policy),
-        thresholds: generation
-            .thresholds
-            .as_ref()
-            .map(preflight_generation_thresholds),
-        speculative_decoding: generation
-            .speculative_decoding
-            .as_ref()
-            .map(preflight_speculative_decoding),
-    }
-}
-
-fn preflight_generation_policy(policy: &PackageGenerationPolicy) -> PreflightGenerationPolicy {
-    PreflightGenerationPolicy {
-        profile: policy.profile.clone(),
-        decode: policy.decode.clone(),
-        short_prefill: policy.short_prefill.clone(),
-        long_prefill: policy.long_prefill.clone(),
-        verify: policy.verify.clone(),
-        indexshare: policy.indexshare.clone(),
-        experimental: policy
-            .experimental
-            .as_ref()
-            .map(preflight_generation_experimental_policy),
-    }
-}
-
-fn preflight_generation_experimental_policy(
-    policy: &PackageGenerationExperimentalPolicy,
-) -> PreflightGenerationExperimentalPolicy {
-    PreflightGenerationExperimentalPolicy {
-        selected_row_flash: policy.selected_row_flash.clone(),
-    }
-}
-
-fn preflight_generation_thresholds(
-    thresholds: &PackageGenerationThresholds,
-) -> PreflightGenerationThresholds {
-    PreflightGenerationThresholds {
-        short_prefill_max_tokens: thresholds.short_prefill_max_tokens,
-        direct_sparse_decode_max_top_k: thresholds.direct_sparse_decode_max_top_k,
-        compact_flash_min_kv: thresholds.compact_flash_min_kv,
-        dense_mask_max_bytes: thresholds.dense_mask_max_bytes,
-    }
-}
-
-fn preflight_speculative_decoding(
-    speculative: &PackageSpeculativeDecoding,
-) -> PreflightSpeculativeDecoding {
-    PreflightSpeculativeDecoding {
-        default: speculative.default.clone(),
-        proposers: speculative
-            .proposers
+        let mut artifact_ids = BTreeSet::new();
+        for tensor in &manifest.tensor_catalog.entries {
+            if tensor
+                .layer_ordinal
+                .is_some_and(|layer| layer < layer_start || layer >= layer_end)
+            {
+                continue;
+            }
+            if let Some(artifact_id) = tensor_artifact_id(tensor, &tensors) {
+                artifact_ids.insert(artifact_id);
+            }
+        }
+        let parts = artifact_ids
             .iter()
-            .map(|(name, proposer)| PreflightSpeculativeProposer {
-                name: name.clone(),
-                proposer_type: proposer.proposer_type.clone(),
-                prediction_depth: proposer.prediction_depth,
-                layer_indices: proposer.layer_indices.clone(),
-                ngram_min: proposer.ngram_min,
-                ngram_max: proposer.ngram_max,
-                max_proposal_tokens: proposer.max_proposal_tokens,
-                history_scope: proposer.history_scope.clone(),
-            })
-            .collect(),
-        strategies: speculative
-            .strategies
+            .filter_map(|id| artifacts.get(id).map(|artifact| artifact.path.clone()))
+            .collect::<Vec<_>>();
+        let missing_parts = artifact_ids
             .iter()
-            .map(|(name, strategy)| PreflightSpeculativeStrategy {
-                name: name.clone(),
-                strategy_type: strategy.strategy_type.clone(),
-                prediction_depth: strategy.prediction_depth,
-                layer_indices: strategy.layer_indices.clone(),
-                window_policy: strategy.window_policy.as_ref().map(preflight_window_policy),
-                proposer: strategy.proposer.clone(),
-                primary: strategy.primary.clone(),
-                extender: strategy.extender.clone(),
-                extension_policy: strategy.extension_policy.as_ref().map(|policy| {
-                    PreflightExtensionPolicy {
-                        max_tokens: policy.max_tokens,
-                    }
-                }),
-            })
-            .collect(),
+            .filter(|id| !presence.get(*id).copied().unwrap_or(false))
+            .filter_map(|id| artifacts.get(id).map(|artifact| artifact.path.clone()))
+            .collect::<Vec<_>>();
+        let artifact_bytes = artifact_ids
+            .iter()
+            .filter_map(|id| artifacts.get(id))
+            .map(|artifact| artifact.byte_size)
+            .sum();
+        report.stages.push(PreflightStage {
+            stage_index,
+            layer_start,
+            layer_end,
+            includes_embeddings: stage_index == 0,
+            includes_output: stage_index + 1 == stage_count,
+            selection_basis: "diagnostic_layer_ordinals; executable closure requires graph admission",
+            part_count: parts.len(),
+            artifact_bytes,
+            parts,
+            missing_parts,
+        });
     }
 }
 
-fn preflight_window_policy(window: &PackageWindowPolicy) -> PreflightWindowPolicy {
-    PreflightWindowPolicy {
-        default: window.default.clone(),
-        initial_window: window.initial_window,
-        min_window: window.min_window,
-        max_window: window.max_window,
-        pipeline_depth: window.pipeline_depth,
+fn tensor_artifact_id<'a>(
+    tensor: &'a skippy_package_format::Tensor,
+    tensors: &'a BTreeMap<&str, &'a skippy_package_format::Tensor>,
+) -> Option<&'a str> {
+    match &tensor.storage {
+        TensorStorage::Owned { artifact_id, .. } => Some(artifact_id),
+        TensorStorage::Alias { target_tensor_id } => tensors
+            .get(target_tensor_id.as_str())
+            .and_then(|target| match &target.storage {
+                TensorStorage::Owned { artifact_id, .. } => Some(artifact_id.as_str()),
+                TensorStorage::Alias { .. } => None,
+            }),
     }
 }
 
-fn push_error(
-    issues: &mut Vec<PreflightIssue>,
-    code: impl Into<String>,
-    message: impl Into<String>,
-    path: Option<String>,
-    remediation: impl Into<String>,
-) {
-    issues.push(PreflightIssue {
-        severity: PreflightSeverity::Error,
-        code: code.into(),
-        message: message.into(),
-        path,
-        remediation: remediation.into(),
-    });
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+fn partition_layers(layer_count: u32, stages: u32) -> Vec<(u32, u32)> {
+    (0..stages)
+        .map(|stage| {
+            let layer_count = u64::from(layer_count);
+            let stages = u64::from(stages);
+            let stage = u64::from(stage);
+            let start = (layer_count * stage / stages) as u32;
+            let end = (layer_count * (stage + 1) / stages) as u32;
+            (start, end)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::package::ArtifactHook;
+    use crate::package_v2::write_package;
+    use crate::test_gguf::{explicit, fixture, tensor};
 
-    #[test]
-    fn preflight_accepts_complete_package_and_reports_stage_parts() {
-        let dir = unique_test_dir("valid");
-        let package = write_package_fixture(&dir);
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: Some(2),
-                verify_sha256: true,
-            },
-        );
-
-        assert!(report.valid, "{:?}", report.issues);
-        assert_eq!(report.checked_artifact_count, 5);
-        assert_eq!(report.stages.len(), 2);
-        assert_eq!(
-            report.stages[0].parts,
-            ["metadata", "embeddings", "layer:0"]
-        );
-        assert_eq!(report.stages[1].parts, ["metadata", "layer:1", "output"]);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_reports_missing_shared_embedding_before_split_startup() {
-        let dir = unique_test_dir("missing-embeddings");
-        let package = write_package_fixture(&dir);
-        fs::remove_file(package.join("shared/embeddings.gguf")).unwrap();
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: Some(2),
-                verify_sha256: false,
-            },
-        );
-
-        assert!(!report.valid);
-        assert_issue(&report, "missing_artifact");
-        assert!(
-            report.stages[0]
-                .missing_parts
-                .contains(&"embeddings".to_string())
-        );
-        assert_eq!(
-            report.stages[0].artifact_bytes,
-            (b"metadata".len() + b"layer0".len()) as u64
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_detects_artifact_sha_mismatch_when_requested() {
-        let dir = unique_test_dir("sha-mismatch");
-        let package = write_package_fixture(&dir);
-        fs::write(package.join("layers/layer-001.gguf"), b"corrupt1").unwrap();
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: None,
-                verify_sha256: true,
-            },
-        );
-
-        assert!(!report.valid);
-        assert_issue(&report, "artifact_sha256_mismatch");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn artifact_sha_verification_uses_resolved_safe_path() {
-        let dir = unique_test_dir("resolved-sha-path");
-        fs::create_dir_all(&dir).unwrap();
-        let resolved = dir.join("resolved.gguf");
-        fs::write(&resolved, b"resolved").unwrap();
-        fs::write(dir.join("manifest-path.gguf"), b"other").unwrap();
-        let artifact = ArtifactSpec {
-            role: "metadata",
-            layer_index: None,
-            path: "manifest-path.gguf".to_string(),
-            tensor_count: 1,
-            tensor_bytes: b"resolved".len() as u64,
-            artifact_bytes: b"resolved".len() as u64,
-            sha256: file_sha256(&resolved).unwrap(),
-        };
-        let mut issues = Vec::new();
-
-        assert!(validate_artifact_sha(&resolved, &artifact, &mut issues));
-        assert!(issues.is_empty(), "{issues:?}");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_stage_count_above_layer_count() {
-        let dir = unique_test_dir("too-many-stages");
-        let package = write_package_fixture(&dir);
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: Some(3),
-                verify_sha256: false,
-            },
-        );
-
-        assert!(!report.valid);
-        assert_issue(&report, "stage_count_exceeds_layer_count");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_reports_native_mtp_generation_defaults() {
-        let dir = unique_test_dir("native-mtp-generation");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp",
-                    "strategies": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [1],
-                            "window_policy": {
-                                "default": "fixed",
-                                "initial_window": 1,
-                                "min_window": 1,
-                                "max_window": 1,
-                                "pipeline_depth": 2
-                            }
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: None,
-                verify_sha256: false,
-            },
-        );
-
-        assert!(report.valid, "{:?}", report.issues);
-        let generation = report.generation.expect("generation should be reported");
-        let speculative = generation
-            .speculative_decoding
-            .expect("speculative decoding should be reported");
-        assert_eq!(speculative.default, "mtp");
-        assert_eq!(speculative.strategies.len(), 1);
-        assert_eq!(speculative.strategies[0].name, "mtp");
-        assert_eq!(speculative.strategies[0].strategy_type, "native-mtp");
-        assert_eq!(speculative.strategies[0].prediction_depth, Some(1));
-        assert_eq!(speculative.strategies[0].layer_indices, [1]);
-        let window_policy = speculative.strategies[0]
-            .window_policy
-            .as_ref()
-            .expect("window policy should be reported");
-        assert_eq!(window_policy.default, "fixed");
-        assert_eq!(window_policy.initial_window, 1);
-        assert_eq!(window_policy.min_window, 1);
-        assert_eq!(window_policy.max_window, 1);
-        assert_eq!(window_policy.pipeline_depth, Some(2));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_accepts_request_local_ngram_cache_composite_strategy() {
-        let dir = unique_test_dir("ngram-cache-composite");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp-cache",
-                    "proposers": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [1]
-                        },
-                        "cache": {
-                            "type": "ngram-cache",
-                            "ngram_min": 2,
-                            "ngram_max": 4,
-                            "max_proposal_tokens": 4,
-                            "history_scope": "request"
-                        }
-                    },
-                    "strategies": {
-                        "mtp-cache": {
-                            "type": "composite",
-                            "primary": "mtp",
-                            "extender": "cache",
-                            "extension_policy": {
-                                "max_tokens": 4
-                            }
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(report.valid, "{:?}", report.issues);
-        let speculative = report
-            .generation
-            .and_then(|generation| generation.speculative_decoding)
-            .expect("generation strategy should be reported");
-        assert_eq!(speculative.proposers.len(), 2);
-        assert_eq!(speculative.strategies[0].primary.as_deref(), Some("mtp"));
-        assert_eq!(speculative.strategies[0].extender.as_deref(), Some("cache"));
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_native_mtp_strategy_with_ngram_proposer() {
-        let dir = unique_test_dir("native-mtp-strategy-type-mismatch");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp",
-                    "proposers": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [1]
-                        },
-                        "cache": {
-                            "type": "ngram-cache",
-                            "ngram_min": 2,
-                            "ngram_max": 4,
-                            "max_proposal_tokens": 6,
-                            "history_scope": "request"
-                        },
-                        "suffix": {
-                            "type": "ngram-suffix",
-                            "ngram_min": 5,
-                            "ngram_max": 32,
-                            "max_proposal_tokens": 48,
-                            "history_scope": "request"
-                        }
-                    },
-                    "strategies": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "proposer": "mtp"
-                        },
-                        "ngram-cache": {
-                            "type": "ngram-cache",
-                            "proposer": "cache"
-                        },
-                        "ngram-suffix": {
-                            "type": "ngram-suffix",
-                            "proposer": "suffix"
-                        },
-                        "mtp-cache": {
-                            "type": "composite",
-                            "primary": "mtp",
-                            "extender": "cache",
-                            "extension_policy": {
-                                "initial_tokens": 2,
-                                "max_tokens": 6,
-                                "tail_backoff_proposals": 2
-                            }
-                        },
-                        "mtp-suffix": {
-                            "type": "composite",
-                            "primary": "mtp",
-                            "extender": "suffix",
-                            "extension_policy": {
-                                "initial_tokens": 2,
-                                "max_tokens": 48,
-                                "tail_backoff_proposals": 2
-                            }
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(report.valid, "{:?}", report.issues);
-        let strategies = report
-            .generation
-            .and_then(|generation| generation.speculative_decoding)
-            .expect("generation strategies should be reported")
-            .strategies;
-        assert_eq!(strategies.len(), 5);
-        assert!(
-            strategies
-                .iter()
-                .any(|strategy| strategy.name == "mtp-cache")
-        );
-        assert!(
-            strategies
-                .iter()
-                .any(|strategy| strategy.name == "ngram-suffix")
-        );
-        assert!(
-            strategies
-                .iter()
-                .any(|strategy| strategy.name == "mtp-suffix")
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_invalid_request_local_suffix_proposer() {
-        let dir = unique_test_dir("ngram-suffix-invalid");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "suffix",
-                    "proposers": {
-                        "suffix": {
-                            "type": "ngram-suffix",
-                            "ngram_min": 2,
-                            "ngram_max": 65,
-                            "max_proposal_tokens": 48,
-                            "history_scope": "shared"
-                        }
-                    },
-                    "strategies": {
-                        "suffix": { "type": "ngram-suffix", "proposer": "suffix" }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(!report.valid);
-        assert_issue(&report, "unsupported_ngram_suffix_window");
-        assert_issue(&report, "invalid_ngram_suffix_history_scope");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_ngram_strategy_with_mismatched_proposer_type() {
-        let dir = unique_test_dir("ngram-strategy-type-mismatch");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp",
-                    "proposers": {
-                        "cache": {
-                            "type": "ngram-cache",
-                            "ngram_min": 2,
-                            "ngram_max": 4,
-                            "max_proposal_tokens": 4,
-                            "history_scope": "request"
-                        }
-                    },
-                    "strategies": {
-                        "mtp": { "type": "native-mtp", "proposer": "cache" }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(!report.valid);
-        assert_issue(&report, "native_mtp_strategy_proposer_type_mismatch");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_shared_ngram_cache_history() {
-        let dir = unique_test_dir("ngram-cache-shared-history");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp-cache",
-                    "proposers": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [1]
-                        },
-                        "cache": {
-                            "type": "ngram-cache",
-                            "ngram_min": 2,
-                            "ngram_max": 4,
-                            "max_proposal_tokens": 4,
-                            "history_scope": "shared"
-                        }
-                    },
-                    "strategies": {
-                        "mtp-cache": {
-                            "type": "composite",
-                            "primary": "mtp",
-                            "extender": "cache"
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(!report.valid);
-        assert_issue(&report, "invalid_ngram_cache_history_scope");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_ngram_cache_window_above_llama_limit() {
-        let dir = unique_test_dir("ngram-cache-max-window");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp-cache",
-                    "proposers": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [1]
-                        },
-                        "cache": {
-                            "type": "ngram-cache",
-                            "ngram_min": 2,
-                            "ngram_max": 5,
-                            "max_proposal_tokens": 6,
-                            "history_scope": "request"
-                        }
-                    },
-                    "strategies": {
-                        "mtp-cache": {
-                            "type": "composite",
-                            "primary": "mtp",
-                            "extender": "cache"
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(!report.valid);
-        assert_issue(&report, "unsupported_ngram_cache_max_window");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_native_mtp_layer_out_of_range() {
-        let dir = unique_test_dir("native-mtp-out-of-range");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "mtp",
-                    "strategies": {
-                        "mtp": {
-                            "type": "native-mtp",
-                            "prediction_depth": 1,
-                            "layer_indices": [2],
-                            "window_policy": {
-                                "default": "fixed",
-                                "initial_window": 1,
-                                "min_window": 1,
-                                "max_window": 1
-                            }
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(
-            &package,
-            &PackagePreflightOptions {
-                stages: None,
-                verify_sha256: false,
-            },
-        );
-
-        assert!(!report.valid);
-        assert_issue(&report, "native_mtp_layer_out_of_range");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_rejects_zero_verify_window_pipeline_depth() {
-        let dir = unique_test_dir("zero-window-pipeline-depth");
-        let package = write_package_fixture(&dir);
-        write_generation_to_manifest(
-            &package,
-            serde_json::json!({
-                "speculative_decoding": {
-                    "default": "ngram-suffix",
-                    "proposers": {
-                        "suffix": {
-                            "type": "ngram-suffix",
-                            "ngram_min": 5,
-                            "ngram_max": 32,
-                            "max_proposal_tokens": 48,
-                            "history_scope": "request"
-                        }
-                    },
-                    "strategies": {
-                        "ngram-suffix": {
-                            "type": "ngram-suffix",
-                            "proposer": "suffix",
-                            "window_policy": {
-                                "default": "fixed",
-                                "initial_window": 32,
-                                "min_window": 1,
-                                "max_window": 32,
-                                "pipeline_depth": 0
-                            }
-                        }
-                    }
-                }
-            }),
-        );
-
-        let report = preflight_package(&package, &PackagePreflightOptions::default());
-
-        assert!(!report.valid);
-        assert_issue(&report, "invalid_window_policy_pipeline_depth");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn preflight_enforces_verify_window_pipeline_depth_maximum() {
-        for (depth, expected_valid) in [
-            (MAX_VERIFY_WINDOW_PIPELINE_DEPTH, true),
-            (MAX_VERIFY_WINDOW_PIPELINE_DEPTH + 1, false),
-        ] {
-            let dir = unique_test_dir(&format!("window-pipeline-depth-{depth}"));
-            let package = write_package_fixture(&dir);
-            write_generation_to_manifest(
-                &package,
-                serde_json::json!({
-                    "speculative_decoding": {
-                        "default": "ngram-suffix",
-                        "proposers": {
-                            "suffix": {
-                                "type": "ngram-suffix",
-                                "ngram_min": 5,
-                                "ngram_max": 32,
-                                "max_proposal_tokens": 48,
-                                "history_scope": "request"
-                            }
-                        },
-                        "strategies": {
-                            "ngram-suffix": {
-                                "type": "ngram-suffix",
-                                "proposer": "suffix",
-                                "window_policy": {
-                                    "default": "fixed",
-                                    "initial_window": 32,
-                                    "min_window": 1,
-                                    "max_window": 32,
-                                    "pipeline_depth": depth
-                                }
-                            }
-                        }
-                    }
-                }),
-            );
-
-            let report = preflight_package(&package, &PackagePreflightOptions::default());
-            assert_eq!(report.valid, expected_valid, "pipeline depth {depth}");
-            if !expected_valid {
-                assert_issue(&report, "invalid_window_policy_pipeline_depth");
-            }
-            fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
-    fn assert_issue(report: &PackagePreflightReport, code: &str) {
-        assert!(
-            report.issues.iter().any(|issue| issue.code == code),
-            "missing issue {code}; issues: {:?}",
-            report.issues
-        );
-    }
-
-    fn write_package_fixture(root: &Path) -> PathBuf {
-        let package = root.join("package");
-        fs::create_dir_all(package.join("shared")).unwrap();
-        fs::create_dir_all(package.join("layers")).unwrap();
-        write_artifact(&package, "shared/metadata.gguf", b"metadata");
-        write_artifact(&package, "shared/embeddings.gguf", b"embeddings");
-        write_artifact(&package, "shared/output.gguf", b"output");
-        write_artifact(&package, "layers/layer-000.gguf", b"layer0");
-        write_artifact(&package, "layers/layer-001.gguf", b"layer1");
-        let manifest = serde_json::json!({
-            "schema_version": 1,
-            "model_id": "meshllm/test-model-layers",
-            "source_model": {
-                "path": "test-model.gguf",
-                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "format": "layer-package",
-            "layer_count": 2,
-            "shared": {
-                "metadata": artifact_json(&package, "shared/metadata.gguf", b"metadata"),
-                "embeddings": artifact_json(&package, "shared/embeddings.gguf", b"embeddings"),
-                "output": artifact_json(&package, "shared/output.gguf", b"output")
-            },
-            "layers": [
-                layer_json(&package, 0, "layers/layer-000.gguf", b"layer0"),
-                layer_json(&package, 1, "layers/layer-001.gguf", b"layer1")
+    fn write_v2_fixture(root: &Path) -> std::path::PathBuf {
+        let source = root.join("model.gguf");
+        fixture(
+            &source,
+            &[
+                tensor("token_embd.weight", 0),
+                tensor("blk.0.attn_q.weight", 32),
             ],
-            "skippy_abi_version": "1.0.0"
-        });
-        fs::write(
-            package.join("model-package.json"),
-            serde_json::to_vec_pretty(&manifest).unwrap(),
+            None,
+        );
+        let package = root.join("package");
+        write_package(
+            source.display().to_string(),
+            package.clone(),
+            Vec::new(),
+            ArtifactHook { command: None },
+            ArtifactHook { command: None },
+            explicit(&source),
+            false,
         )
         .unwrap();
         package
     }
 
-    fn write_generation_to_manifest(package: &Path, generation: serde_json::Value) {
-        let manifest_path = package.join("model-package.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["generation"] = generation;
-        fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    #[test]
+    fn writer_output_passes_preflight_with_diagnostic_stages() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = write_v2_fixture(temp.path());
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                stages: Some(2),
+                verify_sha256: true,
+            },
+        );
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(report.schema_version, PACKAGE_SCHEMA_VERSION);
+        assert_eq!(report.checked_artifact_count, 1);
+        assert_eq!(report.stages.len(), 2);
+        assert!(report.stages.iter().all(|stage| !stage.parts.is_empty()));
     }
 
-    fn write_artifact(package: &Path, relative_path: &str, bytes: &[u8]) {
-        let path = package.join(relative_path);
-        fs::write(path, bytes).unwrap();
+    #[test]
+    fn missing_and_corrupt_artifacts_fail_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = write_v2_fixture(temp.path());
+        let manifest: PackageManifest =
+            serde_json::from_slice(&fs::read(package.join("model-package.json")).unwrap()).unwrap();
+        let artifact = package.join(&manifest.artifact_catalog.entries[0].path);
+        fs::write(&artifact, b"corrupt").unwrap();
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                verify_sha256: true,
+                ..PackagePreflightOptions::default()
+            },
+        );
+        assert!(!report.valid);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "artifact_size_mismatch")
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "artifact_sha256_mismatch")
+        );
+        fs::remove_file(artifact).unwrap();
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+        assert!(!report.valid);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "missing_artifact")
+        );
     }
 
-    fn artifact_json(package: &Path, path: &str, bytes: &[u8]) -> serde_json::Value {
-        serde_json::json!({
-            "path": path,
-            "tensor_count": 1,
-            "tensor_bytes": bytes.len(),
-            "artifact_bytes": bytes.len(),
-            "sha256": file_sha256(&package.join(path)).unwrap()
-        })
+    #[test]
+    fn incompatible_schema_fails_before_legacy_shape_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("package");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("model-package.json"),
+            br#"{"schema_version":1,"format":"layer-package"}"#,
+        )
+        .unwrap();
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+        assert!(!report.valid);
+        assert_eq!(report.issues[0].code, "unsupported_schema_version");
     }
 
-    fn layer_json(package: &Path, layer_index: u32, path: &str, bytes: &[u8]) -> serde_json::Value {
-        let mut value = artifact_json(package, path, bytes);
-        value["layer_index"] = serde_json::json!(layer_index);
-        value
+    #[test]
+    fn malformed_v2_manifest_uses_shared_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("package");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("model-package.json"),
+            br#"{"schema_version":2,"unexpected":true}"#,
+        )
+        .unwrap();
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+        assert!(!report.valid);
+        assert_eq!(report.issues[0].code, "invalid_manifest_shape");
     }
 
-    fn unique_test_dir(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "skippy-model-package-preflight-{name}-{}-{nanos}",
-            std::process::id()
-        ))
+    #[test]
+    fn invalid_stage_counts_fail() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = write_v2_fixture(temp.path());
+        for stages in [0, 3, usize::MAX] {
+            let report = preflight_package(
+                &package,
+                &PackagePreflightOptions {
+                    stages: Some(stages),
+                    ..PackagePreflightOptions::default()
+                },
+            );
+            assert!(!report.valid);
+        }
     }
 }

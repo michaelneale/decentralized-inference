@@ -15,11 +15,13 @@ pub(crate) enum Command {
     Inspect {
         model: PathBuf,
     },
+    /// Offline schema-v1 planning tool; its output is not admitted for serving.
     Plan {
         model: PathBuf,
         #[arg(long)]
         stages: usize,
     },
+    /// Offline schema-v1 slice writer; its output is not admitted for serving.
     Write {
         model: PathBuf,
         #[arg(long)]
@@ -35,6 +37,7 @@ pub(crate) enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Offline schema-v1 stage writer; its output is not admitted for serving.
     WriteStages {
         model: PathBuf,
         #[arg(long)]
@@ -42,7 +45,7 @@ pub(crate) enum Command {
         #[arg(long)]
         out_dir: PathBuf,
     },
-    /// Emit a source-complete v2 package (not accepted by the v1 serving path).
+    /// Emit the source-complete v2 package used by graph-admitted serving.
     WritePackage {
         model: String,
         #[arg(long)]

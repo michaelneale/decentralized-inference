@@ -934,8 +934,8 @@ index 000000000..0e23cfef2
 +            }
 +            filter.include_embeddings = config->include_embeddings;
 +            filter.include_output = config->include_output;
-+            if (config->resident_tensor_name_count > 0 && config->resident_tensor_names == nullptr) {
-+                throw std::invalid_argument("resident tensor name count requires a non-null array");
++            if (config->resident_tensor_name_count == 0 || config->resident_tensor_names == nullptr) {
++                throw std::invalid_argument("filtered stage loading requires explicit resident tensor names");
 +            }
 +            for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
 +                const char * name = config->resident_tensor_names[i];
@@ -2588,8 +2588,8 @@ index 000000000..2592ab088
 +            }
 +            filter.include_embeddings = config->include_embeddings;
 +            filter.include_output = config->include_output;
-+            if (config->resident_tensor_name_count > 0 && config->resident_tensor_names == nullptr) {
-+                throw std::invalid_argument("resident tensor name count requires a non-null array");
++            if (config->resident_tensor_name_count == 0 || config->resident_tensor_names == nullptr) {
++                throw std::invalid_argument("filtered stage loading requires explicit resident tensor names");
 +            }
 +            for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
 +                const char * name = config->resident_tensor_names[i];

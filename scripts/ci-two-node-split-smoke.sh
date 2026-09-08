@@ -580,9 +580,42 @@ wait_for_split_topology() {
             return 1
         fi
         if [[ "$reconciliation_ready" -eq 1 ]]; then
-            DRIVER_LABEL=seed
-            DRIVER_API_PORT="$SEED_API_PORT"
+            DRIVER_LABEL="$(python3 - "$SPLIT_EVIDENCE_PATH" <<'PY'
+import json
+import sys
+
+evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+stage0 = next(
+    (stage for stage in evidence["topology"]["stages"] if stage["stage_index"] == 0),
+    None,
+)
+if stage0 is None:
+    raise SystemExit("split evidence has no stage 0")
+
+stage0_node = stage0["node_id"]
+matches = [
+    label
+    for label, observer in evidence["observers"].items()
+    if isinstance(observer, dict)
+    and stage0_node.startswith(observer.get("node_id", "missing-observer-node"))
+]
+if len(matches) != 1:
+    raise SystemExit(
+        f"cannot map stage-0 node {stage0_node!r} to exactly one observer: {matches!r}"
+    )
+print(matches[0])
+PY
+)"
+            case "$DRIVER_LABEL" in
+                seed) DRIVER_API_PORT="$SEED_API_PORT" ;;
+                worker) DRIVER_API_PORT="$WORKER_API_PORT" ;;
+                *)
+                    echo "split evidence selected unknown stage-0 driver: $DRIVER_LABEL" >&2
+                    return 1
+                    ;;
+            esac
             echo "Split topology ready after $((now - started_at))s (${MODEL_LABEL}): ${READY_SUMMARY}"
+            echo "Selected ${DRIVER_LABEL} as stage-0 OpenAI driver"
             return 0
         fi
         sleep 1
@@ -746,6 +779,11 @@ if [[ -z "$MODEL_ID" ]]; then
 fi
 export MODEL_ID MODEL_LABEL
 
+# Stage readiness is published before the serving target finishes registering
+# on every observer. Give routing the same bounded settle interval used between
+# inference requests so the first probe cannot race that final handoff.
+sleep "$REQUEST_SETTLE_SECONDS"
+
 run_client_routing_probe
 
 PREFIX_PAYLOAD_ROOT="${WORK_DIR}/prefix-payloads"
@@ -908,7 +946,7 @@ print(
 PY
 }
 
-assert_expected_exact_payload() {
+assert_expected_stage_payload() {
     [[ -n "$EXPECTED_EXACT_PAYLOAD_KIND" ]] || return 0
     python3 - "$EXPECTED_EXACT_PAYLOAD_KIND" "$SEED_LOG" "$WORKER_LOG" <<'PY'
 import json
@@ -922,15 +960,17 @@ for log_path in logs:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (
-                event.get("event") == "stage.openai_kv_record_decision"
-                and (event.get("attributes") or {}).get("skippy.exact_cache.payload_kind")
-                == expected
-            ):
-                print(f"observed exact-state payload kind: {expected}")
+            attributes = event.get("attributes") or {}
+            exact_kind = attributes.get("skippy.exact_cache.payload_kind")
+            dense_resident = (
+                expected == "kv-dense"
+                and attributes.get("skippy.kv.payload") == "ResidentKv"
+            )
+            if exact_kind == expected or dense_resident:
+                print(f"observed stage-state payload kind: {expected}")
                 raise SystemExit(0)
 raise SystemExit(
-    f"did not observe exact-state payload kind {expected!r} in split-stage telemetry"
+    f"did not observe stage-state payload kind {expected!r} in split-stage telemetry"
 )
 PY
 }
@@ -943,11 +983,16 @@ for attempt in $(seq 1 "$PREFIX_ATTEMPTS"); do
     write_prefix_payloads "$payload_dir" "attempt-${attempt}"
 
     for index in $(seq 1 "$PREFIX_REQUEST_COUNT"); do
-        curl -fsS --max-time 180 \
+        response_path="${response_dir}/response-${index}.json"
+        if ! curl --fail-with-body -sS --max-time 180 \
             "http://127.0.0.1:${DRIVER_API_PORT}/v1/chat/completions" \
             -H 'content-type: application/json' \
             -d @"${payload_dir}/prompt-${index}.json" \
-            -o "${response_dir}/response-${index}.json"
+            -o "$response_path"; then
+            echo "split inference request ${index} failed through ${DRIVER_LABEL} stage-0 driver" >&2
+            cat "$response_path" >&2 2>/dev/null || true
+            exit 1
+        fi
         # The host returns the OpenAI response before the stage connection has
         # released its single CI lane. Give graceful Stop enough time to finish
         # so the next request tests cache reuse rather than transient admission.
@@ -973,7 +1018,7 @@ if [[ "$prefix_validated" -ne 1 ]]; then
     exit 1
 fi
 
-assert_expected_exact_payload
+assert_expected_stage_payload
 
 echo "Two-node split smoke passed for model leg: ${MODEL_LABEL:-default}"
 
@@ -1061,7 +1106,7 @@ if [[ -n "$RECURRENT_MODEL" ]]; then
         exit 1
     fi
 
-    assert_expected_exact_payload
+    assert_expected_stage_payload
 
     echo "Two-node split smoke passed for model leg: recurrent"
 fi

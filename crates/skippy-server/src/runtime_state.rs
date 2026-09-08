@@ -16,8 +16,6 @@ use skippy_runtime::{
     TokenSignal, parse_cache_type,
 };
 
-use crate::package::select_package_parts;
-
 mod frame_operations;
 mod lane_lifecycle;
 
@@ -241,7 +239,8 @@ pub fn load_runtime_with_overrides(
     config: &StageConfig,
     overrides: &RuntimeLaunchOverrides,
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
-    let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
+    reject_legacy_serving_package(config)?;
+    let runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
     let admitted_model_parts = config
         .model_part_paths
@@ -254,17 +253,6 @@ pub fn load_runtime_with_overrides(
         }
         _ if !admitted_model_parts.is_empty() => {
             open_stage_model_from_parts(&admitted_model_parts, &runtime_config)?
-        }
-        LoadMode::LayerPackage => {
-            let selected =
-                select_package_parts(config).context("select layer package parts for stage")?;
-            if runtime_config.projector_path.is_none() && should_attach_package_projector(config) {
-                runtime_config.projector_path = selected
-                    .projector_paths
-                    .first()
-                    .map(|path| path.to_string_lossy().to_string());
-            }
-            open_stage_model_from_parts(&selected.absolute_paths, &runtime_config)?
         }
         _ => {
             let Some(model_path) = config.model_path.as_ref().map(std::path::Path::new) else {
@@ -297,7 +285,8 @@ pub fn load_runtime_with_overrides_and_open_events(
     overrides: &RuntimeLaunchOverrides,
     model_open_event_reporter: Option<&mut (dyn FnMut(skippy_runtime::RuntimeEvent) + Send)>,
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
-    let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
+    reject_legacy_serving_package(config)?;
+    let runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
     let admitted_model_parts = config
         .model_part_paths
@@ -313,21 +302,6 @@ pub fn load_runtime_with_overrides_and_open_events(
             &runtime_config,
             model_open_event_reporter,
         )?,
-        LoadMode::LayerPackage => {
-            let selected =
-                select_package_parts(config).context("select layer package parts for stage")?;
-            if runtime_config.projector_path.is_none() && should_attach_package_projector(config) {
-                runtime_config.projector_path = selected
-                    .projector_paths
-                    .first()
-                    .map(|path| path.to_string_lossy().to_string());
-            }
-            open_stage_model_from_parts_with_events(
-                &selected.absolute_paths,
-                &runtime_config,
-                model_open_event_reporter,
-            )?
-        }
         _ => {
             let Some(model_path) = config.model_path.as_ref().map(std::path::Path::new) else {
                 return Ok(None);
@@ -360,8 +334,12 @@ fn max_idle_sessions_from_stage_config(config: &StageConfig) -> Option<usize> {
     config.cache_idle_slots.map(|slots| slots as usize)
 }
 
-fn should_attach_package_projector(config: &StageConfig) -> bool {
-    config.stage_index == 0 && config.layer_start == 0
+fn reject_legacy_serving_package(config: &StageConfig) -> Result<()> {
+    anyhow::ensure!(
+        config.load_mode != LoadMode::LayerPackage,
+        "layer-package schema v1 is offline-only; split serving requires package-v2 graph admission"
+    );
+    Ok(())
 }
 
 fn runtime_config_from_stage_config(
@@ -437,8 +415,7 @@ fn runtime_config_from_stage_config(
             skippy_protocol::GlmDsaPolicy::Auto => RuntimeGlmDsaPolicy::Auto,
             skippy_protocol::GlmDsaPolicy::V1 => RuntimeGlmDsaPolicy::V1,
         },
-        include_embeddings: config.layer_start == 0
-            || (config.load_mode == LoadMode::LayerPackage && config.downstream.is_none()),
+        include_embeddings: config.layer_start == 0,
         include_output: config.downstream.is_none(),
         mtp_source: overrides.mtp_source,
         filter_tensors_on_load: config.filter_tensors_on_load,
@@ -503,8 +480,8 @@ mod tests {
 
     use super::{
         RuntimeLaunchOverrides, RuntimeState, load_runtime_with_overrides,
-        max_idle_sessions_from_stage_config, runtime_config_from_stage_config,
-        should_attach_package_projector,
+        max_idle_sessions_from_stage_config, reject_legacy_serving_package,
+        runtime_config_from_stage_config,
     };
 
     #[test]
@@ -711,7 +688,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_keeps_package_embeddings_for_final_non_first_stage() {
+    fn legacy_layer_packages_are_rejected_before_model_open() {
+        let mut config = fake_stage_config_with_cache_idle_slots(None);
+        config.load_mode = LoadMode::LayerPackage;
+
+        let error = reject_legacy_serving_package(&config)
+            .expect_err("schema-v1 layer packages must be offline-only");
+
+        assert!(error.to_string().contains("package-v2 graph admission"));
+    }
+
+    #[test]
+    fn runtime_config_does_not_infer_embedding_ownership_from_stage_role() {
         let config = StageConfig {
             run_id: "run-a".to_string(),
             topology_id: "topology-a".to_string(),
@@ -774,7 +762,7 @@ mod tests {
         let runtime_config =
             runtime_config_from_stage_config(&config, &RuntimeLaunchOverrides::default()).unwrap();
 
-        assert!(runtime_config.include_embeddings);
+        assert!(!runtime_config.include_embeddings);
         assert!(runtime_config.include_output);
         assert_eq!(runtime_config.mtp_source, MtpSource::Disabled);
     }
@@ -1178,77 +1166,5 @@ mod tests {
             error.to_string().contains("parse cache_type_k for stage-0"),
             "unexpected error: {error:#}"
         );
-    }
-
-    #[test]
-    fn package_projector_fallback_is_stage_zero_only() {
-        let mut config = StageConfig {
-            run_id: "run-a".to_string(),
-            topology_id: "topology-a".to_string(),
-            model_id: "model-a".to_string(),
-            package_ref: Some("/tmp/package".to_string()),
-            manifest_sha256: Some("manifest".to_string()),
-            source_model_path: None,
-            source_model_sha256: None,
-            source_model_bytes: None,
-            materialized_path: None,
-            materialized_pinned: false,
-            model_path: Some("/tmp/package".to_string()),
-            projector_path: None,
-            stage_id: "stage-0".to_string(),
-            stage_index: 0,
-            layer_start: 0,
-            layer_end: 10,
-            ctx_size: 512,
-            lane_count: 1,
-            n_batch: None,
-            n_ubatch: None,
-            n_gpu_layers: -1,
-            mmap: None,
-            mlock: false,
-            repack: false,
-            op_offload: None,
-            no_host_buffer: false,
-            check_tensors: false,
-            direct_io: false,
-            main_gpu: None,
-            split_mode: SplitMode::Auto,
-            cache_type_k: "f16".to_string(),
-            cache_type_v: "f16".to_string(),
-            flash_attn_type: FlashAttentionType::Auto,
-            kv_offload: None,
-            kv_unified: None,
-            swa_full: None,
-            cache_idle_slots: None,
-            filter_tensors_on_load: true,
-            resident_tensor_names: Vec::new(),
-            selected_device: None,
-            kv_cache: None,
-            native_mtp_enabled: true,
-            load_mode: LoadMode::LayerPackage,
-            bind_addr: "127.0.0.1:0".to_string(),
-            upstream: None,
-            downstream: Some(PeerConfig {
-                stage_id: "stage-1".to_string(),
-                stage_index: 1,
-                endpoint: "tcp://127.0.0.1:19001".to_string(),
-            }),
-            ..StageConfig::default()
-        };
-
-        assert!(should_attach_package_projector(&config));
-
-        config.stage_id = "stage-1".to_string();
-        config.stage_index = 1;
-        config.layer_start = 10;
-        config.layer_end = 20;
-        config.upstream = Some(PeerConfig {
-            stage_id: "stage-0".to_string(),
-            stage_index: 0,
-            endpoint: "tcp://127.0.0.1:19000".to_string(),
-        });
-        config.downstream = None;
-
-        assert!(!should_attach_package_projector(&config));
     }
 }

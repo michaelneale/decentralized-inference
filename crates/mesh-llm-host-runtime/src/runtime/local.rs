@@ -625,7 +625,7 @@ pub(super) async fn start_local_openai_model(
 )> {
     let model_name = runtime_model_name.to_string();
     let package_ref = spec.model_path.to_string_lossy().to_string();
-    let layer_package = if skippy::is_layer_package_ref(&package_ref) {
+    let package = if skippy::is_layer_package_ref(&package_ref) {
         let package_ref_for_identity = package_ref.clone();
         Some(
             tokio::task::spawn_blocking(move || {
@@ -637,7 +637,7 @@ pub(super) async fn start_local_openai_model(
     } else {
         None
     };
-    let total_model_bytes = layer_package
+    let total_model_bytes = package
         .as_ref()
         .map(|package| package.source_model_bytes)
         .unwrap_or_else(|| election::total_model_bytes(spec.model_path));
@@ -669,7 +669,7 @@ pub(super) async fn start_local_openai_model(
     // thread because the underlying calls do filesystem I/O (stat, open, read
     // GGUF headers).
     let compact_meta = {
-        let package_clone = layer_package.clone();
+        let package_clone = package.clone();
         let model_path = spec.model_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
             if let Some(ref package) = package_clone {
@@ -712,9 +712,8 @@ pub(super) async fn start_local_openai_model(
         planning_profile: spec.planning_profile,
     });
 
-    if let Some(package) = layer_package {
-        start_local_layer_package_model(spec, model_name, package, plan, compact_meta.as_ref())
-            .await
+    if let Some(package) = package {
+        start_local_package_v2_model(spec, model_name, package, plan, compact_meta.as_ref()).await
     } else {
         start_local_skippy_model(spec, model_name, plan, compact_meta.as_ref()).await
     }
@@ -816,7 +815,7 @@ async fn start_local_skippy_model(
     ))
 }
 
-async fn start_local_layer_package_model(
+async fn start_local_package_v2_model(
     spec: LocalOpenAiModelStartSpec<'_>,
     model_name: String,
     package: skippy::SkippyPackageIdentity,
@@ -863,17 +862,32 @@ async fn start_local_layer_package_model(
     let mut runtime_options = resolved.to_embedded_runtime_options(
         &spec.skippy_telemetry,
         Some(package.clone()),
-        LoadMode::LayerPackage,
+        LoadMode::RuntimeSlice,
     )?;
     runtime_options.config.run_id = run_id.clone();
     runtime_options.config.topology_id = format!("topology-{run_id}");
     runtime_options.config.model_id = model_name.clone();
     runtime_options.config.package_ref = Some(package.package_ref.clone());
     runtime_options.config.manifest_sha256 = Some(package.manifest_sha256.clone());
-    runtime_options.config.source_model_path = Some(package.package_ref.clone());
+    runtime_options.config.source_model_path =
+        Some(package.source_model_path.to_string_lossy().into_owned());
     runtime_options.config.source_model_sha256 = Some(package.source_model_sha256.clone());
     runtime_options.config.source_model_bytes = Some(package.source_model_bytes);
-    runtime_options.config.model_path = Some(package.package_ref.clone());
+    runtime_options.config.model_path =
+        Some(package.source_model_path.to_string_lossy().into_owned());
+    runtime_options.config.model_part_paths = std::iter::once(&package.source_model_path)
+        .chain(package.source_files.iter().map(|source| &source.path))
+        .filter(|path| {
+            path.file_name()
+                .is_none_or(|name| name != "model-package.json")
+        })
+        .fold(Vec::new(), |mut paths, path| {
+            let path = path.to_string_lossy().into_owned();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+            paths
+        });
     runtime_options.config.stage_id = "stage-0".to_string();
     runtime_options.config.stage_index = 0;
     if resolved.hardware.stage_layer_start.is_none() && resolved.hardware.stage_layer_end.is_none()
@@ -883,13 +897,13 @@ async fn start_local_layer_package_model(
     }
     runtime_options.config.ctx_size = context_length;
     runtime_options.config.lane_count = plan.slots as u32;
-    runtime_options.config.filter_tensors_on_load = true;
+    runtime_options.config.filter_tensors_on_load = false;
     if spec.device_override.is_none()
         && let Some(gpu) = spec.pinned_gpu
     {
         runtime_options.config.selected_device = Some(pinned_stage_device(gpu));
     }
-    runtime_options.config.load_mode = LoadMode::LayerPackage;
+    runtime_options.config.load_mode = LoadMode::RuntimeSlice;
     runtime_options.config.bind_addr = "127.0.0.1:0".to_string();
     runtime_options.config.upstream = None;
     runtime_options.config.downstream = None;
@@ -916,7 +930,7 @@ async fn start_local_layer_package_model(
         )
     })
     .await
-    .context("join load skippy layer package task")??;
+    .context("join load skippy package-v2 task")??;
     let _ = emit_event(OutputEvent::ModelLoaded {
         model: model_ref,
         bytes: None,

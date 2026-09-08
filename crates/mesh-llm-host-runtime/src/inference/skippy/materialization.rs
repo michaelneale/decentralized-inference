@@ -5,9 +5,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use skippy_protocol::{LoadMode, StageConfig};
+use skippy_protocol::LoadMode;
 use skippy_runtime::package::PackageGenerationInfo;
-use skippy_runtime::package::{self, LayerPackageInfo, PackageStageRequest};
+use skippy_runtime::package::{self, LayerPackageInfo};
 
 use super::StageLoadRequest;
 
@@ -15,7 +15,7 @@ mod cache_management;
 mod package_download;
 
 pub use cache_management::{
-    MaterializedStagePin, materialized_stages_for_sources, prune_unpinned_materialized_stages,
+    materialized_stages_for_sources, prune_unpinned_materialized_stages,
     remove_materialized_stages_for_sources,
 };
 pub use package_download::{
@@ -59,15 +59,6 @@ pub struct StagePackageLayerInfo {
     pub tensor_count: usize,
     pub tensor_bytes: u64,
     pub artifact_bytes: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MaterializedStageArtifact {
-    pub path: PathBuf,
-    pub manifest_sha256: String,
-    pub source_model_path: String,
-    pub source_model_sha256: String,
-    pub source_model_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,91 +150,11 @@ pub fn resolve_stage_load_package(load: &StageLoadRequest) -> Result<Option<Reso
             projector_path,
         }));
     }
-    if load.load_mode != LoadMode::LayerPackage {
-        return Ok(None);
-    }
-    let is_first = load.layer_start == 0;
-    let is_final = load.downstream.is_none();
-    let include_embeddings = is_first || is_final;
-    // Resolve hf:// to a local package directory, verifying the needed package
-    // files exist without materializing them into a single GGUF on disk.
-    let local_ref = resolve_hf_package_to_local(
-        &load.package_ref,
-        load.layer_start,
-        load.layer_end,
-        include_embeddings,
-        is_final, // include_output
-    )?;
-    ensure_package_manifest_sha(&local_ref, &load.manifest_sha256)?;
-    let info = package::inspect_layer_package(&local_ref)
-        .with_context(|| format!("inspect resolved layer package {}", load.package_ref))?;
-    Ok(Some(ResolvedStagePackage {
-        local_ref,
-        source_model_path: info.source_model_path,
-        source_model_sha256: info.source_model_sha256,
-        source_model_bytes: info.source_model_bytes,
-        model_part_paths: Vec::new(),
-        projector_path: None,
-    }))
-}
-
-pub fn materialize_stage_config(
-    config: &StageConfig,
-) -> Result<Option<(MaterializedStageArtifact, MaterializedStagePin)>> {
-    if config.load_mode != LoadMode::LayerPackage {
-        return Ok(None);
-    }
-    let package_ref = config
-        .model_path
-        .as_deref()
-        .or(config.package_ref.as_deref())
-        .context("layer-package config is missing package ref")?;
-    let is_first = config.layer_start == 0;
-    let is_final = config.downstream.is_none();
-    let include_embeddings = is_first || is_final;
-    let include_output = is_final;
-    // Resolve hf:// to local dir with needed files downloaded
-    let local_ref = resolve_hf_package_to_local(
-        package_ref,
-        config.layer_start,
-        config.layer_end,
-        include_embeddings,
-        include_output,
-    )?;
-    if let Some(expected_manifest_sha) = config.manifest_sha256.as_deref() {
-        ensure_package_manifest_sha(&local_ref, expected_manifest_sha)?;
-    }
-    let request = package_stage_request(
-        &config.model_id,
-        &config.topology_id,
-        &local_ref,
-        &config.stage_id,
-        config.layer_start,
-        config.layer_end,
-        is_final,
+    anyhow::ensure!(
+        load.load_mode != LoadMode::LayerPackage,
+        "layer-package schema v1 is offline-only; split serving requires package-v2 graph admission"
     );
-    let materialized = package::materialize_layer_package_details(&request).with_context(|| {
-        format!(
-            "materialize skippy stage package {} layers {}..{}",
-            config.stage_id, config.layer_start, config.layer_end
-        )
-    })?;
-    let info = package::inspect_layer_package(&local_ref)?;
-    let artifact = MaterializedStageArtifact {
-        path: materialized.output_path,
-        manifest_sha256: materialized.manifest_sha256,
-        source_model_path: info.source_model_path,
-        source_model_sha256: info.source_model_sha256,
-        source_model_bytes: info.source_model_bytes,
-    };
-    let pin = cache_management::pin_materialized_stage(
-        &artifact.path,
-        &local_ref,
-        &config.topology_id,
-        &config.run_id,
-        &config.stage_id,
-    )?;
-    Ok(Some((artifact, pin)))
+    Ok(None)
 }
 
 fn stage_package_info(package_ref: &str, info: LayerPackageInfo) -> Result<StagePackageInfo> {
@@ -275,27 +186,6 @@ fn stage_package_info(package_ref: &str, info: LayerPackageInfo) -> Result<Stage
     })
 }
 
-fn package_stage_request(
-    model_id: &str,
-    topology_id: &str,
-    package_ref: &str,
-    stage_id: &str,
-    layer_start: u32,
-    layer_end: u32,
-    is_final_stage: bool,
-) -> PackageStageRequest {
-    PackageStageRequest {
-        model_id: model_id.to_string(),
-        topology_id: topology_id.to_string(),
-        package_ref: package_ref.to_string(),
-        stage_id: stage_id.to_string(),
-        layer_start,
-        layer_end,
-        include_embeddings: layer_start == 0 || is_final_stage,
-        include_output: is_final_stage,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,70 +193,6 @@ mod tests {
 
     fn sha256_hex(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
-    }
-
-    fn write_local_package_fixture(root: &Path) -> (PathBuf, String) {
-        fs::create_dir_all(root.join("shared")).unwrap();
-        fs::create_dir_all(root.join("layers")).unwrap();
-        fs::write(root.join("shared/metadata.gguf"), b"metadata").unwrap();
-        fs::write(root.join("shared/embeddings.gguf"), b"embeddings").unwrap();
-        fs::write(root.join("shared/output.gguf"), b"output").unwrap();
-        fs::write(root.join("layers/layer-000.gguf"), b"layer").unwrap();
-        let manifest = serde_json::json!({
-            "schema_version": 1,
-            "model_id": "model-a",
-            "source_model": {
-                "path": "model-a.gguf",
-                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "files": [
-                    {
-                        "path": "model-a.gguf",
-                        "size_bytes": 123,
-                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    }
-                ]
-            },
-            "format": "layer-package",
-            "layer_count": 1,
-            "shared": {
-                "metadata": {
-                    "path": "shared/metadata.gguf",
-                    "tensor_count": 1,
-                    "tensor_bytes": 1,
-                    "artifact_bytes": 8,
-                    "sha256": sha256_hex(b"metadata")
-                },
-                "embeddings": {
-                    "path": "shared/embeddings.gguf",
-                    "tensor_count": 1,
-                    "tensor_bytes": 1,
-                    "artifact_bytes": 10,
-                    "sha256": sha256_hex(b"embeddings")
-                },
-                "output": {
-                    "path": "shared/output.gguf",
-                    "tensor_count": 1,
-                    "tensor_bytes": 1,
-                    "artifact_bytes": 6,
-                    "sha256": sha256_hex(b"output")
-                }
-            },
-            "layers": [
-                {
-                    "layer_index": 0,
-                    "path": "layers/layer-000.gguf",
-                    "tensor_count": 1,
-                    "tensor_bytes": 1,
-                    "artifact_bytes": 5,
-                    "sha256": sha256_hex(b"layer")
-                }
-            ],
-            "skippy_abi_version": "0.1.0"
-        });
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
-        let manifest_sha = sha256_hex(&manifest_bytes);
-        fs::write(root.join("model-package.json"), manifest_bytes).unwrap();
-        (root.to_path_buf(), manifest_sha)
     }
 
     fn write_local_package_v2_fixture(root: &Path) -> (String, String) {
@@ -581,26 +407,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_stage_load_package_requires_expected_manifest_sha() {
+    fn resolve_stage_load_package_rejects_legacy_package_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let (package_dir, manifest_sha) = write_local_package_fixture(dir.path());
-
-        let load = stage_load_request_for_package(&package_dir, manifest_sha.clone());
-        let resolved = resolve_stage_load_package(&load).unwrap();
-        assert_eq!(
-            resolved.as_ref().map(|package| package.local_ref.as_str()),
-            Some(package_dir.to_str().unwrap())
-        );
-
-        let mut mismatched = stage_load_request_for_package(&package_dir, "0".repeat(64));
-        mismatched.package_ref = package_dir.to_string_lossy().to_string();
-        let error = resolve_stage_load_package(&mismatched)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("package manifest sha256 mismatch"),
-            "{error}"
-        );
+        let load = stage_load_request_for_package(dir.path(), "0".repeat(64));
+        let error = resolve_stage_load_package(&load).unwrap_err().to_string();
+        assert!(error.contains("package-v2 graph admission"), "{error}");
     }
 
     #[test]
@@ -629,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_stage_load_package_keeps_local_path_out_of_source_identity() {
+    fn resolved_stage_load_package_does_not_accept_v1_manifest() {
         let dir = tempfile::tempdir().unwrap();
         write_cached_package_snapshot(dir.path(), sha256_hex(b"layer"));
         let manifest_bytes = fs::read(dir.path().join("model-package.json")).unwrap();
@@ -688,15 +499,8 @@ mod tests {
             downstream: None,
         };
 
-        let resolved = resolve_stage_load_package(&load)
-            .unwrap()
-            .expect("layer package should resolve");
-
-        assert_eq!(resolved.local_ref, dir.path().to_string_lossy());
-        assert_eq!(resolved.source_model_path, "model-a.gguf");
-        assert_eq!(
-            resolved.source_model_sha256,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
+        let error = resolve_stage_load_package(&load)
+            .expect_err("v1 package selection must not remain reachable from serving");
+        assert!(error.to_string().contains("package-v2 graph admission"));
     }
 }
