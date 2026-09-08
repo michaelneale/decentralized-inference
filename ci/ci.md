@@ -345,7 +345,7 @@ runtime producers are not duplicated.
   logs on success or failure. The existing Qwen3.5 recurrent job remains
   required until Granite passes that live contract. The typed runner supports
   CPU, CUDA, Metal, Vulkan, and ROCm,
-  but only CPU is selected during the first qualification stage; the existing
+  but the checked catalog still selects the retained legacy CPU consumers; the existing
   CUDA inference and Metal model-load signals remain required until their typed
   product rows pass live qualification in that order. CUDA and Metal request
   their explicit accelerator device and reject unsupported typed selections.
@@ -723,6 +723,17 @@ for scope-specific checks, and run the canonical `just test-all` target when
 full repository validation is required.
 
 ### PR/main recurrence coverage
+
+During typed-suite qualification, the existing Linux catalog IDs keep their
+original executable owners: `core` calls `smoke.yml`, `two-node-client` calls
+the passive-client serving script, and `two-node-split` calls the dense plus
+Qwen3.5 recurrent script through `scripted-binary-smoke.yml`. Their original
+artifact identities, cache scopes and exact recurrent-payload gate are retained.
+The new `product-integration-*` and `qwen-recurrent-gate` selectors remain dormant
+until a deliberate catalog migration; they are not aliases for these old IDs.
+Planner-fixture-to-workflow tests require every selected Linux smoke ID to have
+its exact job selector, executable consumer and matching product producer. This
+restores selected CPU work without expanding the catalog or qualifying GPUs.
 
 Explicit ownership routes script-only changes: release UI preparation and the
 version updater select the UI producer; product smoke and the native-runtime

@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import yaml
 from unittest import mock
 
 
@@ -51,6 +53,50 @@ class PlanCiTests(unittest.TestCase):
             with self.subTest(fixture=name):
                 plan = PLANNER.build_plan(fixture(name), root=ROOT)
                 self.assertTrue({"core", "core-cuda"} <= {row["id"] for row in plan["matrices"]["smoke"]})
+
+    def test_planned_linux_smoke_rows_have_executable_job_owners(self) -> None:
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/ci-linux-product-smoke-slice.yml").read_text()
+        )
+        owners = {
+            "core": ("core", "smoke.yml", None),
+            "core-cuda": ("core_cuda", "smoke.yml", None),
+            "two-node-client": ("two_node_client", "scripted-binary-smoke.yml",
+                                "scripts/ci-two-node-client-serving-smoke.sh"),
+            "two-node-split": ("two_node_split", "scripted-binary-smoke.yml",
+                               "scripts/ci-two-node-split-smoke.sh"),
+            "model-download": ("model_download", "hf-download-smoke.yml", None),
+        }
+        # Exercise all checked planner fixtures, including docs-only, main,
+        # runtime and the six single-script recurrence regressions.
+        for path in sorted(FIXTURE_ROOT.glob("*.json")):
+            with self.subTest(fixture=path.name):
+                payload = fixture(path.name)
+                # Empty fixture closures should stay empty, not query the
+                # surrounding checkout and escape the synthetic workspace.
+                with mock.patch.object(PLANNER, "_affected_crates", return_value=payload.get("affected_crates", [])):
+                    plan = PLANNER.build_plan(payload, root=ROOT)
+                for row in plan["matrices"]["smoke"]:
+                    if row["id"] == "metal-model-load":
+                        continue
+                    job_id, callee, script = owners[row["id"]]
+                    self.assertIn(job_id, workflow["jobs"], row)
+                    job = workflow["jobs"][job_id]
+                    # Exact sole selector proves singleton selection executes
+                    # its consumer and an empty/unselected plan skips it.
+                    self.assertEqual(job["if"], "${{ contains(fromJson(inputs.smoke_matrix).*.id, '" + row["id"] + "') }}")
+                    self.assertEqual(job["uses"], "./.github/workflows/" + callee)
+                    if script:
+                        self.assertEqual(job["with"]["smoke_script"], script)
+                    if row["id"] != "model-download":
+                        backend = "cuda" if row["id"] == "core-cuda" else "cpu"
+                        self.assertEqual(job["with"]["artifact_name"], f"ci-product-linux-amd64-{backend}")
+                        self.assertTrue(any(product["platform"] == "linux" and
+                                            product["backend"] == backend
+                                            for product in plan["matrices"]["runtime_products"]))
+                    if row["id"] == "two-node-split":
+                        self.assertEqual(job["with"]["kv_recurrent_expected_exact_payload_kind"], "kv-recurrent")
+                        self.assertEqual(job["with"]["kv_recurrent_model_file"], "Qwen3.5-0.8B-Q4_K_M.gguf")
 
     def test_manifest_root_is_independent_from_workspace_root(self) -> None:
         with (

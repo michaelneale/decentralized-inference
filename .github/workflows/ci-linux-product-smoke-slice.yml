@@ -29,6 +29,59 @@ permissions:
   packages: read
 
 jobs:
+  # Keep catalogued CPU consumers executable until the typed-suite catalog
+  # migration is qualified and bootstrapped. New IDs below are not aliases.
+  core:
+    name: Core inference smoke
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'core') }}
+    uses: ./.github/workflows/smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-cpu
+      artifact_path: ci-artifacts/linux
+      mesh_binary_target: ${{ inputs.binary_target }}
+      cache_key_prefix: ""
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  two_node_client:
+    name: Two-node client smoke
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'two-node-client') }}
+    uses: ./.github/workflows/scripted-binary-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-cpu
+      artifact_path: ci-artifacts/linux
+      staged_binary_path: ${{ inputs.binary_target }}
+      model_cache_scope: two-node-smoke-model
+      smoke_script: scripts/ci-two-node-client-serving-smoke.sh
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  two_node_split:
+    name: KV caching smoke (dense + recurrent)
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'two-node-split') }}
+    uses: ./.github/workflows/scripted-binary-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-linux-amd64-cpu
+      artifact_path: ci-artifacts/linux
+      staged_binary_path: ${{ inputs.binary_target }}
+      model_url: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/9e6855bc4be717fca1ef21360a1db4b29d5c559a/SmolLM2-135M-Instruct-Q8_0.gguf
+      model_file: SmolLM2-135M-Instruct-Q8_0.gguf
+      model_cache_scope: two-node-split-smoke-model
+      smoke_script: scripts/ci-two-node-split-smoke.sh
+      kv_recurrent_model_url: https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf
+      kv_recurrent_model_file: Qwen3.5-0.8B-Q4_K_M.gguf
+      kv_recurrent_model_cache_scope: two-node-split-recurrent-smoke-model
+      kv_recurrent_context_size: '4096'
+      kv_recurrent_expected_exact_payload_kind: kv-recurrent
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   product_integration_cpu:
     name: CPU product integration suite
     if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-cpu') }}
