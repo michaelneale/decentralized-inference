@@ -184,6 +184,7 @@ use gossip::{apply_transitive_ann, peer_meaningfully_changed};
 use heartbeat::heartbeat_failure_policy_for_peer;
 pub(crate) use heartbeat::resolve_peer_down;
 use heartbeat::{PeerDownReportDisposition, peer_down_report_disposition};
+pub(crate) use stage_proto::stage_status_from_load;
 use stage_proto::*;
 
 #[cfg(test)]

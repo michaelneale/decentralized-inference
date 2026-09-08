@@ -1,6 +1,7 @@
 //! Validated source checkpoint metadata and tensor access for Skippy.
 
 mod float_convert;
+pub mod gguf_catalog;
 pub mod gguf_metadata;
 pub mod gguf_template;
 pub mod gguf_writer;

@@ -1,0 +1,96 @@
+From 7b4ffb2204935fca7522a04eb20d4bbcda4506b4 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Tue, 8 Sep 2026 00:57:55 +1000
+Subject: [PATCH] skippy: classify MTP request inputs centrally
+
+---
+ src/llama-graph.cpp                     | 23 +++++++++++++++++++++++
+ src/skippy/tests/graph_build_inputs.cpp | 24 ++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 1d1987309..499832ec1 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -15,6 +15,7 @@
+ #include "llama-memory-hybrid-iswa.h"
+ #include "llama-memory-recurrent.h"
+ 
++#include <algorithm>
+ #include <cassert>
+ #include <cmath>
+ #include <cstring>
+@@ -1657,6 +1657,29 @@ bool llm_graph_result::can_reuse(const llm_graph_params & params) {
+ }
+ 
+ llm_graph_input_i * llm_graph_result::add_input(llm_graph_input_ptr input) {
++    // MTP graph builders create this shared input bundle directly instead of
++    // going through build_inp_embd(). Register its generic request leaves in
++    // one place so every current and future MTP family exposes the same
++    // semantic input contract to graph planning.
++    if (auto * mtp = dynamic_cast<llm_graph_input_embd_h *>(input.get())) {
++        const auto request_input = [&](ggml_tensor * tensor, const char * identity) {
++            if (tensor == nullptr) {
++                return;
++            }
++            const auto existing = std::find_if(request_input_bindings.begin(), request_input_bindings.end(),
++                    [tensor](const skippy_request_input_binding & binding) {
++                        return binding.tensor == tensor;
++                    });
++            if (existing == request_input_bindings.end()) {
++                const uint32_t ordinal = request_input_ordinals[identity]++;
++                request_input_bindings.push_back(
++                        {tensor, std::string(identity) + "." + std::to_string(ordinal)});
++            }
++        };
++        request_input(mtp->tokens, "tokens");
++        request_input(mtp->embd, "embeddings");
++        request_input(mtp->h, "mtp.hidden");
++    }
+     inputs.emplace_back(std::move(input));
+     return inputs.back().get();
+ }
+diff --git a/src/skippy/tests/graph_build_inputs.cpp b/src/skippy/tests/graph_build_inputs.cpp
+index b6007e395..9da60aba5 100644
+--- a/src/skippy/tests/graph_build_inputs.cpp
++++ b/src/skippy/tests/graph_build_inputs.cpp
+@@ -178,6 +178,27 @@ static int check_concurrent_builds() {
+     return failed.load(std::memory_order_acquire) ? 9 : 0;
+ }
+ 
++static int check_mtp_request_input_registration() {
++    llm_graph_result result(64);
++    auto input = std::make_unique<llm_graph_input_embd_h>(4);
++    input->tokens = ggml_new_tensor_1d(result.get_ctx(), GGML_TYPE_I32, 2);
++    input->embd = ggml_new_tensor_2d(result.get_ctx(), GGML_TYPE_F32, 4, 2);
++    input->h = ggml_new_tensor_2d(result.get_ctx(), GGML_TYPE_F32, 4, 2);
++    const ggml_tensor * tokens = input->tokens;
++    const ggml_tensor * embeddings = input->embd;
++    const ggml_tensor * hidden = input->h;
++    result.add_input(std::move(input));
++
++    const auto & bindings = result.get_request_input_bindings();
++    if (bindings.size() != 3 ||
++            bindings[0].tensor != tokens || bindings[0].identity != "tokens.0" ||
++            bindings[1].tensor != embeddings || bindings[1].identity != "embeddings.0" ||
++            bindings[2].tensor != hidden || bindings[2].identity != "mtp.hidden.0") {
++        return 20;
++    }
++    return 0;
++}
++
+ static skippy_graph_build_inputs make_stage_inputs(
+         int32_t layer_start,
+         int32_t layer_end,
+@@ -310,6 +331,9 @@ int main(int argc, char ** argv) {
+     if (const int rc = check_concurrent_builds()) {
+         return rc;
+     }
++    if (const int rc = check_mtp_request_input_registration()) {
++        return rc;
++    }
+     llama_backend_init();
+     int rc = check_sched_reserve_and_memory_update(argv[1]);
+     if (rc == 0) {
+-- 
+2.54.0 (Apple Git-157)

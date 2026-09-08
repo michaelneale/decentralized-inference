@@ -706,6 +706,8 @@ fn load_claim_ref(load: &StageLoadRequest) -> LoadClaimRef {
         run_id: load.run_id.clone(),
         coordinator_id: load.coordinator_id.map(|id| id.to_string()),
         coordinator_term: load.coordinator_term,
+        participant_set_hash: load.participant_set_hash.clone(),
+        topology_hash: load.topology_hash.clone(),
     }
 }
 
@@ -852,6 +854,7 @@ fn stage_config(
             "selected backend device must not be empty"
         );
     }
+    let resident_tensor_names = admitted_resident_tensor_names(load, package)?;
     let mut config = StageConfig {
         run_id: load.run_id.clone(),
         topology_id: load.topology_id.clone(),
@@ -873,7 +876,20 @@ fn stage_config(
         materialized_path: materialized.map(|artifact| artifact.path.to_string_lossy().to_string()),
         materialized_pinned: materialized.is_some(),
         model_path: load.model_path.clone(),
-        projector_path: load.projector_path.clone(),
+        model_part_paths: package
+            .map(|package| {
+                package
+                    .model_part_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        projector_path: load.projector_path.clone().or_else(|| {
+            package
+                .and_then(|package| package.projector_path.as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+        }),
         projector_use_gpu: load.projector_use_gpu,
         media_marker: load.media_marker.clone(),
         image_min_tokens: load.image_min_tokens,
@@ -881,6 +897,8 @@ fn stage_config(
         batch_max_tokens: load.batch_max_tokens,
         glm_dsa_policy: load.glm_dsa_policy,
         generation_signal_window: load.generation_signal_window,
+        activation_codec: load.activation_codec,
+        activation_codec_policy: load.activation_codec_policy,
         stage_id: load.stage_id.clone(),
         stage_index: load.stage_index,
         layer_start: load.layer_start,
@@ -910,6 +928,7 @@ fn stage_config(
             load.load_mode,
             LoadMode::RuntimeSlice | LoadMode::LayerPackage
         ),
+        resident_tensor_names,
         checkpoint_quantization: None,
         checkpoint_imatrix: None,
         checkpoint_imatrix_sha256: None,
@@ -929,6 +948,70 @@ fn stage_config(
         },
     );
     Ok(config)
+}
+
+fn admitted_resident_tensor_names(
+    load: &StageLoadRequest,
+    package: Option<&super::materialization::ResolvedStagePackage>,
+) -> Result<Vec<String>> {
+    let package_ref = package
+        .map(|package| package.local_ref.as_str())
+        .unwrap_or(&load.package_ref);
+    let manifest: skippy_package_format::PackageManifest = if super::is_package_v2_ref(package_ref)
+    {
+        let manifest_path = Path::new(package_ref).join("model-package.json");
+        serde_json::from_slice(
+            &std::fs::read(&manifest_path)
+                .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+        )
+        .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?
+    } else if super::is_content_addressed_gguf_ref(&load.package_ref) {
+        let model_path = load
+            .model_path
+            .as_deref()
+            .context("direct-GGUF stage load requires a verified local model path")?;
+        let identity = super::verify_registered_content_source(
+            &load.model_id,
+            &load.package_ref,
+            &load.manifest_sha256,
+            load.source_model_sha256
+                .as_deref()
+                .context("direct-GGUF stage load requires a source SHA-256")?,
+        )?;
+        anyhow::ensure!(
+            identity.source_model_path == Path::new(model_path),
+            "verified direct-GGUF planning path differs from the stage load path"
+        );
+        super::direct_gguf_planning_manifest_from_identity(&load.model_id, &identity)?.0
+    } else if load.package_ref.starts_with("gguf://") {
+        let model_path = load
+            .model_path
+            .as_deref()
+            .context("direct-GGUF stage load requires a local model path")?;
+        let identity = super::synthetic_direct_gguf_package(&load.model_id, Path::new(model_path))?;
+        super::direct_gguf_planning_manifest_from_identity(&load.model_id, &identity)?.0
+    } else {
+        return Ok(Vec::new());
+    };
+    let package_id = manifest
+        .computed_package_id()
+        .context("compute planning identity for resident tensor binding")?;
+    anyhow::ensure!(
+        package_id == load.admission.package_id,
+        "stage admission package identity differs from the local planning manifest"
+    );
+    let mut names = manifest
+        .materialization_tensors(&load.admission.resident_tensor_ids)
+        .map_err(|error| anyhow!(error.to_string()))?
+        .into_iter()
+        .map(|tensor| tensor.native_name.to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    anyhow::ensure!(
+        !names.is_empty() && names.windows(2).all(|window| window[0] < window[1]),
+        "admitted resident tensor names must be non-empty, strictly sorted, and unique"
+    );
+    Ok(names)
 }
 
 fn peer_config(peer: &StagePeerDescriptor) -> PeerConfig {
@@ -1014,6 +1097,9 @@ fn status_from_running(stage: &RunningStage) -> StageStatusSnapshot {
         stage_index: stage.load.stage_index,
         layer_start: stage.load.layer_start,
         layer_end: stage.load.layer_end,
+        admission: Some(stage.load.admission.clone()),
+        activation_codec: stage.load.activation_codec,
+        activation_codec_policy: stage.load.activation_codec_policy,
         state,
         bind_addr: server.bind_addr.to_string(),
         input_activation_boundary: server.input_activation_boundary,
@@ -1050,6 +1136,9 @@ fn stopped_status(stop: &StageStopRequest) -> StageStatusSnapshot {
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::default(),
         state: StageRuntimeState::Stopped,
         bind_addr: String::new(),
         input_activation_boundary: None,
@@ -1092,6 +1181,9 @@ fn failed_status_from_load(load: &StageLoadRequest, error: String) -> StageStatu
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
+        activation_codec: load.activation_codec,
+        activation_codec_policy: load.activation_codec_policy,
         state: StageRuntimeState::Failed,
         bind_addr: load.bind_addr.clone(),
         input_activation_boundary: None,
@@ -1126,6 +1218,9 @@ fn preparation_status_from_load(
         stage_index: load.stage_index,
         layer_start: load.layer_start,
         layer_end: load.layer_end,
+        admission: Some(load.admission.clone()),
+        activation_codec: load.activation_codec,
+        activation_codec_policy: load.activation_codec_policy,
         state,
         bytes_done: None,
         bytes_total: None,
@@ -1150,6 +1245,9 @@ fn preparation_status_from_cancel(cancel: StageCancelPrepareRequest) -> StagePre
         stage_index: 0,
         layer_start: 0,
         layer_end: 0,
+        admission: None,
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: skippy_protocol::StageActivationCodecPolicy::default(),
         state: StagePreparationState::Cancelled,
         bytes_done: None,
         bytes_total: None,

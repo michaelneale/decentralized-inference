@@ -720,8 +720,16 @@ fn quantize_layer_package(args: QuantizeLayerPackageArgs) -> Result<()> {
     let runner = prepare_quant_runner(args.runner.clone())?;
     with_manifest_lock(&manifest_path, || {
         ensure_manifest(&manifest_path, &manifest)?;
-        let hook = write_layer_package_quant_hook(&args, &runner)?;
-        write_and_preflight_layer_package(&args, &manifest, &hook)?;
+        run_quant_unlocked(RunQuantArgs {
+            window: RunQuantWindowArgs {
+                manifest: manifest_path.clone(),
+                runner,
+                json: args.json,
+            },
+            window_override: None,
+            max_windows: None,
+        })?;
+        write_and_preflight_layer_package(&args, &manifest)?;
         if !args.keep_quant {
             remove_dir_if_exists(&manifest.target)?;
             print_path_event("🧹", "Cleaned quant scratch", &manifest.target);
@@ -733,133 +741,15 @@ fn quantize_layer_package(args: QuantizeLayerPackageArgs) -> Result<()> {
 fn write_and_preflight_layer_package(
     args: &QuantizeLayerPackageArgs,
     manifest: &Manifest,
-    hook: &Path,
 ) -> Result<()> {
-    let first_source_shard = find_first_shard(
-        &manifest.source,
-        manifest
-            .source_prefix
-            .as_deref()
-            .context("quantize manifest is missing source_prefix")?,
-    )?;
-    run_skippy_model_package_write(args, &first_source_shard, hook)?;
-    run_skippy_model_package_preflight(args)
-}
-
-fn write_layer_package_quant_hook(
-    args: &QuantizeLayerPackageArgs,
-    runner: &QuantRunnerArgs,
-) -> Result<PathBuf> {
-    let hook_dir = runner.work_dir.join("layer-package-hook");
-    fs::create_dir_all(&hook_dir)
-        .with_context(|| format!("create hook directory {}", hook_dir.display()))?;
-    fs::create_dir_all(&args.init.target)
-        .with_context(|| format!("create quant scratch {}", args.init.target.display()))?;
-    let hook = hook_dir.join("quantize-package-artifact.sh");
-    let current_exe = std::env::current_exe().context("resolve current skippy-quantize path")?;
-    let hook_work_dir = args.init.target.join("hook-work");
-    let hook_spool_dir = args.init.target.join("hook-spool");
-    let hook_record_dir = args.init.target.join("hook-records");
-    let hook_status_file = args.init.target.join("hook-status.json");
-    let hook_manifest_dir = args.init.target.join("hook-manifests");
-    let hook_result_dir = args.init.target.join("hook-results");
-    let mut script = String::new();
-    script.push_str("#!/usr/bin/env bash\nset -euo pipefail\n");
-    script.push_str("case \"${SKIPPY_PACKAGE_ARTIFACT_RELATIVE_PATH:-}\" in\n");
-    script.push_str("  shared/metadata.gguf) exit 0 ;;\n");
-    script.push_str("esac\n");
-    script.push_str("artifact=\"${SKIPPY_PACKAGE_ARTIFACT_PATH:?}\"\n");
-    script.push_str("artifact_rel=\"${SKIPPY_PACKAGE_ARTIFACT_RELATIVE_PATH:-artifact}\"\n");
-    script.push_str("artifact_safe=\"${artifact_rel//\\//_}\"\n");
-    script.push_str(&format!(
-        "manifest_dir={}\n",
-        shell_quote(&hook_manifest_dir)
-    ));
-    script.push_str(&format!("result_dir={}\n", shell_quote(&hook_result_dir)));
-    script.push_str("mkdir -p \"$manifest_dir\" \"$result_dir\"\n");
-    script.push_str("manifest=\"$manifest_dir/${artifact_safe}.skippy-quantize.json\"\n");
-    script.push_str("result=\"$result_dir/${artifact_safe}.gguf\"\n");
-    script.push_str("single_source=\"${artifact}.quant-src\"\n");
-    script.push_str("rm -rf \"$single_source\"\n");
-    script.push_str("mkdir -p \"$single_source\"\n");
-    script.push_str("ln -s \"$artifact\" \"$single_source/model.gguf\"\n");
-    script.push_str(&format!(
-        "{} quantize --backend {} --source-prefix '' --target-prefix '' --work-dir {} --spool-dir {} --record-dir {} --json-event-file {} --json-event-interval-seconds {} --json-event-window {} --no-verify-on-complete",
-        shell_quote(&current_exe),
-        runner.backend.as_str(),
-        shell_quote(&hook_work_dir),
-        shell_quote(&hook_spool_dir),
-        shell_quote(&hook_record_dir),
-        shell_quote(&hook_status_file),
-        runner.json_event_interval_seconds,
-        runner.json_event_window,
-    ));
-    append_layer_package_hook_quant_flags(&mut script);
-    if let Some(watchdog_seconds) = runner.watchdog_seconds {
-        script.push_str(&format!(" --watchdog-seconds {watchdog_seconds}"));
-    }
-    if let Some(nthreads) = runner.nthreads {
-        script.push_str(&format!(" --nthreads {nthreads}"));
-    }
-    append_optional_tensor_type_file(&mut script, args.init.tensor_type_file.as_deref());
-    append_override_kv_args(&mut script, &runner.override_kv);
-    if runner.allow_requantize {
-        script.push_str(" --allow-requantize");
-    }
-    if runner.pure {
-        script.push_str(" --pure");
-    }
-    if runner.leave_output_tensor {
-        script.push_str(" --leave-output-tensor");
-    }
-    for library in &runner.native_runtime_libraries {
-        script.push_str(&format!(
-            " --native-runtime-library {}",
-            shell_quote(library)
-        ));
-    }
-    script.push_str(" \"$single_source/model.gguf\" \"$result\" ");
-    script.push_str(&shell_quote(args.init.quant.output_name()));
-    script.push('\n');
-    script.push_str("rm -rf \"$single_source\"\n");
-    script.push_str(
-        "if [[ ! -f \"$result\" && -f \"${result%.gguf}-00001-of-00001.gguf\" ]]; then\n",
-    );
-    script.push_str("  result=\"${result%.gguf}-00001-of-00001.gguf\"\n");
-    script.push_str("fi\n");
-    append_layer_package_result_install(&mut script);
-    fs::write(&hook, script).with_context(|| format!("write hook {}", hook.display()))?;
-    make_executable(&hook)?;
-    Ok(hook)
-}
-
-fn append_optional_tensor_type_file(script: &mut String, tensor_type_file: Option<&Path>) {
-    if let Some(path) = tensor_type_file {
-        script.push_str(&format!(" --tensor-type-file {}", shell_quote(path)));
-    }
-}
-
-fn append_layer_package_hook_quant_flags(script: &mut String) {
-    script.push_str(" --manifest \"$manifest\" --no-stage-source");
-}
-
-fn append_layer_package_result_install(script: &mut String) {
-    script.push_str("ready=\"${artifact}.quant-ready\"\n");
-    script.push_str("rm -f \"$ready\"\n");
-    script.push_str("ln \"$result\" \"$ready\" 2>/dev/null || cp \"$result\" \"$ready\"\n");
-    script.push_str("mv -f \"$ready\" \"$artifact\"\n");
-}
-
-fn append_override_kv_args(script: &mut String, overrides: &[String]) {
-    for override_kv in overrides {
-        script.push_str(&format!(" --override-kv {}", shell_quote_str(override_kv)));
-    }
+    let first_quantized_shard = find_first_shard(&manifest.target, &manifest.target_prefix)?;
+    run_skippy_model_package_write(args, &first_quantized_shard)?;
+    run_skippy_model_package_v2_verify(args, &first_quantized_shard)
 }
 
 fn run_skippy_model_package_write(
     args: &QuantizeLayerPackageArgs,
     first_source_shard: &Path,
-    hook: &Path,
 ) -> Result<()> {
     print_path_event("📦", "Writing layer package", &args.package_dir);
     let source_file = args.package_source_file.clone().unwrap_or_else(|| {
@@ -867,7 +757,7 @@ fn run_skippy_model_package_write(
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("model.gguf");
-        format!("{}/{}", args.init.source_prefix, file_name)
+        file_name.to_string()
     });
     let mut command = ProcessCommand::new(&args.skippy_model_package_bin);
     command
@@ -875,8 +765,6 @@ fn run_skippy_model_package_write(
         .arg(first_source_shard)
         .arg("--out-dir")
         .arg(&args.package_dir)
-        .arg("--transform-artifact-command")
-        .arg(hook)
         .arg("--model-id")
         .arg(&args.package_model_id)
         .arg("--source-repo")
@@ -902,47 +790,29 @@ fn run_skippy_model_package_write(
     Ok(())
 }
 
-fn shell_quote(path: impl AsRef<Path>) -> String {
-    shell_quote_str(&path.as_ref().display().to_string())
-}
-
-fn shell_quote_str(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', "'\\''"))
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("read permissions {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("set executable permissions {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn run_skippy_model_package_preflight(args: &QuantizeLayerPackageArgs) -> Result<()> {
-    print_path_event("✅", "Preflighting layer package", &args.package_dir);
+fn run_skippy_model_package_v2_verify(
+    args: &QuantizeLayerPackageArgs,
+    first_source_shard: &Path,
+) -> Result<()> {
+    print_path_event("✅", "Verifying package v2", &args.package_dir);
     let mut command = ProcessCommand::new(&args.skippy_model_package_bin);
     command
-        .arg("preflight")
+        .arg("verify-package-v2")
         .arg(&args.package_dir)
-        .arg("--verify-sha256");
-    if let Some(stages) = args.stages {
-        command.arg("--stages").arg(stages.to_string());
+        .arg("--source")
+        .arg(first_source_shard);
+    if let Some(source_file) = &args.package_source_file {
+        command.arg("--source-file").arg(source_file);
     }
-    let status = command
-        .status()
-        .with_context(|| format!("run {} preflight", args.skippy_model_package_bin.display()))?;
+    let status = command.status().with_context(|| {
+        format!(
+            "run {} verify-package-v2",
+            args.skippy_model_package_bin.display()
+        )
+    })?;
     ensure!(
         status.success(),
-        "{} preflight failed with status {status}",
+        "{} verify-package-v2 failed with status {status}",
         args.skippy_model_package_bin.display()
     );
     Ok(())
@@ -1532,59 +1402,4 @@ fn print_dry_run_complete(json: bool, kind: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::{
-        append_layer_package_hook_quant_flags, append_layer_package_result_install,
-        append_optional_tensor_type_file, append_override_kv_args,
-    };
-
-    #[test]
-    fn layer_package_hook_forwards_tensor_type_file() {
-        let mut script = String::new();
-
-        append_optional_tensor_type_file(
-            &mut script,
-            Some(Path::new("/tmp/recipes/glm 5.2 q2.tensor-types.txt")),
-        );
-
-        assert!(script.contains("--tensor-type-file"));
-        assert!(script.contains("'/tmp/recipes/glm 5.2 q2.tensor-types.txt'"));
-    }
-
-    #[test]
-    fn layer_package_hook_forwards_metadata_overrides() {
-        let mut script = String::new();
-
-        append_override_kv_args(
-            &mut script,
-            &["glm-dsa.attention.indexer.head_count=int:32".to_string()],
-        );
-
-        assert!(script.contains("--override-kv 'glm-dsa.attention.indexer.head_count=int:32'"));
-    }
-
-    #[test]
-    fn layer_package_hook_skips_redundant_source_staging() {
-        let mut script = String::new();
-
-        append_layer_package_hook_quant_flags(&mut script);
-
-        assert!(script.contains("--manifest \"$manifest\""));
-        assert!(script.contains("--no-stage-source"));
-    }
-
-    #[test]
-    fn layer_package_hook_installs_persistent_result_atomically() {
-        let mut script = String::new();
-
-        append_layer_package_result_install(&mut script);
-
-        assert!(script.contains("ln \"$result\" \"$ready\""));
-        assert!(script.contains("mv -f \"$ready\" \"$artifact\""));
-    }
 }

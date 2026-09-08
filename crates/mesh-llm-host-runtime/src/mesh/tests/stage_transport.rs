@@ -63,6 +63,7 @@ fn artifact_transfer_authorization_is_limited_to_stage_assignment() {
         model_id: "model-a".to_string(),
         package_ref: package_ref.clone(),
         manifest_sha256: manifest_sha256.clone(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -203,6 +204,7 @@ async fn artifact_transfer_stream_uses_mesh_subprotocol_and_rejects_dedicated_al
             model_id: "model-artifact".to_string(),
             package_ref: package_ref.clone(),
             manifest_sha256: manifest_sha256.clone(),
+            admissions: Default::default(),
             stages: vec![StageAssignment {
                 stage_id: "stage-0".to_string(),
                 stage_index: 0,
@@ -289,6 +291,137 @@ async fn artifact_transfer_stream_uses_mesh_subprotocol_and_rejects_dedicated_al
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn package_v2_artifact_transfer_populates_empty_peer_cache_with_only_admitted_artifacts()
+-> Result<()> {
+    use crate::protocol::{read_len_prefixed, write_len_prefixed};
+    use base64::Engine as _;
+    use prost::Message as _;
+
+    let cache = tempfile::tempdir().unwrap();
+    let _cache_guard = EnvVarGuard::set("HF_HUB_CACHE", cache.path());
+    let _transfer_guard = EnvVarGuard::set_str("MESH_LLM_ARTIFACT_TRANSFER", "1");
+    let (_package_dir, package_ref, manifest_sha256, package_id) =
+        write_hf_package_v2_artifact_stream_package(cache.path());
+    let server = make_test_node(super::NodeRole::Host { http_port: 9337 }).await?;
+    let client = make_test_node(super::NodeRole::Worker).await?;
+    server.set_mesh_id("artifact-transfer-v2-mesh".to_string()).await;
+    client.set_mesh_id("artifact-transfer-v2-mesh".to_string()).await;
+    server.start_accepting();
+    client.start_accepting();
+
+    let server_id = server.id();
+    let client_id = client.id();
+    let invite = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&server.endpoint.addr())?);
+    client.join(&invite).await?;
+    wait_for_peer(&client, server_id).await;
+    wait_for_peer(&server, client_id).await;
+
+    let mut admission = crate::inference::skippy::test_stage_admission(0, 1);
+    admission.package_id = package_id;
+    admission.resident_tensor_ids = vec!["resident-tensor".to_string()];
+    server
+        .record_stage_topology(StageTopologyInstance {
+            topology_id: "topology-artifact-v2".to_string(),
+            run_id: "run-artifact-v2".to_string(),
+            model_id: "model-artifact-v2".to_string(),
+            package_ref: package_ref.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            admissions: std::collections::BTreeMap::from([(
+                "stage-0".to_string(),
+                admission.clone(),
+            )]),
+            stages: vec![StageAssignment {
+                stage_id: "stage-0".to_string(),
+                stage_index: 0,
+                node_id: client_id,
+                layer_start: 0,
+                layer_end: 1,
+                endpoint: StageEndpoint {
+                    bind_addr: String::new(),
+                },
+            }],
+        })
+        .await;
+
+    let request_for = |relative_path: &str, bytes: &[u8]| {
+        skippy_stage_proto::StageArtifactTransferRequest {
+            r#gen: skippy_protocol::STAGE_PROTOCOL_GENERATION,
+            requester_id: client_id.as_bytes().to_vec(),
+            topology_id: "topology-artifact-v2".to_string(),
+            run_id: "run-artifact-v2".to_string(),
+            stage_id: "stage-0".to_string(),
+            package_ref: package_ref.clone(),
+            manifest_sha256: manifest_sha256.clone(),
+            relative_path: relative_path.to_string(),
+            offset: 0,
+            expected_size: Some(bytes.len() as u64),
+            expected_sha256: Some(sha256_hex(bytes)),
+        }
+    };
+
+    let peer_package = cache
+        .path()
+        .join("models--meshllm--stream-package-v2")
+        .join("empty-peer-cache");
+    assert!(!peer_package.exists());
+    let mut load = stage_load_request();
+    load.topology_id = "topology-artifact-v2".to_string();
+    load.run_id = "run-artifact-v2".to_string();
+    load.stage_id = "stage-0".to_string();
+    load.stage_index = 0;
+    load.layer_start = 0;
+    load.layer_end = 1;
+    load.package_ref = package_ref.clone();
+    load.manifest_sha256 = manifest_sha256.clone();
+    load.admission = admission;
+
+    let manifest = crate::models::artifact_transfer::manifest_artifact_request(
+        &package_ref,
+        &manifest_sha256,
+    )?;
+    let manifest_destination =
+        crate::models::artifact_transfer::local_artifact_path(&peer_package, &manifest);
+    client
+        .fetch_artifact_from_peer(server_id, &load, &manifest, &manifest_destination)
+        .await?;
+    let admitted = crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
+        &peer_package,
+        &package_ref,
+        &manifest_sha256,
+        &load.admission,
+    )?;
+    for artifact in &admitted {
+        let destination =
+            crate::models::artifact_transfer::local_artifact_path(&peer_package, artifact);
+        client
+            .fetch_artifact_from_peer(server_id, &load, artifact, &destination)
+            .await?;
+    }
+    assert_eq!(std::fs::read(peer_package.join("artifacts/primary.gguf"))?, b"primary");
+    assert_eq!(
+        std::fs::read(peer_package.join("artifacts/resident.gguf"))?,
+        b"resident"
+    );
+    assert!(!peer_package.join("artifacts/unowned.gguf").exists());
+
+    let unowned = request_for("artifacts/unowned.gguf", b"unowned");
+    let (mut send, mut recv) = client
+        .open_skippy_stage_mesh_stream(server_id, skippy_protocol::STAGE_STREAM_ARTIFACT_TRANSFER)
+        .await?;
+    write_len_prefixed(&mut send, &unowned.encode_to_vec()).await?;
+    send.finish()?;
+    let response_buf = read_len_prefixed(&mut recv).await?;
+    let response =
+        skippy_stage_proto::StageArtifactTransferResponse::decode(response_buf.as_slice())?;
+    assert!(!response.accepted);
+    assert_eq!(response.error.as_deref(), Some("artifact unavailable"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn artifact_transfer_stream_rejects_corrupt_same_size_cached_artifact() -> Result<()> {
     use crate::protocol::{read_len_prefixed, write_len_prefixed};
     use base64::Engine as _;
@@ -325,6 +458,7 @@ async fn artifact_transfer_stream_rejects_corrupt_same_size_cached_artifact() ->
             model_id: "model-artifact".to_string(),
             package_ref: package_ref.clone(),
             manifest_sha256: manifest_sha256.clone(),
+            admissions: Default::default(),
             stages: vec![StageAssignment {
                 stage_id: "stage-0".to_string(),
                 stage_index: 0,
@@ -403,6 +537,7 @@ async fn artifact_transfer_stream_rejects_public_mesh_without_opt_in() -> Result
             model_id: "model-artifact".to_string(),
             package_ref: package_ref.clone(),
             manifest_sha256: manifest_sha256.clone(),
+            admissions: Default::default(),
             stages: vec![StageAssignment {
                 stage_id: "stage-0".to_string(),
                 stage_index: 0,

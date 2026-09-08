@@ -67,7 +67,12 @@ shard, and requires every shard that carries `*.block_count` and
 before compilation; Qwen4 experimental artifacts derive their wider boundary
 from `hyper_connection.count * embedding_length`. It emits
 deterministic bounded GitHub matrix shards; the current one-runner topology consumes one
-selected-family shard while retaining the plan as evidence. The runner's `.env` exports
+selected-family shard while retaining the plan as evidence. On a changed llama.cpp pin,
+the canary diffs the actual old and new upstream revisions inside the prepared llama.cpp
+checkout. A change limited to model implementation files named by the generated-family
+map selects their certified families plus fixed architecture sentinels. Any shared
+upstream source, unmapped model source, or unavailable diff fails closed to the full
+bump battery; non-bump runs retain their cadence-owned cohort. The runner's `.env` exports
 `HF_CACHE` pointing at a pre-warmed HF cache that lives on the lab NFS models
 volume and `HF_HUB_OFFLINE=1` (NFS offers no `flock`, so `hf` on the runner is
 read-only; the cache is populated by a two-stage prewarm that downloads on
@@ -83,10 +88,12 @@ directly by the immutable snapshot SHA checked into
 `ci/llama-canary/family-certified.json`. The runtime preflight records the
 revisions, verifies all shard/tensor scans and declared runtime/MTP layer
 counts/model bytes, disk
-headroom and certification ports, and runs one cheap MTP speculative-corpus
-smoke. Only GGUFs with a complete native MTP/NextN tensor head across all
-shards run `llama-spec-bench`; those rows also require native MTP draft
-sidebands in staged correctness. Per-lane
+headroom and certification ports. Native MTP/NextN heads remain part of the
+single target model; the battery never reopens that model as a separate draft.
+Those rows require native draft sidebands in staged single-step and chain
+correctness, where each proposed token is verified against the target. The
+general `llama-spec-bench` target/draft benchmark remains available for explicit
+two-model experiments outside the family battery. Per-lane
 outcomes, immutable model manifests, summaries, model scans, preflight
 evidence, and logs are uploaded for 14 days even when the battery fails. Stage
 readiness uses a declared per-model override or a model-size-derived deadline,
@@ -157,7 +164,7 @@ it after the protected-main runner-contract update is active.
 | `ci-{linux,macos,windows}-runtime-slice.yml` | Platform-pure native runtime producers |
 | `ci-{linux,macos,windows}-product-slice.yml` | Platform-pure composition-only product consumers |
 | `ci-platform-checks-slice.yml` | macOS portable/unit, Windows portable, and Windows log-store privacy ACL checks |
-| `ci-linux-product-smoke-slice.yml`, `ci-macos-product-smoke-slice.yml` | Platform-local CPU, CUDA (`gpu-nvidia` self-hosted), two-node, Metal and model-download consumers; one Linux KV caching smoke job runs pinned dense SmolLM2 then recurrent Qwen3.5 legs and requires both to pass; ROCm/Vulkan products remain package-verified pending eligible inference runners |
+| `ci-linux-product-smoke-slice.yml`, `ci-macos-product-smoke-slice.yml` | Platform-local callers of the typed CPU/CUDA/Vulkan (`gpu-nvidia` self-hosted), conditional ROCm (`gpu-amd`), and Metal product-integration suite plus model-download. The suite stages the registry-pinned SmolLM2 Q8 and IBM Granite 4.0 H Q4 pair once, runs dense standalone/SDK/restart, then dense passive-client split routing and strict recurrent `KvRecurrent` validation. Each split phase persists strict-whitelist seed/worker node, mesh, and peer identity plus stage/model snapshots, then atomically reconciles exact two-observer, topology/run/model/package/manifest, two-stage contiguous-cut and bind-address, ready-status, and served-model agreement. A capped five-minute wall-clock deadline with parallel, bounded endpoint capture finalizes failure evidence before workflow cancellation; the status projection excludes invite tokens, nested fields, and unrelated paths. Product reconciliation independently verifies both evidence files, records their paths and SHA-256 digests in `phase-results.json`, rejects missing or modified evidence, and uploads every JSON snapshot/evidence file with logs on success or failure. ROCm skips unless `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; accelerator product-integration rows remain outside the checked plan pending live qualification. |
 | `ci-linux-sdk-slice.yml`, `ci-macos-sdk-slice.yml` | Platform-local Rust/Kotlin/Swift smoke consumers; SDK producers are independent top-level calls and each smoke receives the lane-local immutable UI artifact |
 | `ci-runner-contract-slice.yml` | Provider/cache/plan trust and main runner-image checks |
 | `native-sdk-artifact.yml` | Typed native SDK producer |
@@ -472,7 +479,10 @@ fail-open policy.
 - `prepare-host-input` / `prepare-windows-host-input`: neutral host bytes,
   import report and checksum.
 - `prepare-native-runtime-input`: one verified native runtime archive and
-  manifest.
+  manifest. Non-Windows artifacts include the checksum-bound
+  `skippy-model-package` tool used by split-serving consumers to prepare
+  package-v2 fixtures; Windows artifacts remain DLL-only until the producer has
+  a reliable import-library path for the tool.
 - `prepare-static-abi-input`: portable static ABI archive.
 - `compose-product-input`: exact host/runtime verification and composition.
 - `ci/model-artifacts/registry.json`: canonical immutable model identities,
@@ -562,8 +572,10 @@ may cover eligible build/test rows across Linux, Depot macOS 15 and Windows
 2022 when equivalent images/architectures exist; planning/required summaries,
 credential-bearing smokes, `gpu-nvidia` hardware and uncertified Intel macOS
 rows remain exceptions. The documented `gpu-nvidia` ephemeral scale set is
-the sole current uncredentialed, hardware-qualified same-repository PR
-exception.
+the sole currently verified uncredentialed, hardware-qualified same-repository
+PR exception. The typed ROCm job remains skipped unless
+`MESH_ROCM_INFERENCE_RUNNER_ENABLED` explicitly enables the repository-scoped
+`gpu-amd` role.
 
 The permanent Depot PR gate is documented in `ci/DEPOT_MIGRATION.md`; the
 accepted temporary findings and risks are in

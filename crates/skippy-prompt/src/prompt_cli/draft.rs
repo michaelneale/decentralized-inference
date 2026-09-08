@@ -40,6 +40,7 @@ impl DraftRunner {
                 include_output: true,
                 mtp_source: MtpSource::Disabled,
                 filter_tensors_on_load: true,
+                resident_tensor_names: Vec::new(),
                 checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
                 checkpoint_imatrix: None,
                 checkpoint_imatrix_sha256: None,

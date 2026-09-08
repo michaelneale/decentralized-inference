@@ -1,0 +1,139 @@
+name: Restore product-integration inputs
+description: Restore one composed product and the pinned dense and recurrent acceptance models.
+
+inputs:
+  artifact_name:
+    required: true
+    description: GitHub Actions artifact containing the composed product.
+  artifact_path:
+    required: true
+    description: Destination directory for the product artifact.
+  staged_binary_path:
+    required: true
+    description: Stable executable path used by the product suite.
+  model_cadence:
+    required: true
+    description: Authorized registry cadence for this invocation.
+  cache_key_prefix:
+    required: false
+    default: ''
+    description: Optional cache key prefix.
+  save_model_cache:
+    required: false
+    default: 'false'
+    description: Save cache misses only on trusted branches.
+
+outputs:
+  dense_model_file:
+    value: ${{ steps.resolve.outputs.dense_file }}
+    description: Checksum-pinned dense fixture filename.
+  dense_model_artifact_id:
+    value: ${{ steps.resolve.outputs.dense_artifact_id }}
+    description: Registry artifact ID for the dense fixture.
+  dense_model_sha256:
+    value: ${{ steps.resolve.outputs.dense_sha256 }}
+    description: Verified SHA-256 for the dense fixture.
+  recurrent_model_file:
+    value: ${{ steps.resolve.outputs.recurrent_file }}
+    description: Checksum-pinned recurrent fixture filename.
+  recurrent_model_artifact_id:
+    value: ${{ steps.resolve.outputs.recurrent_artifact_id }}
+    description: Registry artifact ID for the recurrent fixture.
+  recurrent_model_sha256:
+    value: ${{ steps.resolve.outputs.recurrent_sha256 }}
+    description: Verified SHA-256 for the recurrent fixture.
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/restore-smoke-inputs
+      with:
+        artifact_name: ${{ inputs.artifact_name }}
+        artifact_path: ${{ inputs.artifact_path }}
+        staged_binary_path: ${{ inputs.staged_binary_path }}
+
+    - name: Resolve pinned product-integration fixtures
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        manifest=ci/model-artifacts/manifests/product-integration-smoke.json
+        python3 scripts/resolve-test-model-manifest.py "$manifest" \
+          --artifact-id smollm2-q8-inference \
+          --cadence "${{ inputs.model_cadence }}" \
+          --require-single-file \
+          --github-output "$GITHUB_OUTPUT" \
+          --github-output-prefix dense_
+        python3 scripts/resolve-test-model-manifest.py "$manifest" \
+          --artifact-id family-granite-hybrid \
+          --cadence "${{ inputs.model_cadence }}" \
+          --require-single-file \
+          --github-output "$GITHUB_OUTPUT" \
+          --github-output-prefix recurrent_
+
+    - name: Restore dense fixture cache
+      id: dense-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: ~/.models/${{ steps.resolve.outputs.dense_file }}
+        key: ${{ inputs.cache_key_prefix }}mesh-llm-${{ runner.os }}-product-integration-dense-${{ steps.resolve.outputs.dense_sha256 }}-${{ hashFiles('.github/cache-version.txt') }}
+
+    - name: Restore recurrent fixture cache
+      id: recurrent-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: ~/.models/${{ steps.resolve.outputs.recurrent_file }}
+        key: ${{ inputs.cache_key_prefix }}mesh-llm-${{ runner.os }}-product-integration-recurrent-${{ steps.resolve.outputs.recurrent_sha256 }}-${{ hashFiles('.github/cache-version.txt') }}
+
+    - name: Download missing pinned fixtures
+      shell: bash
+      env:
+        DENSE_FILE: ${{ steps.resolve.outputs.dense_file }}
+        DENSE_URL: ${{ steps.resolve.outputs.dense_url }}
+        RECURRENT_FILE: ${{ steps.resolve.outputs.recurrent_file }}
+        RECURRENT_URL: ${{ steps.resolve.outputs.recurrent_url }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.models"
+        token="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+        curl_args=(--fail --location --show-error --retry 12 --retry-delay 20 --retry-max-time 600 --retry-all-errors)
+        if [[ -n "$token" ]]; then
+          curl_args+=(--header "Authorization: Bearer ${token}")
+        fi
+        for fixture in dense recurrent; do
+          upper_fixture="$(printf '%s' "$fixture" | tr '[:lower:]' '[:upper:]')"
+          file_var="${upper_fixture}_FILE"
+          url_var="${upper_fixture}_URL"
+          file="${!file_var}"
+          url="${!url_var}"
+          output="$HOME/.models/$file"
+          if [[ -s "$output" ]]; then
+            continue
+          fi
+          partial="${output}.download"
+          rm -f "$partial"
+          curl "${curl_args[@]}" "$url" -o "$partial"
+          mv "$partial" "$output"
+        done
+
+    - name: Verify pinned fixture integrity
+      shell: bash
+      run: |
+        set -euo pipefail
+        manifest=ci/model-artifacts/manifests/product-integration-smoke.json
+        python3 scripts/resolve-test-model-manifest.py "$manifest" --artifact-id smollm2-q8-inference --cadence "${{ inputs.model_cadence }}" --require-single-file --verify-root "$HOME/.models"
+        python3 scripts/resolve-test-model-manifest.py "$manifest" --artifact-id family-granite-hybrid --cadence "${{ inputs.model_cadence }}" --require-single-file --verify-root "$HOME/.models"
+
+    - name: Save dense fixture cache
+      if: ${{ inputs.save_model_cache == 'true' && steps.dense-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: ~/.models/${{ steps.resolve.outputs.dense_file }}
+        key: ${{ steps.dense-cache.outputs.cache-primary-key }}
+
+    - name: Save recurrent fixture cache
+      if: ${{ inputs.save_model_cache == 'true' && steps.recurrent-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: ~/.models/${{ steps.resolve.outputs.recurrent_file }}
+        key: ${{ steps.recurrent-cache.outputs.cache-primary-key }}

@@ -387,7 +387,9 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         )
 
 
-def validate_inventory(rows: list[dict[str, Any]]) -> int:
+def validate_inventory(
+    rows: list[dict[str, Any]], llama_src: Path | None = None
+) -> int:
     failures = 0
     missing = [row for row in rows if row.get("status") == "missing_candidate"]
     if missing:
@@ -403,6 +405,7 @@ def validate_inventory(rows: list[dict[str, Any]]) -> int:
         "certified",
         "certified_package_only",
         "implementation_base",
+        "needs_boundary_registration",
         "needs_candidate",
         "needs_runtime_slice_support",
         "no_public_gguf_candidate",
@@ -425,8 +428,226 @@ def validate_inventory(rows: list[dict[str, Any]]) -> int:
             )
 
     failures += validate_runtime_slice_admission()
+    failures += validate_boundary_registration(
+        rows, boundary_registered_models(llama_src)
+    )
+    failures += validate_model_pins(rows)
+    failures += validate_pin_manifest_join(rows)
 
     return failures
+
+
+def validate_pin_manifest_join(rows: list[dict[str, Any]]) -> int:
+    """A parity model_pin must join an identical family-certified artifact.
+
+    The family-certified manifest's `file_integrity` is the certification
+    source of truth; a parity row that pins a model the certification
+    manifest does not know about (or disagrees with on repo, revision,
+    file, size, or blob sha256) fails closed. This keeps the two manifests
+    from drifting apart on the same immutable model.
+    """
+    certified_path = ROOT / "ci/llama-canary/family-certified.json"
+    try:
+        certified = json.loads(certified_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"cannot read {certified_path}: {error}", file=sys.stderr)
+        return 1
+    # (repo, revision, file) -> (selector, size_bytes, blob_sha256)
+    certified_index: dict[tuple[str, str, str], tuple[str, int, str]] = {}
+    for model in certified.get("models", []):
+        artifact = model.get("artifact") or {}
+        integrity = artifact.get("file_integrity") or {}
+        for file_name, record in integrity.items():
+            key = (artifact.get("repo", ""), artifact.get("revision", ""), file_name)
+            certified_index[key] = (
+                artifact.get("selector", ""),
+                record.get("size_bytes", -1),
+                record.get("blob_id", ""),
+            )
+
+    failures = 0
+    for row in rows:
+        pin = row.get("model_pin")
+        if pin is None:
+            continue
+        key = (pin.get("repo", ""), pin.get("revision", ""), pin.get("file", ""))
+        record = certified_index.get(key)
+        if record is None:
+            failures += 1
+            print(
+                f"model_pin for {row['llama_model']} does not join any "
+                f"family-certified.json artifact: {key[0]}@{key[1][:12]} {key[2]}",
+                file=sys.stderr,
+            )
+            continue
+        selector, size, blob = record
+        if (
+            pin.get("selector") != selector
+            or pin.get("size_bytes") != size
+            or pin.get("blob_sha256") != blob
+        ):
+            failures += 1
+            print(
+                f"model_pin for {row['llama_model']} disagrees with "
+                f"family-certified.json selector/integrity for {key[2]}",
+                file=sys.stderr,
+            )
+    return failures
+
+
+def boundary_registered_models(llama_src: Path | None) -> set[str]:
+    """Model implementations that register stage block boundaries.
+
+    A model file counts as registered only when its comment-stripped
+    executable source contains real `begin_block(...)` and `end_block(...)`
+    call patterns (the per-layer boundary pair is always added in the same
+    edit per the llama-patch-changes skill). Bare name mentions — comments,
+    docs, or strings — cannot certify a family, and a file with only one
+    half of the pair cannot certify either.
+    """
+    source = llama_src or ROOT / ".deps/llama.cpp"
+    models_dir = source / "src/models"
+    if not models_dir.is_dir():
+        return set()
+    registered: set[str] = set()
+    for path in models_dir.glob("*.cpp"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        executable_text = executable_cpp(text)
+        if re.search(r"\bbegin_block\s*\(", executable_text) and re.search(
+            r"\bend_block\s*\(", executable_text
+        ):
+            registered.add(path.stem)
+    return registered
+
+
+def validate_model_pins(rows: list[dict[str, Any]]) -> int:
+    """Pinned model rows must be immutable — no floating refs.
+
+    A row that carries a `model_pin` (added when the repair lane registers a
+    new family's smallest runnable GGUF) must pin repo, 40-hex revision,
+    file name, byte size, and a 64-hex blob sha256, mirroring the
+    `file_integrity` schema of `ci/llama-canary/family-certified.json`.
+    """
+    failures = 0
+    for row in rows:
+        pin = row.get("model_pin")
+        if pin is None:
+            continue
+        repo = pin.get("repo")
+        revision = pin.get("revision")
+        file_name = pin.get("file")
+        size = pin.get("size_bytes")
+        blob = pin.get("blob_sha256")
+        problems = []
+        if not isinstance(repo, str) or "/" not in repo:
+            problems.append("repo must be an org/name string")
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            problems.append("revision must be a 40-hex commit sha")
+        if not isinstance(file_name, str) or not file_name.endswith(".gguf"):
+            problems.append("file must name a .gguf")
+        if not isinstance(size, int) or size <= 0:
+            problems.append("size_bytes must be a positive integer")
+        if not isinstance(blob, str) or not re.fullmatch(r"[0-9a-f]{64}", blob):
+            problems.append("blob_sha256 must be 64-hex")
+        if problems:
+            failures += 1
+            print(f"invalid model_pin for {row['llama_model']}: {problems}", file=sys.stderr)
+    return failures
+
+
+def validate_boundary_registration(
+    rows: list[dict[str, Any]],
+    registered: set[str],
+) -> int:
+    """Fail closed when a runnable family lacks boundary registration.
+
+    Rows whose llama model does not register `begin_block`/`end_block` must
+    carry an explicit `unsupported_reason` so the gap is classified rather
+    than silently certified. Only a non-runnable classification may carry a
+    reason: a runnable row (`certified`, `candidate`, `candidate_stateful`)
+    with `unsupported_reason` is an ambiguous manifest error regardless of
+    hook state.
+    """
+    failures = 0
+    for row in rows:
+        status = row.get("status")
+        if status not in {"certified", "candidate", "candidate_stateful"}:
+            continue
+        if status in {"certified", "candidate", "candidate_stateful"} and row.get(
+            "unsupported_reason"
+        ):
+            failures += 1
+            print(
+                f"runnable row carries unsupported_reason ({status}): "
+                f"{row['llama_model']}",
+                file=sys.stderr,
+            )
+            continue
+        if row["llama_model"] in registered:
+            continue
+        reason = row.get("unsupported_reason")
+        if not reason:
+            failures += 1
+            print(
+                f"runnable family lacks boundary registration and no unsupported_reason: "
+                f"{row['llama_model']} ({status})",
+                file=sys.stderr,
+            )
+    return failures
+
+
+def needs_boundary_registration_rows(
+    rows: list[dict[str, Any]], registered: set[str]
+) -> list[str]:
+    """Models whose rows must move to `needs_boundary_registration`."""
+    return sorted(
+        row["llama_model"]
+        for row in rows
+        if row.get("status") in {"certified", "candidate", "candidate_stateful"}
+        and row["llama_model"] not in registered
+        and not row.get("unsupported_reason")
+    )
+
+
+def coverage_expansion_target(
+    rows: list[dict[str, Any]], registered: set[str], llama_src: Path | None = None
+) -> dict[str, str] | None:
+    """Deterministically select ONE needs_boundary_registration family.
+
+    Each llama-bump/manual-full canary run hands the battery repair agent a
+    single coverage-expansion target (family + source file) so the queue is
+    worked down one family per run — never fanned out. Selection is
+    lexicographic over the classified rows, so it is stable across runs and
+    advances as families graduate. Returns None when no gaps remain.
+    """
+    source = llama_src or ROOT / ".deps/llama.cpp"
+    pending = sorted(
+        (
+            row
+            for row in rows
+            if row.get("status") == "needs_boundary_registration"
+            and not row.get("unsupported_reason")
+            # Skip rows whose hooks have already landed but whose manifest
+            # status is stale — those are reclassification bugs, not
+            # coverage work, and validate flags them separately.
+            and row["llama_model"] not in registered
+        ),
+        key=lambda row: (row["llama_model"], row.get("family", "")),
+    )
+    if not pending:
+        return None
+    row = pending[0]
+    model = row["llama_model"]
+    source_file = str(source / "src/models" / f"{model}.cpp")
+    return {
+        "llama_model": model,
+        "family": row.get("family", model.replace("-", "_")),
+        "source_file": source_file,
+        "status": row["status"],
+    }
 
 
 def executable_cpp(
@@ -607,9 +828,16 @@ def validate_runtime_slice_admission(llama_root: Path | None = None) -> int:
 
     source = model_loading.read_text(encoding="utf-8")
     executable_source = executable_cpp(source)
-    function_start = executable_source.find(
-        "static enum skippy_status skippy_finish_model_open("
-    )
+    # Match the admission function with or without internal-linkage
+    # qualifiers: upstream revisions have carried both spellings.
+    function_start = -1
+    for needle in (
+        "static enum skippy_status skippy_finish_model_open(",
+        "enum skippy_status skippy_finish_model_open(",
+    ):
+        function_start = executable_source.find(needle)
+        if function_start >= 0:
+            break
     function_end = executable_source.find(
         "enum skippy_status skippy_model_open_impl(", function_start
     )
@@ -880,6 +1108,18 @@ def main() -> int:
 
     sub.add_parser("validate", help="fail if the pinned llama.cpp inventory is not fully classified")
 
+    coverage = sub.add_parser(
+        "next-boundary-target",
+        help="print ONE deterministic needs_boundary_registration family for this run's repair agent",
+    )
+    coverage.add_argument("--json", action="store_true")
+
+    classify = sub.add_parser(
+        "classify-boundaries",
+        help="list runnable families lacking boundary registration (repair queue)",
+    )
+    classify.add_argument("--json", action="store_true")
+
     run_parser = sub.add_parser("run", help="run family-certify for local candidates")
     run_parser.add_argument("--status", action="append")
     run_parser.add_argument("--family", action="append")
@@ -934,7 +1174,26 @@ def main() -> int:
             print(command)
         return 0
     if args.command == "validate":
-        return 1 if validate_inventory(rows) else 0
+        return 1 if validate_inventory(rows, args.llama_src) else 0
+    if args.command == "next-boundary-target":
+        target = coverage_expansion_target(
+            rows, boundary_registered_models(args.llama_src), args.llama_src
+        )
+        if args.json:
+            print(json.dumps(target, indent=2))
+        elif target:
+            print(f"{target['llama_model']}\t{target['family']}\t{target['source_file']}")
+        return 0
+    if args.command == "classify-boundaries":
+        pending = needs_boundary_registration_rows(
+            rows, boundary_registered_models(args.llama_src)
+        )
+        if args.json:
+            print(json.dumps(pending, indent=2))
+        else:
+            for model in pending:
+                print(model)
+        return 0
     if args.command == "run":
         return 1 if run_certifications(args, rows) else 0
     return 2

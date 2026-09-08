@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "manifest_kind": "test-model-artifacts",
+  "suite": "product-integration-smoke",
+  "registry_sha256": "8dd8387e5c934e0245da934e412b20ecec7e1b5b6dfb85914df8e2436102d219",
+  "artifacts": [
+    {
+      "id": "family-granite-hybrid",
+      "family": "granite-hybrid",
+      "capability_tags": [
+        "gguf",
+        "hybrid"
+      ],
+      "suites": [
+        "llama-family-certification",
+        "product-integration-smoke"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full",
+        "pull-request",
+        "main",
+        "release"
+      ],
+      "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+      "revision": "a864f823cce6e6048b5752e2816fe7a23987d790",
+      "selector": "Q4_K_M",
+      "files": [
+        "granite-4.0-h-350m-Q4_K_M.gguf"
+      ],
+      "file_integrity": {
+        "granite-4.0-h-350m-Q4_K_M.gguf": {
+          "size_bytes": 222662560,
+          "blob_id": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb"
+        }
+      },
+      "model_ref": "ibm-granite/granite-4.0-h-350m-GGUF:Q4_K_M",
+      "urls": [
+        "https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF/resolve/a864f823cce6e6048b5752e2816fe7a23987d790/granite-4.0-h-350m-Q4_K_M.gguf"
+      ],
+      "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+      "size_bytes": 222662560,
+      "sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb",
+      "url": "https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF/resolve/a864f823cce6e6048b5752e2816fe7a23987d790/granite-4.0-h-350m-Q4_K_M.gguf"
+    },
+    {
+      "id": "smollm2-q8-inference",
+      "family": "smollm2",
+      "capability_tags": [
+        "dense",
+        "gguf",
+        "inference",
+        "small"
+      ],
+      "suites": [
+        "product-smoke",
+        "product-integration-smoke",
+        "scripted-binary-smoke",
+        "sdk-smoke"
+      ],
+      "cadences": [
+        "pull-request",
+        "main",
+        "release"
+      ],
+      "repo": "unsloth/SmolLM2-135M-Instruct-GGUF",
+      "revision": "9e6855bc4be717fca1ef21360a1db4b29d5c559a",
+      "selector": "Q8_0",
+      "files": [
+        "SmolLM2-135M-Instruct-Q8_0.gguf"
+      ],
+      "file_integrity": {
+        "SmolLM2-135M-Instruct-Q8_0.gguf": {
+          "size_bytes": 144811072,
+          "blob_id": "c4a3dd037301b6ecea31d6da37f5cd793ead920dd5ddfe6d589294628d6ce66a"
+        }
+      },
+      "model_ref": "unsloth/SmolLM2-135M-Instruct-GGUF:Q8_0",
+      "urls": [
+        "https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/9e6855bc4be717fca1ef21360a1db4b29d5c559a/SmolLM2-135M-Instruct-Q8_0.gguf"
+      ],
+      "file": "SmolLM2-135M-Instruct-Q8_0.gguf",
+      "size_bytes": 144811072,
+      "sha256": "c4a3dd037301b6ecea31d6da37f5cd793ead920dd5ddfe6d589294628d6ce66a",
+      "url": "https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/9e6855bc4be717fca1ef21360a1db4b29d5c559a/SmolLM2-135M-Instruct-Q8_0.gguf",
+      "notes": "Shared product, scripted-binary, and SDK inference fixture."
+    }
+  ]
+}

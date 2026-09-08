@@ -952,6 +952,7 @@ impl DriverTokenizer {
                 include_output: plan.stages.len() == 1,
                 mtp_source: MtpSource::Disabled,
                 filter_tensors_on_load: args.stage_load_mode != "runtime-slice",
+                resident_tensor_names: Vec::new(),
                 checkpoint_quantization: skippy_runtime::CheckpointQuantization::Preserve,
                 checkpoint_imatrix: None,
                 checkpoint_imatrix_sha256: None,

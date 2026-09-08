@@ -141,12 +141,9 @@ requested_backend = {"cuda-blackwell": "cuda", "hip": "rocm"}.get(
 )
 expected_skippy_abi = sys.argv[4]
 with open(sys.argv[3], encoding="utf-8") as fh:
-    rows = json.load(fh)
+    payload = json.load(fh)
 
-# Current hosts include catalog diagnostics around the runtime rows. Older
-# smoke products emit the same rows directly as a list.
-if isinstance(rows, dict):
-    rows = rows.get("runtimes")
+rows = payload.get("runtimes") if isinstance(payload, dict) else payload
 if not isinstance(rows, list):
     raise SystemExit(
         "native runtime compatibility output must be a JSON list or an object "

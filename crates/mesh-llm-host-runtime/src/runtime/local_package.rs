@@ -8,6 +8,7 @@ use crate::mesh::{self, NodeRole};
 use crate::models;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(super) const SPLIT_DEFAULT_MIN_PARTICIPANTS: usize = 2;
@@ -44,6 +45,9 @@ pub(super) fn scan_layer_package_metadata(
 }
 
 pub(super) fn runtime_model_planning_bytes(model_path: &Path) -> Result<u64> {
+    if model_path.join("model-package.json").is_file() {
+        return Ok(skippy::identity_from_package_v2(model_path)?.source_model_bytes);
+    }
     let package_ref = model_path.to_string_lossy().to_string();
     if skippy::is_layer_package_ref(&package_ref) {
         return Ok(skippy::identity_from_layer_package(&package_ref)?.source_model_bytes);
@@ -73,9 +77,13 @@ pub(super) fn split_runtime_kv_bytes_per_token(
         cache_type_k_override,
         cache_type_v_override,
     );
-    kv_cache_quant
-        .kv_cache_bytes_per_token(compact_meta)
-        .context("split topology planning requires KV cache byte metadata")
+    if let Some(bytes) = kv_cache_quant.kv_cache_bytes_per_token(compact_meta) {
+        return Ok(bytes);
+    }
+    if compact_meta.has_only_recurrent_layers_without_kv_cache() {
+        return Ok(0);
+    }
+    anyhow::bail!("split topology planning requires KV cache byte metadata")
 }
 
 /// Resolve the K/V cache types that split stages will actually load with.
@@ -123,30 +131,39 @@ pub(super) async fn resolve_split_runtime_package(
     model_ref: &str,
     local_source_required: bool,
 ) -> Result<skippy::SkippyPackageIdentity> {
-    let model_path_str = model_path.to_string_lossy().to_string();
-    if skippy::is_layer_package_ref(&model_path_str) {
-        anyhow::ensure!(
-            !local_source_required,
-            "skippy.source_policy = \"local-required\" supports direct local GGUF files, not layer package references"
-        );
-        Ok(tokio::task::spawn_blocking(move || {
-            skippy::identity_from_layer_package(&model_path_str)
-        })
-        .await
-        .context("join identify skippy layer package task")??)
-    } else {
-        let model_ref = model_ref.to_string();
-        let model_path = model_path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            if local_source_required {
-                skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
+    let model_path = model_path.to_path_buf();
+    let model_ref = model_ref.to_string();
+    tokio::task::spawn_blocking(move || {
+        let package_ref = model_path.to_string_lossy().into_owned();
+        if skippy::is_package_v2_ref(&package_ref) {
+            let identity = skippy::identity_from_package_v2(&model_path)?;
+            return if local_source_required {
+                skippy::into_content_addressed_identity(identity)
             } else {
-                skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
-            }
-        })
-        .await
-        .context("join identify direct GGUF task")?
-    }
+                Ok(identity)
+            };
+        }
+        if skippy::is_layer_package_ref(&package_ref) {
+            let identity = skippy::identity_from_layer_package(&package_ref)?;
+            return if local_source_required {
+                skippy::into_content_addressed_identity(identity)
+            } else {
+                Ok(identity)
+            };
+        }
+        anyhow::ensure!(
+            model_path.is_file(),
+            "generation-8 split source must be a package-v2 directory or direct GGUF file: {}",
+            model_path.display()
+        );
+        if local_source_required {
+            skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
+        } else {
+            skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
+        }
+    })
+    .await
+    .context("join identify split source task")?
 }
 
 pub(super) fn split_kv_cache_quant(
@@ -832,17 +849,76 @@ pub(super) fn split_participant_set_hash(participants: &[SplitParticipant]) -> S
     hex::encode(hasher.finalize())
 }
 
-pub(super) fn split_topology_hash(stages: &[RuntimeSliceStagePlan]) -> String {
+pub(super) fn split_topology_hash(
+    stages: &[RuntimeSliceStagePlan],
+    admissions: &BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
+    activation_codec: skippy_protocol::StageActivationCodec,
+    activation_codec_policy: skippy_protocol::StageActivationCodecPolicy,
+) -> String {
     let mut hasher = Sha256::new();
+    hash_field(&mut hasher, b"skippy-topology:v2");
+    hash_field(
+        &mut hasher,
+        activation_codec_policy
+            .identity(activation_codec)
+            .as_bytes(),
+    );
     for stage in stages {
-        hasher.update(stage.stage_id.as_bytes());
+        hash_field(&mut hasher, stage.stage_id.as_bytes());
         hasher.update(stage.stage_index.to_le_bytes());
-        hasher.update(stage.node_id.to_string().as_bytes());
+        hash_field(&mut hasher, stage.node_id.to_string().as_bytes());
         hasher.update(stage.layer_start.to_le_bytes());
         hasher.update(stage.layer_end.to_le_bytes());
         hasher.update(stage.parameter_bytes.to_le_bytes());
+        if let Some(admission) = admissions.get(&stage.stage_id) {
+            hasher.update([1]);
+            hasher.update(admission.version.to_le_bytes());
+            hash_field(&mut hasher, admission.package_id.as_bytes());
+            hash_field(&mut hasher, admission.plan_id.as_bytes());
+            hasher.update(admission.layer_start.to_le_bytes());
+            hasher.update(admission.layer_end.to_le_bytes());
+            hasher.update((admission.resident_tensor_ids.len() as u64).to_le_bytes());
+            for tensor_id in &admission.resident_tensor_ids {
+                hash_field(&mut hasher, tensor_id.as_bytes());
+            }
+            hasher.update((admission.sidecars.len() as u64).to_le_bytes());
+            for sidecar in &admission.sidecars {
+                hasher.update([match sidecar.kind {
+                    skippy_protocol::StageAdmissionSidecarKind::Mmproj => 1,
+                }]);
+                hash_field(&mut hasher, sidecar.artifact_id.as_bytes());
+                match &sidecar.name {
+                    Some(name) => {
+                        hasher.update([1]);
+                        hash_field(&mut hasher, name.as_bytes());
+                    }
+                    None => hasher.update([0]),
+                }
+            }
+            hasher.update((admission.profiles.len() as u64).to_le_bytes());
+            for profile in &admission.profiles {
+                for value in [
+                    &profile.profile_id,
+                    &profile.graph_identity,
+                    &profile.profile_identity,
+                    &profile.slice_identity,
+                    &profile.source_snapshot_identity,
+                    &profile.graph_configuration_id,
+                    &profile.backend_id,
+                ] {
+                    hash_field(&mut hasher, value.as_bytes());
+                }
+            }
+        } else {
+            hasher.update([0]);
+        }
     }
     hex::encode(hasher.finalize())
+}
+
+fn hash_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
 }
 
 pub(super) fn split_node_labels(nodes: &[iroh::EndpointId]) -> Vec<String> {

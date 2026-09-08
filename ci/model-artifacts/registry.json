@@ -13,6 +13,7 @@
   "suites": [
     "llama-family-certification",
     "product-smoke",
+    "product-integration-smoke",
     "scripted-binary-smoke",
     "sdk-smoke",
     "hf-download-smoke",
@@ -935,11 +936,15 @@
       "id": "family-granite-hybrid",
       "family": "granite-hybrid",
       "suites": [
-        "llama-family-certification"
+        "llama-family-certification",
+        "product-integration-smoke"
       ],
       "cadences": [
         "llama-bump",
-        "manual-full"
+        "manual-full",
+        "pull-request",
+        "main",
+        "release"
       ],
       "capability_tags": [
         "gguf",
@@ -959,6 +964,10 @@
       },
       "certification": {
         "profile": "full",
+        "cadences": [
+          "llama-bump",
+          "manual-full"
+        ],
         "execution": {
           "trunk_layers": 32,
           "mtp_layers": 0,
@@ -972,6 +981,54 @@
           "estimated_model_bytes": 219091712
         },
         "notes": "cheap hybrid boundary sweep"
+      }
+    },
+    {
+      "id": "family-qwen35",
+      "family": "qwen35",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "recurrent"
+      ],
+      "artifact": {
+        "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+        "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+        "selector": "Q4_K_M",
+        "files": [
+          {
+            "path": "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "size_bytes": 532517120,
+            "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "cadences": [
+          "llama-bump",
+          "manual-full"
+        ],
+        "execution": {
+          "trunk_layers": 24,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 4,
+          "speculative_policy": "mtp-if-present"
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 521555200
+        },
+        "notes": "smallest public Qwen3.5 dense GGUF; hybrid gated-delta-net family with full-attention interval 4; coverage-expansion repair from the failed CI fixture row"
       }
     },
     {
@@ -1059,6 +1116,64 @@
           "estimated_model_bytes": 226925568
         },
         "notes": "cheap hybrid boundary sweep"
+      }
+    },
+    {
+      "id": "family-lfm2-vl",
+      "family": "lfm2-vl",
+      "suites": [
+        "llama-family-certification"
+      ],
+      "cadences": [
+        "llama-bump",
+        "manual-full"
+      ],
+      "capability_tags": [
+        "gguf",
+        "hybrid",
+        "recurrent",
+        "multimodal",
+        "projector"
+      ],
+      "artifact": {
+        "repo": "ggml-org/LFM2-VL-450M-GGUF",
+        "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+        "selector": "Q8_0",
+        "files": [
+          {
+            "path": "LFM2-VL-450M-Q8_0.gguf",
+            "size_bytes": 379215264,
+            "sha256": "e97704a0cf0a1d00ca604b4c672c82f4234318dba9d43a7f7a4c0d2df6747844"
+          }
+        ]
+      },
+      "certification": {
+        "profile": "full",
+        "execution": {
+          "trunk_layers": 16,
+          "mtp_layers": 0,
+          "activation_width": 1024,
+          "boundary_sweep_period": 2,
+          "speculative_policy": "mtp-if-present"
+        },
+        "mmproj_artifact": {
+          "repo": "ggml-org/LFM2-VL-450M-GGUF",
+          "revision": "0ff2ce5a6710f9bf0a6de87ec91832b43fa0ac05",
+          "selector": "Q8_0",
+          "files": [
+            {
+              "path": "mmproj-LFM2-VL-450M-Q8_0.gguf",
+              "size_bytes": 103890016,
+              "sha256": "a6a813fae4ba3f90852a990fdd4786a017dba0e80e599a366853ba539ee2b5ef"
+            }
+          ]
+        },
+        "resources": {
+          "runner_role": "family-certify",
+          "cache_policy": "immutable-local",
+          "estimated_model_bytes": 376830976
+        },
+        "notes": "small official multimodal hybrid model; text, recurrent, and mmproj lanes"
       }
     },
     {
@@ -1716,6 +1831,7 @@
       "family": "smollm2",
       "suites": [
         "product-smoke",
+        "product-integration-smoke",
         "scripted-binary-smoke",
         "sdk-smoke"
       ],

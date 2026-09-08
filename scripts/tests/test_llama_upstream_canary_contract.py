@@ -13,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "llama-upstream-canary.yml"
+PARITY = ROOT / "scripts" / "skippy-llama-parity.py"
 UPDATE_PIN = ROOT / "scripts" / "update-llama-pin.sh"
 BATTERY = ROOT / "scripts" / "skippy-family-battery.sh"
 BATTERY_PLANNER = ROOT / "scripts" / "plan-family-battery.py"
@@ -26,6 +27,73 @@ def _step_block(workflow: str, name: str) -> str:
     start = workflow.index(marker)
     end = workflow.find("\n      - name: ", start + len(marker))
     return workflow[start:] if end == -1 else workflow[start:end]
+
+
+class ParityCliInvocationTests(unittest.TestCase):
+    """Executable contract: the exact parity invocations the workflow and
+    repair wrapper use must parse (argparse rejects a global option placed
+    after the subcommand — seen live as exit 2)."""
+
+    def _temp_llama_src(self) -> tempfile.TemporaryDirectory:
+        # Hermetic: CI's quality job has no .deps/llama.cpp checkout. A minimal
+        # source tree with real boundary hooks is enough — argparse errors
+        # precede any source validation, so the global-first property under
+        # test is unchanged.
+        tmp = tempfile.TemporaryDirectory(prefix="parity-cli-src-")
+        models = Path(tmp.name) / "src" / "models"
+        models.mkdir(parents=True)
+        (models / "llama.cpp").write_text(
+            "void f() {\n"
+            "    begin_block(x, 0);\n"
+            "    end_block(y, 0);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(tmp.cleanup)
+        return tmp
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(PARITY), *args],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            check=False,
+        )
+
+    def test_validate_global_llama_src_before_subcommand(self) -> None:
+        tmp = self._temp_llama_src()
+        result = self._run("--llama-src", tmp.name, "validate")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_next_boundary_target_global_llama_src_before_subcommand(self) -> None:
+        tmp = self._temp_llama_src()
+        result = self._run(
+            "--llama-src", tmp.name, "next-boundary-target", "--json"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Valid single-target JSON (or null), not an argparse usage error.
+        payload = json.loads(result.stdout.strip() or "null")
+        self.assertTrue(payload is None or "llama_model" in payload)
+
+    def test_workflow_and_wrapper_use_valid_invocations(self) -> None:
+        # The exact command strings embedded in the workflow and wrapper
+        # must be the valid global-first form, never the rejected
+        # subcommand-first form.
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        wrapper = (ROOT / "scripts" / "llama-canary-agent-repair.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "skippy-llama-parity.py --llama-src .deps/llama.cpp validate", workflow
+        )
+        self.assertNotIn("next-boundary-target", workflow)
+        self.assertIn(
+            "skippy-llama-parity.py --llama-src .deps/llama.cpp \\", wrapper
+        )
+        for text in (workflow, wrapper):
+            self.assertNotIn("validate --llama-src", text)
+            self.assertNotIn("--json --llama-src", text)
 
 
 class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
@@ -61,12 +129,23 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             native_build,
         )
 
+        family_selection = _step_block(workflow, "Select changed generated families")
+        self.assertIn("select-skippy-family-shards.py", family_selection)
+        self.assertIn("--include-sentinels", family_selection)
+        self.assertIn("--changed-paths /tmp/changed-llama-sources.txt", family_selection)
+        self.assertIn("--family-map ci/llama-canary/generated-family-map.json", family_selection)
+        self.assertIn('git -C .deps/llama.cpp diff --name-only', family_selection)
+        self.assertIn('steps.sha.outputs.old_sha', family_selection)
+        self.assertIn('steps.sha.outputs.new_sha', family_selection)
+        self.assertNotIn("HEAD^", family_selection)
+
         family_plan = _step_block(workflow, "Plan and verify family certification cache")
         self.assertIn("python3 scripts/plan-family-battery.py", family_plan)
         self.assertIn('--cadence "${{ steps.sha.outputs.cadence }}"', family_plan)
         self.assertIn("--check-cache", family_plan)
         self.assertIn('--cache-root "$HF_CACHE"', family_plan)
         self.assertIn('--github-output "$GITHUB_OUTPUT"', family_plan)
+        self.assertIn('family_args=(--families "${{ steps.family_selection.outputs.families }}")', family_plan)
         self.assertLess(workflow.index(family_plan), workflow.index(native_build))
 
         build = _step_block(workflow, "Build stage runtime crates")
@@ -77,7 +156,6 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             "skippy-correctness",
             "skippy-server",
             "skippy-model-package",
-            "llama-spec-bench",
         ):
             self.assertIn(f"-p {package}", build)
 
@@ -121,6 +199,7 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, family-certify]", latest_job)
         self.assertIn("permissions:\n      contents: read", latest_job)
         self.assertIn("ref: main", latest_job)
+        self.assertIn("fetch-depth: 1", latest_job)
         self.assertNotIn("queue_ref", workflow)
         self.assertNotIn("github.token", latest_job)
         self.assertIn("runs-on: ubuntu-latest", update_job)
@@ -236,9 +315,124 @@ class LlamaUpstreamCanaryWorkflowTests(unittest.TestCase):
             self.assertNotIn("github.event.inputs", run_body)
             self.assertNotIn("steps.sha.outputs", run_body)
 
-        # The workflow's battery step tees its evidence log so a battery-mode
-        # repair turn reuses it instead of re-running the battery.
-        self.assertIn("tee .deps/llama-canary-repair-battery.log", battery)
+        # The workflow's battery step appends its evidence log (the parity
+        # validation gate writes the head of the same file) so a
+        # battery-mode repair turn reuses it instead of re-running.
+        self.assertIn("tee -a .deps/llama-canary-repair-battery.log", battery)
+
+        # The parity manifest validation gate runs before the family plan,
+        # fail-closed, and its failure feeds the same battery repair loop.
+        parity_gate = _step_block(
+            workflow, "Parity manifest validation (boundary registration gate)"
+        )
+        self.assertIn("skippy-llama-parity.py --llama-src .deps/llama.cpp validate", parity_gate)
+        self.assertIn("continue-on-error: true", parity_gate)
+        gate_idx = workflow.index("Parity manifest validation (boundary registration gate)")
+        plan_idx = workflow.index("Plan and verify family certification cache")
+        self.assertLess(gate_idx, plan_idx, "parity gate must run before the family plan")
+        self.assertIn("steps.parity_validate.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.parity_validate.outcome == 'failure'", fail_step)
+
+        # The live package-v2 two-node matrix makes model_pin rows executable
+        # evidence and routes failures to the same repair loop.
+        live_matrix = _step_block(
+            workflow, "Live package-v2 two-node matrix (model_pin proof)"
+        )
+        self.assertIn("scripts/skippy-canary-live-matrix.sh --prepare", live_matrix)
+        self.assertIn("set -o pipefail", live_matrix)
+        self.assertIn("continue-on-error: true", live_matrix)
+        self.assertIn("steps.live_matrix.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.live_matrix.outcome == 'failure'", fail_step)
+        # The live step must build this run's exact producers (host binary +
+        # patched native runtime) with an explicit backend — no cached
+        # binary/bundle may supply the matrix.
+        self.assertIn("SKIPPY_CANARY_LIVE_MATRIX_BACKEND", live_matrix)
+        self.assertIn("metal", live_matrix)
+
+        # The source rewriter replaces the one-family boundary-expansion loop.
+        # Its deterministic generated-patch check must route drift to the
+        # repair loop and keep every success report fail-closed.
+        family_patch = _step_block(workflow, "Verify generated model-family patch")
+        self.assertIn("id: family_patch", family_patch)
+        self.assertIn("continue-on-error: true", family_patch)
+        self.assertIn("scripts/check-skippy-generated-family-patch.sh", family_patch)
+        self.assertNotIn("next-boundary-target", workflow)
+        self.assertNotIn("llama-canary-coverage-target.json", workflow)
+        self.assertIn("steps.family_patch.outcome == 'failure'", battery_repair)
+        self.assertIn("steps.family_patch.outcome == 'failure'", fail_step)
+        self.assertIn("family_patch_outcome: ${{ steps.family_patch.outcome }}", workflow)
+        update_job = workflow[workflow.index("  update-pin:") :]
+        self.assertIn("needs.latest-upstream.outputs.family_patch_outcome == 'success'", update_job)
+
+        generated_patch_check = ROOT / "scripts" / "check-skippy-generated-family-patch.sh"
+        generated_patch_check_text = generated_patch_check.read_text(encoding="utf-8")
+        self.assertIn("llvm@22", generated_patch_check_text)
+        self.assertIn("patches/generated", generated_patch_check_text)
+        self.assertIn("generated-family-map.json", generated_patch_check_text)
+        self.assertIn("select-skippy-family-shards.py", generated_patch_check_text)
+        self.assertIn("generate-skippy-family-patch.py", generated_patch_check_text)
+        self.assertIn("skippy-rewriter-harness.py", generated_patch_check_text)
+        self.assertIn("skippy-noalloc-graph-planning", generated_patch_check_text)
+        self.assertIn("ORIGINAL_SOURCE_HEAD", generated_patch_check_text)
+        self.assertIn("GENERATED_PATCH_COUNT", generated_patch_check_text)
+        self.assertIn('--diff-base "$CORE_SOURCE_HEAD"', generated_patch_check_text)
+        self.assertIn("core-only generator input already contains", generated_patch_check_text)
+        self.assertIn("stage_filter", generated_patch_check_text)
+        self.assertIn("begin_block", generated_patch_check_text)
+        self.assertIn("end_block", generated_patch_check_text)
+        stage_free_model_patch = (
+            ROOT
+            / "third_party"
+            / "llama.cpp"
+            / "patches"
+            / "0019-skippy-add-stage-free-model-semantics.patch"
+        ).read_text(encoding="utf-8")
+        self.assertNotRegex(stage_free_model_patch, r"\bstage_filter\b")
+        self.assertNotRegex(stage_free_model_patch, r"\bbegin_block\s*\(")
+        self.assertNotRegex(stage_free_model_patch, r"\bend_block\s*\(")
+        self.assertIn("-R '^skippy_'", generated_patch_check_text)
+        generator_index = generated_patch_check_text.index(
+            'python3 "$ROOT/scripts/generate-skippy-family-patch.py"'
+        )
+        compile_index = generated_patch_check_text.index(
+            'cmake --build "$LLAMA_BUILD_DIR"'
+        )
+        self.assertIn(
+            '--target "${TRANSFORMED_TREE_TARGETS[@]}"',
+            generated_patch_check_text,
+        )
+        self.assertIn("skippy-stage-slice-plan", generated_patch_check_text)
+        verify_index = generated_patch_check_text.index(
+            'ctest --test-dir "$LLAMA_BUILD_DIR"'
+        )
+        self.assertLess(generator_index, compile_index)
+        self.assertLess(compile_index, verify_index)
+        self.assertIn('--compile-result "$compile_result"', generated_patch_check_text)
+        self.assertIn(
+            '--graph-verify-result "$graph_verify_result"',
+            generated_patch_check_text,
+        )
+        self.assertNotIn("--compile-result pass", generated_patch_check_text)
+        self.assertNotIn("--graph-verify-result pass", generated_patch_check_text)
+
+        native_build = _step_block(workflow, "Build patched llama.cpp ABI")
+        self.assertIn('LLAMA_STAGE_UPSTREAM_TESTS: "ON"', native_build)
+        self.assertIn("uv run --no-project --with jinja2==3.1.6", native_build)
+
+        # Truthful success reporting requires generated patch + parity + live
+        # + battery gates to be green on every cadence.
+        pin_report = _step_block(workflow, "Report upstream pin update")
+        forced_report = _step_block(workflow, "Report forced certification result")
+        nightly_report = _step_block(workflow, "Report nightly family result")
+        for report in (pin_report, forced_report, nightly_report):
+            self.assertIn("steps.battery.outcome == 'success'", report)
+            self.assertIn("steps.parity_validate.outcome == 'success'", report)
+            self.assertIn("steps.live_matrix.outcome == 'success'", report)
+            self.assertIn("steps.family_patch.outcome == 'success'", report)
+        # Live-matrix and generated-patch evidence are uploaded together.
+        upload = _step_block(workflow, "Upload supported-families battery evidence")
+        self.assertIn("target/family-battery/", upload)
+        self.assertIn("target/skippy-stage-rewriter-check/", upload)
 
     def test_post_green_agent_review_is_wired_and_opt_out(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -495,14 +689,17 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith(str(FAMILY_CERTIFY) + " ")
         ]
-        self.assertEqual(1, len(commands))
-        self.assertTrue(
-            commands[0]
-            .strip()
-            .endswith(
-                "--require-lanes --skip-build --skip-speculative"
-            )
+        self.assertEqual(3, len(commands))
+        self.assertEqual(
+            ["3", "1", "5"],
+            [command.split("--split-layer ", 1)[1].split()[0] for command in commands],
         )
+        for command in commands:
+            self.assertTrue(
+                command.strip().endswith(
+                    "--require-lanes --skip-build --skip-speculative"
+                )
+            )
 
     def test_family_battery_has_no_activation_wire_dtype_switches(self) -> None:
         script = BATTERY.read_text(encoding="utf-8")
@@ -522,9 +719,9 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith(str(FAMILY_CERTIFY) + " ")
         ]
-        self.assertEqual(2, len(commands))
+        self.assertEqual(6, len(commands))
         self.assertIn("--family test-family", commands[0])
-        self.assertIn("--family second-family", commands[1])
+        self.assertIn("--family second-family", commands[3])
 
     def test_family_filter_limits_the_resolved_dry_run(self) -> None:
         selected = self._dry_run("--families", "test-family")
@@ -567,7 +764,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
         self.assertIn("SKIPPY_MM_PROJECTOR=", smokes[0])
         self.assertIn("frontend::tests::multimodal", smokes[0])
         self.assertIn("--test-threads=1", smokes[0])
-        self.assertIn("family battery complete: 1/1", with_mmproj.stdout)
+        self.assertIn("family battery complete: 3/3", with_mmproj.stdout)
 
     def test_mmproj_failure_is_accounted_separately_from_core_certification(self) -> None:
         script = BATTERY.read_text(encoding="utf-8")
@@ -593,7 +790,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             digest,
         )
 
-    def test_preflight_pins_snapshot_and_limits_speculative_corpus_to_mtp(self) -> None:
+    def test_preflight_pins_snapshot_and_records_native_mtp_models(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             revision = "a" * 40
@@ -654,17 +851,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
                 f"#!/bin/sh\nprintf '%s\\n' '{complete_scan}'\n",
                 encoding="utf-8",
             )
-            spec = bin_dir / "llama-spec-bench"
-            spec.write_text(
-                "#!/bin/sh\n"
-                "while [ \"$#\" -gt 0 ]; do\n"
-                "  if [ \"$1\" = --json-out ]; then printf '{}\\n' > \"$2\"; exit 0; fi\n"
-                "  shift\n"
-                "done\n"
-                "exit 1\n",
-                encoding="utf-8",
-            )
-            for name in ("hf", "skippy-model-package", "llama-spec-bench"):
+            for name in ("hf", "skippy-model-package"):
                 path = bin_dir / name
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
             for name in ("skippy-correctness", "skippy-server"):
@@ -728,9 +915,13 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             resolved = (run_dir / "resolved-models.tsv").read_text(encoding="utf-8")
             self.assertIn(revision, resolved)
             self.assertIn("|1|1024|5|", resolved)
-            mtp_corpus = (run_dir / "mtp-corpus.tsv").read_text(encoding="utf-8")
-            self.assertIn("mtp-family", mtp_corpus)
-            self.assertTrue((run_dir / "preflight" / "speculative-smoke.json").is_file())
+            native_mtp_models = (run_dir / "native-mtp-models.tsv").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("mtp-family", native_mtp_models)
+            self.assertFalse(
+                (run_dir / "preflight" / "speculative-smoke.json").exists()
+            )
 
             incomplete_tensors = complete_tensors[:5] + [complete_tensors[5]]
             incomplete_scan = json.dumps(
@@ -759,7 +950,7 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             )
             self.assertEqual(1, incomplete.returncode)
             incomplete_run = next(incomplete_artifacts.iterdir())
-            incomplete_corpus = (incomplete_run / "mtp-corpus.tsv").read_text(
+            incomplete_corpus = (incomplete_run / "native-mtp-models.tsv").read_text(
                 encoding="utf-8"
             )
             self.assertEqual(
@@ -769,6 +960,14 @@ class SkippyFamilyBatteryTests(unittest.TestCase):
             self.assertFalse(
                 (incomplete_run / "preflight" / "speculative-smoke.json").exists()
             )
+
+    def test_native_mtp_uses_one_target_model_and_correctness_sidebands(self) -> None:
+        script = BATTERY.read_text(encoding="utf-8")
+
+        self.assertIn("--require-native-mtp-draft", script)
+        self.assertIn("--skip-speculative", script)
+        self.assertNotIn("--draft-model", script)
+        self.assertNotIn("llama-spec-bench", script)
 
 
 if __name__ == "__main__":
