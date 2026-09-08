@@ -61,6 +61,8 @@ pub(crate) use local_source::{
     is_content_addressed_gguf_ref, register_local_source_policy, unregister_local_source_policy,
     verify_registered_content_source,
 };
+#[cfg(test)]
+pub(crate) use materialization::resolve_package_v2_stage_to_local;
 pub use materialization::{
     configure_materialized_stage_cache, is_layer_package_ref, materialized_stage_cache_dir,
     materialized_stages_for_sources, prune_unpinned_materialized_stages,

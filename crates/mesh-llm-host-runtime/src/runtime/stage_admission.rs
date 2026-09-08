@@ -623,46 +623,80 @@ impl PlannerInputs {
             .iter()
             .map(|artifact| (artifact.id.as_str(), artifact))
             .collect::<BTreeMap<_, _>>();
-        let mut source_artifacts = artifact_by_id
-            .iter()
-            .filter_map(|(id, artifact)| source_artifact_index(id).map(|index| (index, *artifact)))
-            .collect::<Vec<_>>();
-        source_artifacts.sort_by_key(|(index, _)| *index);
-        anyhow::ensure!(
-            !source_artifacts.is_empty()
-                && source_artifacts
-                    .iter()
-                    .enumerate()
-                    .all(|(expected, (actual, _))| expected == *actual),
-            "package-v2 source artifacts are not a contiguous source-00000 shard set"
-        );
-        let mut shard_paths = Vec::with_capacity(source_artifacts.len());
         let mut shard_index_by_artifact = BTreeMap::new();
-        for (index, artifact) in &source_artifacts {
-            let path = match (package_dir, explicit_shard_paths) {
-                (Some(package_dir), None) => contained_package_path(package_dir, &artifact.path)?,
-                (None, Some(paths)) => paths
-                    .get(*index)
-                    .cloned()
-                    .with_context(|| format!("direct GGUF source shard {index} is missing"))?,
-                _ => anyhow::bail!(
-                    "stage planner requires exactly one package directory or explicit shard set"
-                ),
-            };
-            anyhow::ensure!(
-                path.is_file(),
-                "stage-planning source artifact is missing: {}",
-                path.display()
-            );
-            shard_paths.push(path_cstring(&path, "stage-planning shard path")?);
-            shard_index_by_artifact.insert(artifact.id.as_str(), *index);
-        }
-        if let Some(paths) = explicit_shard_paths {
-            anyhow::ensure!(
-                paths.len() == source_artifacts.len(),
-                "direct GGUF source shard count differs from planning manifest"
-            );
-        }
+        let mut carrier_tensors = None;
+        let shard_paths = match (package_dir, explicit_shard_paths) {
+            (Some(package_dir), None) => {
+                let artifact = artifact_by_id
+                    .get(manifest.source_model.metadata_artifact_id.as_str())
+                    .with_context(|| {
+                        format!(
+                            "package-v2 metadata artifact {:?} is absent",
+                            manifest.source_model.metadata_artifact_id
+                        )
+                    })?;
+                let path = contained_package_path(package_dir, &artifact.path)?;
+                anyhow::ensure!(
+                    path.is_file(),
+                    "stage-planning metadata carrier is missing: {}",
+                    path.display()
+                );
+                let catalog = skippy_model::gguf_catalog::read_gguf_metadata_catalog(&path)
+                    .with_context(|| {
+                        format!("read stage-planning metadata carrier {}", path.display())
+                    })?;
+                let tensors = catalog
+                    .tensors
+                    .into_iter()
+                    .map(|tensor| (tensor.name.clone(), tensor))
+                    .collect::<BTreeMap<_, _>>();
+                anyhow::ensure!(
+                    tensors.len() == manifest.tensor_catalog.entries.len(),
+                    "metadata carrier and package tensor inventory sizes differ"
+                );
+                carrier_tensors = Some(tensors);
+                vec![path_cstring(&path, "stage-planning metadata carrier path")?]
+            }
+            (None, Some(paths)) => {
+                let mut source_artifacts = artifact_by_id
+                    .iter()
+                    .filter_map(|(id, artifact)| {
+                        source_artifact_index(id).map(|index| (index, *artifact))
+                    })
+                    .collect::<Vec<_>>();
+                source_artifacts.sort_by_key(|(index, _)| *index);
+                anyhow::ensure!(
+                    !source_artifacts.is_empty()
+                        && source_artifacts
+                            .iter()
+                            .enumerate()
+                            .all(|(expected, (actual, _))| expected == *actual),
+                    "direct GGUF source artifacts are not a contiguous source-00000 shard set"
+                );
+                anyhow::ensure!(
+                    paths.len() == source_artifacts.len(),
+                    "direct GGUF source shard count differs from planning manifest"
+                );
+                let mut shard_paths = Vec::with_capacity(source_artifacts.len());
+                for (index, artifact) in &source_artifacts {
+                    let path = paths
+                        .get(*index)
+                        .cloned()
+                        .with_context(|| format!("direct GGUF source shard {index} is missing"))?;
+                    anyhow::ensure!(
+                        path.is_file(),
+                        "stage-planning source artifact is missing: {}",
+                        path.display()
+                    );
+                    shard_paths.push(path_cstring(&path, "stage-planning shard path")?);
+                    shard_index_by_artifact.insert(artifact.id.as_str(), *index);
+                }
+                shard_paths
+            }
+            _ => anyhow::bail!(
+                "stage planner requires exactly one package directory or explicit shard set"
+            ),
+        };
 
         let tensor_by_id = manifest
             .tensor_catalog
@@ -687,13 +721,30 @@ impl PlannerInputs {
         for (index, tensor) in ordered_tensors.iter().enumerate() {
             let (artifact_id, data_offset, stored_length) =
                 tensor_storage(manifest, &tensor_by_id, &tensor.id)?;
-            let split_no = *shard_index_by_artifact.get(artifact_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "tensor {:?} resolves to non-source artifact {:?}",
-                    tensor.id,
-                    artifact_id
-                )
-            })?;
+            let (split_no, data_offset) = if let Some(carrier_tensors) = &carrier_tensors {
+                let carrier = carrier_tensors.get(&tensor.name).with_context(|| {
+                    format!(
+                        "tensor {:?} is absent from the metadata carrier",
+                        tensor.name
+                    )
+                })?;
+                anyhow::ensure!(
+                    carrier.ggml_type == tensor.ggml_type
+                        && carrier.dimensions == tensor.dimensions,
+                    "tensor {:?} metadata differs from the metadata carrier",
+                    tensor.name
+                );
+                (0, carrier.data_offset)
+            } else {
+                let split_no = *shard_index_by_artifact.get(artifact_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "tensor {:?} resolves to non-source artifact {:?}",
+                        tensor.id,
+                        artifact_id
+                    )
+                })?;
+                (split_no, data_offset)
+            };
             let mut dimensions = [0_i64; skippy_ffi::STAGE_PLAN_MAX_DIMS];
             anyhow::ensure!(
                 !tensor.dimensions.is_empty()
@@ -1934,5 +1985,35 @@ mod tests {
                 .iter()
                 .all(|admission| admission.profiles.len() == 3)
         );
+        let package_ref = package_dir.to_string_lossy();
+        for admission in &admissions {
+            let descriptor = skippy_package_format::stage_admission::StageAdmissionDescriptor {
+                package_id: admission.package_id.clone(),
+                resident_tensor_ids: admission.resident_tensor_ids.clone(),
+                sidecars: Vec::new(),
+            };
+            let (_, model_parts, projector) =
+                crate::inference::skippy::resolve_package_v2_stage_to_local(
+                    &package_ref,
+                    &descriptor,
+                )
+                .expect("real package-v2 stage artifacts must resolve");
+            assert!(projector.is_none());
+            assert!(
+                model_parts
+                    .iter()
+                    .any(|path| path.ends_with("shared/metadata.gguf"))
+            );
+            assert!(
+                model_parts
+                    .iter()
+                    .all(|path| path.starts_with(&package_dir))
+            );
+            assert!(
+                model_parts
+                    .iter()
+                    .all(|path| !path.starts_with(package_dir.join("artifacts")))
+            );
+        }
     }
 }
