@@ -125,6 +125,8 @@
       "domain": "ui",
       "patterns": [
         "crates/mesh-llm-ui/**",
+        "scripts/ci-prepare-release-ui.sh",
+        "scripts/release-version.sh",
         "pnpm-lock.yaml",
         "package.json"
       ]
@@ -135,6 +137,9 @@
         "scripts/build-*.sh",
         "scripts/build-*.ps1",
         "scripts/ci-*-smoke.sh",
+        "scripts/ci-smoke-test.sh",
+        "scripts/ci-verify-smoke-offload.py",
+        "scripts/ci-prepare-native-runtime.sh",
         "scripts/ci-*-smoke.py",
         "scripts/ci-*-smoke.cjs",
         "scripts/compose-product*",
@@ -196,6 +201,7 @@
         "crates/mesh-llm-sdk/**",
         "crates/mesh-llm-api-client/**",
         "crates/mesh-llm-api-server/**",
+        "scripts/ci-prepare-native-runtime.sh",
         "scripts/ci-rust-sdk-smoke.sh",
         "sdk/**"
       ]
@@ -204,6 +210,7 @@
       "domain": "sdk-kotlin",
       "patterns": [
         "sdk/kotlin/**",
+        "scripts/ci-prepare-native-runtime.sh",
         "scripts/ci-kotlin-sdk-smoke.sh"
       ]
     },
@@ -212,6 +219,7 @@
       "patterns": [
         "sdk/swift/**",
         "Package.swift",
+        "scripts/ci-prepare-native-runtime.sh",
         "scripts/ci-swift-sdk-smoke.sh"
       ]
     },
@@ -237,6 +245,9 @@
       "domain": "backend-cuda",
       "patterns": [
         "scripts/detect-cuda-arch.sh",
+        "scripts/ci-smoke-test.sh",
+        "scripts/ci-compat-smoke.sh",
+        "scripts/ci-verify-smoke-offload.py",
         "scripts/build-linux.sh",
         "scripts/build-windows.ps1"
       ]
