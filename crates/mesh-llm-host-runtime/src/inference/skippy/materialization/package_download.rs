@@ -1232,7 +1232,9 @@ pub fn resolve_package_v2_stage_to_local(
 /// Split stages arrive with an exact coordinator-produced admission descriptor.
 /// A local single-node load owns every tensor, so its admission descriptor is
 /// the manifest's complete, ordered tensor catalog.
-pub fn resolve_package_v2_full_model_to_local(package_ref: &str) -> Result<Vec<PathBuf>> {
+pub fn resolve_package_v2_full_model_to_local(
+    package_ref: &str,
+) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
     let local_ref = resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
     let manifest_path = Path::new(&local_ref).join("model-package.json");
     let manifest: PackageManifestV2 = serde_json::from_slice(
@@ -1240,6 +1242,8 @@ pub fn resolve_package_v2_full_model_to_local(package_ref: &str) -> Result<Vec<P
             .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
     )
     .context("parse package-v2 manifest")?;
+    let mut sidecars = manifest.sidecars.clone();
+    sidecars.sort();
     let admission = PackageV2StageAdmissionDescriptor {
         package_id: manifest.package_id.clone(),
         resident_tensor_ids: manifest
@@ -1254,10 +1258,10 @@ pub fn resolve_package_v2_full_model_to_local(package_ref: &str) -> Result<Vec<P
             })
             .map(|tensor| tensor.id.clone())
             .collect(),
-        sidecars: Vec::new(),
+        sidecars,
     };
-    let (_, model_parts, _) = resolve_package_v2_stage_to_local(package_ref, &admission)?;
-    Ok(model_parts)
+    let (_, model_parts, projector) = resolve_package_v2_stage_to_local(package_ref, &admission)?;
+    Ok((model_parts, projector))
 }
 
 fn safe_manifest_file_path(path: &str) -> Result<PathBuf> {

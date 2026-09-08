@@ -826,7 +826,7 @@ async fn start_local_package_v2_model(
     LocalRuntimeModelHandle,
     tokio::sync::oneshot::Receiver<()>,
 )> {
-    let admitted_model_parts = if package.source_files.is_empty() {
+    let (admitted_model_parts, package_projector_path) = if package.source_files.is_empty() {
         let package_ref = package.package_ref.clone();
         tokio::task::spawn_blocking(move || {
             skippy::resolve_package_v2_full_model_to_local(&package_ref)
@@ -834,26 +834,30 @@ async fn start_local_package_v2_model(
         .await
         .context("join resolve complete package-v2 model task")??
     } else {
-        std::iter::once(package.source_model_path.clone())
-            .chain(
-                package
-                    .source_files
-                    .iter()
-                    .map(|source| source.path.clone()),
-            )
-            .filter(|path| {
-                path.file_name()
-                    .is_none_or(|name| name != "model-package.json")
-            })
-            .fold(Vec::new(), |mut paths, path| {
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
-                paths
-            })
+        (
+            std::iter::once(package.source_model_path.clone())
+                .chain(
+                    package
+                        .source_files
+                        .iter()
+                        .map(|source| source.path.clone()),
+                )
+                .filter(|path| {
+                    path.file_name()
+                        .is_none_or(|name| name != "model-package.json")
+                })
+                .fold(Vec::new(), |mut paths, path| {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                    paths
+                }),
+            None,
+        )
     };
     let context_length = plan.context_length;
-    let fallback_projector_path = mmproj_path_for_model(&model_name).filter(|path| path.exists());
+    let fallback_projector_path = package_projector_path
+        .or_else(|| mmproj_path_for_model(&model_name).filter(|path| path.exists()));
     let mut resolved = resolve_local_openai_skippy_config(
         &spec,
         &model_name,
