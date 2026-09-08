@@ -159,3 +159,149 @@ async fn singleton_and_context_filtered_fleet_do_not_leak_reservations() {
     assert!(selected.is_empty());
     assert_eq!(affinity.stats_snapshot().reservation_active, 0);
 }
+
+#[tokio::test]
+async fn healthy_clones_beat_faster_deprioritized_clone_even_under_pressure() {
+    use crate::proto::node::InferenceAdmissionState;
+
+    let (node, healthy) = fleet(2).await;
+    let hot = fleet_peer_with_health(
+        3,
+        BIG_MODELS[0],
+        Some(InferenceAdmissionState::AcceptingDeprioritized),
+        Some(200_000),
+    );
+    node.insert_test_peer(hot).await;
+    let candidates: Vec<_> = node
+        .hosts_for_model(BIG_MODELS[0].name)
+        .await
+        .into_iter()
+        .map(InferenceTarget::Remote)
+        .collect();
+    let affinity = AffinityRouter::new();
+    let mut committees = Vec::new();
+    // Also preserve health priority when reservation accounting is disabled.
+    for router in [None, Some(&affinity), Some(&affinity), Some(&affinity)] {
+        let selected = select_clones(
+            &node,
+            BIG_MODELS[0].name,
+            Some(13_000),
+            candidates.clone(),
+            router,
+        )
+        .await;
+        assert_eq!(selected.len(), 2);
+        assert_ne!(selected[0].0, selected[1].0);
+        assert!(selected.iter().all(|(target, _)| healthy.contains(target)));
+        committees.push(selected);
+    }
+    assert_eq!(affinity.stats_snapshot().reservation_active, 6);
+    drop(committees);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+}
+
+#[tokio::test]
+async fn depleted_healthy_tier_uses_and_spreads_spillover() {
+    use crate::proto::node::InferenceAdmissionState;
+
+    // With one healthy clone it owns slot one; with none, both slots may
+    // use spillover. Equal throughput across tiers must not merge their
+    // reservation windows, even after the healthy clone is reserved.
+    for healthy_count in [0, 1] {
+        let (node, healthy) = fleet(healthy_count).await;
+        let mut spillover = Vec::new();
+        for seed in 2..=5 {
+            let peer = fleet_peer_with_health(
+                seed,
+                BIG_MODELS[0],
+                Some(InferenceAdmissionState::AcceptingDeprioritized),
+                Some(100_000),
+            );
+            spillover.push(InferenceTarget::Remote(peer.id));
+            node.insert_test_peer(peer).await;
+        }
+        let candidates = node
+            .hosts_for_model(BIG_MODELS[0].name)
+            .await
+            .into_iter()
+            .map(InferenceTarget::Remote)
+            .collect::<Vec<_>>();
+        let affinity = AffinityRouter::new();
+        let mut committees = Vec::new();
+        let mut used_spillover = HashSet::new();
+        for _ in 0..(4 / (2 - healthy_count)) {
+            let selected = select_clones(
+                &node,
+                BIG_MODELS[0].name,
+                Some(13_000),
+                candidates.clone(),
+                Some(&affinity),
+            )
+            .await;
+            assert_eq!(selected.len(), 2);
+            assert_ne!(selected[0].0, selected[1].0);
+            if healthy_count == 1 {
+                assert_eq!(selected[0].0, healthy[0]);
+            }
+            for (target, _) in &selected {
+                if spillover.contains(target) {
+                    assert!(used_spillover.insert(format!("{target:?}")));
+                }
+            }
+            committees.push(selected);
+        }
+        assert_eq!(used_spillover.len(), 4);
+        assert_eq!(
+            affinity.stats_snapshot().reservation_active,
+            committees.len() * 2
+        );
+        drop(committees);
+        assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+    }
+}
+
+#[tokio::test]
+async fn context_ineligible_healthy_clones_do_not_block_spillover() {
+    use crate::proto::node::InferenceAdmissionState;
+
+    let (node, _) = fleet(2).await;
+    let mut spillover = Vec::new();
+    for seed in 3..=4 {
+        let mut peer = fleet_peer_with_health(
+            seed,
+            BIG_MODELS[0],
+            Some(InferenceAdmissionState::AcceptingDeprioritized),
+            Some(200_000),
+        );
+        // Existing healthy clones cannot fit 100k; these can.
+        for runtime in &mut peer.served_model_runtime {
+            runtime.context_length = Some(200_000);
+        }
+        spillover.push(InferenceTarget::Remote(peer.id));
+        node.insert_test_peer(peer).await;
+    }
+    let candidates = node
+        .hosts_for_model(BIG_MODELS[0].name)
+        .await
+        .into_iter()
+        .map(InferenceTarget::Remote)
+        .collect();
+    let affinity = AffinityRouter::new();
+    let selected = select_clones(
+        &node,
+        BIG_MODELS[0].name,
+        Some(100_000),
+        candidates,
+        Some(&affinity),
+    )
+    .await;
+    assert_eq!(selected.len(), 2);
+    assert_ne!(selected[0].0, selected[1].0);
+    assert!(
+        selected
+            .iter()
+            .all(|(target, _)| spillover.contains(target))
+    );
+    drop(selected);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+}

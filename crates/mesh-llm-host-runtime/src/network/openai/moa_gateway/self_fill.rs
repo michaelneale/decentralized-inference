@@ -15,14 +15,33 @@ async fn select_clones(
     node: &mesh::Node,
     name: &str,
     required_tokens: Option<u32>,
-    mut candidates: Vec<InferenceTarget>,
+    candidates: Vec<InferenceTarget>,
     affinity: Option<&AffinityRouter>,
 ) -> Vec<(InferenceTarget, Option<RoutingReservation>)> {
+    use crate::proto::node::InferenceAdmissionState;
+
+    let deprioritized: std::collections::HashSet<_> = node
+        .peers()
+        .await
+        .into_iter()
+        .filter(|peer| {
+            peer.inference_admission_state == Some(InferenceAdmissionState::AcceptingDeprioritized)
+        })
+        .map(|peer| peer.id)
+        .collect();
+    // Preserve admission priority before context/throughput ranking. Local and
+    // legacy peers stay healthy; hosts_for_model already excludes paused peers.
+    let (mut healthy, mut spillover): (Vec<_>, Vec<_>) = candidates.into_iter().partition(
+        |target| !matches!(target, InferenceTarget::Remote(id) if deprioritized.contains(id)),
+    );
     let mut selected = Vec::with_capacity(SELF_FILL_TARGET_WORKERS);
     while selected.len() < SELF_FILL_TARGET_WORKERS {
-        // Re-rank the remaining endpoints so slot two can use the next tier
-        // only when slot one exhausted the best tier, never due to load alone.
-        let ranked = rank_targets_by_context(node, name, required_tokens, &candidates).await;
+        // Exhaust context-eligible healthy endpoints before considering spillover,
+        // even when every healthy clone already has reservations from other turns.
+        let mut ranked = rank_targets_by_context(node, name, required_tokens, &healthy).await;
+        if ranked.ordered.is_empty() {
+            ranked = rank_targets_by_context(node, name, required_tokens, &spillover).await;
+        }
         let Some(preferred) = ranked.ordered.first() else {
             break;
         };
@@ -40,7 +59,8 @@ async fn select_clones(
             .unwrap_or_else(|| (preferred.clone(), None));
         // Selection+reservation is atomic per slot; removing the endpoint
         // prevents duplicate workers even when other turns interleave slots.
-        candidates.retain(|candidate| candidate != &target);
+        healthy.retain(|candidate| candidate != &target);
+        spillover.retain(|candidate| candidate != &target);
         selected.push((target, reservation));
     }
     selected
