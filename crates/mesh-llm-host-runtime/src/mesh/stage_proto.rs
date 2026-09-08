@@ -12,6 +12,7 @@ use super::{StageAssignment, StageEndpoint, StageRuntimeStatus, StageTopologyIns
 use anyhow::Context;
 use iroh::EndpointId;
 use skippy_protocol::proto::stage as skippy_stage_proto;
+use std::collections::BTreeMap;
 
 pub(super) fn stage_topology_key(topology_id: &str, run_id: &str) -> String {
     format!("{topology_id}\n{run_id}")
@@ -143,6 +144,7 @@ pub(super) fn stage_topology_from_load(
         model_id: load.model_id.clone(),
         package_ref: load.package_ref.clone(),
         manifest_sha256: load.manifest_sha256.clone(),
+        admissions: BTreeMap::from([(load.stage_id.clone(), load.admission.clone())]),
         stages: load
             .topology_stages
             .iter()

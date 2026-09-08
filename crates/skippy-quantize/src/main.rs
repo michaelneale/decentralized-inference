@@ -744,7 +744,7 @@ fn write_and_preflight_layer_package(
 ) -> Result<()> {
     let first_quantized_shard = find_first_shard(&manifest.target, &manifest.target_prefix)?;
     run_skippy_model_package_write(args, &first_quantized_shard)?;
-    run_skippy_model_package_preflight(args)
+    run_skippy_model_package_v2_verify(args, &first_quantized_shard)
 }
 
 fn run_skippy_model_package_write(
@@ -790,22 +790,29 @@ fn run_skippy_model_package_write(
     Ok(())
 }
 
-fn run_skippy_model_package_preflight(args: &QuantizeLayerPackageArgs) -> Result<()> {
-    print_path_event("✅", "Preflighting layer package", &args.package_dir);
+fn run_skippy_model_package_v2_verify(
+    args: &QuantizeLayerPackageArgs,
+    first_source_shard: &Path,
+) -> Result<()> {
+    print_path_event("✅", "Verifying package v2", &args.package_dir);
     let mut command = ProcessCommand::new(&args.skippy_model_package_bin);
     command
-        .arg("preflight")
+        .arg("verify-package-v2")
         .arg(&args.package_dir)
-        .arg("--verify-sha256");
-    if let Some(stages) = args.stages {
-        command.arg("--stages").arg(stages.to_string());
+        .arg("--source")
+        .arg(first_source_shard);
+    if let Some(source_file) = &args.package_source_file {
+        command.arg("--source-file").arg(source_file);
     }
-    let status = command
-        .status()
-        .with_context(|| format!("run {} preflight", args.skippy_model_package_bin.display()))?;
+    let status = command.status().with_context(|| {
+        format!(
+            "run {} verify-package-v2",
+            args.skippy_model_package_bin.display()
+        )
+    })?;
     ensure!(
         status.success(),
-        "{} preflight failed with status {status}",
+        "{} verify-package-v2 failed with status {status}",
         args.skippy_model_package_bin.display()
     );
     Ok(())

@@ -202,7 +202,7 @@ pub(super) async fn load_split_runtime_generation_inner(
     let mut ready_by_stage: HashMap<String, skippy::StageStatusSnapshot> = HashMap::new();
     let mut downstream: Option<skippy::StagePeerDescriptor> = None;
 
-    if settings.load_mode == LoadMode::LayerPackage {
+    if spec.package.package_ref.starts_with("hf://") {
         spec.node
             .record_stage_topology(split_stage_topology_instance(
                 &spec.generation.topology_id,
@@ -210,6 +210,7 @@ pub(super) async fn load_split_runtime_generation_inner(
                 spec.model_ref,
                 spec.package,
                 &spec.generation.stages,
+                &spec.generation.admissions,
                 None,
                 &ready_by_stage,
             ))
@@ -342,6 +343,7 @@ pub(super) async fn load_split_runtime_generation_inner(
             spec.model_ref,
             spec.package,
             &spec.generation.stages,
+            &spec.generation.admissions,
             Some(&stage0_return_endpoint),
             &ready_by_stage,
         ))
@@ -384,7 +386,7 @@ pub(super) async fn stage0_runtime_options(
     runtime_options.config.package_ref = Some(spec.package.package_ref.clone());
     runtime_options.config.manifest_sha256 = Some(spec.package.manifest_sha256.clone());
     let verified_stage0_model_path = if spec.local_source_required {
-        let mut stage0_load = split_runtime_stage_load_request(
+        let mut verified_load = split_runtime_stage_load_request(
             spec,
             settings,
             settings.stage0,
@@ -393,9 +395,9 @@ pub(super) async fn stage0_runtime_options(
             &HashMap::new(),
         )?;
         let stage0_load = tokio::task::spawn_blocking(move || {
-            let verified = skippy::apply_verified_local_source(&mut stage0_load)?;
+            let verified = skippy::apply_verified_local_source(&mut verified_load)?;
             anyhow::ensure!(verified, "local-required stage 0 was not content-verified");
-            anyhow::Ok(stage0_load)
+            anyhow::Ok(verified_load)
         })
         .await
         .context("join verify local-required stage 0 source task")??;
@@ -407,21 +409,70 @@ pub(super) async fn stage0_runtime_options(
     } else {
         None
     };
-    let effective_model_path = verified_stage0_model_path.unwrap_or_else(|| {
-        stage_load_model_path(
-            settings.load_mode.clone(),
-            &spec.package.package_ref,
-            &spec.package.source_model_path,
+    let resolved_stage0_package = if !spec.local_source_required
+        && settings.load_mode == LoadMode::RuntimeSlice
+        && skippy::is_layer_package_ref(&spec.package.package_ref)
+    {
+        let stage0_load = split_runtime_stage_load_request(
+            spec,
+            settings,
+            settings.stage0,
+            Some(downstream.clone()),
+            stage0_return_endpoint,
+            &HashMap::new(),
+        )?;
+        Some(
+            tokio::task::spawn_blocking(move || skippy::resolve_stage_load_package(&stage0_load))
+                .await
+                .context("join resolve package-v2 stage 0 task")??
+                .context("package-v2 stage 0 did not resolve to a local package")?,
         )
+    } else {
+        None
+    };
+    let effective_model_path = verified_stage0_model_path.unwrap_or_else(|| {
+        resolved_stage0_package
+            .as_ref()
+            .map(|package| package.source_model_path.clone())
+            .unwrap_or_else(|| {
+                stage_load_model_path(
+                    settings.load_mode.clone(),
+                    &spec.package.package_ref,
+                    &spec.package.source_model_path,
+                )
+            })
     });
     runtime_options.config.source_model_path = Some(effective_model_path.clone());
-    runtime_options.config.source_model_sha256 = Some(spec.package.source_model_sha256.clone());
-    runtime_options.config.source_model_bytes = Some(spec.package.source_model_bytes);
+    runtime_options.config.source_model_sha256 = Some(
+        resolved_stage0_package
+            .as_ref()
+            .map(|package| package.source_model_sha256.clone())
+            .unwrap_or_else(|| spec.package.source_model_sha256.clone()),
+    );
+    runtime_options.config.source_model_bytes = resolved_stage0_package
+        .as_ref()
+        .and_then(|package| package.source_model_bytes)
+        .or(Some(spec.package.source_model_bytes));
     runtime_options.config.materialized_path = None;
     runtime_options.config.materialized_pinned = false;
     runtime_options.config.model_path = Some(effective_model_path);
+    runtime_options.config.model_part_paths = resolved_stage0_package
+        .as_ref()
+        .map(|package| {
+            package
+                .model_part_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
     if runtime_options.config.projector_path.is_none() {
-        runtime_options.config.projector_path = spec.projector_path.clone();
+        runtime_options.config.projector_path = spec.projector_path.clone().or_else(|| {
+            resolved_stage0_package
+                .as_ref()
+                .and_then(|package| package.projector_path.as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+        });
     }
     runtime_options.config.stage_id = settings.stage0.stage_id.clone();
     runtime_options.config.stage_index = settings.stage0.stage_index;
@@ -615,7 +666,7 @@ pub(super) fn stage_source_prepare_timeout(
     include_output: bool,
 ) -> Result<Duration> {
     let assigned_bytes = if skippy::is_layer_package_ref(&package.package_ref)
-        && !skippy::is_package_v2_ref(&package.package_ref)
+        && !skippy::is_package_v2_identity(package)
     {
         crate::models::artifact_transfer::required_stage_package_bytes(
             model_path,
@@ -888,7 +939,7 @@ pub(super) fn apply_split_generation_pinned_device(
 
 pub(super) fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
     if skippy::is_layer_package_ref(&package.package_ref)
-        && !skippy::is_package_v2_ref(&package.package_ref)
+        && !skippy::is_package_v2_identity(package)
     {
         LoadMode::LayerPackage
     } else {
@@ -1265,12 +1316,14 @@ pub(super) async fn query_stage_inventory(
     Ok(inventory)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn split_stage_topology_instance(
     topology_id: &str,
     run_id: &str,
     model_ref: &str,
     package: &skippy::SkippyPackageIdentity,
     stages: &[RuntimeSliceStagePlan],
+    admissions: &std::collections::BTreeMap<String, skippy_protocol::StageAdmissionDescriptor>,
     stage0_bind_addr: Option<&str>,
     ready_by_stage: &HashMap<String, skippy::StageStatusSnapshot>,
 ) -> mesh::StageTopologyInstance {
@@ -1280,6 +1333,7 @@ pub(super) fn split_stage_topology_instance(
         model_id: model_ref.to_string(),
         package_ref: package.package_ref.clone(),
         manifest_sha256: package.manifest_sha256.clone(),
+        admissions: admissions.clone(),
         stages: stages
             .iter()
             .map(|stage| mesh::StageAssignment {

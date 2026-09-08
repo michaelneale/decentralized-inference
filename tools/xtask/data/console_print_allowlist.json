@@ -1579,19 +1579,15 @@
   ],
   "crates/mesh-llm-host-runtime/src/inference/skippy/materialization/package_download.rs": [
     {
-      "line": 146,
+      "line": 151,
       "macro_name": "eprintln!"
     },
     {
-      "line": 190,
+      "line": 195,
       "macro_name": "eprint!"
     },
     {
-      "line": 194,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 299,
+      "line": 199,
       "macro_name": "eprintln!"
     },
     {
@@ -1599,11 +1595,15 @@
       "macro_name": "eprintln!"
     },
     {
-      "line": 501,
+      "line": 309,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 506,
       "macro_name": "eprint!"
     },
     {
-      "line": 504,
+      "line": 509,
       "macro_name": "eprintln!"
     }
   ],
@@ -1905,19 +1905,19 @@
   ],
   "crates/mesh-llm-host-runtime/src/runtime/local_split/tests.rs": [
     {
-      "line": 2101,
+      "line": 2129,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2106,
+      "line": 2134,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2118,
+      "line": 2146,
       "macro_name": "eprintln!"
     },
     {
-      "line": 2139,
+      "line": 2167,
       "macro_name": "eprintln!"
     }
   ],
@@ -4099,19 +4099,19 @@
   ],
   "crates/skippy-prompt/src/prompt_cli/stage_config.rs": [
     {
-      "line": 357,
+      "line": 358,
       "macro_name": "eprintln!"
     },
     {
-      "line": 397,
+      "line": 398,
       "macro_name": "eprintln!"
     },
     {
-      "line": 463,
+      "line": 464,
       "macro_name": "eprintln!"
     },
     {
-      "line": 477,
+      "line": 478,
       "macro_name": "eprint!"
     }
   ],
@@ -4433,27 +4433,27 @@
   ],
   "crates/skippy-server/src/runtime_state.rs": [
     {
-      "line": 768,
+      "line": 786,
       "macro_name": "eprintln!"
     },
     {
-      "line": 861,
+      "line": 879,
       "macro_name": "eprintln!"
     },
     {
-      "line": 903,
+      "line": 921,
       "macro_name": "eprintln!"
     },
     {
-      "line": 940,
+      "line": 958,
       "macro_name": "eprintln!"
     },
     {
-      "line": 944,
+      "line": 962,
       "macro_name": "eprintln!"
     },
     {
-      "line": 949,
+      "line": 967,
       "macro_name": "eprintln!"
     }
   ]

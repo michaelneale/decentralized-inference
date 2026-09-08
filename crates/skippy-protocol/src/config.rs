@@ -195,6 +195,10 @@ pub struct StageConfig {
     pub materialized_pinned: bool,
     #[serde(default)]
     pub model_path: Option<String>,
+    /// Ordered local GGUF artifacts selected from an admitted package-v2
+    /// tensor closure. The metadata-bearing primary artifact is first.
+    #[serde(default)]
+    pub model_part_paths: Vec<String>,
     /// Optional load-time quantization recipe for a SafeTensors checkpoint.
     #[serde(default)]
     pub checkpoint_quantization: Option<String>,

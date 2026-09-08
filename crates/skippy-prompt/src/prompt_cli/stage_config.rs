@@ -54,6 +54,7 @@ fn write_local_configs(
             materialized_path: None,
             materialized_pinned: false,
             model_path: Some(stage_model_path),
+            model_part_paths: Vec::new(),
             projector_path: None,
             projector_use_gpu: None,
             media_marker: None,

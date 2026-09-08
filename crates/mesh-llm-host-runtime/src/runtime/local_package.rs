@@ -134,24 +134,32 @@ pub(super) async fn resolve_split_runtime_package(
     let model_path = model_path.to_path_buf();
     let model_ref = model_ref.to_string();
     tokio::task::spawn_blocking(move || {
-        if model_path.join("model-package.json").is_file() {
+        let package_ref = model_path.to_string_lossy().into_owned();
+        if skippy::is_package_v2_ref(&package_ref) {
             let identity = skippy::identity_from_package_v2(&model_path)?;
-            if local_source_required {
+            return if local_source_required {
                 skippy::into_content_addressed_identity(identity)
             } else {
                 Ok(identity)
-            }
-        } else {
-            anyhow::ensure!(
-                model_path.is_file(),
-                "generation-8 split source must be a package-v2 directory or direct GGUF file: {}",
-                model_path.display()
-            );
-            if local_source_required {
-                skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
+            };
+        }
+        if skippy::is_layer_package_ref(&package_ref) {
+            let identity = skippy::identity_from_layer_package(&package_ref)?;
+            return if local_source_required {
+                skippy::into_content_addressed_identity(identity)
             } else {
-                skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
-            }
+                Ok(identity)
+            };
+        }
+        anyhow::ensure!(
+            model_path.is_file(),
+            "generation-8 split source must be a package-v2 directory or direct GGUF file: {}",
+            model_path.display()
+        );
+        if local_source_required {
+            skippy::synthetic_content_addressed_gguf_package(&model_ref, &model_path)
+        } else {
+            skippy::synthetic_direct_gguf_package(&model_ref, &model_path)
         }
     })
     .await

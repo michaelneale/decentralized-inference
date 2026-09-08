@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -8,6 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use hf_hub::progress::{DownloadEvent, Progress, ProgressEvent, ProgressHandler};
+use sha2::{Digest, Sha256};
+use skippy_package_format::{
+    Artifact as PackageV2Artifact, PackageManifest as PackageManifestV2,
+    stage_admission::StageAdmissionDescriptor as PackageV2StageAdmissionDescriptor,
+};
 use skippy_runtime::package::{self, PackageIntegrityOptions, PackageStageRequest};
 
 use mesh_llm_events::terminal_progress::{
@@ -530,6 +535,24 @@ fn resolve_local_package_files(
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest_contents).context("parse local package manifest")?;
 
+    if manifest
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION))
+    {
+        anyhow::ensure!(
+            is_metadata_only_package_inspection(
+                layer_start,
+                layer_end,
+                include_embeddings,
+                include_output,
+            ),
+            "package-v2 artifact selection requires an exact stage admission descriptor"
+        );
+        verify_package_v2_metadata(package_dir, &manifest_contents)?;
+        return Ok(package_dir.to_string_lossy().to_string());
+    }
+
     // Verify shared/metadata.gguf exists
     let metadata_path = manifest
         .pointer("/shared/metadata/path")
@@ -608,6 +631,25 @@ fn verify_resolved_hf_package_files(
     include_embeddings: bool,
     include_output: bool,
 ) -> Result<String> {
+    let manifest_contents = fs::read(package_dir.join("model-package.json"))
+        .context("read resolved package manifest")?;
+    let schema_version = serde_json::from_slice::<serde_json::Value>(&manifest_contents)
+        .context("parse resolved package manifest")?
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if schema_version == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)) {
+        anyhow::ensure!(
+            is_metadata_only_package_inspection(
+                layer_start,
+                layer_end,
+                include_embeddings,
+                include_output,
+            ),
+            "package-v2 artifact selection requires an exact stage admission descriptor"
+        );
+        verify_package_v2_metadata(package_dir, &manifest_contents)?;
+        return Ok(package_dir.to_string_lossy().to_string());
+    }
     let local_ref = resolve_local_package_files(
         package_dir,
         layer_start,
@@ -903,22 +945,57 @@ fn download_hf_package_to_local_sync(
     let manifest: serde_json::Value =
         serde_json::from_slice(&manifest_contents).context("parse package manifest")?;
 
+    let package_v2 = manifest
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION));
+    if package_v2 {
+        anyhow::ensure!(
+            is_metadata_only_package_inspection(
+                layer_start,
+                layer_end,
+                include_embeddings,
+                include_output,
+            ),
+            "package-v2 artifact selection requires an exact stage admission descriptor"
+        );
+    }
+
     // Collect the files we need to download
     let mut needed_files: Vec<(PathBuf, Option<u64>)> = Vec::new();
 
-    // Always need shared/metadata.gguf — required for materialization
-    let metadata_artifact = manifest
-        .pointer("/shared/metadata")
-        .context("manifest missing required /shared/metadata")?;
-    let metadata_path = metadata_artifact
-        .get("path")
-        .and_then(|v| v.as_str())
-        .context("manifest missing required /shared/metadata/path")?;
-    needed_files.push((
-        safe_manifest_file_path(metadata_path)?,
-        manifest_artifact_bytes(metadata_artifact),
-    ));
-    if include_embeddings
+    if package_v2 {
+        let manifest_v2: PackageManifestV2 =
+            serde_json::from_slice(&manifest_contents).context("parse package-v2 manifest")?;
+        manifest_v2
+            .validate()
+            .context("validate package-v2 manifest")?;
+        let metadata_artifact = manifest_v2
+            .artifact_catalog
+            .entries
+            .iter()
+            .find(|artifact| artifact.id == manifest_v2.source_model.metadata_artifact_id)
+            .context("package-v2 metadata artifact is absent")?;
+        needed_files.push((
+            safe_manifest_file_path(&metadata_artifact.path)?,
+            Some(metadata_artifact.byte_size),
+        ));
+    } else {
+        // Legacy packages always need shared/metadata.gguf.
+        let metadata_artifact = manifest
+            .pointer("/shared/metadata")
+            .context("manifest missing required /shared/metadata")?;
+        let metadata_path = metadata_artifact
+            .get("path")
+            .and_then(|v| v.as_str())
+            .context("manifest missing required /shared/metadata/path")?;
+        needed_files.push((
+            safe_manifest_file_path(metadata_path)?,
+            manifest_artifact_bytes(metadata_artifact),
+        ));
+    }
+    if !package_v2
+        && include_embeddings
         && let Some(artifact) = manifest.pointer("/shared/embeddings")
         && let Some(path) = artifact.get("path").and_then(|v| v.as_str())
     {
@@ -927,7 +1004,8 @@ fn download_hf_package_to_local_sync(
             manifest_artifact_bytes(artifact),
         ));
     }
-    if include_output
+    if !package_v2
+        && include_output
         && let Some(artifact) = manifest.pointer("/shared/output")
         && let Some(path) = artifact.get("path").and_then(|v| v.as_str())
     {
@@ -939,7 +1017,7 @@ fn download_hf_package_to_local_sync(
 
     // Layer files for assigned range — use explicit layer_index if present,
     // fall back to array position.
-    if let Some(layers) = manifest.get("layers").and_then(|l| l.as_array()) {
+    if !package_v2 && let Some(layers) = manifest.get("layers").and_then(|l| l.as_array()) {
         for (i, layer) in layers.iter().enumerate() {
             let idx = layer
                 .get("layer_index")
@@ -956,7 +1034,8 @@ fn download_hf_package_to_local_sync(
             }
         }
     }
-    if layer_start == 0
+    if !package_v2
+        && layer_start == 0
         && let Some(projectors) = manifest.get("projectors").and_then(|p| p.as_array())
     {
         for projector in projectors {
@@ -999,6 +1078,153 @@ fn download_hf_package_to_local_sync(
         include_embeddings,
         include_output,
     )
+}
+
+fn verify_package_v2_metadata(package_dir: &Path, manifest_bytes: &[u8]) -> Result<()> {
+    let manifest: PackageManifestV2 =
+        serde_json::from_slice(manifest_bytes).context("parse package-v2 manifest")?;
+    manifest
+        .validate()
+        .context("validate package-v2 manifest")?;
+    let computed = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed,
+        "package-v2 manifest package_id does not match its content"
+    );
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .context("package-v2 metadata artifact is absent")?;
+    verify_package_v2_artifact(package_dir, artifact)
+}
+
+fn verify_package_v2_artifact(package_dir: &Path, artifact: &PackageV2Artifact) -> Result<()> {
+    let relative = safe_manifest_file_path(&artifact.path)?;
+    let path = package_dir.join(&relative);
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("stat package-v2 artifact {}", relative.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "package-v2 artifact is not a file: {}",
+        relative.display()
+    );
+    anyhow::ensure!(
+        metadata.len() == artifact.byte_size,
+        "package-v2 artifact {} size differs from manifest",
+        relative.display()
+    );
+    let mut file = fs::File::open(&path)
+        .with_context(|| format!("open package-v2 artifact {}", relative.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash package-v2 artifact {}", relative.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = hex::encode(hasher.finalize());
+    anyhow::ensure!(
+        actual.eq_ignore_ascii_case(&artifact.sha256),
+        "package-v2 artifact {} SHA-256 differs from manifest",
+        relative.display()
+    );
+    Ok(())
+}
+
+pub fn resolve_package_v2_stage_to_local(
+    package_ref: &str,
+    admission: &PackageV2StageAdmissionDescriptor,
+) -> Result<(String, Vec<PathBuf>, Option<PathBuf>)> {
+    let local_ref = resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    let package_dir = PathBuf::from(&local_ref);
+    let manifest_path = package_dir.join("model-package.json");
+    let manifest_bytes = fs::read(&manifest_path)
+        .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?;
+    let manifest: PackageManifestV2 =
+        serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    let resolved = manifest
+        .resolve_stage_admission(admission)
+        .context("resolve exact package-v2 stage admission")?;
+    let required = resolved
+        .required_artifacts
+        .iter()
+        .map(|artifact| (*artifact).clone())
+        .collect::<Vec<_>>();
+
+    if let StagePackageRef::HuggingFacePackage { repo, revision } =
+        StagePackageRef::parse(package_ref)?
+    {
+        let revision = revision.unwrap_or_else(|| "main".to_string());
+        let missing = required
+            .iter()
+            .filter(|artifact| verify_package_v2_artifact(&package_dir, artifact).is_err())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let package_dir_for_download = package_dir.clone();
+            let required_for_download = required.clone();
+            crate::models::run_hf_sync(move || {
+                let api = crate::models::build_hf_api(false)?;
+                let (owner, name) = repo.split_once('/').context("invalid HF repo format")?;
+                let model_api = api.model(owner, name);
+                let label = layer_package_progress_label(&repo, &revision);
+                let scope = Arc::new(LayerPackageDownloadScope::new(&label, missing.len()));
+                for (index, artifact) in missing.iter().enumerate() {
+                    download_layer_package_file(
+                        &model_api,
+                        &revision,
+                        &label,
+                        &artifact.path,
+                        Some(artifact.byte_size),
+                        Some(Arc::clone(&scope)),
+                        index,
+                    )?;
+                }
+                for artifact in &required_for_download {
+                    verify_package_v2_artifact(&package_dir_for_download, artifact)?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    for artifact in &required {
+        verify_package_v2_artifact(&package_dir, artifact)?;
+    }
+
+    let sidecar_ids = resolved
+        .sidecars
+        .iter()
+        .map(|sidecar| sidecar.artifact.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut model_artifacts = required
+        .iter()
+        .filter(|artifact| !sidecar_ids.contains(artifact.id.as_str()))
+        .collect::<Vec<_>>();
+    model_artifacts.sort_by(|left, right| {
+        let left_primary = left.id == manifest.source_model.metadata_artifact_id;
+        let right_primary = right.id == manifest.source_model.metadata_artifact_id;
+        right_primary
+            .cmp(&left_primary)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let model_parts = model_artifacts
+        .into_iter()
+        .map(|artifact| package_dir.join(&artifact.path))
+        .collect::<Vec<_>>();
+    let projector = resolved
+        .sidecars
+        .iter()
+        .find(|sidecar| sidecar.kind == skippy_package_format::SidecarKind::Mmproj)
+        .map(|sidecar| package_dir.join(&sidecar.artifact.path));
+    Ok((local_ref, model_parts, projector))
 }
 
 fn safe_manifest_file_path(path: &str) -> Result<PathBuf> {

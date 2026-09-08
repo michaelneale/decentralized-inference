@@ -38,6 +38,16 @@ pub(crate) fn is_package_v2_ref(package_ref: &str) -> bool {
         == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION))
 }
 
+pub(crate) fn is_package_v2_identity(package: &SkippyPackageIdentity) -> bool {
+    if is_package_v2_ref(&package.package_ref) {
+        return true;
+    }
+    package
+        .source_model_path
+        .ancestors()
+        .any(|path| is_package_v2_ref(&path.to_string_lossy()))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
     pub package_ref: String,
@@ -1217,6 +1227,9 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
     // Resolve hf:// to a local package dir for lightweight package inspection.
     let local_ref =
         super::materialization::resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    if is_package_v2_ref(&local_ref) {
+        return identity_from_package_v2_metadata(package_ref, &local_ref);
+    }
     let info = skippy_runtime::package::inspect_layer_package(&local_ref)
         .with_context(|| format!("inspect layer package {package_ref}"))?;
 
@@ -1242,6 +1255,113 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
         activation_width: 0,
         tensor_count: info.layers.iter().map(|l| l.tensor_count as u64).sum(),
         generation: info.generation,
+    })
+}
+
+fn identity_from_package_v2_metadata(
+    package_ref: &str,
+    local_ref: &str,
+) -> Result<SkippyPackageIdentity> {
+    let package_dir = PathBuf::from(local_ref);
+    let manifest_path = package_dir.join(PACKAGE_V2_MANIFEST);
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?;
+    let manifest: PackageManifestV2 =
+        serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    manifest
+        .validate()
+        .context("validate package-v2 manifest")?;
+    let computed_package_id = manifest
+        .computed_package_id()
+        .context("compute package-v2 identity")?;
+    anyhow::ensure!(
+        manifest.package_id == computed_package_id,
+        "package-v2 manifest package_id does not match its content"
+    );
+    let required_native_abi = format!(
+        "{}.{}.{}",
+        skippy_ffi::ABI_VERSION_MAJOR,
+        skippy_ffi::ABI_VERSION_MINOR,
+        skippy_ffi::ABI_VERSION_PATCH
+    );
+    anyhow::ensure!(
+        manifest.native_abi_version == required_native_abi,
+        "package-v2 native ABI {} differs from runtime ABI {required_native_abi}",
+        manifest.native_abi_version
+    );
+    let metadata_artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .context("package-v2 metadata artifact is absent")?;
+    let metadata_relative = Path::new(&metadata_artifact.path);
+    anyhow::ensure!(
+        !metadata_relative.as_os_str().is_empty()
+            && metadata_relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "package-v2 artifact path is not a safe relative path: {metadata_relative:?}"
+    );
+    let source_model_path = package_dir.join(metadata_relative);
+    let source_metadata = source_model_path
+        .metadata()
+        .with_context(|| format!("stat package-v2 source {}", source_model_path.display()))?;
+    anyhow::ensure!(
+        source_metadata.is_file() && source_metadata.len() == metadata_artifact.byte_size,
+        "package-v2 metadata artifact size differs from manifest"
+    );
+    let source_sha256 = source_file_sha256(
+        &source_model_path,
+        &source_metadata,
+        SidecarDigestCache::open_default().as_ref(),
+    )?;
+    anyhow::ensure!(
+        source_sha256 == metadata_artifact.sha256 && source_sha256 == manifest.source_model.sha256,
+        "package-v2 metadata artifact SHA-256 differs from manifest"
+    );
+    let architecture = manifest
+        .model_metadata
+        .get("general.architecture")
+        .and_then(serde_json::Value::as_str)
+        .context("package-v2 model metadata is missing general.architecture")?;
+    let activation_width_key = format!("{architecture}.embedding_length");
+    let activation_width = manifest
+        .model_metadata
+        .get(&activation_width_key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .with_context(|| {
+            format!("package-v2 model metadata is missing positive {activation_width_key}")
+        })?;
+    let source_model_bytes = manifest
+        .source_model
+        .files
+        .iter()
+        .try_fold(0_u64, |total, file| total.checked_add(file.byte_size))
+        .context("package-v2 source byte count overflow")?;
+    anyhow::ensure!(
+        source_model_bytes > 0,
+        "package-v2 source model byte count must be positive"
+    );
+    let layer_weight_bytes = package_v2_layer_weight_bytes(&manifest)?;
+    let tensor_count = u64::try_from(manifest.tensor_catalog.entries.len())
+        .context("package-v2 tensor count exceeds u64")?;
+    let manifest_sha256 = hex_lower(&Sha256::digest(&manifest_bytes));
+    let canonical_package_ref = canonical_layer_package_ref(package_ref, local_ref);
+    Ok(SkippyPackageIdentity {
+        package_ref: canonical_package_ref,
+        manifest_sha256,
+        source_model_path,
+        source_model_sha256: manifest.source_model.sha256,
+        source_model_bytes,
+        source_files: Vec::new(),
+        layer_weight_bytes,
+        layer_count: manifest.layer_count,
+        activation_width,
+        tensor_count,
+        generation: manifest.generation.as_ref().map(package_v2_generation_info),
     })
 }
 

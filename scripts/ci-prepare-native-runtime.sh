@@ -141,10 +141,13 @@ requested_backend = {"cuda-blackwell": "cuda", "hip": "rocm"}.get(
 )
 expected_skippy_abi = sys.argv[4]
 with open(sys.argv[3], encoding="utf-8") as fh:
-    rows = json.load(fh)
+    payload = json.load(fh)
 
+rows = payload.get("runtimes") if isinstance(payload, dict) else payload
 if not isinstance(rows, list):
-    raise SystemExit("native runtime compatibility output must be a JSON list")
+    raise SystemExit(
+        "native runtime compatibility output must contain a runtimes JSON list"
+    )
 
 supported = [row for row in rows if row.get("supported") is True]
 preferred = [row for row in supported if row.get("backend") == requested_backend]

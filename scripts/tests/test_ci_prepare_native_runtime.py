@@ -129,7 +129,9 @@ class CiPrepareNativeRuntimeTests(unittest.TestCase):
             }
         ]
         rows_path = product / "runtime-rows.json"
-        rows_path.write_text(json.dumps(rows), encoding="utf-8")
+        rows_path.write_text(
+            json.dumps({"catalogs": {}, "runtimes": rows}), encoding="utf-8"
+        )
         binary.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail

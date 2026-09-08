@@ -243,9 +243,17 @@ pub fn load_runtime_with_overrides(
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
     let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
+    let admitted_model_parts = config
+        .model_part_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
     let model = match config.load_mode {
         _ if std::env::var("MESH_LLM_BYPASS_SKIPPY_MODEL_LOAD").is_ok() => {
             skippy_runtime::StageModel::new_dummy()
+        }
+        _ if !admitted_model_parts.is_empty() => {
+            open_stage_model_from_parts(&admitted_model_parts, &runtime_config)?
         }
         LoadMode::LayerPackage => {
             let selected =
@@ -291,10 +299,20 @@ pub fn load_runtime_with_overrides_and_open_events(
 ) -> Result<Option<Arc<Mutex<RuntimeState>>>> {
     let mut runtime_config = runtime_config_from_stage_config(config, overrides)?;
 
+    let admitted_model_parts = config
+        .model_part_paths
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
     let model = match config.load_mode {
         _ if std::env::var("MESH_LLM_BYPASS_SKIPPY_MODEL_LOAD").is_ok() => {
             skippy_runtime::StageModel::new_dummy()
         }
+        _ if !admitted_model_parts.is_empty() => open_stage_model_from_parts_with_events(
+            &admitted_model_parts,
+            &runtime_config,
+            model_open_event_reporter,
+        )?,
         LoadMode::LayerPackage => {
             let selected =
                 select_package_parts(config).context("select layer package parts for stage")?;

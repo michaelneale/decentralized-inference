@@ -123,6 +123,7 @@ pub(crate) fn stage0_config(
         materialized_path: None,
         materialized_pinned: false,
         model_path: Some(context.package.package_ref.clone()),
+        model_part_paths: Vec::new(),
         projector_path: context
             .projector_path
             .clone()
@@ -210,6 +211,7 @@ pub(crate) fn stage_topology_instance(
         model_id: context.model_id.to_string(),
         package_ref: context.package.package_ref.clone(),
         manifest_sha256: context.package.manifest_sha256.clone(),
+        admissions: Default::default(),
         stages: stages
             .iter()
             .map(|stage| mesh::StageAssignment {

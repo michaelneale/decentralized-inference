@@ -21,10 +21,7 @@ pub(super) fn split_stage_source_is_ready(
     if ready_running_stage {
         return true;
     }
-    if load.load_mode != LoadMode::LayerPackage
-        && (!skippy::is_layer_package_ref(&load.package_ref)
-            || skippy::is_package_v2_ref(&load.package_ref))
-    {
+    if load.load_mode != LoadMode::LayerPackage {
         return inventory
             .available_ranges
             .iter()

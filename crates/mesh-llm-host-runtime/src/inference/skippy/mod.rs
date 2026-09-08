@@ -65,15 +65,15 @@ pub use materialization::{
     configure_materialized_stage_cache, is_layer_package_ref, materialize_stage_config,
     materialized_stage_cache_dir, materialized_stages_for_sources,
     prune_unpinned_materialized_stages, remove_materialized_stages_for_sources,
-    resolve_hf_package_to_local,
+    resolve_hf_package_to_local, resolve_stage_load_package,
 };
 pub use package::{
     SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,
     synthetic_direct_gguf_package,
 };
 pub(crate) use package::{
-    direct_gguf_planning_manifest_from_identity, direct_gguf_source_paths, is_package_v2_ref,
-    synthetic_content_addressed_gguf_package,
+    direct_gguf_planning_manifest_from_identity, direct_gguf_source_paths, is_package_v2_identity,
+    is_package_v2_ref, synthetic_content_addressed_gguf_package,
 };
 pub(crate) use resolver::{
     ResolvedEmbeddedOpenAiArgs, ResolvedSkippyConfig, SkippyConfigResolveRequest,
@@ -1290,6 +1290,7 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         materialized_path: None,
         materialized_pinned: false,
         model_path: Some(options.model_path.to_string_lossy().to_string()),
+        model_part_paths: Vec::new(),
         projector_path: options
             .projector_path
             .as_ref()

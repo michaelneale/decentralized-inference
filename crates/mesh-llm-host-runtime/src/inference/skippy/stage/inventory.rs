@@ -71,32 +71,31 @@ pub(super) fn resolve_inventory_source(request: &StageInventoryRequest) -> Optio
             sha256: Some(identity.source_model_sha256),
         });
     }
-    if crate::inference::skippy::is_package_v2_ref(&request.package_ref) {
-        let identity =
-            crate::inference::skippy::identity_from_package_v2(Path::new(&request.package_ref))
-                .map_err(|error| {
-                    tracing::debug!(
-                        package_ref = request.package_ref,
-                        error = %error,
-                        "package-v2 inventory verification failed"
-                    );
-                    error
-                })
-                .ok()?;
-        let kind = if is_split_gguf_path(&identity.source_model_path) {
-            SourceModelKind::SplitGguf
-        } else {
-            SourceModelKind::PlainGguf
-        };
-        return Some(InventorySource {
-            path: identity.source_model_path,
-            bytes: Some(identity.source_model_bytes),
-            layer_count: identity.layer_count,
-            kind,
-            sha256: Some(identity.source_model_sha256),
-        });
-    }
     if is_layer_package_ref(&request.package_ref) {
+        let identity = crate::inference::skippy::identity_from_layer_package(&request.package_ref)
+            .map_err(|error| {
+                tracing::debug!(
+                    package_ref = request.package_ref,
+                    error = %error,
+                    "package inventory verification failed"
+                );
+                error
+            })
+            .ok()?;
+        if crate::inference::skippy::is_package_v2_identity(&identity) {
+            let kind = if is_split_gguf_path(&identity.source_model_path) {
+                SourceModelKind::SplitGguf
+            } else {
+                SourceModelKind::PlainGguf
+            };
+            return Some(InventorySource {
+                path: identity.source_model_path,
+                bytes: Some(identity.source_model_bytes),
+                layer_count: identity.layer_count,
+                kind,
+                sha256: Some(identity.source_model_sha256),
+            });
+        }
         let info = inspect_stage_package(&request.package_ref).ok()?;
         return Some(InventorySource {
             path: info.package_dir,
