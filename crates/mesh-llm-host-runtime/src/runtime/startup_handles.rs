@@ -759,12 +759,11 @@ pub(super) fn update_startup_target(
 
 #[derive(Clone)]
 pub(super) struct StartupReadyReporter {
-    pub(super) ready_by_model: Arc<Mutex<Vec<bool>>>,
+    pub(super) ready_by_model: Arc<Mutex<Vec<Option<String>>>>,
     pub(super) emitted: Arc<AtomicBool>,
     pub(super) shutdown_requested: Arc<AtomicBool>,
     startup_failure_policy: mesh_llm_config::StartupFailurePolicy,
     terminal_failures: Arc<Mutex<Vec<String>>>,
-    pub(super) primary_model: String,
     pub(super) api_url: String,
     pub(super) console_url: Option<String>,
     pub(super) api_port: u16,
@@ -781,7 +780,6 @@ impl StartupReadyReporter {
     )]
     pub(super) fn new(
         models: &[String],
-        primary_model: String,
         api_url: String,
         console_url: Option<String>,
         api_port: u16,
@@ -789,7 +787,6 @@ impl StartupReadyReporter {
     ) -> Self {
         Self::new_with_failure_policy(
             models,
-            primary_model,
             api_url,
             console_url,
             api_port,
@@ -800,21 +797,19 @@ impl StartupReadyReporter {
 
     pub(super) fn new_with_failure_policy(
         models: &[String],
-        primary_model: String,
         api_url: String,
         console_url: Option<String>,
         api_port: u16,
         console_port: Option<u16>,
         startup_failure_policy: mesh_llm_config::StartupFailurePolicy,
     ) -> Self {
-        let ready_by_model = vec![false; models.len()];
+        let ready_by_model = vec![None; models.len()];
         Self {
             ready_by_model: Arc::new(Mutex::new(ready_by_model)),
             emitted: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             startup_failure_policy,
             terminal_failures: Arc::new(Mutex::new(Vec::new())),
-            primary_model,
             api_url,
             console_url,
             api_port,
@@ -874,23 +869,22 @@ impl StartupReadyReporter {
         self.shutdown_requested.store(true, Ordering::SeqCst);
     }
 
-    pub(super) fn mark_ready_and_build_event(&self, readiness_index: usize) -> Option<OutputEvent> {
-        let models_count = {
+    pub(super) fn mark_ready_and_build_event(
+        &self,
+        readiness_index: usize,
+        loaded_model: &str,
+    ) -> Option<OutputEvent> {
+        let (models_count, primary_model) = {
             let mut ready_by_model = self
                 .ready_by_model
                 .lock()
                 .expect("startup readiness mutex poisoned");
-            if let Some(entry) = ready_by_model.get_mut(readiness_index) {
-                *entry = true;
+            *ready_by_model.get_mut(readiness_index)? = Some(loaded_model.to_string());
+            if ready_by_model.iter().any(Option::is_none) {
+                return None;
             }
-            if ready_by_model.iter().all(|ready| *ready) {
-                Some(ready_by_model.len())
-            } else {
-                None
-            }
+            (ready_by_model.len(), ready_by_model[0].as_ref()?.clone())
         };
-
-        let models_count = models_count?;
 
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return None;
@@ -903,11 +897,11 @@ impl StartupReadyReporter {
         let pi_command = Some(format!(
             "mesh-llm pi --host 127.0.0.1:{} --model {}",
             self.api_port,
-            single_quote_shell_arg(&self.primary_model)
+            single_quote_shell_arg(&primary_model)
         ));
         let goose_command = Some(format!(
             "GOOSE_PROVIDER=openai OPENAI_HOST={} OPENAI_API_KEY=mesh GOOSE_MODEL={} goose session",
-            self.api_url, self.primary_model
+            self.api_url, primary_model
         ));
         Some(OutputEvent::RuntimeReady {
             api_url: self.api_url.clone(),
@@ -920,8 +914,8 @@ impl StartupReadyReporter {
         })
     }
 
-    fn mark_ready_and_maybe_emit(&self, readiness_index: usize) {
-        let Some(event) = self.mark_ready_and_build_event(readiness_index) else {
+    fn mark_ready_and_maybe_emit(&self, readiness_index: usize, loaded_model: &str) {
+        let Some(event) = self.mark_ready_and_build_event(readiness_index, loaded_model) else {
             return;
         };
         let _ = emit_event(event);
@@ -945,7 +939,6 @@ mod startup_failure_policy_tests {
     fn reporter(policy: StartupFailurePolicy) -> StartupReadyReporter {
         StartupReadyReporter::new_with_failure_policy(
             &["model-a".to_string()],
-            "model-a".to_string(),
             "http://127.0.0.1:1".to_string(),
             None,
             1,

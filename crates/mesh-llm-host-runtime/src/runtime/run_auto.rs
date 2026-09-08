@@ -1606,7 +1606,6 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
     let primary_model_name = requested_model_names.first().cloned().unwrap_or_default();
     let startup_ready_reporter = StartupReadyReporter::new_with_failure_policy(
         &requested_model_names,
-        primary_model_name.clone(),
         api_ready_url,
         ready_console_url,
         ready_api_port,
