@@ -38,6 +38,9 @@ REPOSITORY = "ghcr.io/mesh-llm/mesh-llm-cuda-runner"
 REFERENCE = re.compile(re.escape(REPOSITORY) + r"@sha256:([0-9a-f]{64})\Z")
 IDENTIFIER = re.compile(r"[a-z][a-z0-9_-]*\Z")
 EPOCH_PREFIX = "mesh-llm-cuda-runner-sha256-"
+_evidence_spec = importlib.util.spec_from_file_location("runner_image_evidence", Path(__file__).with_name("runner-image-evidence.py"))
+EVIDENCE = importlib.util.module_from_spec(_evidence_spec)
+_evidence_spec.loader.exec_module(EVIDENCE)
 
 
 class IdentityError(ValueError):
@@ -49,16 +52,8 @@ def require(condition: bool, message: str) -> None:
         raise IdentityError(message)
 
 
-def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        require(key not in result, f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
 def read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=object_pairs)
+    value = EVIDENCE.decode(EVIDENCE.read_bytes(path))
     require(isinstance(value, dict), f"{path}: expected an object")
     return value
 
@@ -78,7 +73,7 @@ def nonempty(value: Any, where: str) -> None:
     require(isinstance(value, str) and bool(value.strip()), f"{where}: expected a string")
 
 
-def validate(catalog: dict[str, Any]) -> None:
+def validate(catalog: dict[str, Any], root: Path = ROOT) -> None:
     fields(catalog, "schema_version images consumer_roles runtime_rows compiler_seed sdk_rust", "catalog")
     require(type(catalog["schema_version"]) is int and catalog["schema_version"] == 1,
             "unsupported schema_version")
@@ -95,10 +90,10 @@ def validate(catalog: dict[str, Any]) -> None:
                 f"{image_id}: unsupported backend")
         epoch = image["native_toolchain_epoch"]
         require(epoch is None or epoch == EPOCH_PREFIX + digest(image), f"{image_id}: epoch/digest mismatch")
-        # Qualified sidecars will be introduced with their binder and validator.
-        # Accepting an unchecked path here would imply evidence we do not have.
-        require(image["receipt"] is None and image["provenance"] is None,
-                f"{image_id}: this catalog version only supports unknown historical evidence")
+    try:
+        EVIDENCE.validate_catalog(catalog, root)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        raise IdentityError(str(error)) from error
     require(len(references) == len(set(references)), "duplicate image reference")
     roles = catalog["consumer_roles"]
     named_map(roles, "consumer_roles")
@@ -255,7 +250,7 @@ def planner_rows(root: Path) -> list[dict[str, Any]]:
 
 
 def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
-    validate(catalog)
+    validate(catalog, root)
     workflow_paths = sorted(path for path in (root / ".github/workflows").iterdir() if path.suffix in (".yml", ".yaml"))
     workflows = {path.name: workflow_jobs(path) for path in workflow_paths}
     images, roles = catalog["images"], catalog["consumer_roles"]
@@ -383,11 +378,18 @@ def main() -> int:
     lookup.add_argument("--field", choices=("reference", "native_toolchain_epoch", "receipt", "provenance"))
     key = commands.add_parser("seed-key")
     key.add_argument("--recipe-hash", required=True)
+    binder = commands.add_parser("bind")
+    binder.add_argument("--image-id", required=True)
+    binder.add_argument("--cohort", type=Path, required=True)
+    binder.add_argument("--anchor", type=Path, required=True)
+    binder.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         catalog = read_json(args.catalog or args.root / "ci/runner-images.json")
-        validate(catalog)
-        if args.command == "check":
+        validate(catalog, args.root)
+        if args.command == "bind":
+            result = EVIDENCE.bind(catalog, args.image_id, args.cohort, args.anchor, args.output, args.root)
+        elif args.command == "check":
             result: Any = check(catalog, args.root)
         elif args.command == "diagnose":
             result = diagnose(catalog, args.root)

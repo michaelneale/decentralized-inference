@@ -96,7 +96,7 @@ class RunnerImageIdentityTests(unittest.TestCase):
 
     def test_catalog_rejects_unverified_receipt_claim(self) -> None:
         self.catalog["images"]["public-cpu"]["receipt"] = {"path": "invented.json", "sha256": "a" * 64}
-        self.assert_drift("unknown historical evidence")
+        self.assert_drift("receipt/provenance must be paired")
 
     def test_catalog_rejects_workflow_path_escape(self) -> None:
         self.catalog["consumer_roles"]["ui-quality"]["bindings"][0]["workflow"] = "../private.yml"

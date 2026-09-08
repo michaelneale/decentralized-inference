@@ -694,3 +694,14 @@ gh api orgs/Mesh-LLM/actions/runner-groups
 
 Organization runner-group responses of `403` are unverified administrative
 state, not proof that a restriction is absent.
+
+### Proposed retained-cohort identity evidence
+
+Runner-images PR #23 is pending; its retained exact-attempt admission flow is
+not yet the producer's merged-main behavior. After that producer flow lands,
+`scripts/runner-image-identity.py bind` can prepare offline catalog proposals
+from maintainer-reviewed admission anchors. The exact cohort bytes are retained
+under `ci/runner-image-evidence/<sha256>.json`; ordinary commands validate hashes
+and consumer relationships without executing producer code or authenticating
+GitHub provenance again. See `ci/ci.md` for the explicit trust boundary and CLI.
+Current image references and historical null evidence remain unchanged.

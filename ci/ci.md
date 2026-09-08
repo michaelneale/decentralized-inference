@@ -738,3 +738,47 @@ complete
 [manage-ci validation contract](../.agents/skills/manage-ci/SKILL.md#validation-contract)
 for scope-specific checks, and run the canonical `just test-all` target when
 full repository validation is required.
+
+### Offline runner identity qualification
+
+The proposed retained-cohort producer flow belongs to runner-images PR #23,
+which is still pending. Upon merge, trusted producer admission must run
+`runner-cohort.py fetch` for the exact successful staged attempt before a
+maintainer adopts its exact-byte cohort hash, origin and admission-validator
+revision. Offline structural validation alone cannot perform that admission.
+
+The consumer's `runner-image-identity.py bind` accepts a separate reviewed anchor
+and emits a fresh proposal directory containing `ci/runner-images.json` plus
+content-addressed `ci/runner-image-evidence/<sha256>.json` files. It does not
+modify the input catalog, workflows, image pins, compiler seed or cache policy.
+All current catalog receipt/provenance fields remain null.
+
+```sh
+python3 scripts/runner-image-identity.py --root /trusted/mesh-llm bind \
+  --image-id public-cpu --cohort /admitted/staged-cohort.json \
+  --anchor /reviewed/anchor.json --output /new/proposal
+python3 scripts/runner-image-identity.py --root /new/proposal validate
+```
+
+The anchor has exactly `receipt` and `provenance` objects. Receipt fields are
+`schema: 1`, `cohort_sha256` and `index_candidate_key`. Provenance fields are
+`schema: 1`, `scope: reviewed_producer_admission`,
+`validation: offline_binding_only`, `cohort_sha256`, the exact producer `origin`
+object, and `admission_validator_revision`. The anchor must come from the
+maintainer's reviewed admission result, never from a downloaded assertion that
+it was admitted. Hashes identify bytes; they do not authenticate their author.
+
+Review and apply both catalog and evidence together. `validate` works on the
+proposal alone; `check` also needs the trusted workflow/planner tree after
+reviewed application. Every command validates non-null bindings. `--catalog`
+changes only the catalog input; evidence always resolves beneath explicit
+`--root`. Existing output directories fail rather than being overwritten.
+
+Bindings require the existing pinned family-index digest and exact platform,
+source and family relationships. Full producer tool-policy, OCI and cache-input
+verification remains producer admission's responsibility. The complete hashed
+cohort retains those observations without a mandatory external checkout at
+ordinary check time. This is reviewed producer admission with offline binding
+only, never independently authenticated provenance or verified attestation.
+Matching identity does not establish compiler workload coverage, authorize
+cross-image reuse, or enable a currently ineligible cache restore.
