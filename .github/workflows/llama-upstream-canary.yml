@@ -77,9 +77,20 @@ jobs:
             echo "HF_CACHE is not exported on this runner" >&2
             missing=1
           fi
+          # Match scripts/check-skippy-generated-family-patch.sh: prefer the
+          # pinned llvm@22, but accept any Homebrew LLVM that provides Clang
+          # LibTooling (bin/clang + ClangConfig.cmake) so a runner image whose
+          # pinned keg was rotated out does not fail the whole canary.
           llvm_prefix="$(brew --prefix llvm@22 2>/dev/null || true)"
-          if [[ ! -x "$llvm_prefix/bin/clang" || ! -f "$llvm_prefix/lib/cmake/clang/ClangConfig.cmake" ]]; then
-            echo "pinned llvm@22 with Clang LibTooling is not installed on the family-certify image" >&2
+          llvm_ok() {
+            [[ -n "$1" && -x "$1/bin/clang" && -f "$1/lib/cmake/clang/ClangConfig.cmake" ]]
+          }
+          if ! llvm_ok "$llvm_prefix"; then
+            echo "pinned llvm@22 missing or incomplete on the family-certify image; falling back to $(brew --prefix llvm 2>/dev/null || echo 'brew llvm')" >&2
+            llvm_prefix="$(brew --prefix llvm 2>/dev/null || true)"
+          fi
+          if ! llvm_ok "$llvm_prefix"; then
+            echo "no Homebrew LLVM with Clang LibTooling is installed on the family-certify image" >&2
             missing=1
           else
             echo "SKIPPY_REWRITER_LLVM_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"

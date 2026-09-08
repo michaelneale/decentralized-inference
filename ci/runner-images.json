@@ -1,0 +1,617 @@
+{
+  "schema_version": 1,
+  "images": {
+    "public-cpu": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d",
+      "environment": "public",
+      "backend": "cpu",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-web": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:1c73f0f2e4b2ce657cc9dc49c9c27374f3c364af19f884f1970331c3689da5d2",
+      "environment": "public",
+      "backend": "web",
+      "native_toolchain_epoch": null,
+      "receipt": null,
+      "provenance": null
+    },
+    "public-cuda12": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:c5b85ef527230f77cf9933ef40bcb44316f9bbcb8fd2ce0651b58acda5143dfd",
+      "environment": "public",
+      "backend": "cuda12",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-c5b85ef527230f77cf9933ef40bcb44316f9bbcb8fd2ce0651b58acda5143dfd",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-cuda13": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:6b87598605f5d8deeafecfb1a55027e0ca9e47f4fc6f230d030487c450c31aa6",
+      "environment": "public",
+      "backend": "cuda13",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-6b87598605f5d8deeafecfb1a55027e0ca9e47f4fc6f230d030487c450c31aa6",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-rocm-ci": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:6b88ca9371ada2c507d6e36b71f0e0538fee378c6a5e2b39c17249b4b7e5088a",
+      "environment": "public",
+      "backend": "rocm",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-6b88ca9371ada2c507d6e36b71f0e0538fee378c6a5e2b39c17249b4b7e5088a",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-rocm-release": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:0e13e5d2d2c121df265ff6c69be81e468989e09f81d6b7ff049b110cc0bb0d2b",
+      "environment": "public",
+      "backend": "rocm",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-0e13e5d2d2c121df265ff6c69be81e468989e09f81d6b7ff049b110cc0bb0d2b",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-vulkan": {
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:ce55fed5c680cd3184b5d4770d9a77c43a702687690906e5753efd2cea27ed80",
+      "environment": "public",
+      "backend": "vulkan",
+      "native_toolchain_epoch": "mesh-llm-cuda-runner-sha256-ce55fed5c680cd3184b5d4770d9a77c43a702687690906e5753efd2cea27ed80",
+      "receipt": null,
+      "provenance": null
+    },
+    "public-browser": {
+      "backend": "browser",
+      "environment": "public",
+      "native_toolchain_epoch": null,
+      "provenance": {
+        "admission_validator_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "origin": {
+          "event": "push",
+          "mesh_revision": "8578d0f467de5ba659d376d52079ae1d63ed2871",
+          "repository": "Mesh-LLM/mesh-llm-runner-images",
+          "repository_id": 1210986689,
+          "run_attempt": 1,
+          "run_id": 34256062098,
+          "runner_images_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+          "timestamp": "20260908171716",
+          "workflow_id": 318369515,
+          "workflow_path": ".github/workflows/build-and-push.yml"
+        },
+        "schema": 1,
+        "scope": "reviewed_producer_admission",
+        "validation": "offline_binding_only"
+      },
+      "receipt": {
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "index_candidate_key": "candidate-index-public-browser",
+        "schema": 1
+      },
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:4c3f0a73b8d47c10f2ac98047b3f1ca226992dcff72cb57b029238c98b828f94"
+    },
+    "public-ui": {
+      "backend": "ui",
+      "environment": "public",
+      "native_toolchain_epoch": null,
+      "provenance": {
+        "admission_validator_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "origin": {
+          "event": "push",
+          "mesh_revision": "8578d0f467de5ba659d376d52079ae1d63ed2871",
+          "repository": "Mesh-LLM/mesh-llm-runner-images",
+          "repository_id": 1210986689,
+          "run_attempt": 1,
+          "run_id": 34256062098,
+          "runner_images_revision": "f73c2a956a992e55bc100fe9543fe60f4cc77684",
+          "timestamp": "20260908171716",
+          "workflow_id": 318369515,
+          "workflow_path": ".github/workflows/build-and-push.yml"
+        },
+        "schema": 1,
+        "scope": "reviewed_producer_admission",
+        "validation": "offline_binding_only"
+      },
+      "receipt": {
+        "cohort_sha256": "sha256:27182b63ef62518a8084d6bd069899d88eacee7038c766a2fff20d196f4011aa",
+        "index_candidate_key": "candidate-index-public-ui",
+        "schema": 1
+      },
+      "reference": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:b0fa8081c77334b47744f87a0dd46bf092dfc8badc75a832b72233feb026ec25"
+    }
+  },
+  "consumer_roles": {
+    "rust-clippy": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-quality-slice.yml",
+          "job": "rust_clippy",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "linux-host": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-linux-host-slice.yml",
+          "job": "linux_host",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "linux-product": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-linux-product-slice.yml",
+          "job": "linux_product",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "rust-tests": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-rust-tests-slice.yml",
+          "job": "rust_tests",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "safetensors-runtime-smoke": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-rust-tests-slice.yml",
+          "job": "safetensors_runtime_smoke",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "compiler-seed-publisher": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "cache-warm-sccache.yml",
+          "job": "warm",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "static-abi": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "static-abi-artifact.yml",
+          "job": "static_abi_artifact",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": "pinned_epoch"
+        }
+      ]
+    },
+    "native-sdk-linux": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "native-sdk-artifact.yml",
+          "job": "linux_native_sdk_artifact",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": "pinned_epoch"
+        }
+      ]
+    },
+    "node-sdk-linux": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "node-sdk-addon-artifact.yml",
+          "job": "linux_addon",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "hf-download-smoke": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "hf-download-smoke.yml",
+          "job": "hf_download_smoke",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "scripted-binary-smoke": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "scripted-binary-smoke.yml",
+          "job": "scripted_binary_smoke",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "nightly-ownership": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "nightly-kv-coverage.yml",
+          "job": "ownership-state-machines",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "product-smoke": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "smoke.yml",
+          "job": "smoke_tests",
+          "matrix_selector": null,
+          "image_expression": "${{ inputs.runner != 'gpu-nvidia' && '{image}' || '' }}",
+          "epoch_field": null
+        },
+        {
+          "workflow": "product-integration-smoke.yml",
+          "job": "product_integration",
+          "matrix_selector": null,
+          "image_expression": "${{ inputs.platform == 'linux' && inputs.backend == 'cpu' && '{image}' || '' }}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "sdk-smoke": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "sdk-smoke.yml",
+          "job": "sdk_smoke",
+          "matrix_selector": null,
+          "image_expression": "${{ inputs.sdk_kind != 'swift' && '{image}' || '' }}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "ui-quality": {
+      "image_id": "public-ui",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-web-slice.yml",
+          "job": "ui_quality",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "ui-e2e": {
+      "image_id": "public-browser",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-web-slice.yml",
+          "job": "ui_e2e",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "website-quality": {
+      "image_id": "public-web",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-web-slice.yml",
+          "job": "website",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "ui-artifact": {
+      "image_id": "public-ui",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "ci-ui-artifact-slice.yml",
+          "job": "ui_artifact",
+          "matrix_selector": {
+            "release_tag": "empty"
+          },
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "website-pages": {
+      "image_id": "public-web",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "website-pages.yml",
+          "job": "build",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "nightly-stability": {
+      "image_id": "public-web",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "nightly-stability-run.yml",
+          "job": "stability",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "release-cuda12-aarch64": {
+      "image_id": "public-cuda12",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_aarch64_cuda",
+          "matrix_selector": {
+            "cuda_major": "12"
+          },
+          "image_expression": "{image}",
+          "epoch_field": "toolchain_epoch"
+        }
+      ]
+    },
+    "release-cuda13-aarch64": {
+      "image_id": "public-cuda13",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_aarch64_cuda",
+          "matrix_selector": {
+            "cuda_major": "13"
+          },
+          "image_expression": "{image}",
+          "epoch_field": "toolchain_epoch"
+        }
+      ]
+    },
+    "release-cuda12-x86_64": {
+      "image_id": "public-cuda12",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_x86_64_cuda",
+          "matrix_selector": {
+            "cuda_major": "12"
+          },
+          "image_expression": "{image}",
+          "epoch_field": "toolchain_epoch"
+        }
+      ]
+    },
+    "release-cuda13-x86_64": {
+      "image_id": "public-cuda13",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_x86_64_cuda",
+          "matrix_selector": {
+            "cuda_major": "13"
+          },
+          "image_expression": "{image}",
+          "epoch_field": "toolchain_epoch"
+        }
+      ]
+    },
+    "release-rocm": {
+      "image_id": "public-rocm-release",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_x86_64_rocm",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": "pinned_epoch"
+        }
+      ]
+    },
+    "release-vulkan": {
+      "image_id": "public-vulkan",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "build_native_runtime_linux_x86_64_vulkan",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": "pinned_epoch"
+        }
+      ]
+    },
+    "release-compose-linux-aarch64-cuda": {
+      "image_id": "public-cpu",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "compose_linux_aarch64_cuda",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "release-compose-linux-cuda": {
+      "image_id": "public-cpu",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "compose_linux_cuda",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "release-compose-linux-rocm": {
+      "image_id": "public-cpu",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "compose_linux_rocm",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "release-compose-linux-vulkan": {
+      "image_id": "public-cpu",
+      "scope": "release",
+      "bindings": [
+        {
+          "workflow": "release.yml",
+          "job": "compose_linux_vulkan",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
+    },
+    "release-ui-artifact": {
+      "bindings": [
+        {
+          "epoch_field": null,
+          "image_expression": "{image}",
+          "job": "ui_artifact",
+          "matrix_selector": {
+            "release_tag": "nonempty"
+          },
+          "workflow": "ci-ui-artifact-slice.yml"
+        }
+      ],
+      "image_id": "public-web",
+      "scope": "release"
+    }
+  },
+  "runtime_rows": {
+    "linux-cpu": {
+      "image_id": "public-cpu",
+      "platform": "linux",
+      "architecture": "amd64",
+      "backend": "cpu"
+    },
+    "linux-cuda": {
+      "image_id": "public-cuda12",
+      "platform": "linux",
+      "architecture": "amd64",
+      "backend": "cuda"
+    },
+    "linux-rocm": {
+      "image_id": "public-rocm-ci",
+      "platform": "linux",
+      "architecture": "amd64",
+      "backend": "rocm"
+    },
+    "linux-vulkan": {
+      "image_id": "public-vulkan",
+      "platform": "linux",
+      "architecture": "amd64",
+      "backend": "vulkan"
+    }
+  },
+  "compiler_seed": {
+    "image_id": "public-cpu",
+    "architecture": "amd64",
+    "key_prefix": "mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-",
+    "recipe_inputs": [
+      "Cargo.lock",
+      ".github/cache-version.txt",
+      "Justfile",
+      "just/**"
+    ],
+    "recipe": "ci-sccache-seed-build",
+    "workload_coverage": null,
+    "publisher_role": "compiler-seed-publisher",
+    "consumer_roles": [
+      "rust-clippy",
+      "linux-host",
+      "rust-tests",
+      "safetensors-runtime-smoke"
+    ],
+    "runtime_consumer": {
+      "workflow": "ci-linux-runtime-slice.yml",
+      "job": "linux_runtime",
+      "row_id": "linux-cpu"
+    }
+  },
+  "sdk_rust": {
+    "role": "sdk-smoke",
+    "target": "x86_64-unknown-linux-gnu",
+    "rust_action_ref": "dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
+    "toolchain_epoch": "rust-stable-2026-08-20-4360b52568e2003a75bf9bc1d59f33a8e3fc893c",
+    "profile_linker": "debug-fuse-ld-lld",
+    "cache_namespace": "mesh-llm",
+    "cache_recipe_inputs": [
+      "Cargo.lock",
+      ".github/cache-version.txt",
+      ".cargo/config.toml",
+      "**/Cargo.toml",
+      "scripts/ci-rust-sdk-smoke.sh",
+      "scripts/ci-sdk-fixture.sh",
+      "scripts/ci-prepare-native-runtime.sh",
+      "scripts/package-sdk-console-assets.sh",
+      "scripts/check-sdk-contract.sh",
+      "scripts/verify-sdk-console-assets.sh",
+      ".github/workflows/sdk-smoke.yml"
+    ]
+  }
+}

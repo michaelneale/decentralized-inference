@@ -275,27 +275,6 @@ pub(crate) fn required_admitted_stage_package_artifacts(
         .collect()
 }
 
-pub(crate) fn required_stage_package_bytes(
-    package_dir: &Path,
-    package_ref: &str,
-    manifest_sha256: &str,
-    selection: StageArtifactSelection,
-) -> Result<u64> {
-    let manifest_bytes = u64::try_from(read_bounded_package_manifest(package_dir)?.len())
-        .context("package manifest length exceeds u64")?;
-    required_stage_package_artifacts(package_dir, package_ref, manifest_sha256, selection)?
-        .into_iter()
-        .try_fold(manifest_bytes, |total, artifact| {
-            let artifact_bytes = artifact.expected_size.with_context(|| {
-                format!(
-                    "package manifest is missing the size of {}",
-                    artifact.relative_path.display()
-                )
-            })?;
-            Ok(total.saturating_add(artifact_bytes))
-        })
-}
-
 pub(crate) fn local_artifact_path(package_dir: &Path, request: &PackageArtifactRequest) -> PathBuf {
     package_dir.join(&request.relative_path)
 }
@@ -1003,37 +982,6 @@ mod tests {
             vec!["artifacts/source-00000.gguf", "artifacts/source-00001.gguf"]
         );
         assert!(!paths.iter().any(|path| path.contains("unowned")));
-    }
-
-    #[test]
-    #[serial]
-    fn required_stage_package_bytes_include_manifest_and_selected_shared_artifacts() {
-        let prev = std::env::var_os("HF_HUB_CACHE");
-        let temp = tempfile::tempdir().unwrap();
-        // SAFETY: the enclosing test contract is `#[serial]`, so this process
-        // environment mutation cannot race another test.
-        unsafe { std::env::set_var("HF_HUB_CACHE", temp.path()) };
-        let (package_dir, package_ref, manifest_sha) = write_package_fixture(temp.path());
-        let manifest_bytes = fs::metadata(package_dir.join(PACKAGE_MANIFEST_FILE))
-            .unwrap()
-            .len();
-
-        let selected_bytes = required_stage_package_bytes(
-            &package_dir,
-            &package_ref,
-            &manifest_sha,
-            StageArtifactSelection {
-                layer_start: 1,
-                layer_end: 2,
-                include_embeddings: false,
-                include_output: true,
-                include_projectors: true,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(selected_bytes, manifest_bytes + 8 + 6 + 8 + 9);
-        restore_env("HF_HUB_CACHE", prev);
     }
 
     #[test]

@@ -254,6 +254,11 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("core", smoke_ids)
         self.assertIn("two-node-client", smoke_ids)
         self.assertIn("two-node-split", smoke_ids)
+        for smoke_id in ("core", "two-node-client", "two-node-split"):
+            self.assertIn(
+                f"contains(fromJson(inputs.smoke_matrix).*.id, '{smoke_id}')",
+                linux,
+            )
         self.assertIn("Qwen3.5-0.8B-Q4_K_M.gguf", linux)
         self.assertIn("expected_exact_payload_kind: kv-recurrent", linux)
         self.assertNotIn("product-integration-cuda", smoke_ids)

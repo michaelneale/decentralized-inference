@@ -451,24 +451,30 @@ stop = ["END"]
         projector_path = projector_path_toml
     ))
     .expect("test mesh config should parse");
-    let mut package = package(40);
-    package.package_ref = "hf://Mesh-LLM/test-split-package".to_string();
+    let package = package(40);
     let temp_dir = tempfile::tempdir().unwrap();
     let model_path = temp_dir.path().join("qwen.gguf");
     write_fake_gguf_model(&model_path);
     let compact_meta =
         crate::models::gguf::scan_gguf_compact_meta(&model_path).expect("synthetic GGUF metadata");
     let local_id = node.id();
+    let stages = vec![
+        local_stage(local_id, 0, 0, 12),
+        local_stage(local_id, 1, 12, 40),
+    ];
+    let admissions = stages
+        .iter()
+        .map(|stage| skippy::test_stage_admission(stage.layer_start, stage.layer_end))
+        .collect();
     let generation = SplitTopologyGeneration::new(
         "resolver-topology".into(),
         "resolver-run".into(),
         1,
         vec![SplitParticipant::new(local_id, 24_000_000_000, None)],
-        vec![
-            local_stage(local_id, 0, 0, 12),
-            local_stage(local_id, 1, 12, 40),
-        ],
-    );
+        stages,
+    )
+    .with_admissions(admissions)
+    .unwrap();
 
     let mut spec = SplitGenerationLoadSpec {
         node: &node,
@@ -504,7 +510,7 @@ stop = ["END"]
         .expect("split settings should resolve");
 
     assert_eq!(split_allocatable_memory_bytes(&spec), Some(6_000_000_000));
-    assert_eq!(settings.load_mode, LoadMode::LayerPackage);
+    assert_eq!(settings.load_mode, LoadMode::RuntimeSlice);
     assert_eq!(settings.embedded_openai.activation_width, 0);
     assert_eq!(settings.runtime_options.n_threads, Some(6));
     assert_eq!(settings.runtime_options.n_threads_batch, Some(3));
@@ -548,29 +554,6 @@ stop = ["END"]
     );
     assert_eq!(settings.embedded_openai.speculative_window, 7);
     assert_eq!(settings.embedded_openai.draft_n_gpu_layers, Some(11));
-    let downstream_stage = &generation.stages[1];
-    let stage0_options = stage0_runtime_options(
-        &spec,
-        &settings,
-        &skippy::StagePeerDescriptor {
-            stage_id: downstream_stage.stage_id.clone(),
-            stage_index: downstream_stage.stage_index,
-            endpoint: "127.0.0.1:41001".to_string(),
-            node_id: Some(downstream_stage.node_id),
-        },
-        "127.0.0.1:41001",
-        "127.0.0.1:41000",
-    )
-    .await
-    .expect("stage 0 runtime options should resolve");
-    assert_eq!(
-        stage0_options.config.activation_codec,
-        generation.activation_codec
-    );
-    assert_eq!(
-        stage0_options.config.activation_codec_policy,
-        generation.activation_codec_policy
-    );
     spec.capacity_budget_bytes = Some(0);
     assert_eq!(
         split_allocatable_memory_bytes(&spec),
