@@ -1,0 +1,45 @@
+{
+  "stats": {
+    "cache_errors": {
+      "adv_counts": {},
+      "counts": {}
+    },
+    "cache_hits": {
+      "adv_counts": {},
+      "counts": {}
+    },
+    "cache_misses": {
+      "adv_counts": {
+        "assemblerToPreprocess [gcc]": 139,
+        "c [gcc]": 284,
+        "c++ [gcc]": 319,
+        "rust": 304
+      },
+      "counts": {
+        "Assembler": 139,
+        "C/C++": 603,
+        "Rust": 304
+      }
+    },
+    "cache_read_errors": 0,
+    "cache_timeouts": 0,
+    "cache_write_errors": 0,
+    "cache_writes": 1046,
+    "compilations": 1046,
+    "compile_fails": 4,
+    "compile_requests": 1125,
+    "dist_errors": 0,
+    "forced_recaches": 0,
+    "non_cacheable_compilations": 0,
+    "not_cached": {
+      "-": 4,
+      "-o": 6,
+      "crate-type": 59,
+      "missing input": 2
+    },
+    "requests_executed": 1050,
+    "requests_not_cacheable": 71,
+    "requests_not_compile": 4,
+    "requests_unsupported_compiler": 0
+  }
+}
