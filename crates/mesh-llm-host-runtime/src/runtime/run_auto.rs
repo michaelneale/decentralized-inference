@@ -1704,14 +1704,13 @@ async fn run_auto_inner(
     let mut model_intent_rx = install_run_auto_model_intent_channel(node.clone()).await;
 
     let model_name_for_console = String::new();
-    let model_path_for_console = PathBuf::new();
     let runtime_owner_key_path = resolve_runtime_owner_key_path(&options)?;
     let console_state = setup_run_auto_console_state(RunAutoConsoleStateContext {
         options: &options,
         node: &node,
         console_enabled: console_port.is_some(),
         model_name: &model_name_for_console,
-        model_path: &model_path_for_console,
+        model_path: &PathBuf::new(),
         api_port,
         plugin_manager: &plugin_manager,
         affinity_router: &affinity_router,
