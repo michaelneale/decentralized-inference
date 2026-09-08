@@ -105,6 +105,7 @@ class SkippyDynamicLinkTests(unittest.TestCase):
     def test_driverless_elf_link_resolves_indirect_driver_without_bundling_stub(self) -> None:
         self.assertIsNotNone(shutil.which("cc"))
         self.assertIsNotNone(shutil.which("readelf"))
+        self.assertIsNotNone(shutil.which("ld.bfd"))
         lines, stubs = self.run_build_script("aarch64-unknown-linux-gnu", "cuda")
         root = stubs.parent.parent
         staged = root / "staged libraries"
@@ -136,7 +137,10 @@ class SkippyDynamicLinkTests(unittest.TestCase):
             elif line.startswith("cargo:rustc-link-lib="):
                 args.extend(["-l", line.split("=", 1)[1]])
         self.assertEqual(args[-2:], ["-l", "dylib=cuda"])
-        command = ["rustc", "--edition=2024", str(source), "-o", str(root / "probe")]
+        # Reproduce the ARM64 release's GNU linker. Other Rust targets may
+        # default to LLD, which accepts this unresolved indirect dependency.
+        command = ["rustc", "--edition=2024", "-C", "link-arg=-fuse-ld=bfd",
+                   str(source), "-o", str(root / "probe")]
         broken = subprocess.run(command + args[:-2], cwd=root, capture_output=True, text=True)
         self.assertNotEqual(broken.returncode, 0)
         self.assertIn("cuGetErrorString", broken.stderr)
