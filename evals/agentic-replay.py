@@ -183,7 +183,15 @@ def parse_ref_specs(repo: Path, values: Sequence[str]) -> list[RefSpec]:
 
 def external_config(args: argparse.Namespace) -> EngineConfig | None:
     path = getattr(args, "engine_config", None)
-    return load_engine_config(path) if path is not None else None
+    if path is None:
+        return None
+    # validate_args already loaded and model-checked this file; reuse that
+    # snapshot so a file change after argument validation cannot make the run
+    # execute a different configuration than the one that was validated.
+    snapshot = getattr(args, "engine_config_snapshot", None)
+    if snapshot is not None:
+        return snapshot
+    return load_engine_config(path)
 
 
 def combined_specs(
@@ -599,10 +607,12 @@ def server_command(binary: Path, model: str) -> list[str]:
 def command_for_build(build: dict[str, Any], model: str) -> list[str]:
     if build.get("engine", "mesh") == "mesh":
         return server_command(Path(build["binary"]), model)
+    # Launch the exact executable that preflight resolved and version-probed
+    # (arm.cwd-relative path or PATH hit), not the raw configured string.
     arm = EngineArm(
         label=build["external_engine"]["label"],
         engine=build["external_engine"]["engine"],
-        executable=build["external_engine"]["executable"],
+        executable=build["provenance"]["resolved_executable"],
         model=build["external_engine"]["model"],
         served_model=build["external_engine"]["served_model"],
         context_size=build["external_engine"]["context_size"],
@@ -2450,6 +2460,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
             parser.error(
                 "--model must exactly match engine config comparison.model"
             )
+        args.engine_config_snapshot = config
     trajectories_per_cohort = (
         args.trajectories_per_framework * len(args.framework)
         if args.trajectories_per_framework is not None

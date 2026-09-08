@@ -1406,6 +1406,104 @@ class AgenticReplayTest(unittest.TestCase):
             "<code>multi  line</code>",
         )
 
+    def test_command_for_build_launches_the_preflight_resolved_executable(
+        self,
+    ) -> None:
+        build = {
+            "engine": "vllm",
+            "worktree": "/engine",
+            "external_engine": {
+                "label": "vllm",
+                "engine": "vllm",
+                "executable": "vllm",
+                "model": "org/model",
+                "served_model": "org/model",
+                "context_size": 65536,
+                "max_concurrency": 4,
+                "tokenizer": None,
+                "hf_config": None,
+                "prefix_cache": True,
+                "batch_size": 2048,
+                "ubatch_size": 512,
+                "extra_args": [],
+                "cwd": "/engine",
+            },
+            "provenance": {
+                "resolved_executable": "/opt/vllm/bin/vllm-resolved",
+            },
+        }
+
+        command = BENCH.command_for_build(build, "model-uri")
+
+        self.assertEqual(command[0], "/opt/vllm/bin/vllm-resolved")
+
+    def test_external_config_reuses_the_validated_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 4096,
+                                "max_concurrency": 2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot = BENCH.load_engine_config(path)
+            args = SimpleNamespace(
+                engine_config=path, engine_config_snapshot=snapshot
+            )
+
+            with mock.patch.object(
+                BENCH,
+                "load_engine_config",
+                side_effect=AssertionError(
+                    "validated snapshot must be reused, not reloaded"
+                ),
+            ):
+                config = BENCH.external_config(args)
+
+            self.assertIs(config, snapshot)
+
+    def test_external_config_without_snapshot_loads_from_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 4096,
+                                "max_concurrency": 2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(engine_config=path)
+
+            config = BENCH.external_config(args)
+
+            self.assertEqual(config.path, path.resolve())
+            self.assertEqual(config.arms[0].label, "vllm")
+
 
 if __name__ == "__main__":
     unittest.main()

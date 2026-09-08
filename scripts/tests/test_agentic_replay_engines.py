@@ -164,7 +164,9 @@ class AgenticReplayEnginesTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "version command timed out"):
                 ENGINES.engine_version(self.arm("vllm"), "/engine")
 
-    def test_engine_version_passes_timeout_and_resolved_executable(self) -> None:
+    def test_engine_version_passes_timeout_cwd_and_resolved_executable(
+        self,
+    ) -> None:
         arm = self.arm("vllm", executable="/opt/vllm/bin/vllm")
         completed = mock.Mock(returncode=0, stdout="vLLM 0.10.1", stderr="")
 
@@ -179,9 +181,28 @@ class AgenticReplayEnginesTest(unittest.TestCase):
             run.call_args.kwargs.get("timeout"),
             ENGINES.VERSION_COMMAND_TIMEOUT_SECONDS,
         )
+        self.assertEqual(run.call_args.kwargs.get("cwd"), REPO)
         self.assertEqual(
             run.call_args.args[0], ["/resolved/vllm", "--version"]
         )
+
+    def test_sglang_version_query_runs_in_arm_cwd_not_runner_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine_dir = root / "engine"
+            engine_dir.mkdir()
+            arm = self.arm("sglang", cwd=engine_dir)
+            completed = mock.Mock(returncode=0, stdout="0.5.0", stderr="")
+
+            with mock.patch.object(
+                ENGINES.subprocess, "run", return_value=completed
+            ) as run:
+                ENGINES.engine_version(arm, str(engine_dir / "python"))
+
+            self.assertEqual(run.call_args.kwargs.get("cwd"), engine_dir)
+            self.assertEqual(
+                run.call_args.args[0][0], str(engine_dir / "python")
+            )
 
     def test_relative_executable_resolves_against_arm_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

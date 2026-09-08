@@ -319,6 +319,10 @@ def engine_version(arm: EngineArm, executable: str) -> str:
             capture_output=True,
             check=False,
             timeout=VERSION_COMMAND_TIMEOUT_SECONDS,
+            # The SGLang query imports through sys.path, which includes the
+            # current directory; run it where the server will run so a
+            # configured checkout reports its own version.
+            cwd=arm.cwd,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
