@@ -142,11 +142,6 @@ pub fn identity_from_package_v2(package_dir: &Path) -> Result<SkippyPackageIdent
         source_sha256 == metadata_artifact.sha256,
         "package-v2 metadata artifact SHA-256 differs from manifest"
     );
-    anyhow::ensure!(
-        source_sha256 == manifest.source_model.sha256,
-        "package-v2 metadata artifact SHA-256 differs from source model identity"
-    );
-
     let architecture = manifest
         .model_metadata
         .get("general.architecture")
@@ -1284,7 +1279,7 @@ fn identity_from_package_v2_metadata(
         SidecarDigestCache::open_default().as_ref(),
     )?;
     anyhow::ensure!(
-        source_sha256 == metadata_artifact.sha256 && source_sha256 == manifest.source_model.sha256,
+        source_sha256 == metadata_artifact.sha256,
         "package-v2 metadata artifact SHA-256 differs from manifest"
     );
     let architecture = manifest
@@ -1464,6 +1459,109 @@ mod tests {
 
         std::fs::write(&manifest, br#"{"schema_version":2}"#).unwrap();
         assert!(is_package_v2_ref(&root.path().to_string_lossy()));
+    }
+
+    #[test]
+    fn package_v2_identity_keeps_source_provenance_separate_from_generated_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata_dir = root.path().join("shared");
+        std::fs::create_dir(&metadata_dir).unwrap();
+        let metadata_path = metadata_dir.join("metadata.gguf");
+        let metadata_bytes = b"generated package metadata";
+        std::fs::write(&metadata_path, metadata_bytes).unwrap();
+        let metadata_sha256 = hex_lower(&Sha256::digest(metadata_bytes));
+        let source_sha256 = "a".repeat(64);
+        let mut manifest = PackageManifestV2 {
+            schema_version: PACKAGE_SCHEMA_VERSION,
+            package_id: String::new(),
+            model_id: "fixture/model".to_string(),
+            source_model: SourceModel {
+                sha256: source_sha256.clone(),
+                metadata_artifact_id: "metadata".to_string(),
+                repo: Some("fixture/model".to_string()),
+                revision: Some("revision".to_string()),
+                primary_file: Some("source.gguf".to_string()),
+                canonical_ref: Some("hf://fixture/model@revision/source.gguf".to_string()),
+                distribution_id: None,
+                files: vec![SourceFile {
+                    path: "source.gguf".to_string(),
+                    byte_size: 1024,
+                    sha256: source_sha256.clone(),
+                }],
+            },
+            format: "gguf".to_string(),
+            layer_count: 1,
+            model_metadata: [
+                (
+                    "general.architecture".to_string(),
+                    serde_json::Value::String("llama".to_string()),
+                ),
+                (
+                    "llama.embedding_length".to_string(),
+                    serde_json::Value::from(16),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            artifact_catalog: ArtifactCatalog {
+                entries: vec![Artifact {
+                    id: "metadata".to_string(),
+                    path: "shared/metadata.gguf".to_string(),
+                    byte_size: metadata_bytes.len() as u64,
+                    sha256: metadata_sha256,
+                }],
+            },
+            tensor_catalog: TensorCatalog {
+                entries: vec![Tensor {
+                    id: "tensor".to_string(),
+                    name: "blk.0.weight".to_string(),
+                    ggml_type: 0,
+                    dimensions: vec![1],
+                    layer_ordinal: Some(0),
+                    storage: TensorStorage::Owned {
+                        artifact_id: "metadata".to_string(),
+                        data_offset: 0,
+                        stored_length: 4,
+                        alignment: 1,
+                        integrity: TensorIntegrity::ArtifactSha256,
+                    },
+                }],
+            },
+            sidecars: Vec::new(),
+            generation: None,
+            native_abi_version: format!(
+                "{}.{}.{}",
+                skippy_ffi::ABI_VERSION_MAJOR,
+                skippy_ffi::ABI_VERSION_MINOR,
+                skippy_ffi::ABI_VERSION_PATCH
+            ),
+            generator_version: "test".to_string(),
+            created_at_unix_secs: 0,
+        };
+        manifest.package_id = manifest.computed_package_id().unwrap();
+        std::fs::write(
+            root.path().join(PACKAGE_V2_MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let direct = identity_from_package_v2(root.path()).unwrap();
+        let metadata = identity_from_package_v2_metadata(
+            &root.path().to_string_lossy(),
+            &root.path().to_string_lossy(),
+        )
+        .unwrap();
+
+        assert_eq!(direct.source_model_sha256, source_sha256);
+        assert_eq!(
+            direct.source_model_path,
+            metadata_path.canonicalize().unwrap()
+        );
+        assert_eq!(metadata.source_model_sha256, direct.source_model_sha256);
+        assert_eq!(
+            metadata.source_model_path,
+            root.path().join("shared/metadata.gguf")
+        );
     }
 
     #[test]

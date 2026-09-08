@@ -87,7 +87,10 @@ impl PackageManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceModel {
+    /// Digest of the primary file in the immutable source distribution.
     pub sha256: String,
+    /// Generated package artifact that carries the model metadata needed to
+    /// construct the metadata-only graph.
     pub metadata_artifact_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
@@ -555,17 +558,6 @@ fn validate_metadata_artifact_binding(
             format!("metadata artifact {:?} has a sidecar role", artifact.id),
         );
     }
-    if artifact.sha256 != manifest.source_model.sha256 {
-        push_issue(
-            issues,
-            ValidationCode::SourceIdentityMismatch,
-            "source_model.metadata_artifact_id",
-            format!(
-                "metadata artifact {:?} SHA-256 does not match source model digest",
-                artifact.id
-            ),
-        );
-    }
     let Some(primary_path) = manifest.source_model.primary_file.as_deref() else {
         return;
     };
@@ -583,28 +575,6 @@ fn validate_metadata_artifact_binding(
             ValidationCode::SourceIdentityMismatch,
             "source_model.sha256",
             "source model digest does not match the primary source file",
-        );
-    }
-    if artifact.sha256 != primary_file.sha256 {
-        push_issue(
-            issues,
-            ValidationCode::SourceIdentityMismatch,
-            "source_model.metadata_artifact_id",
-            format!(
-                "metadata artifact {:?} SHA-256 does not match primary source file {:?}",
-                artifact.id, primary_file.path
-            ),
-        );
-    }
-    if artifact.byte_size != primary_file.byte_size {
-        push_issue(
-            issues,
-            ValidationCode::SourceIdentityMismatch,
-            "source_model.metadata_artifact_id",
-            format!(
-                "metadata artifact {:?} byte size does not match primary source file {:?}",
-                artifact.id, primary_file.path
-            ),
         );
     }
 }

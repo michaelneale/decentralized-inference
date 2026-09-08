@@ -17,6 +17,14 @@ The package format has no model-family staging policy, endpoint ownership, or
 cut-specific artifacts. Per-layer GGUF files remain valid physical containers,
 but their placement does not determine whether a stage owns a tensor.
 
+`source_model` records the immutable input distribution. Its digest is bound to
+the declared primary source file and does not identify any generated package
+artifact. `source_model.metadata_artifact_id` instead selects the generated GGUF
+container used to construct the metadata-only graph. That artifact has its own
+size and digest in the artifact catalog, so a packager may emit a small shared
+metadata container while preserving the original source identity for
+provenance and verification.
+
 ## Top-Level Contract
 
 `PackageManifest` contains:

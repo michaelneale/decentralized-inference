@@ -8,7 +8,7 @@ fn valid_manifest_passes() {
 }
 
 #[test]
-fn metadata_artifact_binding_is_required_and_exact() {
+fn metadata_artifact_binding_is_required_and_source_identity_is_exact() {
     let manifest = fixture();
     let mut encoded = serde_json::to_value(&manifest).unwrap();
     encoded["source_model"]
@@ -55,23 +55,24 @@ fn metadata_artifact_binding_is_required_and_exact() {
             })
     );
 
-    for mismatch in 0..3 {
-        let mut changed = manifest.clone();
-        match mismatch {
-            0 => changed.artifact_catalog.entries[0].sha256 = "1".repeat(64),
-            1 => changed.artifact_catalog.entries[0].byte_size += 1,
-            _ => changed.source_model.sha256 = "1".repeat(64),
-        }
-        changed.package_id = changed.computed_package_id().unwrap();
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .issues()
-                .iter()
-                .any(|issue| { issue.code == ValidationCode::SourceIdentityMismatch })
-        );
-    }
+    let mut generated_metadata = manifest.clone();
+    generated_metadata.artifact_catalog.entries[0].path = "shared/metadata.gguf".to_string();
+    generated_metadata.artifact_catalog.entries[0].sha256 = "1".repeat(64);
+    generated_metadata.artifact_catalog.entries[0].byte_size += 1;
+    generated_metadata.package_id = generated_metadata.computed_package_id().unwrap();
+    generated_metadata.validate().unwrap();
+
+    let mut changed_source = manifest;
+    changed_source.source_model.sha256 = "1".repeat(64);
+    changed_source.package_id = changed_source.computed_package_id().unwrap();
+    assert!(
+        changed_source
+            .validate()
+            .unwrap_err()
+            .issues()
+            .iter()
+            .any(|issue| { issue.code == ValidationCode::SourceIdentityMismatch })
+    );
 }
 
 #[test]
