@@ -251,6 +251,7 @@ mod tests {
                 interactive: false,
             },
             NativeRuntimeConfigSelection::default(),
+            None,
             false,
         );
         actions.github_outcome = github_outcome;

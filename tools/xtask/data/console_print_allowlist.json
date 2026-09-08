@@ -1459,27 +1459,27 @@
   ],
   "crates/mesh-llm-commands/src/setup/command.rs": [
     {
-      "line": 170,
+      "line": 184,
       "macro_name": "eprintln!"
     },
     {
-      "line": 172,
+      "line": 186,
       "macro_name": "eprintln!"
     },
     {
-      "line": 185,
+      "line": 199,
       "macro_name": "eprintln!"
     },
     {
-      "line": 205,
+      "line": 219,
       "macro_name": "eprintln!"
     },
     {
-      "line": 208,
+      "line": 222,
       "macro_name": "eprintln!"
     },
     {
-      "line": 228,
+      "line": 242,
       "macro_name": "eprintln!"
     }
   ],

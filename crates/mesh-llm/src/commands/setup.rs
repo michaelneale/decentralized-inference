@@ -10,13 +10,18 @@ pub(crate) async fn dispatch_setup_command(
     config_path: Option<&Path>,
 ) -> Result<()> {
     let selector = native_runtime_config_selector(config_path)?;
-    let args = setup_command_args(cmd, native_runtime_command_selection(selector.as_ref()))?;
+    let args = setup_command_args(
+        cmd,
+        native_runtime_command_selection(selector.as_ref()),
+        config_path,
+    )?;
     mesh_llm_commands::setup::run_setup_command(args).await
 }
 
 fn setup_command_args<'a>(
     cmd: &Command,
     configured: mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection<'a>,
+    config_path: Option<&'a Path>,
 ) -> Result<SetupCommandArgs<'a>> {
     let Command::Setup {
         yes,
@@ -46,6 +51,7 @@ fn setup_command_args<'a>(
             interactive: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         },
         configured,
+        config_path,
     })
 }
 
@@ -79,6 +85,7 @@ mod tests {
                 verbose: true,
             },
             mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection::default(),
+            None,
         )
         .expect("setup args should build");
 
@@ -104,6 +111,7 @@ mod tests {
                 command: None,
             },
             mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection::default(),
+            None,
         )
         .expect_err("doctor command must not route through setup dispatch");
 

@@ -30,6 +30,9 @@ pub struct SetupCommandArgs<'a> {
     pub options: SetupOptions,
     pub environment: SetupEnvironment,
     pub configured: NativeRuntimeConfigSelection<'a>,
+    /// Explicit `--config` path, so endpoint discovery reports against the same
+    /// file the rest of setup uses rather than the default location.
+    pub config_path: Option<&'a std::path::Path>,
 }
 
 pub async fn run_setup<P, A>(
@@ -56,7 +59,12 @@ where
 
 pub async fn run_setup_command(args: SetupCommandArgs<'_>) -> Result<()> {
     let mut prompter = CliSetupPrompter;
-    let mut actions = CliSetupActions::new(args.environment, args.configured, args.options.verbose);
+    let mut actions = CliSetupActions::new(
+        args.environment,
+        args.configured,
+        args.config_path,
+        args.options.verbose,
+    );
     let plan = run_setup(args.options, args.environment, &mut prompter, &mut actions).await?;
     print_setup_summary(&plan, &actions, args.options.verbose);
     Ok(())
@@ -73,6 +81,7 @@ impl SetupPrompter for CliSetupPrompter {
 pub(crate) struct CliSetupActions<'a> {
     environment: SetupEnvironment,
     configured: NativeRuntimeConfigSelection<'a>,
+    config_path: Option<&'a std::path::Path>,
     pub(crate) runtime_outcome: Option<SetupNativeRuntimeOutcome>,
     service_context: Option<ServiceInstallContext>,
     service_runner: Box<dyn ServiceCommandRunner>,
@@ -87,11 +96,13 @@ impl<'a> CliSetupActions<'a> {
     pub(crate) fn new(
         environment: SetupEnvironment,
         configured: NativeRuntimeConfigSelection<'a>,
+        config_path: Option<&'a std::path::Path>,
         verbose: bool,
     ) -> Self {
         Self::with_support(
             environment,
             configured,
+            config_path,
             None,
             Box::new(CliServiceCommandRunner),
             Box::new(ProcessGhCommandRunner::default()),
@@ -102,6 +113,7 @@ impl<'a> CliSetupActions<'a> {
     fn with_support(
         environment: SetupEnvironment,
         configured: NativeRuntimeConfigSelection<'a>,
+        config_path: Option<&'a std::path::Path>,
         service_context: Option<ServiceInstallContext>,
         service_runner: Box<dyn ServiceCommandRunner>,
         github_runner: Box<dyn GhCommandRunner>,
@@ -110,6 +122,7 @@ impl<'a> CliSetupActions<'a> {
         Self {
             environment,
             configured,
+            config_path,
             runtime_outcome: None,
             endpoints_found: Vec::new(),
             service_context,
@@ -132,6 +145,7 @@ impl<'a> CliSetupActions<'a> {
         Self::with_support(
             environment,
             configured,
+            None,
             Some(service_context),
             service_runner,
             github_runner,
@@ -199,7 +213,7 @@ impl<'a> CliSetupActions<'a> {
         // Read the real config so setup does not advise publishing something
         // already configured. A bad config must not fail setup, so an
         // unreadable one falls back to reporting the findings only.
-        let existing = existing_endpoint_entry_at(None).unwrap_or_default();
+        let existing = existing_endpoint_entry_at(self.config_path).unwrap_or_default();
         let plan = plan_endpoint_publish(found, existing.as_ref());
         for endpoint in &plan.found {
             eprintln!("{} Found {}", style_ok("\u{2713}"), endpoint.describe());

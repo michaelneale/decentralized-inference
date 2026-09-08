@@ -1161,7 +1161,7 @@ pub enum PluginCommand {
     /// Detect OpenAI-compatible LLM servers already running on this machine
     /// (Ollama, LM Studio, LiteLLM, vLLM) and offer to publish their models.
     Discover {
-        /// Write the discovered endpoint into ~/.mesh-llm/config.toml.
+        /// Write the discovered endpoint into the selected mesh-llm config file.
         #[arg(long)]
         apply: bool,
     },

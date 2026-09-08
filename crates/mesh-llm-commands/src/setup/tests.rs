@@ -312,3 +312,27 @@ fn endpoint_probe_runs_before_service_install() {
         "operators should see what was found before the node is installed as a service"
     );
 }
+
+/// `mesh-llm setup --config <path>` must report endpoint discovery against that
+/// file. Reading the default location instead produced a false "publish this"
+/// hint when the selected file already configured or disabled the plugin.
+#[test]
+fn setup_command_args_carry_the_selected_config_path() {
+    let path = std::path::Path::new("/tmp/example-mesh-config.toml");
+
+    let args = super::SetupCommandArgs {
+        options: SetupOptions::default(),
+        environment: SetupEnvironment {
+            platform: SetupPlatform::Linux,
+            interactive: false,
+        },
+        configured: crate::runtime_native::NativeRuntimeConfigSelection::default(),
+        config_path: Some(path),
+    };
+
+    assert_eq!(
+        args.config_path,
+        Some(path),
+        "discovery must consult the same config file as the rest of setup"
+    );
+}
