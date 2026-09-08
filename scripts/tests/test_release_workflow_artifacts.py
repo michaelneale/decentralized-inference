@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
+import tempfile
 import unittest
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +20,83 @@ def job_block(workflow: str, job_name: str, next_job_name: str) -> str:
 
 
 class ReleaseWorkflowArtifactTests(unittest.TestCase):
+    def test_release_ui_version_preparation_handles_container_ownership(self) -> None:
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/ci-ui-artifact-slice.yml").read_text()
+        )
+        step = next(
+            step for step in workflow["jobs"]["ui_artifact"]["steps"]
+            if step.get("name") == "Prepare release UI version"
+        )
+        for source in ("matching", "mismatching", "malformed"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                repo = root / "container checkout"
+                repo.mkdir()
+                home = root / "home"
+                home.mkdir()
+                env = {
+                    key: value for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                }
+                env.update(
+                    HOME=str(home), XDG_CONFIG_HOME=str(home),
+                    GIT_CONFIG_GLOBAL=str(home / ".gitconfig"),
+                    GIT_CONFIG_NOSYSTEM="1",
+                )
+
+                def git(*args: str) -> subprocess.CompletedProcess[str]:
+                    return subprocess.run(
+                        ["git", *args], cwd=repo, env=env,
+                        text=True, capture_output=True,
+                    )
+
+                self.assertEqual(git("init", "--quiet").returncode, 0)
+                commit = git(
+                    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture",
+                )
+                self.assertEqual(commit.returncode, 0, commit.stderr)
+                sha = git("rev-parse", "HEAD").stdout.strip()
+                scripts = repo / "scripts"
+                scripts.mkdir()
+                version = scripts / "release-version.sh"
+                version.write_text(
+                    '#!/usr/bin/env bash\nset -euo pipefail\n'
+                    'git rev-parse HEAD > version-source\nprintf "%s\\n" "$1" > version-tag\n'
+                )
+                version.chmod(0o755)
+                env.update(
+                    GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+                    GITHUB_WORKSPACE=str(repo), GITHUB_ENV=str(root / "github-env"),
+                    UI_SOURCE_SHA=sha if source == "matching" else (
+                        "0" * 40 if source == "mismatching" else "invalid"
+                    ),
+                    RELEASE_TAG="v0.76.0-rc9",
+                )
+                untrusted = git("rev-parse", "HEAD")
+                self.assertNotEqual(untrusted.returncode, 0)
+                self.assertIn("dubious ownership", untrusted.stderr)
+                result = subprocess.run(
+                    ["bash", "-c", step["run"]], cwd=repo, env=env,
+                    text=True, capture_output=True,
+                )
+                if source != "matching":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((repo / "version-tag").exists())
+                    self.assertFalse((root / "github-env").exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((repo / "version-source").read_text().strip(), sha)
+                self.assertEqual((repo / "version-tag").read_text().strip(), env["RELEASE_TAG"])
+                self.assertEqual(
+                    (root / "github-env").read_text(), "VITE_MESH_LLM_DEBUG_UI=false\n"
+                )
+                self.assertEqual(
+                    git("config", "--global", "--get-all", "safe.directory").stdout.splitlines(),
+                    [str(repo)],
+                )
+
     def test_release_ui_is_one_verified_producer_for_hosts_and_sdks(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         producer = job_block(workflow, "release_ui", "build")

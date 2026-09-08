@@ -102,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$UI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse HEAD)" = "$UI_SOURCE_SHA"
           scripts/release-version.sh "$RELEASE_TAG"
           echo "VITE_MESH_LLM_DEBUG_UI=false" >> "$GITHUB_ENV"

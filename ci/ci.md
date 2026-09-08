@@ -119,6 +119,9 @@ main.
 
 Release efficiency TODOs:
 
+- [x] Prepare release UI versions in container checkouts with different owners.
+  QA: execute the workflow step with Git's ownership check enabled, verify
+  workspace-only trust and source rejection, then shellcheck the extracted step.
 - [x] Build one version-bound console distribution and verify its complete file
   checksums before each host embeds it or an SDK packages it. QA: run the UI
   identity/tampering tests and release artifact graph tests.
@@ -146,7 +149,10 @@ the same script and rejects any tracked diff. Canary dispatches do not mutate
 Release calls the existing UI producer once with the immutable source SHA and
 release tag. It prepares that version, builds the TypeScript console in release
 mode, and records every output checksum in `.mesh-llm-ui-release.json`. The
-Linux amd64/arm64, macOS and Windows host producers restore and verify this same
+version step registers only `GITHUB_WORKSPACE` as a safe Git directory in the
+container's active home before checking the source SHA or running the version
+script; checkout's temporary home configuration does not reach these commands.
+The Linux amd64/arm64, macOS and Windows host producers restore and verify this same
 distribution before compiling their own target-specific Rust embedding crate
 and host. Swift resource assembly and the release-tag SDK resources consume the
 same bytes with `--skip-build`. Missing manifests, mismatched source/version,
