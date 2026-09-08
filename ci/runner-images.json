@@ -225,6 +225,13 @@
           "matrix_selector": null,
           "image_expression": "${{ inputs.runner != 'gpu-nvidia' && '{image}' || '' }}",
           "epoch_field": null
+        },
+        {
+          "workflow": "product-integration-smoke.yml",
+          "job": "product_integration",
+          "matrix_selector": null,
+          "image_expression": "${{ inputs.platform == 'linux' && inputs.backend == 'cpu' && '{image}' || '' }}",
+          "epoch_field": null
         }
       ]
     },

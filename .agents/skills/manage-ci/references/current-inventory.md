@@ -705,3 +705,8 @@ under `ci/runner-image-evidence/<sha256>.json`; ordinary commands validate hashe
 and consumer relationships without executing producer code or authenticating
 GitHub provenance again. See `ci/ci.md` for the explicit trust boundary and CLI.
 Current image references and historical null evidence remain unchanged.
+
+The `product-smoke` catalog role covers both the legacy `smoke.yml` job and
+the typed `product-integration-smoke.yml` job. The latter uses the same pinned
+CPU image only for Linux CPU; accelerator and macOS paths retain their existing
+container opt-outs. The inventory has 30 roles and 31 literal workflow bindings.
