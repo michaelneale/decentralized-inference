@@ -608,6 +608,43 @@ struct PlannerInputs {
     backend_id: CString,
 }
 
+fn planner_profiles(
+    profiles: &[StagePlannerProfile],
+) -> anyhow::Result<(Vec<CString>, Vec<skippy_ffi::StagePlannerProfileV1>)> {
+    let mut previous_profile = None;
+    let profile_ids = profiles
+        .iter()
+        .map(|profile| {
+            if previous_profile
+                .is_some_and(|previous: &str| previous >= profile.profile_id.as_str())
+            {
+                anyhow::bail!("stage planner profile IDs are not strictly sorted");
+            }
+            previous_profile = Some(profile.profile_id.as_str());
+            cstring(&profile.profile_id, "profile ID")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !profile_ids.is_empty(),
+        "stage planner profile set is empty"
+    );
+    let native_profiles = profiles
+        .iter()
+        .zip(&profile_ids)
+        .map(|(profile, id)| skippy_ffi::StagePlannerProfileV1 {
+            abi_version: skippy_ffi::STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
+            struct_size: u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerProfileV1>())
+                .expect("stage planner profile descriptor size fits u32"),
+            profile_id: id.as_ptr(),
+            n_tokens: profile.n_tokens,
+            n_sequences: profile.n_sequences,
+            n_outputs: profile.n_outputs,
+            n_recurrent_rollback_sequences: profile.n_recurrent_rollback_sequences,
+        })
+        .collect();
+    Ok((profile_ids, native_profiles))
+}
+
 impl PlannerInputs {
     fn new(
         package_dir: Option<&Path>,
@@ -780,38 +817,7 @@ impl PlannerInputs {
             });
         }
 
-        let mut previous_profile = None;
-        let profile_ids = profiles
-            .iter()
-            .map(|profile| {
-                if previous_profile
-                    .is_some_and(|previous: &str| previous >= profile.profile_id.as_str())
-                {
-                    anyhow::bail!("stage planner profile IDs are not strictly sorted");
-                }
-                previous_profile = Some(profile.profile_id.as_str());
-                cstring(&profile.profile_id, "profile ID")
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        anyhow::ensure!(
-            !profile_ids.is_empty(),
-            "stage planner profile set is empty"
-        );
-        let profiles = profiles
-            .iter()
-            .zip(&profile_ids)
-            .map(|(profile, id)| skippy_ffi::StagePlannerProfileV1 {
-                abi_version: skippy_ffi::STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
-                struct_size:
-                    u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerProfileV1>())
-                        .expect("stage planner profile descriptor size fits u32"),
-                profile_id: id.as_ptr(),
-                n_tokens: profile.n_tokens,
-                n_sequences: profile.n_sequences,
-                n_outputs: profile.n_outputs,
-                n_recurrent_rollback_sequences: profile.n_recurrent_rollback_sequences,
-            })
-            .collect();
+        let (profile_ids, profiles) = planner_profiles(profiles)?;
         Ok(Self {
             package_id: cstring(&manifest.package_id, "package ID")?,
             shard_paths,
