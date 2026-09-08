@@ -202,7 +202,7 @@ def one_field(text: str, name: str, where: str, indent: int | None = None) -> st
     return scalar(values[0])
 
 
-def workflow_jobs(path: Path) -> dict[str, str]:
+def workflow_jobs(path: Path, seed_guard_job: str | None = None) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     # Scan the complete file before selecting jobs, so shorthand/flow containers
     # and indirect literal declarations cannot disappear from the census. The
@@ -223,6 +223,11 @@ def workflow_jobs(path: Path) -> dict[str, str]:
         require(name not in jobs, f"{path.name}: duplicate job {name}")
         jobs[name] = body[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(body)]
     require(bool(jobs), f"{path.name}: unsupported jobs mapping")
+    guard_pattern = r"^ {10}allow_trusted_seed:[^\n]*" + re.escape(REPOSITORY) + r"[^\n]*$"
+    guards = re.findall(guard_pattern, text, re.MULTILINE)
+    scoped_guards = re.findall(guard_pattern, jobs.get(seed_guard_job, ""), re.MULTILINE)
+    require(guards == scoped_guards,
+            f"{path.name}: seed guard image references are limited to the runtime consumer job")
     return jobs
 
 
@@ -266,7 +271,9 @@ def planner_rows(root: Path) -> list[dict[str, Any]]:
 def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
     validate(catalog, root)
     workflow_paths = sorted(path for path in (root / ".github/workflows").iterdir() if path.suffix in (".yml", ".yaml"))
-    workflows = {path.name: workflow_jobs(path) for path in workflow_paths}
+    runtime = catalog["compiler_seed"]["runtime_consumer"]
+    workflows = {path.name: workflow_jobs(path, runtime["job"] if path.name == runtime["workflow"] else None)
+                 for path in workflow_paths}
     images, roles = catalog["images"], catalog["consumer_roles"]
     expected_locations: Counter[tuple[str, str]] = Counter()
     for role_id, role in roles.items():
@@ -378,7 +385,7 @@ def check(catalog: dict[str, Any], root: Path) -> dict[str, int]:
 def diagnose(catalog: dict[str, Any], root: Path) -> list[str]:
     """Report eligibility concerns separately; a matching image is not coverage."""
     runtime = catalog["compiler_seed"]["runtime_consumer"]
-    job = workflow_jobs(root / ".github/workflows" / runtime["workflow"])[runtime["job"]]
+    job = workflow_jobs(root / ".github/workflows" / runtime["workflow"], runtime["job"])[runtime["job"]]
     guard_architectures = re.findall(r"matrix\.runtime\.architecture == '([^']+)'", job)
     matches = [row for row in planner_rows(root) if row["id"] == runtime["row_id"]]
     require(len(matches) == 1, f"planner has no unique row {runtime['row_id']}")

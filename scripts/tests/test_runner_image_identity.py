@@ -339,5 +339,27 @@ class RunnerImageIdentityTests(unittest.TestCase):
         self.assertIn("complete UI artifact pair", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_seed_guard_reference_outside_runtime_consumer_fails(self) -> None:
+        guard = "          allow_trusted_seed: " + IDENTITY.REPOSITORY + ":unregistered\n"
+        cases = {
+            "other workflow": ("extra.yml", "jobs:\n  extra:\n    steps:\n      - uses: example/action@sha\n        with:\n" + guard),
+            "other job": ("ci-linux-runtime-slice.yml", "  extra:\n    steps:\n      - uses: example/action@sha\n        with:\n" + guard),
+            "outside jobs": ("ci-linux-runtime-slice.yml", "\nenv:\n" + guard),
+        }
+        for name, (workflow, addition) in cases.items():
+            with self.subTest(case=name):
+                path = self.root / ".github/workflows" / workflow
+                original = path.read_text() if path.exists() else None
+                path.write_text((original or "") + addition)
+                result = self.cli("check")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("seed guard image references are limited", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_text(original)
+
 if __name__ == "__main__":
     unittest.main()

@@ -797,8 +797,9 @@ are catalogued and checked exactly. Website crate docs, AI runtime, and other
 full-web consumers retain their existing image. CPU seed eligibility and hardware
 runner placement are unchanged.
 
-Before merge, dispatch the existing `ci-website-lane.yml` and `ci-linux-lane.yml`
-on the reviewed candidate branch with the actual candidate source SHA and canonical
+Before merge, dispatch the existing `ci-website-lane.yml` and an applicable fully
+hosted platform lane, such as `ci-macos-lane.yml`, on the reviewed candidate branch
+with the actual candidate source SHA and canonical
 planner-generated lane projections and full-plan digest. Preserve the actual PR
 profile, changed files, required slices and matrices; do not trim a projection to
 avoid required work. These lanes call same-commit slices, proving UI quality, E2E
