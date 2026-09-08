@@ -165,7 +165,8 @@ jobs:
       - name: Open repair PR on regression (opencode loop)
         if: failure()
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Same token as the llama canary repair loop, per James 2026-09-08.
+          GH_TOKEN: ${{ secrets.CANARY_REPAIR_TOKEN }}
         run: |
           set -euo pipefail
           scripts/agentic-replay-repair.sh "$OUTPUT_DIR" || {
