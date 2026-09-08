@@ -119,6 +119,9 @@ main.
 
 Release efficiency TODOs:
 
+- [x] Link the CUDA package tool with the selected build-time driver library.
+  QA: reproduce the unresolved driver symbols, verify the dynamic build-script
+  output and ELF link without a runtime stub search path, and run CI validation.
 - [x] Prepare release UI versions in container checkouts with different owners.
   QA: execute the workflow step with Git's ownership check enabled, verify
   workspace-only trust and source rejection, then shellcheck the extracted step.
