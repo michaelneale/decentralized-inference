@@ -270,6 +270,15 @@ if [[ "$INPUT_READINESS_SMOKE" == "true" ]]; then
         "$output_dir/$INPUT_BINARY_NAME" --log-format json --version
     MESH_LLM_NATIVE_RUNTIME_BUNDLE_DIR="$output_dir/native-runtimes" \
         "$output_dir/$INPUT_BINARY_NAME" --log-format json runtime list
+    # Exercise the shared SDK reader even when full SDK suites are unselected.
+    # CPU needs no accelerator/driver; reuse only the just-composed producer bytes.
+    if [[ "$INPUT_BACKEND" == "cpu" && "$(uname -s)" == "Linux" ]]; then
+        echo "Checking CLI runtime JSON with the shared SDK runtime reader"
+        MESH_SDK_NATIVE_RUNTIME_BUILD_FALLBACK=0 \
+            scripts/ci-prepare-native-runtime.sh \
+                "$output_dir/sdk-runtime-fallback" cpu \
+                --reuse-from-binary "$output_dir/$INPUT_BINARY_NAME"
+    fi
     scripts/ci-client-readiness-smoke.sh \
         "$output_dir/$INPUT_BINARY_NAME" \
         "$output_dir/native-runtimes"

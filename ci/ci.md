@@ -469,6 +469,16 @@ Smoke and SDK consumers download those artifacts and never rebuild a missing
 producer. PR and smoke artifacts retain for one day; caches are acceleration,
 not correctness contracts.
 
+Linux CPU composition readiness runs the composed host's `runtime list
+--available --json` through the shared SDK runtime reader
+(`ci-prepare-native-runtime.sh`) with fallback building disabled. This protects
+that CLI/consumer boundary without selecting full SDK suites for every runtime
+change or requiring accelerator drivers on composition workers.
+`test_ci_sdk_json_consumer.py` checks the original #1675 changed paths select
+this product and its producers, and that invalid CLI JSON blocks publication.
+The protected workflow checks out candidate source before invoking the existing
+composition action; no catalog or workflow-definition change is needed.
+
 Non-Windows native runtime artifacts include the checksum-bound
 `skippy-model-package` tool under `tools/`. Split-serving smoke consumers use
 that producer-owned tool to convert registry-pinned GGUF fixtures into verified
