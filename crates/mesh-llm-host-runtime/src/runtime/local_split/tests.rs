@@ -928,11 +928,8 @@ fn stage_source_prepare_timeout_scales_with_assigned_package_bytes() {
         parameter_bytes: 0,
     };
 
-    let model_path = Path::new("/nonexistent/direct.gguf");
-    let small_timeout =
-        stage_source_prepare_timeout(model_path, &package, &small_stage, true).unwrap();
-    let large_timeout =
-        stage_source_prepare_timeout(model_path, &package, &large_stage, false).unwrap();
+    let small_timeout = stage_source_prepare_timeout(&package, &small_stage);
+    let large_timeout = stage_source_prepare_timeout(&package, &large_stage);
 
     assert!(small_timeout > MIN_STAGE_SOURCE_PREPARE_TIMEOUT);
     assert!(large_timeout > small_timeout);

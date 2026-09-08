@@ -132,7 +132,8 @@ jobs:
       - id: sccache_seed
         uses: ./.github/actions/restore-sccache-seed
         with:
-          allow_trusted_seed: ${{ needs.runner_policy.outputs.allow_trusted_sccache_seed == 'true' && matrix.runtime.architecture == 'x86_64' && matrix.runtime.container_image == 'ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d' && matrix.runtime.toolchain_epoch == 'mesh-llm-cuda-runner-sha256-8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d' && 'true' || 'false' }}
+          # Three verified warm samples in run 34272984200/1 observed zero reuse.
+          allow_trusted_seed: "false"
           cache_key: mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-${{ hashFiles('Cargo.lock', '.github/cache-version.txt', 'Justfile', 'just/**') }}
       - uses: ./.github/actions/configure-sccache-gha
         with:

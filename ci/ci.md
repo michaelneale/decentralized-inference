@@ -119,6 +119,9 @@ main.
 
 Release efficiency TODOs:
 
+- [x] Link the CUDA package tool with the selected build-time driver library.
+  QA: reproduce the unresolved driver symbols, verify the dynamic build-script
+  output and ELF link without a runtime stub search path, and run CI validation.
 - [x] Prepare release UI versions in container checkouts with different owners.
   QA: execute the workflow step with Git's ownership check enabled, verify
   workspace-only trust and source rejection, then shellcheck the extracted step.
@@ -650,12 +653,22 @@ successful Main Quality. Central runner policy denies that seed to every Depot
 selection because Depot's Actions-cache proxy crosses trust scopes. Seeded
 jobs enforce measured hit-rate floors only after an exact warm restore; a
 missing seed is explicitly cold and does not fail. The seed key fingerprints
-the warmer container image and toolchain epoch; runtime rows whose image or
-epoch differs from the warmer are explicitly cold and skip seed restoration.
+the warmer container image and toolchain epoch. Production runtime rows
+explicitly skip seed restoration after three verified CPU warm samples observed
+zero reuse in run `34272984200/1`.
 The warmer's `just ci-sccache-seed-build` recipe covers both the dominant
 `mesh-llm` Clippy graph and the isolated `mesh-llm-cli` test graph used by the
 Rust-test matrix; its `Justfile` and `just/**` inputs are part of the exact
 seed key.
+`ci/runner-images.json` and `scripts/runner-image-identity.py check` make the
+current image, native epoch, compiler-seed and SDK Rust identities auditable
+without changing execution. The existing Python test discovery verifies the
+catalog against workflow bindings and real planner rows. Historical tool
+receipts and source provenance remain unknown until qualified image receipts
+exist. Other consumer workload coverage remains unknown. The measured CPU
+runtime workload had zero seed hits in all three warm samples; the separate
+`diagnose` command reports deliberate runtime exclusion. The checker rejects
+re-enablement independently of architecture spelling.
 These four high-fanout job families also disable the per-object GHA backend on
 every provider. Small exact native
 caches have substantially better reuse-to-storage value. Cache hits are always
@@ -725,3 +738,106 @@ complete
 [manage-ci validation contract](../.agents/skills/manage-ci/SKILL.md#validation-contract)
 for scope-specific checks, and run the canonical `just test-all` target when
 full repository validation is required.
+
+### Offline runner identity qualification
+
+Runner-images PR #23 merged as `f73c2a9`. Trusted producer admission must run
+`runner-cohort.py fetch` for the exact successful staged attempt before a
+maintainer adopts its exact-byte cohort hash, origin and admission-validator
+revision. Offline structural validation alone cannot perform that admission.
+
+The consumer's `runner-image-identity.py bind` accepts a separate reviewed anchor
+and emits a fresh proposal directory containing `ci/runner-images.json` plus
+content-addressed `ci/runner-image-evidence/<sha256>.json` files. It does not
+modify the input catalog, workflows, image pins, compiler seed or cache policy.
+Qualified public UI and browser entries retain reviewed admission evidence; historical full-web and native entries remain null.
+
+```sh
+python3 scripts/runner-image-identity.py --root /trusted/mesh-llm bind \
+  --image-id public-cpu --cohort /admitted/staged-cohort.json \
+  --anchor /reviewed/anchor.json --output /new/proposal
+python3 scripts/runner-image-identity.py --root /new/proposal validate
+```
+
+The anchor has exactly `receipt` and `provenance` objects. Receipt fields are
+`schema: 1`, `cohort_sha256` and `index_candidate_key`. Provenance fields are
+`schema: 1`, `scope: reviewed_producer_admission`,
+`validation: offline_binding_only`, `cohort_sha256`, the exact producer `origin`
+object, and `admission_validator_revision`. The anchor must come from the
+maintainer's reviewed admission result, never from a downloaded assertion that
+it was admitted. Hashes identify bytes; they do not authenticate their author.
+
+Review and apply both catalog and evidence together. `validate` works on the
+proposal alone; `check` also needs the trusted workflow/planner tree after
+reviewed application. Every command validates non-null bindings. `--catalog`
+changes only the catalog input; evidence always resolves beneath explicit
+`--root`. Existing output directories fail rather than being overwritten.
+
+Bindings require the existing pinned family-index digest and exact platform,
+source and family relationships. Full producer tool-policy, OCI and cache-input
+verification remains producer admission's responsibility. The complete hashed
+cohort retains those observations without a mandatory external checkout at
+ordinary check time. This is reviewed producer admission with offline binding
+only, never independently authenticated provenance or verified attestation.
+Matching identity does not establish compiler workload coverage, authorize
+cross-image reuse, or enable a currently ineligible cache restore.
+
+### Qualified lean UI consumers
+
+Public UI and browser images were admitted from runner-images run `34256062098`,
+attempt 1, producer `f73c2a956a992e55bc100fe9543fe60f4cc77684`, Mesh source
+`8578d0f467de5ba659d376d52079ae1d63ed2871`. Their full retained cohort is
+content-addressed under `ci/runner-image-evidence/`; catalog provenance describes
+reviewed producer admission and offline binding, not independent authentication.
+
+UI quality and ordinary UI artifact builds use public UI; E2E uses public browser.
+The UI artifact job selects full web only when `release_tag` is nonempty, preserving
+release version preparation with Cargo and Perl. Both conditional image branches
+are catalogued and checked exactly. Website crate docs, AI runtime, and other
+full-web consumers retain their existing image. CPU seed eligibility and hardware
+runner placement are unchanged.
+
+Before merge, dispatch the existing `ci-website-lane.yml` and an applicable fully
+hosted platform lane, such as `ci-macos-lane.yml`, on the reviewed candidate branch
+with the actual candidate source SHA and canonical
+planner-generated lane projections and full-plan digest. Preserve the actual PR
+profile, changed files, required slices and matrices; do not trim a projection to
+avoid required work. These lanes call same-commit slices, proving UI quality, E2E
+and ordinary artifact execution in the new images. Retain logs and artifact checks.
+Protected default-branch PR slices alone can still execute old image definitions;
+their success is not candidate-image qualification. Release-tag selection must also
+retain its full-web image and release-only preparation guard.
+
+### Existing-seed CPU runtime canary
+
+`depot-canary.yml` adds an isolated manual `runtime-seed` mode. Existing audit and
+cache-authority modes retain their behavior. Six fresh GitHub-hosted Ubuntu jobs
+run three cold/warm pairs in the unchanged CPU `8d93…` image, preserving the real
+CPU native build directory and `prepare-native-runtime-input` action. The canary
+registers its image and seed restore separately from production seed consumers.
+It never saves a cache or changes production eligibility, provider policy or ARC
+placement. The compiler cache remains disk-only and capped at 2 GiB.
+
+The exact main cache is ID `7456497330`, version `6e0f5d94…`, key suffix `9522c1c3…`,
+from trusted publisher run `34230668171` at `a6487dd`. A miss, branch shadow,
+metadata drift, nonfresh outputs, cache error or incomparable host makes evidence
+inconclusive. The warm 1% floor still fails the worker; complete below-floor data
+is retained as a negative qualification result. C/C++ improvements are compared
+against each cold partner separately from assembler and Rust packaging hits.
+Restore-step elapsed, unchanged action elapsed and total measured path are primary
+timings. Optional native-preparation/packaging splits may be derived from timestamped
+job logs at `built patched llama.cpp`; missing markers leave that split unavailable.
+No automatic result grants eligibility. The completed qualification below
+retains its negative coverage result and inconclusive full-cohort timing.
+
+The existing CPU seed is deliberately excluded from production runtime restore.
+[Run 34272984200/1](https://github.com/Mesh-LLM/mesh-llm/actions/runs/34272984200),
+source `1f4545616e98db715e37c57e1196cbdc975a010e`, completed all six real
+build/package verifications. Every warm sample restored the exact main seed and
+had zero hits across 603 C/C++, 139 assembler and 304 Rust cacheable requests.
+All warm samples failed the required 1% floor. The summary remains inconclusive
+for timing because pairs 1 and 2 had different CPUs; no timing improvement or
+exact cause of misses is claimed. Whole-action C/C++ counts also include package
+tool dependencies. Global workload coverage stays unknown for other consumers.
+[Original retained evidence and hashes](runtime-seed-evidence/34272984200-1/README.md)
+preserve the basis beyond remote artifact expiry.

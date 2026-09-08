@@ -38,16 +38,6 @@ pub(crate) fn is_package_v2_ref(package_ref: &str) -> bool {
         == Some(u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION))
 }
 
-pub(crate) fn is_package_v2_identity(package: &SkippyPackageIdentity) -> bool {
-    if is_package_v2_ref(&package.package_ref) {
-        return true;
-    }
-    package
-        .source_model_path
-        .ancestors()
-        .any(|path| is_package_v2_ref(&path.to_string_lossy()))
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
     pub package_ref: String,
@@ -1230,32 +1220,9 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
     if is_package_v2_ref(&local_ref) {
         return identity_from_package_v2_metadata(package_ref, &local_ref);
     }
-    let info = skippy_runtime::package::inspect_layer_package(&local_ref)
-        .with_context(|| format!("inspect layer package {package_ref}"))?;
-
-    let source_model_bytes = info
-        .source_model_bytes
-        .unwrap_or_else(|| info.layers.iter().map(|l| l.artifact_bytes).sum::<u64>());
-    let layer_weight_bytes = layer_weight_bytes_from_info(&info);
-
-    // For local paths inside an HF cache, convert to an exact hf:// ref so all
-    // nodes resolve the same snapshot independently. HF cache dirs look like:
-    // .../models--owner--name/snapshots/<hash>/
-    let canonical_package_ref = canonical_layer_package_ref(package_ref, &local_ref);
-
-    Ok(SkippyPackageIdentity {
-        package_ref: canonical_package_ref,
-        manifest_sha256: info.manifest_sha256,
-        source_model_path: PathBuf::from(&info.source_model_path),
-        source_model_sha256: info.source_model_sha256,
-        source_model_bytes,
-        source_files: Vec::new(),
-        layer_weight_bytes,
-        layer_count: info.layer_count,
-        activation_width: 0,
-        tensor_count: info.layers.iter().map(|l| l.tensor_count as u64).sum(),
-        generation: info.generation,
-    })
+    anyhow::bail!(
+        "layer-package schema v1 is offline-only; split serving requires a package-v2 manifest"
+    )
 }
 
 fn identity_from_package_v2_metadata(

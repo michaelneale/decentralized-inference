@@ -71,7 +71,7 @@ jobs:
     runs-on: ${{ needs.runner_policy.outputs.runner_4 }}
     timeout-minutes: 20
     container:
-      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:1c73f0f2e4b2ce657cc9dc49c9c27374f3c364af19f884f1970331c3689da5d2
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:b0fa8081c77334b47744f87a0dd46bf092dfc8badc75a832b72233feb026ec25
     defaults:
       run:
         working-directory: crates/mesh-llm-ui
@@ -113,7 +113,7 @@ jobs:
     runs-on: ${{ needs.runner_policy.outputs.runner_4 }}
     timeout-minutes: 20
     container:
-      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:1c73f0f2e4b2ce657cc9dc49c9c27374f3c364af19f884f1970331c3689da5d2
+      image: ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:4c3f0a73b8d47c10f2ac98047b3f1ca226992dcff72cb57b029238c98b828f94
     defaults:
       run:
         working-directory: crates/mesh-llm-ui
@@ -148,7 +148,7 @@ jobs:
           resolved="$(pnpm exec playwright --version | head -n1 | awk '{print $NF}')"
           grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$resolved" \
             || { echo "unexpected playwright --version output: $resolved" >&2; exit 1; }
-          verify-runner-image public web "" "" "" "" "$resolved"
+          verify-runner-image public browser "" "" "" "" "$resolved"
       - name: Run console E2E
         run: pnpm run test:e2e
       - name: Upload E2E failure artifacts
