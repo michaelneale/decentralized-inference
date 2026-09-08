@@ -12,6 +12,25 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 pub use mesh_llm_api_client::*;
 
+/// Detect OpenAI-compatible LLM servers already running on the local machine
+/// (Ollama, LM Studio, LiteLLM, vLLM, TGI, Lemonade Server).
+///
+/// Probes go to loopback addresses only, never traverse a configured HTTP
+/// proxy, and use a sub-second timeout. Nothing here reads or writes
+/// configuration — it reports what is listening so the caller can decide.
+///
+/// ```no_run
+/// # async fn example() {
+/// for endpoint in mesh_llm_sdk::endpoint_discovery::discover_local_endpoints().await {
+///     println!("{} serves {:?}", endpoint.describe(), endpoint.models);
+/// }
+/// # }
+/// ```
+#[cfg(feature = "endpoint-discovery")]
+pub mod endpoint_discovery {
+    pub use endpoint_discovery::{DiscoveredEndpoint, discover_local_endpoints};
+}
+
 #[cfg(feature = "console")]
 pub mod console {
     pub use mesh_llm_console_server::{

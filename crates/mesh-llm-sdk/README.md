@@ -19,6 +19,39 @@ does not build them from source as part of SDK compilation. Runtime artifacts
 are fetched from Mesh LLM release manifests by default, but compatibility is
 checked against the exact Skippy ABI version.
 
+The `endpoint-discovery` feature is standalone: it needs no client transport,
+node, or native runtime, so an application can offer "publish the LLM server
+you already run" without taking on the rest of the SDK.
+
+## Local Endpoint Discovery Example
+
+Find OpenAI-compatible servers already running on the machine — Ollama, LM
+Studio, LiteLLM, vLLM, TGI, Lemonade Server:
+
+```toml
+[dependencies]
+mesh-llm-sdk = { version = "0.76.0-rc9", features = ["endpoint-discovery"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+```rust,no_run
+# async fn example() {
+for endpoint in mesh_llm_sdk::endpoint_discovery::discover_local_endpoints().await {
+    // e.g. "Ollama on :11434 (2 models)"
+    println!("{}", endpoint.describe());
+    println!("  base_url: {}", endpoint.base_url);
+    for model in &endpoint.models {
+        println!("  - {model}");
+    }
+}
+# }
+```
+
+Probes go to loopback addresses only, never traverse a configured HTTP proxy,
+and use a sub-second timeout. Discovery reports what is listening and reads no
+configuration; deciding what to publish is the caller's. The `mesh-llm plugins
+discover` command is one consumer of exactly this API.
+
 ## Client Transport Example
 
 ```toml

@@ -1,10 +1,21 @@
 //! Detect OpenAI-compatible LLM servers that are already running on this
-//! machine (Ollama, LM Studio, LiteLLM, vLLM, TGI, llama.cpp, Lemonade) so
-//! `mesh setup` and `mesh-llm plugins discover` can offer to publish their
-//! models to the mesh through the `openai-endpoint` plugin.
+//! machine — Ollama, LM Studio, LiteLLM, vLLM, TGI, llama.cpp, Lemonade — so a
+//! host can offer to publish their models to a mesh through the
+//! `openai-endpoint` plugin.
 //!
-//! Probes are loopback-only and short-timeout. Nothing here writes config;
-//! callers decide what to do with the findings.
+//! Probes go to loopback addresses only, never traverse a configured HTTP
+//! proxy, and use a sub-second timeout. Nothing here reads or writes
+//! configuration; callers decide what to do with the findings.
+//!
+//! ```no_run
+//! # async fn example() {
+//! for endpoint in endpoint_discovery::discover_local_endpoints().await {
+//!     println!("{} -> {:?}", endpoint.describe(), endpoint.models);
+//! }
+//! # }
+//! ```
+
+#![forbid(unsafe_code)]
 
 use serde::Serialize;
 use serde_json::Value;

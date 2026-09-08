@@ -13,6 +13,9 @@ categories = ["api-bindings", "network-programming"]
 [features]
 default = ["client"]
 client = ["dep:mesh-llm-api-client"]
+# Detect OpenAI-compatible LLM servers already running on the local machine.
+# Standalone: needs no node, runtime, or client transport.
+endpoint-discovery = ["dep:endpoint-discovery"]
 console = ["dep:mesh-llm-console-server", "mesh-llm-embedded-runtime?/web-ui"]
 node = ["client", "dep:mesh-llm-api-server"]
 serving = [
@@ -31,6 +34,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
+endpoint-discovery = { path = "../endpoint-discovery", version = "0.76.0-rc9", optional = true }
 mesh-llm-api-client = { path = "../mesh-llm-api-client", version = "0.76.0-rc9", optional = true }
 mesh-llm-api-server = { path = "../mesh-llm-api-server", version = "0.76.0-rc9", optional = true }
 mesh-llm-console-server = { path = "../mesh-llm-console-server", version = "0.76.0-rc9", optional = true }
@@ -39,3 +43,6 @@ mesh-llm-runtime-install = { path = "../mesh-llm-runtime-install", version = "0.
 reqwest = { version = "0.13", features = ["json"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }

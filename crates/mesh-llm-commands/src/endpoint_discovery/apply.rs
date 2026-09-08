@@ -7,9 +7,10 @@
 //! endpoint and reports the rest as unpublishable rather than silently
 //! dropping them.
 
-use super::probe::{DiscoveredEndpoint, OPENAI_ENDPOINT_PLUGIN, discover_local_endpoints};
+use super::OPENAI_ENDPOINT_PLUGIN;
 use crate::terminal::{style_muted, style_ok, style_warn};
 use anyhow::{Context, Result};
+use endpoint_discovery::{DiscoveredEndpoint, discover_local_endpoints};
 use mesh_llm_config::ConfigStore;
 use std::path::Path;
 

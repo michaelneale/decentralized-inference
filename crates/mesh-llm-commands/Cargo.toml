@@ -18,6 +18,7 @@ workspace = true
 anyhow.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6.0.0"
+endpoint-discovery = { path = "../endpoint-discovery", version = "0.76.0-rc9" }
 hf_hub = { package = "mesh-llm-hf-hub", version = "1.0.2", default-features = false, features = ["blocking"] }
 hex = "0.4.3"
 iroh = { version = "1.0.3", default-features = false, features = ["metrics", "fast-apple-datapath", "portmapper", "tls-aws-lc-rs"] }

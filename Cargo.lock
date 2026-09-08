@@ -1875,6 +1875,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869b0adbda23651a9c5c0c3d270aac9fcb52e8622a8f2b17e57802d7791962f2"
 
 [[package]]
+name = "endpoint-discovery"
+version = "0.76.0-rc9"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "enum-assoc"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3775,6 +3785,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "endpoint-discovery",
  "hex",
  "iroh",
  "json5",
@@ -4198,6 +4209,7 @@ name = "mesh-llm-sdk"
 version = "0.76.0-rc9"
 dependencies = [
  "anyhow",
+ "endpoint-discovery",
  "mesh-llm-api-client",
  "mesh-llm-api-server",
  "mesh-llm-console-server",
@@ -4206,6 +4218,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

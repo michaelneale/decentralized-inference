@@ -663,43 +663,39 @@
   ],
   "crates/mesh-llm-commands/src/endpoint_discovery/apply.rs": [
     {
-      "line": 169,
+      "line": 170,
       "macro_name": "eprintln!"
     },
     {
-      "line": 171,
+      "line": 172,
       "macro_name": "eprintln!"
     },
     {
-      "line": 177,
+      "line": 178,
       "macro_name": "eprintln!"
     },
     {
-      "line": 186,
+      "line": 187,
       "macro_name": "eprintln!"
     },
     {
-      "line": 193,
+      "line": 194,
       "macro_name": "eprintln!"
     },
     {
-      "line": 200,
+      "line": 201,
       "macro_name": "eprintln!"
     },
     {
-      "line": 207,
+      "line": 208,
       "macro_name": "eprintln!"
     },
     {
-      "line": 211,
+      "line": 212,
       "macro_name": "eprintln!"
     },
     {
-      "line": 216,
-      "macro_name": "eprintln!"
-    },
-    {
-      "line": 223,
+      "line": 217,
       "macro_name": "eprintln!"
     },
     {
@@ -707,15 +703,19 @@
       "macro_name": "eprintln!"
     },
     {
-      "line": 231,
+      "line": 225,
       "macro_name": "eprintln!"
     },
     {
-      "line": 236,
+      "line": 232,
       "macro_name": "eprintln!"
     },
     {
-      "line": 239,
+      "line": 237,
+      "macro_name": "eprintln!"
+    },
+    {
+      "line": 240,
       "macro_name": "eprintln!"
     }
   ],
