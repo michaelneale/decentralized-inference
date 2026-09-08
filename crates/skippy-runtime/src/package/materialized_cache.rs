@@ -4,9 +4,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -96,10 +93,7 @@ pub(super) struct MaterializedOutputLock {
 
 impl Drop for MaterializedOutputLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -117,13 +111,8 @@ pub(super) fn lock_output(output: &Path) -> Result<MaterializedOutputLock> {
         .open(&lock_path)
         .with_context(|| format!("open materialized cache lock {}", lock_path.display()))?;
 
-    #[cfg(unix)]
-    unsafe {
-        if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("lock materialized cache {}", lock_path.display()));
-        }
-    }
+    file.lock()
+        .with_context(|| format!("lock materialized cache {}", lock_path.display()))?;
 
     Ok(MaterializedOutputLock { file })
 }
@@ -280,4 +269,63 @@ fn sanitize_suffix(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn output_lock_excludes_other_processes_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("model.gguf");
+        let guard = lock_output(&output).unwrap();
+        assert_child_lock_state(&output, "locked");
+        drop(guard);
+        assert_child_lock_state(&output, "unlocked");
+        let guard = lock_output(&output).unwrap();
+        assert_child_lock_state(&output, "locked");
+        drop(guard);
+    }
+
+    fn assert_child_lock_state(output: &Path, expected: &str) {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "package::materialized_cache::tests::probe_output_lock_in_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SKIPPY_TEST_OUTPUT_LOCK_PATH", output)
+            .env("SKIPPY_TEST_OUTPUT_LOCK_STATE", expected)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success()
+                && String::from_utf8_lossy(&result.stdout).contains("1 passed;"),
+            "lock probe failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for output_lock_excludes_other_processes_until_dropped"]
+    fn probe_output_lock_in_child() {
+        let output = PathBuf::from(std::env::var_os("SKIPPY_TEST_OUTPUT_LOCK_PATH").unwrap());
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(sibling_path(&output, "lock"))
+            .unwrap();
+        match std::env::var("SKIPPY_TEST_OUTPUT_LOCK_STATE")
+            .unwrap()
+            .as_str()
+        {
+            "locked" => assert!(matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock))),
+            "unlocked" => file.try_lock().unwrap(),
+            state => panic!("unexpected lock state: {state}"),
+        }
+    }
 }
