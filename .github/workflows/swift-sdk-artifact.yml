@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      ui_artifact_name:
+        description: Optional verified release UI artifact shared with the host producers.
+        required: false
+        default: ''
+        type: string
       prepare_release_version:
         description: Prepare checked-out sources for release_tag before building.
         required: false
@@ -107,6 +112,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           PREPARE_RELEASE_VERSION: ${{ inputs.prepare_release_version }}
           UPDATE_RELEASE_MANIFEST: ${{ inputs.update_release_manifest }}
+          UI_ARTIFACT_NAME: ${{ inputs.ui_artifact_name }}
+          UI_SOURCE_SHA: ${{ inputs.source_sha }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -119,6 +126,11 @@ jobs:
           esac
           if [[ ! "$MAX_PARALLEL" =~ ^[1-4]$ ]]; then
             echo "max_parallel must be an integer from 1 through 4" >&2
+            exit 1
+          fi
+          if [[ -n "$UI_ARTIFACT_NAME" &&
+                ( -z "$RELEASE_TAG" || ! "$UI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ) ]]; then
+            echo "a release UI artifact requires its immutable source SHA and release tag" >&2
             exit 1
           fi
           if [[ ( "$PREPARE_RELEASE_VERSION" == "true" ||
@@ -266,14 +278,15 @@ jobs:
           persist-credentials: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        if: ${{ inputs.ui_artifact_name == '' }}
         with:
           version: 10.34.5
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.20.0
-          package-manager-cache: ${{ needs.runner_policy.outputs.allow_native_github_cache == 'true' }}
-          cache: ${{ needs.runner_policy.outputs.allow_native_github_cache == 'true' && 'pnpm' || '' }}
+          package-manager-cache: ${{ inputs.ui_artifact_name == '' && needs.runner_policy.outputs.allow_native_github_cache == 'true' }}
+          cache: ${{ inputs.ui_artifact_name == '' && needs.runner_policy.outputs.allow_native_github_cache == 'true' && 'pnpm' || '' }}
           cache-dependency-path: |
             .github/cache-version.txt
             crates/mesh-llm-ui/pnpm-lock.yaml
@@ -327,8 +340,23 @@ jobs:
         run: scripts/release-version.sh "$RELEASE_TAG"
 
       - name: Prepare Swift console resources
+        if: ${{ inputs.ui_artifact_name == '' }}
         run: |
           scripts/package-sdk-console-assets.sh --sdk swift
+          scripts/verify-sdk-console-assets.sh --sdk swift
+
+      - name: Restore shared release UI
+        if: ${{ inputs.ui_artifact_name != '' }}
+        uses: ./.github/actions/restore-release-ui
+        with:
+          artifact_name: ${{ inputs.ui_artifact_name }}
+          source_sha: ${{ inputs.source_sha }}
+          release_tag: ${{ inputs.release_tag }}
+
+      - name: Prepare Swift resources from verified release UI
+        if: ${{ inputs.ui_artifact_name != '' }}
+        run: |
+          scripts/package-sdk-console-assets.sh --sdk swift --skip-build
           scripts/verify-sdk-console-assets.sh --sdk swift
 
       - name: Verify tagged Swift console resources

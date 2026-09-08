@@ -2930,11 +2930,11 @@ class CiArtifactActionTests(unittest.TestCase):
         # baked pnpm store instead (#1392); see the comment on
         # `eligible_consumers` above.
         self.assertIn(
-            f"cache: ${{{{ {native_cache_expression} && 'pnpm' || '' }}}}",
+            f"cache: ${{{{ inputs.ui_artifact_name == '' && {native_cache_expression} && 'pnpm' || '' }}}}",
             swift,
         )
         self.assertIn(
-            f"package-manager-cache: ${{{{ {native_cache_expression} }}}}",
+            f"package-manager-cache: ${{{{ inputs.ui_artifact_name == '' && {native_cache_expression} }}}}",
             swift,
         )
         self.assertIn(
