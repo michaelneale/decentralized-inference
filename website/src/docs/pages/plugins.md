@@ -78,6 +78,50 @@ name = "openai-endpoint"
 url = "http://127.0.0.1:8000/v1"
 ```
 
+## Publish LLM servers already running on this machine
+
+If you already run Ollama, LM Studio, a LiteLLM proxy, vLLM, or any other
+OpenAI-compatible server locally, Mesh can find it and publish its models to
+your mesh without you looking up ports or hand-editing TOML.
+
+`mesh-llm setup` reports what it finds. To publish it:
+
+```bash
+mesh-llm plugins install openai-endpoint
+mesh-llm plugins discover           # report only
+mesh-llm plugins discover --apply   # write the config entry
+```
+
+```text
+✓ Found Ollama on :11434 (2 models)
+    llama3:8b
+    qwen3:4b
+✓ Publishing Ollama on :11434 (2 models) via openai-endpoint
+```
+
+`--apply` adds (or updates) a single `openai-endpoint` block in
+`~/.mesh-llm/config.toml`. It edits the file in place rather than rewriting it,
+so your other settings and comments are preserved. Restart Mesh and the
+server's models appear in `/v1/models` under their own names and are gossiped
+to your peers.
+
+Details worth knowing:
+
+- Probes go to **loopback addresses only**, never traverse a configured HTTP
+  proxy, and use a sub-second timeout. They cover the well-known ports `11434`
+  (Ollama), `1234` (LM Studio), `4000` (LiteLLM), `8000`, and `8080`. No
+  network scanning or port sweeping happens.
+- Discovery never overwrites your existing choices. If `openai-endpoint` is
+  already configured for another URL, or you have disabled it, `discover`
+  reports and stops. An explicit `startup.optional` value is preserved; it is
+  only defaulted to `true` when you have not set it.
+- Only **one** `openai-endpoint` entry is possible, because a second
+  `[[plugin]]` block with the same name is rejected at config load. When
+  several servers are running, `discover` selects the one serving the most
+  models and names the others as unpublishable.
+- A server that has no model loaded is reported but not published.
+- Skip probing during setup with `mesh-llm setup --no-discover-endpoints`.
+
 ## External-endpoint-only workflow
 
 Mesh can expose an existing OpenAI-compatible provider without loading any

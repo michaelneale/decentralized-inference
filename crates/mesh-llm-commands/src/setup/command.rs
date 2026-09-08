@@ -12,10 +12,15 @@ use super::{
     plan_setup,
     service::{ServiceInstallReport, install_service},
 };
+use crate::endpoint_discovery::{
+    DiscoveredEndpoint, EndpointPublishStatus, OPENAI_ENDPOINT_PLUGIN, discover_local_endpoints,
+    existing_endpoint_entry_at, plan_endpoint_publish,
+};
 use crate::runtime_native::{
     NativeRuntimeConfigSelection, SetupNativeRuntimeOptions, SetupNativeRuntimeOutcome,
     SetupNativeRuntimePruneResult, install_and_prune_native_runtime_for_setup,
 };
+use crate::terminal::style_ok;
 use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::pin::Pin;
@@ -72,6 +77,7 @@ pub(crate) struct CliSetupActions<'a> {
     service_context: Option<ServiceInstallContext>,
     service_runner: Box<dyn ServiceCommandRunner>,
     github_runner: Box<dyn GhCommandRunner>,
+    pub(crate) endpoints_found: Vec<DiscoveredEndpoint>,
     pub(crate) service_outcome: SetupServiceOutcome,
     pub(crate) github_outcome: SetupGitHubOutcome,
     verbose: bool,
@@ -105,6 +111,7 @@ impl<'a> CliSetupActions<'a> {
             environment,
             configured,
             runtime_outcome: None,
+            endpoints_found: Vec::new(),
             service_context,
             service_runner,
             github_runner,
@@ -181,6 +188,31 @@ impl<'a> CliSetupActions<'a> {
         Ok(())
     }
 
+    /// Report OpenAI-compatible servers already running on this machine.
+    /// Setup only reports; publishing is an explicit follow-up command so that
+    /// running `mesh-llm setup` never silently changes what this node serves.
+    async fn discover_local_endpoints(&mut self) -> Result<()> {
+        let found = discover_local_endpoints().await;
+        if found.is_empty() {
+            return Ok(());
+        }
+        // Read the real config so setup does not advise publishing something
+        // already configured. A bad config must not fail setup, so an
+        // unreadable one falls back to reporting the findings only.
+        let existing = existing_endpoint_entry_at(None).unwrap_or_default();
+        let plan = plan_endpoint_publish(found, existing.as_ref());
+        for endpoint in &plan.found {
+            eprintln!("{} Found {}", style_ok("\u{2713}"), endpoint.describe());
+        }
+        if matches!(plan.status, EndpointPublishStatus::Publish { .. }) {
+            eprintln!(
+                "  Publish to your mesh with: mesh-llm plugins install {OPENAI_ENDPOINT_PLUGIN} && mesh-llm plugins discover --apply"
+            );
+        }
+        self.endpoints_found = plan.found;
+        Ok(())
+    }
+
     fn install_service(&mut self) -> Result<()> {
         let context = match self.service_context.clone() {
             Some(context) => context,
@@ -220,6 +252,7 @@ impl SetupActions for CliSetupActions<'_> {
             match step {
                 SetupStep::InstallRuntime => self.install_runtime().await,
                 SetupStep::PruneInactiveRuntimes => self.report_runtime_prune(),
+                SetupStep::DiscoverLocalEndpoints => self.discover_local_endpoints().await,
                 SetupStep::InstallService => self.install_service(),
                 SetupStep::PrintServiceGuidance => {
                     self.service_outcome = SetupServiceOutcome::PrintedGuidance;

@@ -135,6 +135,36 @@ impl ConfigStore {
         self.model_refs()
     }
 
+    /// Point a URL-backed plugin entry at `url`, preserving the rest of the
+    /// file byte-for-byte.
+    ///
+    /// Unlike [`Self::update`], this does not round-trip through `MeshConfig`,
+    /// so operator comments and omitted defaults survive. `startup.optional` is
+    /// seeded to `true` only when the operator has not already chosen a value.
+    pub fn upsert_plugin_url(&self, name: &str, url: &str) -> Result<()> {
+        let name = normalize_non_empty(name, "plugin name")?;
+        let url = normalize_non_empty(url, "plugin url")?;
+        self.edit_preserving(|doc| {
+            let table = ensure_plugin_table(doc, name)?;
+            table["enabled"] = value(true);
+            table["url"] = value(url);
+            match table.get("startup") {
+                None => table["startup"]["optional"] = value(true),
+                Some(item) if item.as_table_like().is_some() => {
+                    let startup = table["startup"]
+                        .as_table_like_mut()
+                        .context("plugin `startup` is not a table")?;
+                    if startup.get("optional").is_none() {
+                        startup.insert("optional", value(true));
+                    }
+                }
+                Some(_) => bail!("plugin `{name}` has a non-table `startup` value"),
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     fn read_document(&self) -> Result<DocumentMut> {
         if !self.path.exists() {
             return Ok(DocumentMut::new());
@@ -149,6 +179,42 @@ impl ConfigStore {
         atomic_write(&self.path, doc.to_string().as_bytes())
             .with_context(|| format!("failed to write config {}", self.path.display()))
     }
+}
+
+fn normalize_non_empty<'a>(value: &'a str, label: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{label} cannot be empty");
+    }
+    Ok(value)
+}
+
+/// Find the `[[plugin]]` table named `name`, appending one if absent.
+fn ensure_plugin_table<'a>(doc: &'a mut DocumentMut, name: &str) -> Result<&'a mut Table> {
+    if !doc.as_table().contains_key("plugin") {
+        doc["plugin"] = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+    let plugins = doc["plugin"]
+        .as_array_of_tables_mut()
+        .ok_or_else(|| anyhow::anyhow!("config key `plugin` is not a TOML array of tables"))?;
+    let index = plugins.iter().position(|table| {
+        table
+            .get("name")
+            .and_then(Item::as_str)
+            .is_some_and(|configured| configured == name)
+    });
+    let index = match index {
+        Some(index) => index,
+        None => {
+            let mut table = Table::new();
+            table["name"] = value(name);
+            plugins.push(table);
+            plugins.len() - 1
+        }
+    };
+    plugins
+        .get_mut(index)
+        .context("plugin table should exist after lookup")
 }
 
 fn ensure_models_array(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables> {

@@ -43,6 +43,7 @@ pub(super) fn format_command(command: &Command, assembly: &mut SummaryAssembly) 
             service,
             no_service,
             skip_runtime,
+            no_discover_endpoints,
             verbose,
         } => {
             assembly.command.push_str(" setup");
@@ -51,6 +52,7 @@ pub(super) fn format_command(command: &Command, assembly: &mut SummaryAssembly) 
             assembly.flag("service", *service);
             assembly.flag("no-service", *no_service);
             assembly.flag("skip-runtime", *skip_runtime);
+            assembly.flag("no-discover-endpoints", *no_discover_endpoints);
             assembly.flag("verbose", *verbose);
         }
         Command::Uninstall {

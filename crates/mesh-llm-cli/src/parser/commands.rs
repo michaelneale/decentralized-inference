@@ -858,6 +858,9 @@ pub enum Command {
         /// Skip downloading or configuring the native runtime.
         #[arg(long = "skip-runtime")]
         skip_runtime: bool,
+        /// Do not probe loopback for LLM servers already running on this machine.
+        #[arg(long = "no-discover-endpoints")]
+        no_discover_endpoints: bool,
         /// Print detailed setup paths, commands, and follow-up guidance.
         #[arg(long)]
         verbose: bool,
@@ -1155,6 +1158,13 @@ pub enum PluginCommand {
     },
     /// List installed, auto-registered, and configured plugins.
     List,
+    /// Detect OpenAI-compatible LLM servers already running on this machine
+    /// (Ollama, LM Studio, LiteLLM, vLLM) and offer to publish their models.
+    Discover {
+        /// Write the discovered endpoint into ~/.mesh-llm/config.toml.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

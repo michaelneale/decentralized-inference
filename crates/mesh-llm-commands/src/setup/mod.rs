@@ -17,8 +17,8 @@ pub use actions::SetupActions;
 pub use command::{SetupCommandArgs, run_setup, run_setup_command};
 pub use environment::{SetupEnvironment, SetupOptions, SetupPlatform};
 pub use plan::{
-    SetupGitHubStarPlan, SetupGitHubStarSkipReason, SetupPlan, SetupRuntimePlan, SetupServicePlan,
-    SetupStep,
+    SetupEndpointPlan, SetupGitHubStarPlan, SetupGitHubStarSkipReason, SetupPlan, SetupRuntimePlan,
+    SetupServicePlan, SetupStep,
 };
 pub use planner::{SetupPlanError, plan_setup};
 pub use prompt::{SetupConfirmPrompt, SetupPromptDefault, SetupPromptKind, SetupPrompter};

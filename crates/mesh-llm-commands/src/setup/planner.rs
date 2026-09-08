@@ -1,3 +1,4 @@
+use super::SetupEndpointPlan;
 use super::{
     SetupConfirmPrompt, SetupEnvironment, SetupGitHubStarPlan, SetupGitHubStarSkipReason,
     SetupOptions, SetupPlan, SetupPlatform, SetupPromptDefault, SetupPromptKind, SetupPrompter,
@@ -49,9 +50,14 @@ pub fn plan_setup<P: SetupPrompter>(
     } else {
         SetupRuntimePlan::InstallAndPrune
     };
+    let endpoints = if options.no_discover_endpoints {
+        SetupEndpointPlan::Skip
+    } else {
+        SetupEndpointPlan::Probe
+    };
     let service = plan_service(options, environment, prompter);
     let github_star = plan_github_star(options, environment);
-    Ok(SetupPlan::new(runtime, service, github_star))
+    Ok(SetupPlan::new(runtime, endpoints, service, github_star))
 }
 
 fn plan_service<P: SetupPrompter>(

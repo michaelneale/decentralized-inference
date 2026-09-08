@@ -59,6 +59,7 @@ async fn run_setup_with_cli_actions_records_nonfatal_github_failure() {
     let options = SetupOptions {
         skip_runtime: true,
         no_service: true,
+        no_discover_endpoints: true,
         ..SetupOptions::default()
     };
 

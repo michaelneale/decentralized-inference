@@ -244,6 +244,7 @@ fn eligible_explicit_no_skips_star_command() {
 fn summary_reports_nonfatal_eligibility_failures_honestly() {
     let plan = SetupPlan::new(
         super::SetupRuntimePlan::Skip,
+        super::SetupEndpointPlan::Skip,
         super::SetupServicePlan::Skip,
         prompt_plan(),
     );

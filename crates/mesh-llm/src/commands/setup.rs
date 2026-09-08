@@ -24,6 +24,7 @@ fn setup_command_args<'a>(
         service,
         no_service,
         skip_runtime,
+        no_discover_endpoints,
         verbose,
     } = cmd
     else {
@@ -37,6 +38,7 @@ fn setup_command_args<'a>(
             service: *service,
             no_service: *no_service,
             skip_runtime: *skip_runtime,
+            no_discover_endpoints: *no_discover_endpoints,
             verbose: *verbose,
         },
         environment: SetupEnvironment {
@@ -73,6 +75,7 @@ mod tests {
                 service: true,
                 no_service: false,
                 skip_runtime: true,
+                no_discover_endpoints: true,
                 verbose: true,
             },
             mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection::default(),
@@ -87,6 +90,7 @@ mod tests {
                 service: true,
                 no_service: false,
                 skip_runtime: true,
+                no_discover_endpoints: true,
                 verbose: true,
             }
         );
