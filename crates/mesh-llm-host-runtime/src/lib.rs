@@ -198,20 +198,63 @@ pub async fn initialize_host_runtime_for_options(options: &RuntimeOptions) -> Re
     if !runtime_options_require_native_runtime(options) {
         return initialize_logging_for_cli(options.config.as_deref()).await;
     }
-    initialize_host_runtime_with_config(options.config.as_deref()).await
+    initialize_host_runtime_with_config_for_local_serving(
+        options.config.as_deref(),
+        runtime_options_request_local_serving(options),
+    )
+    .await
 }
 
 fn runtime_options_require_native_runtime(options: &RuntimeOptions) -> bool {
     !options.client && options.plugin.is_none()
 }
 
+/// `true` when this startup explicitly names a model this node must load
+/// itself. Such a model needs the native runtime, so a missing runtime stays
+/// fatal even if an external inference plugin is also configured.
+fn runtime_options_request_local_serving(options: &RuntimeOptions) -> bool {
+    !options.model.is_empty() || !options.gguf.is_empty()
+}
+
 pub async fn initialize_host_runtime_with_config(config_path: Option<&Path>) -> Result<()> {
+    initialize_host_runtime_with_config_for_local_serving(config_path, true).await
+}
+
+/// A warning produced during startup, before the output surface exists.
+static DEFERRED_STARTUP_WARNING: LazyLock<std::sync::Mutex<Option<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn set_deferred_startup_warning(warning: String) {
+    *DEFERRED_STARTUP_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(warning);
+}
+
+/// Take the startup warning, if one was recorded, for emission by the runtime
+/// once its output surface is installed.
+pub(crate) fn take_deferred_startup_warning() -> Option<String> {
+    DEFERRED_STARTUP_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+async fn initialize_host_runtime_with_config_for_local_serving(
+    config_path: Option<&Path>,
+    local_serving_requested: bool,
+) -> Result<()> {
     let config = plugin::load_config(config_path)?;
 
     // Logging config is validated as part of config loading and must be resolved
     // before native runtime setup. Foundation failures remain fail-open so they
     // cannot prevent serving from starting.
     initialize_logging_foundation(&config.logging).await;
+
+    let requirement_input = system::native_runtime_requirement::NativeRuntimeRequirementInput {
+        local_serving_requested: local_serving_requested || !config.models.is_empty(),
+        external_inference_configured:
+            system::native_runtime_requirement::config_declares_external_inference(&config),
+    };
 
     #[cfg(feature = "dynamic-native-runtime")]
     {
@@ -229,19 +272,34 @@ pub async fn initialize_host_runtime_with_config(config_path: Option<&Path>) -> 
             }
             None => system::native_runtime::NativeRuntimeStartupSelection::current(),
         };
-        if let Some(runtime) =
-            system::native_runtime::try_load_installed_native_runtime(startup_selection).await?
-        {
-            tracing::info!(
+        let requirement =
+            system::native_runtime_requirement::native_runtime_requirement(requirement_input);
+        match system::native_runtime::try_load_installed_native_runtime(startup_selection).await {
+            Ok(Some(runtime)) => tracing::info!(
                 native_runtime_id = %runtime.native_runtime_id,
                 libraries = ?runtime.libraries,
                 "Loaded MeshLLM native runtime"
-            );
+            ),
+            Ok(None) => {}
+            Err(error)
+                if requirement
+                    == system::native_runtime_requirement::NativeRuntimeRequirement::OptionalExternalInference =>
+            {
+                let warning =
+                    system::native_runtime_requirement::external_inference_only_startup_warning(
+                        &format!("{error:#}"),
+                    );
+                tracing::warn!(target: "mesh_llm", "{warning}");
+                // Startup runs before the output surface is installed, so the
+                // runtime replays this once the CLI surface exists.
+                set_deferred_startup_warning(warning);
+            }
+            Err(error) => return Err(error),
         }
     }
     #[cfg(not(feature = "dynamic-native-runtime"))]
     {
-        let _ = config;
+        let _ = (config, requirement_input);
     }
 
     Ok(())

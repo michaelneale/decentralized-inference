@@ -454,6 +454,18 @@ impl StageControlState {
     }
 
     async fn load(&mut self, mut load: StageLoadRequest) -> Result<StageReadyResponse> {
+        // Nodes serving only through an external inference plugin never load a
+        // native runtime, so they cannot host a split stage for a peer.
+        if !skippy_runtime::native_runtime_loaded() {
+            let error = "no MeshLLM native runtime is loaded on this node; it cannot host a \
+                         split stage"
+                .to_string();
+            return Ok(StageReadyResponse {
+                accepted: false,
+                status: failed_status_from_load(&load, error.clone()),
+                error: Some(error),
+            });
+        }
         anyhow::ensure!(
             load.backend == "skippy",
             "unsupported stage backend '{}'",

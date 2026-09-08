@@ -1117,6 +1117,18 @@ No `[[models]]` entry or placeholder local model is required. `on_demand`
 prevents any configured local models from loading eagerly while preserving the
 ability to load one later.
 
+A native runtime is also not required. When an enabled plugin entry supplies a
+URL and no local model is requested, `mesh-llm serve` starts even if no
+compatible native runtime is installed for this machine — for example a box
+that only runs Ollama and has no supported GPU. It prints a warning naming the
+limitation and continues serving the plugin's models. A later attempt to load a
+local GGUF or layer package on that node fails with an actionable error rather
+than starting.
+
+A native runtime remains required when the startup explicitly names a local
+model (`--model`, `--gguf`, or a configured `[[models]]` entry). In that case a
+missing runtime still fails startup as before.
+
 After startup, mesh-llm should include Lemonade-hosted models in its own model list:
 
 ```bash
