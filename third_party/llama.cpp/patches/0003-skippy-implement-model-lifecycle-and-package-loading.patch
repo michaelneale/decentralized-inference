@@ -555,7 +555,7 @@ new file mode 100644
 index 000000000..0e23cfef2
 --- /dev/null
 +++ b/src/skippy/model_loading.cpp
-@@ -0,0 +1,923 @@
+@@ -0,0 +1,950 @@
 +#include "skippy.h"
 +#include "skippy/errors.h"
 +#include "skippy/environment.h"
@@ -922,6 +922,27 @@ index 000000000..0e23cfef2
 +    return !config->filter_tensors_on_load && config->layer_start == 0;
 +}
 +
++static const char * skippy_validate_filter_config(const struct skippy_runtime_config * config) {
++    if (config == nullptr || !config->filter_tensors_on_load) {
++        return nullptr;
++    }
++    if (config->resident_tensor_name_count == 0 || config->resident_tensor_names == nullptr) {
++        return "filtered stage loading requires explicit resident tensor names";
++    }
++    for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
++        const char * name = config->resident_tensor_names[i];
++        if (name == nullptr || name[0] == '\0') {
++            return "resident tensor names must be non-empty";
++        }
++        for (size_t j = 0; j < i; ++j) {
++            if (std::strcmp(name, config->resident_tensor_names[j]) == 0) {
++                return "resident tensor names must be unique";
++            }
++        }
++    }
++    return nullptr;
++}
++
 +struct skippy_filter_scope {
 +    explicit skippy_filter_scope(const skippy_runtime_config * config) {
 +        if (config != nullptr && config->filter_tensors_on_load) {
@@ -934,17 +955,9 @@ index 000000000..0e23cfef2
 +            }
 +            filter.include_embeddings = config->include_embeddings;
 +            filter.include_output = config->include_output;
-+            if (config->resident_tensor_name_count == 0 || config->resident_tensor_names == nullptr) {
-+                throw std::invalid_argument("filtered stage loading requires explicit resident tensor names");
-+            }
 +            for (size_t i = 0; i < config->resident_tensor_name_count; ++i) {
 +                const char * name = config->resident_tensor_names[i];
-+                if (name == nullptr || name[0] == '\0') {
-+                    throw std::invalid_argument("resident tensor names must be non-empty");
-+                }
-+                if (!filter.resident_tensor_names.emplace(name).second) {
-+                    throw std::invalid_argument("resident tensor names must be unique");
-+                }
++                filter.resident_tensor_names.emplace(name);
 +            }
 +            llama_model_loader_set_stage_filter(filter);
 +            enabled = true;
@@ -1265,6 +1278,11 @@ index 000000000..0e23cfef2
 +    }
 +
 +    *out_model = nullptr;
++    if (const char * message = skippy_validate_filter_config(config)) {
++        event_scope.emit_failure(SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
 +
 +    if (config != nullptr && config->filter_tensors_on_load && (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
 +        const char * message = "layer_start must be non-negative and less than layer_end";
@@ -1349,6 +1367,11 @@ index 000000000..0e23cfef2
 +    }
 +
 +    *out_model = nullptr;
++    if (const char * message = skippy_validate_filter_config(config)) {
++        event_scope.emit_failure(SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, message);
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
 +
 +    if (config != nullptr && config->filter_tensors_on_load && (config->layer_start < 0 || config->layer_start >= config->layer_end)) {
 +        const char * message = "layer_start must be non-negative and less than layer_end";
@@ -1416,6 +1439,10 @@ index 000000000..0e23cfef2
 +    }
 +    if (target_model->mtp_ctx != nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "target model already has an MTP draft context");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
++    if (const char * message = skippy_validate_filter_config(config)) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, message);
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
 +

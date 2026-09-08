@@ -472,6 +472,13 @@ fn mid_stage_artifact_opens_with_the_stage_filter_applied() -> anyhow::Result<()
         &source.tensors,
     );
     crate::write::write_stage_artifact(&source, &stage, &artifact)?;
+    let mut resident_tensor_names = crate::write::ModelSource::open(&artifact)?
+        .tensors
+        .into_iter()
+        .map(|tensor| tensor.name)
+        .collect::<Vec<_>>();
+    resident_tensor_names.sort();
+    resident_tensor_names.dedup();
 
     let config = RuntimeConfig {
         stage_index: 1,
@@ -486,7 +493,7 @@ fn mid_stage_artifact_opens_with_the_stage_filter_applied() -> anyhow::Result<()
         include_embeddings: true,
         include_output: true,
         filter_tensors_on_load: true,
-        resident_tensor_names: Vec::new(),
+        resident_tensor_names,
         ..RuntimeConfig::default()
     };
 

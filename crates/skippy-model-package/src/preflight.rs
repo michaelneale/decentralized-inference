@@ -4,7 +4,8 @@ use std::path::Path;
 
 use serde::Serialize;
 use skippy_package_format::{
-    Artifact, Generation, PACKAGE_SCHEMA_VERSION, PackageManifest, TensorStorage,
+    Artifact, Generation, PACKAGE_SCHEMA_VERSION, PackageManifest, ProposerKind, StrategyKind,
+    TensorStorage, WindowPolicy,
 };
 
 use crate::hash::file_sha256;
@@ -167,10 +168,151 @@ pub(crate) fn preflight_package(
             );
         }
     }
+    validate_runtime_generation(&manifest, &mut report);
 
     validate_artifacts(package, &manifest, options.verify_sha256, &mut report);
     build_stage_reports(&manifest, options.stages, &mut report);
     report.finalize()
+}
+
+fn validate_runtime_generation(manifest: &PackageManifest, report: &mut PackagePreflightReport) {
+    let Some(speculative) = manifest
+        .generation
+        .as_ref()
+        .and_then(|generation| generation.speculative_decoding.as_ref())
+    else {
+        return;
+    };
+
+    for (name, proposer) in &speculative.proposers {
+        match &proposer.kind {
+            ProposerKind::NativeMtp {
+                prediction_depth, ..
+            } if *prediction_depth != 1 => report.error(
+                "unsupported_native_mtp_prediction_depth",
+                format!("native MTP proposer {name} must use prediction_depth 1"),
+                Some(format!(
+                    "model-package.json: generation.speculative_decoding.proposers[{name}].prediction_depth"
+                )),
+                "rebuild the package with the native MTP depth supported by this runtime",
+            ),
+            ProposerKind::NgramCache {
+                ngram_max,
+                history_scope,
+                ..
+            } => {
+                if usize::try_from(*ngram_max).map_or(true, |value| {
+                    value > skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+                }) {
+                    report.error(
+                        "unsupported_ngram_cache_max_window",
+                        format!(
+                            "N-gram cache proposer {name} ngram_max {ngram_max} exceeds runtime limit {}",
+                            skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+                        ),
+                        Some(format!(
+                            "model-package.json: generation.speculative_decoding.proposers[{name}].ngram_max"
+                        )),
+                        format!(
+                            "set ngram_max to at most {}",
+                            skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+                        ),
+                    );
+                }
+                validate_request_history_scope(name, "cache", history_scope, report);
+            }
+            ProposerKind::NgramSuffix {
+                ngram_min,
+                ngram_max,
+                history_scope,
+                ..
+            } => {
+                if *ngram_min < 3 || *ngram_max > 64 {
+                    report.error(
+                        "unsupported_ngram_suffix_window",
+                        format!(
+                            "N-gram suffix proposer {name} must satisfy 3 <= ngram_min <= ngram_max <= 64"
+                        ),
+                        Some(format!(
+                            "model-package.json: generation.speculative_decoding.proposers[{name}]"
+                        )),
+                        "use at least the three-token exact seed and cap backward comparison at 64 tokens",
+                    );
+                }
+                validate_request_history_scope(name, "suffix", history_scope, report);
+            }
+            ProposerKind::NativeMtp { .. } => {}
+        }
+    }
+
+    for (name, strategy) in &speculative.strategies {
+        let window = match &strategy.kind {
+            StrategyKind::NativeMtp {
+                prediction_depth,
+                window_policy,
+                ..
+            } => {
+                if prediction_depth.is_some_and(|depth| depth != 1) {
+                    report.error(
+                        "unsupported_native_mtp_prediction_depth",
+                        format!("native MTP strategy {name} must use prediction_depth 1"),
+                        Some(format!(
+                            "model-package.json: generation.speculative_decoding.strategies[{name}].prediction_depth"
+                        )),
+                        "rebuild the package with the native MTP depth supported by this runtime",
+                    );
+                }
+                window_policy.as_ref()
+            }
+            StrategyKind::NgramCache { window_policy, .. }
+            | StrategyKind::NgramSuffix { window_policy, .. }
+            | StrategyKind::Composite { window_policy, .. } => window_policy.as_ref(),
+        };
+        if let Some(window) = window {
+            validate_runtime_window(name, window, report);
+        }
+    }
+}
+
+fn validate_request_history_scope(
+    name: &str,
+    kind: &str,
+    history_scope: &str,
+    report: &mut PackagePreflightReport,
+) {
+    if history_scope != "request" {
+        report.error(
+            format!("invalid_ngram_{kind}_history_scope"),
+            format!("N-gram {kind} proposer {name} must set history_scope to request"),
+            Some(format!(
+                "model-package.json: generation.speculative_decoding.proposers[{name}].history_scope"
+            )),
+            "set history_scope to request; shared history is not supported",
+        );
+    }
+}
+
+fn validate_runtime_window(name: &str, window: &WindowPolicy, report: &mut PackagePreflightReport) {
+    if window.pipeline_depth.is_some_and(|depth| {
+        usize::try_from(depth).map_or(true, |depth| {
+            depth > skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH
+        })
+    }) {
+        report.error(
+            "unsupported_window_policy_pipeline_depth",
+            format!(
+                "speculative strategy {name} window_policy.pipeline_depth exceeds runtime limit {}",
+                skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH
+            ),
+            Some(format!(
+                "model-package.json: generation.speculative_decoding.strategies[{name}].window_policy.pipeline_depth"
+            )),
+            format!(
+                "set pipeline_depth to at most {}",
+                skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH
+            ),
+        );
+    }
 }
 
 impl PackagePreflightReport {
@@ -536,6 +678,68 @@ mod tests {
         assert_eq!(report.checked_artifact_count, 1);
         assert_eq!(report.stages.len(), 2);
         assert!(report.stages.iter().all(|stage| !stage.parts.is_empty()));
+    }
+
+    #[test]
+    fn runtime_generation_limits_fail_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = write_v2_fixture(temp.path());
+        let manifest_path = package.join("model-package.json");
+        let mut manifest: PackageManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.generation = Some(
+            serde_json::from_value(serde_json::json!({
+                "speculative_decoding": {
+                    "default": "mtp",
+                    "proposers": {
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": skippy_runtime::NGRAM_CACHE_MAX_NGRAM + 1,
+                            "max_proposal_tokens": 8,
+                            "history_scope": "session"
+                        },
+                        "mtp": {
+                            "type": "native-mtp",
+                            "prediction_depth": 2,
+                            "layer_indices": [0]
+                        }
+                    },
+                    "strategies": {
+                        "mtp": {
+                            "type": "native-mtp",
+                            "proposer": "mtp",
+                            "window_policy": {
+                                "default": "fixed",
+                                "initial_window": 1,
+                                "min_window": 1,
+                                "max_window": 1,
+                                "pipeline_depth": skippy_protocol::MAX_VERIFY_WINDOW_PIPELINE_DEPTH + 1
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        manifest.package_id = manifest.computed_package_id().unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+        assert!(!report.valid);
+        let codes = report
+            .issues
+            .iter()
+            .map(|issue| issue.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("unsupported_native_mtp_prediction_depth"));
+        assert!(codes.contains("unsupported_ngram_cache_max_window"));
+        assert!(codes.contains("invalid_ngram_cache_history_scope"));
+        assert!(codes.contains("unsupported_window_policy_pipeline_depth"));
     }
 
     #[test]

@@ -767,16 +767,64 @@ mod tests {
         assert_eq!(runtime_config.mtp_source, MtpSource::Disabled);
     }
 
-    fn glm52_mtp_fixture() -> Option<(std::path::PathBuf, StageConfig)> {
-        let package_path =
-            std::env::var_os("SKIPPY_GLM52_MTP_PACKAGE").map(std::path::PathBuf::from)?;
+    fn glm52_mtp_fixture() -> anyhow::Result<Option<(std::path::PathBuf, StageConfig)>> {
+        let Some(package_path) =
+            std::env::var_os("SKIPPY_GLM52_MTP_PACKAGE").map(std::path::PathBuf::from)
+        else {
+            return Ok(None);
+        };
         if !package_path.join("model-package.json").is_file() {
             eprintln!(
-                "skipping: {} does not look like a layer package",
+                "skipping: {} does not look like a package-v2 directory",
                 package_path.display()
             );
-            return None;
+            return Ok(None);
         }
+        let manifest_path = package_path.join("model-package.json");
+        let manifest: skippy_package_format::PackageManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+        let descriptor = skippy_package_format::stage_admission::StageAdmissionDescriptor {
+            package_id: manifest.package_id.clone(),
+            resident_tensor_ids: manifest
+                .tensor_catalog
+                .entries
+                .iter()
+                .filter(|tensor| {
+                    matches!(
+                        tensor.storage,
+                        skippy_package_format::TensorStorage::Owned { .. }
+                    )
+                })
+                .map(|tensor| tensor.id.clone())
+                .collect(),
+            sidecars: Vec::new(),
+        };
+        let admission = manifest.resolve_stage_admission(&descriptor)?;
+        let mut resident_tensor_names = admission
+            .tensor_bindings
+            .iter()
+            .map(|tensor| tensor.native_name.to_string())
+            .collect::<Vec<_>>();
+        resident_tensor_names.sort();
+        resident_tensor_names.dedup();
+        let mut artifacts = admission.required_artifacts;
+        artifacts.sort_by(|left, right| {
+            let left_primary = left.id == manifest.source_model.metadata_artifact_id;
+            let right_primary = right.id == manifest.source_model.metadata_artifact_id;
+            right_primary
+                .cmp(&left_primary)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let model_part_paths = artifacts
+            .into_iter()
+            .map(|artifact| {
+                package_path
+                    .join(&artifact.path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        let model_path = model_part_paths.first().cloned();
         let config = StageConfig {
             run_id: "glm52-mtp-smoke".to_string(),
             topology_id: "glm52-mtp-smoke-topology".to_string(),
@@ -788,7 +836,8 @@ mod tests {
             source_model_bytes: None,
             materialized_path: None,
             materialized_pinned: false,
-            model_path: Some(package_path.to_string_lossy().to_string()),
+            model_path,
+            model_part_paths,
             projector_path: None,
             stage_id: "stage-final".to_string(),
             stage_index: 1,
@@ -820,7 +869,7 @@ mod tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: true,
-            resident_tensor_names: Vec::new(),
+            resident_tensor_names,
             selected_device: Some(StageDevice {
                 backend_device: "CPU".into(),
                 stable_id: None,
@@ -829,7 +878,7 @@ mod tests {
             }),
             kv_cache: None,
             native_mtp_enabled: true,
-            load_mode: LoadMode::LayerPackage,
+            load_mode: LoadMode::RuntimeSlice,
             bind_addr: "127.0.0.1:0".to_string(),
             upstream: Some(PeerConfig {
                 stage_id: "stage-prev".to_string(),
@@ -839,7 +888,7 @@ mod tests {
             downstream: None,
             ..StageConfig::default()
         };
-        Some((package_path, config))
+        Ok(Some((package_path, config)))
     }
 
     fn glm52_mtp_input(token_count: u32) -> ActivationFrame {
@@ -863,7 +912,7 @@ mod tests {
 
     #[test]
     fn glm52_final_stage_package_executes_native_mtp_when_fixture_is_set() -> anyhow::Result<()> {
-        let Some((_package_path, config)) = glm52_mtp_fixture() else {
+        let Some((_package_path, config)) = glm52_mtp_fixture()? else {
             eprintln!("skipping: SKIPPY_GLM52_MTP_PACKAGE is not set");
             return Ok(());
         };
@@ -905,7 +954,7 @@ mod tests {
 
     #[test]
     fn glm52_final_stage_does_not_create_integrated_mtp_when_disabled() -> anyhow::Result<()> {
-        let Some((_package_path, config)) = glm52_mtp_fixture() else {
+        let Some((_package_path, config)) = glm52_mtp_fixture()? else {
             eprintln!("skipping: SKIPPY_GLM52_MTP_PACKAGE is not set");
             return Ok(());
         };
@@ -942,7 +991,7 @@ mod tests {
     #[test]
     fn glm52_external_sidecar_attaches_when_target_has_integrated_mtp_tensors() -> anyhow::Result<()>
     {
-        let Some((_package_path, config)) = glm52_mtp_fixture() else {
+        let Some((_package_path, config)) = glm52_mtp_fixture()? else {
             eprintln!("skipping: SKIPPY_GLM52_MTP_PACKAGE is not set");
             return Ok(());
         };

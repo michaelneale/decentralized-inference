@@ -4502,7 +4502,7 @@ index 1b1f852a0..ce4325bdf 100644
 +                }
 +                return true;
 +            }
-+            if (t_meta != nullptr && !(flags & TENSOR_DUPLICATED)) {
++            if (t_meta != nullptr) {
 +                skippy_requested_resident_tensors.insert(tensor_name);
 +            }
 +            return false;

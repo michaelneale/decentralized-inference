@@ -65,7 +65,7 @@ pub use materialization::{
     configure_materialized_stage_cache, is_layer_package_ref, materialized_stage_cache_dir,
     materialized_stages_for_sources, prune_unpinned_materialized_stages,
     remove_materialized_stages_for_sources, resolve_hf_package_to_local,
-    resolve_stage_load_package,
+    resolve_package_v2_full_model_to_local, resolve_stage_load_package,
 };
 pub use package::{
     SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,

@@ -48,5 +48,6 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+skippy-package-format = { path = "../skippy-package-format", version = "0.76.0-rc9" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

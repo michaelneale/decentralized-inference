@@ -826,6 +826,32 @@ async fn start_local_package_v2_model(
     LocalRuntimeModelHandle,
     tokio::sync::oneshot::Receiver<()>,
 )> {
+    let admitted_model_parts = if package.source_files.is_empty() {
+        let package_ref = package.package_ref.clone();
+        tokio::task::spawn_blocking(move || {
+            skippy::resolve_package_v2_full_model_to_local(&package_ref)
+        })
+        .await
+        .context("join resolve complete package-v2 model task")??
+    } else {
+        std::iter::once(package.source_model_path.clone())
+            .chain(
+                package
+                    .source_files
+                    .iter()
+                    .map(|source| source.path.clone()),
+            )
+            .filter(|path| {
+                path.file_name()
+                    .is_none_or(|name| name != "model-package.json")
+            })
+            .fold(Vec::new(), |mut paths, path| {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                paths
+            })
+    };
     let context_length = plan.context_length;
     let fallback_projector_path = mmproj_path_for_model(&model_name).filter(|path| path.exists());
     let mut resolved = resolve_local_openai_skippy_config(
@@ -875,19 +901,10 @@ async fn start_local_package_v2_model(
     runtime_options.config.source_model_bytes = Some(package.source_model_bytes);
     runtime_options.config.model_path =
         Some(package.source_model_path.to_string_lossy().into_owned());
-    runtime_options.config.model_part_paths = std::iter::once(&package.source_model_path)
-        .chain(package.source_files.iter().map(|source| &source.path))
-        .filter(|path| {
-            path.file_name()
-                .is_none_or(|name| name != "model-package.json")
-        })
-        .fold(Vec::new(), |mut paths, path| {
-            let path = path.to_string_lossy().into_owned();
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-            paths
-        });
+    runtime_options.config.model_part_paths = admitted_model_parts
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
     runtime_options.config.stage_id = "stage-0".to_string();
     runtime_options.config.stage_index = 0;
     if resolved.hardware.stage_layer_start.is_none() && resolved.hardware.stage_layer_end.is_none()

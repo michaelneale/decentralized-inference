@@ -984,11 +984,17 @@ for attempt in $(seq 1 "$PREFIX_ATTEMPTS"); do
 
     for index in $(seq 1 "$PREFIX_REQUEST_COUNT"); do
         response_path="${response_dir}/response-${index}.json"
-        if ! curl --fail-with-body -sS --max-time 180 \
+        if ! response_status="$(curl -sS --max-time 180 \
             "http://127.0.0.1:${DRIVER_API_PORT}/v1/chat/completions" \
             -H 'content-type: application/json' \
             -d @"${payload_dir}/prompt-${index}.json" \
-            -o "$response_path"; then
+            -o "$response_path" \
+            -w '%{http_code}')"; then
+            echo "split inference request ${index} failed through ${DRIVER_LABEL} stage-0 driver" >&2
+            cat "$response_path" >&2 2>/dev/null || true
+            exit 1
+        fi
+        if [[ ! "$response_status" =~ ^2[0-9][0-9]$ ]]; then
             echo "split inference request ${index} failed through ${DRIVER_LABEL} stage-0 driver" >&2
             cat "$response_path" >&2 2>/dev/null || true
             exit 1
