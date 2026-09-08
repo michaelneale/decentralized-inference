@@ -254,6 +254,15 @@ pub(super) async fn run_runtime_cli(
         });
     }
 
+    // Startup native-runtime resolution runs before the output surface is
+    // installed; surface anything it deferred now that the surface exists.
+    if let Some(warning) = crate::take_deferred_startup_warning() {
+        let _ = emit_event(OutputEvent::Warning {
+            message: warning,
+            context: None,
+        });
+    }
+
     // These topologies are intentionally selected before plugin startup,
     // release lookup, config-driven mesh discovery, and `mesh::Node::start`.
     // Load config only to configure their optional audit sink; failures stay
