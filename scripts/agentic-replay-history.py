@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Normalize agentic-replay nightly artifacts and gate on cohort-matched drift.
 
-Reads the summary JSON produced by evals/agentic-replay.py for each model in
-the pinned micstudio matrix, emits schema-version-2 JSONL history rows, and
-compares them against the append-only baseline in the HF dataset checkout.
-Mirrors scripts/performance-history.py semantics: exact cohort keys only,
-bootstrap-then-gate (three prior complete runs before a regression fails).
+Reads the per-concurrency cell JSON files that evals/agentic-replay.py writes
+under ``<output>/<family>/data/pass-N/<label>/c-<concurrency>.json`` for the
+candidate label, emits schema-version-2 JSONL history rows (one per model x
+concurrency), and compares them against the append-only baseline in the HF
+dataset checkout. Mirrors scripts/performance-history.py semantics: exact
+cohort keys only, bootstrap-then-gate (three prior complete runs before a
+regression fails).
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
 import statistics
@@ -31,66 +34,112 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_summary(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"expected a JSON object: {path}")
-    return value
+def load_cells(replay_root: Path, family: str, label: str) -> list[dict[str, Any]]:
+    """Load every candidate-label cell for a family across passes."""
+    cells: list[dict[str, Any]] = []
+    pattern = f"{family}/data/pass-*/{label}/c-*.json"
+    for path in sorted(replay_root.glob(pattern)):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError(f"expected a JSON object: {path}")
+        value["_mtime"] = dt.datetime.utcfromtimestamp(path.stat().st_mtime)
+        cells.append(value)
+    if not cells:
+        raise FileNotFoundError(f"no replay cells matched {replay_root / pattern}")
+    return cells
 
 
-def build_row(
-    summary: dict[str, Any],
+def build_rows(
+    cells: list[dict[str, Any]],
     *,
     model: dict[str, Any],
     replay: dict[str, Any],
     hardware: dict[str, Any],
     source_sha: str,
     backend_binary_sha256: str | None,
-) -> dict[str, Any]:
-    requests = summary["requests"]
-    cohort = {
-        "model": model["family"],
-        "quant": model["quant"],
-        "concurrency": replay["concurrency"],
-        "backend": "mesh",
-        "runner": hardware["machine_model"],
-    }
-    successful = [r for r in requests if r.get("ok")]
-    failed = len(requests) - len(successful)
-    output_tokens = sum(int(r.get("completion_tokens", 0)) for r in successful)
-    wall_ms = float(summary["measured_wall_ms"])
-    ttfts = [float(r["ttft_ms"]) for r in successful if r.get("ttft_ms") is not None]
-    ttfts.sort()
-    p90 = ttfts[int(0.9 * (len(ttfts) - 1))] if ttfts else 0.0
-    clipped = sum(
-        1 for r in successful if (r.get("finish_reason") or "") == "length"
-    )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "created_utc": summary["created_utc"],
-        "source_sha": source_sha,
-        "cohort_key": stable_hash(
-            {"cohort": cohort, "source": source_sha, "replay": replay, "model_sha": model.get("sha256")}
-        ),
-        "cohort": cohort,
-        "backend_binary_sha256": backend_binary_sha256,
-        "hardware_fingerprint": hardware,
-        "model": model,
-        "replay": replay,
-        "prompt_count": len(requests),
-        "successful_requests": len(successful),
-        "failed_requests": failed,
-        "output_tokens": output_tokens,
-        "measured_wall_ms": wall_ms,
-        "decode_tokens_per_second": float(summary["decode_tokens_per_second"]),
-        "end_to_end_tokens_per_second": float(summary["end_to_end_tokens_per_second"]),
-        "ttft_ms_mean": statistics.fmean(ttfts) if ttfts else 0.0,
-        "ttft_ms_p90": p90,
-        "cache_hit_pct": summary.get("cache_hit_pct"),
-        "finish_reason_length_pct": (100.0 * clipped / len(successful)) if successful else None,
-        "complete": failed == 0,
-        "artifact_result": summary["artifact_result"],
-    }
+) -> list[dict[str, Any]]:
+    """Group cells by concurrency and emit one history row per level."""
+    by_concurrency: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for cell in cells:
+        by_concurrency[int(cell["concurrency"])].append(cell)
+
+    rows: list[dict[str, Any]] = []
+    for concurrency in sorted(by_concurrency):
+        group = sorted(by_concurrency[concurrency], key=lambda c: c["_mtime"])
+        requests = sum(int(c["requests"]) for c in group)
+        successful = sum(int(c["successful_requests"]) for c in group)
+        failed = sum(int(c["failed_requests"]) for c in group)
+        completion_tokens = sum(int(c.get("completion_tokens", 0)) for c in group)
+        generation_seconds = sum(float(c.get("generation_seconds", 0.0)) for c in group)
+        workload_seconds = sum(float(c.get("workload_window_seconds", 0.0)) for c in group)
+        ttft_ms = sorted(
+            1000.0 * s for c in group for s in c.get("ttft_samples", [])
+        )
+        cache_pcts = [c["cache_pct"] for c in group if c.get("cache_pct") is not None]
+        newest = max(c["_mtime"] for c in group)
+
+        def mean_or_none(values: list[float]) -> float | None:
+            return statistics.fmean(values) if values else None
+
+        cohort = {
+            "model": model["family"],
+            "quant": model["quant"],
+            "concurrency": concurrency,
+            "backend": "mesh",
+            "runner": hardware["machine_model"],
+        }
+        replay_params = {k: v for k, v in replay.items() if k != "concurrency"} | {
+            "concurrency": concurrency
+        }
+        rows.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "created_utc": newest.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source_sha": source_sha,
+                "cohort_key": stable_hash(
+                    {
+                        "cohort": cohort,
+                        "source": source_sha,
+                        "replay": replay_params,
+                        "model_sha": model.get("sha256"),
+                    }
+                ),
+                "cohort": cohort,
+                "backend_binary_sha256": backend_binary_sha256,
+                "hardware_fingerprint": hardware,
+                "model": model,
+                "replay": replay_params,
+                "prompt_count": requests,
+                "successful_requests": successful,
+                "failed_requests": failed,
+                "output_tokens": completion_tokens,
+                "measured_wall_ms": 1000.0 * workload_seconds,
+                "decode_tokens_per_second": (
+                    completion_tokens / generation_seconds
+                    if generation_seconds > 0
+                    else float(mean_or_none(
+                        [c["decode_tokens_per_second"] for c in group
+                         if c.get("decode_tokens_per_second") is not None]
+                    ) or 0.0)
+                ),
+                "end_to_end_tokens_per_second": (
+                    completion_tokens / workload_seconds if workload_seconds > 0 else 0.0
+                ),
+                "ttft_ms_mean": statistics.fmean(ttft_ms) if ttft_ms else 0.0,
+                "ttft_ms_p90": (
+                    ttft_ms[int(0.9 * (len(ttft_ms) - 1))] if ttft_ms else 0.0
+                ),
+                "cache_hit_pct": mean_or_none(cache_pcts),
+                "finish_reason_length_pct": None,
+                "complete": failed == 0 and requests > 0,
+                "artifact_result": "ok" if failed == 0 else "incomplete",
+            }
+        )
+    return rows
+
+
+def baseline_key(row: dict[str, Any]) -> str:
+    return f'{row["cohort"]["model"]}|c{row["replay"]["concurrency"]}'
 
 
 def load_baseline(root: Path) -> dict[str, list[dict[str, Any]]]:
@@ -99,42 +148,60 @@ def load_baseline(root: Path) -> dict[str, list[dict[str, Any]]]:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
-                runs[row["cohort"]["model"] + f'|c{row["replay"]["concurrency"]}'].append(row)
+                runs[baseline_key(row)].append(row)
     return runs
 
 
-def compare(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
+def compare(row: dict[str, Any], prior: list[dict[str, Any]]) -> list[str]:
     problems: list[str] = []
-    prior = [r for r in baseline if r["complete"] and r["model"] == rows[0]["model"]]
-    for row in rows:
-        if not row["complete"]:
-            problems.append(f"{row['cohort']['model']}: incomplete run ({row['failed_requests']} failed)")
-            continue
-        if len(prior) < BASELINE_MIN_RUNS:
-            continue  # bootstrap: informational only
-        metrics = (
-            ("decode_tokens_per_second", 1.0),
-            ("end_to_end_tokens_per_second", 1.0),
-            ("ttft_ms_mean", -1.0),
-            ("ttft_ms_p90", -1.0),
+    if not row["complete"]:
+        problems.append(
+            f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
+            f"incomplete run ({row['failed_requests']} failed)"
         )
-        for metric, direction in metrics:
-            base = statistics.median(r[metric] for r in prior[-BASELINE_MIN_RUNS:])
-            candidate = row[metric]
-            delta_pct = 100.0 * (candidate - base) / base * direction
-            if delta_pct < -(DEFAULT_TOLERANCE["pct"]) and abs(candidate - base) > DEFAULT_TOLERANCE["abs"]:
+        return problems
+    prior = [
+        r
+        for r in prior
+        if r.get("complete")
+        # Cohort contract: a model artifact digest change starts a new cohort.
+        and r.get("model", {}).get("sha256") == row["model"].get("sha256")
+    ]
+    if len(prior) < BASELINE_MIN_RUNS:
+        return []  # bootstrap: informational only
+    metrics = (
+        ("decode_tokens_per_second", 1.0),
+        ("end_to_end_tokens_per_second", 1.0),
+        ("ttft_ms_mean", -1.0),
+        ("ttft_ms_p90", -1.0),
+    )
+    for metric, direction in metrics:
+        base = statistics.median(r[metric] for r in prior[-BASELINE_MIN_RUNS:])
+        candidate = row[metric]
+        if base == 0:
+            # Zero baseline median (e.g. no TTFT samples): only the absolute
+            # tolerance can fire; the percentage is undefined.
+            if abs(candidate) > DEFAULT_TOLERANCE["abs"]:
                 problems.append(
                     f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
-                    f"{metric} regressed {delta_pct:.1f}% vs baseline median {base:.2f} "
-                    f"(candidate {candidate:.2f})"
+                    f"{metric} moved from 0.0 baseline to {candidate:.2f}"
                 )
+            continue
+        delta_pct = 100.0 * (candidate - base) / base * direction
+        if delta_pct < -(DEFAULT_TOLERANCE["pct"]) and abs(candidate - base) > DEFAULT_TOLERANCE["abs"]:
+            problems.append(
+                f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
+                f"{metric} regressed {delta_pct:.1f}% vs baseline median {base:.2f} "
+                f"(candidate {candidate:.2f})"
+            )
     return problems
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", type=Path, required=True, help="pinned model matrix JSON")
-    parser.add_argument("--summary-dir", type=Path, required=True, help="per-model summary JSON directory")
+    parser.add_argument("--replay-dir", "--summary-dir", dest="replay_dir", type=Path, required=True, help="per-family replay output directory")
+    parser.add_argument("--label", default="pr", help="candidate ref label whose cells become history rows")
     parser.add_argument("--hardware", type=Path, required=True, help="hardware fingerprint JSON")
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--backend-binary-sha256", default=None)
@@ -150,12 +217,12 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict[str, Any]] = []
     for model in matrix["models"]:
-        summary = load_summary(args.summary_dir / f"{model['family']}.json")
-        rows.append(
-            build_row(
-                summary,
+        cells = load_cells(args.replay_dir, model["family"], args.label)
+        rows.extend(
+            build_rows(
+                cells,
                 model=model,
-                replay={k: v for k, v in replay.items() if k != "concurrency"} | {"concurrency": summary["concurrency"]},
+                replay=replay,
                 hardware=hardware,
                 source_sha=args.source_sha,
                 backend_binary_sha256=args.backend_binary_sha256,
@@ -170,14 +237,17 @@ def main(argv: list[str] | None = None) -> int:
     problems: list[str] = []
     if args.baseline and args.baseline.is_dir():
         baseline = load_baseline(args.baseline)
-        problems = compare(rows, baseline.get("all", [])) or [
-            p
-            for row in rows
-            for p in compare(
-                [row],
-                [r for r in baseline.get(row["cohort"]["model"] + f'|c{row["replay"]["concurrency"]}', [])],
-            )
-        ]
+        for row in rows:
+            prior = [
+                r for r in baseline.get(baseline_key(row), [])
+                # Cohort contract from build_rows: repo/file moves are not a
+                # cohort change; exact identity is enforced via replay params
+                # embedded in cohort_key by producers of those rows.
+                if r.get("replay", {}).get("trajectories_per_framework")
+                == row["replay"].get("trajectories_per_framework")
+                and r.get("replay", {}).get("passes") == row["replay"].get("passes")
+            ]
+            problems.extend(compare(row, prior))
     if problems:
         print("regressions detected:", file=sys.stderr)
         for problem in problems:
