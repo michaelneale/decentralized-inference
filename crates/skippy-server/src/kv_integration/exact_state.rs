@@ -33,7 +33,18 @@ impl KvStageIntegration {
         session_id: &str,
         identities: &[PrefillKvIdentity],
     ) -> Result<Option<ExactStateRestore>> {
-        if !self.should_lookup() || !self.payload.is_exact_state() {
+        if !self.should_lookup() || self.exact_state_payload().is_none() {
+            return Ok(None);
+        }
+        // Dense L3 uses serialized exact state only as the durable floor.
+        // Prefer a native resident-prefix hit whenever one is already warm;
+        // importing the serialized snapshot would otherwise make enabling L3
+        // slower than the ordinary L1 path on every repeated request.
+        if self.payload == StagePrefixCachePayload::ResidentKv
+            && identities
+                .iter()
+                .any(|identity| self.probe_resident_prefix(identity).is_some())
+        {
             return Ok(None);
         }
         for identity in identities {
@@ -253,7 +264,10 @@ impl KvStageIntegration {
         session_id: &str,
         identity: &PrefillKvIdentity,
     ) -> Result<Option<ExactStateRecord>> {
-        if !self.should_record() || !self.payload.is_exact_state() {
+        let Some(exact_state_payload) = self.exact_state_payload() else {
+            return Ok(None);
+        };
+        if !self.should_record() {
             return Ok(None);
         }
         let token_count = identity.identity.token_count;
@@ -288,7 +302,7 @@ impl KvStageIntegration {
             self.finish_record(&identity.page_id);
             return Ok(None);
         }
-        let exported = match self.payload {
+        let exported = match exact_state_payload {
             StagePrefixCachePayload::FullState => {
                 runtime.export_full_state(session_id).map(|state| {
                     (

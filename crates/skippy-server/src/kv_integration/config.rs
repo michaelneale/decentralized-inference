@@ -85,7 +85,7 @@ impl KvStageIntegration {
             emit_cache_disabled_warning(config, reason);
             return Ok(None);
         }
-        let mut payload = effective_cache_payload(cache_config.payload, &model_capability);
+        let payload = effective_cache_payload(cache_config.payload, &model_capability);
         if payload == StagePrefixCachePayload::Disabled {
             return Ok(None);
         }
@@ -109,18 +109,24 @@ impl KvStageIntegration {
             return Ok(None);
         }
         let l3_manager = manager()?;
-        if l3_manager.is_some()
-            && payload == StagePrefixCachePayload::ResidentKv
-            && dense_without_recurrent
-        {
-            // The durable tier needs exportable state and ResidentKv is
-            // borrow-only. Dense families record KV pages with an empty
-            // recurrent snapshot so they reach disk; the model is known
-            // dense, so the empty snapshot is expected rather than corrupt.
-            payload = StagePrefixCachePayload::KvRecurrent;
-        }
+        let durable_payload = l3_manager.as_ref().map(|_| {
+            if payload == StagePrefixCachePayload::ResidentKv && dense_without_recurrent {
+                // Resident KV stays the in-process fast path. Dense families
+                // export KV pages with an empty recurrent snapshot for L3;
+                // the known-dense capability makes that empty component valid.
+                StagePrefixCachePayload::KvRecurrent
+            } else {
+                payload
+            }
+        });
         let l3 = l3_manager
-            .map(|manager| l3_tier_for_manager(config, payload, manager))
+            .map(|manager| {
+                l3_tier_for_manager(
+                    config,
+                    durable_payload.expect("enabled cache has a durable payload"),
+                    manager,
+                )
+            })
             .transpose()?;
         // FullState is architecture-neutral: the native runtime serializes the
         // complete session state for both dense and recurrent model families.
@@ -206,6 +212,7 @@ impl KvStageIntegration {
         Ok(Some(Self {
             mode,
             payload,
+            durable_payload,
             correctness_mode: false,
             trust_local_writes: true,
             checkpoint_policy,
@@ -1315,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_auto_cache_becomes_exportable_when_disk_is_injected() {
+    fn dense_disk_cache_preserves_resident_fast_path_and_exports_exact_state() {
         let root = std::env::temp_dir()
             .join("skippy-server-l3-manager-tests")
             .join(format!("dense-export-{}", std::process::id()));
@@ -1331,7 +1338,15 @@ mod tests {
         .unwrap()
         .expect("dense disk cache should remain enabled");
 
-        assert_eq!(kv.payload, StagePrefixCachePayload::KvRecurrent);
+        assert_eq!(kv.payload, StagePrefixCachePayload::ResidentKv);
+        assert_eq!(
+            kv.durable_payload,
+            Some(StagePrefixCachePayload::KvRecurrent)
+        );
+        assert_eq!(
+            kv.exact_state_payload(),
+            Some(StagePrefixCachePayload::KvRecurrent)
+        );
         assert!(kv.l3.is_some());
     }
 
