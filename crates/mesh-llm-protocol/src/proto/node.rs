@@ -132,6 +132,31 @@ pub struct PeerAnnouncement {
     /// Positive, short-lived cache evidence. Digests are salted and contain no tokens.
     #[prost(message, optional, tag = "50")]
     pub cache_affinity: ::core::option::Option<CacheAffinityAdvertisement>,
+    /// An optional, signed attestation this node MAY advertise about its own
+    /// append-only history. Advisory only: absent means the peer does not
+    /// advertise one, or has not produced one yet. Never verified by mesh-llm
+    /// itself — carried opaquely so a receiver MAY verify independently.
+    #[prost(message, optional, tag = "51")]
+    pub attested_log_head: ::core::option::Option<AttestedLogHead>,
+}
+/// A minimal, self-contained, signed attestation of the current head of a
+/// peer's append-only log. `signature` is an Ed25519 signature by the
+/// announcing peer's own node key (the same key backing its `endpoint_id`)
+/// over the canonical encoding of (log_id, size, root, timestamp_unix_ms).
+/// mesh-llm carries this opaquely and never verifies `signature` itself.
+/// `root` and `signature` are carried as-received; length is not enforced here.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttestedLogHead {
+    #[prost(string, tag = "1")]
+    pub log_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub root: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub timestamp_unix_ms: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AdvertisedModelThroughput {

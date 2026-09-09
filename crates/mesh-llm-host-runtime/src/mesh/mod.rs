@@ -152,17 +152,17 @@ pub use node::{
     LocalRequestMetricsSnapshot, Node, RouteEntry, RoutingTable, detect_vram_bytes_capped,
 };
 pub(crate) use node::{PeerDownReport, peer_down_endpoint_id};
-pub(crate) use peer_state::{
-    ControlListenerLifecycle, DEAD_PEER_TTL, MeshState, PEER_DOWN_REPORTER_COOLDOWN_SECS,
-    PEER_STALE_SECS, resolve_peer_leaving,
-};
 #[expect(
     unused_imports,
     reason = "public compatibility re-export for existing mesh state callers"
 )]
 pub use peer_state::{
-    DisplayLatency, DisplayLatencySource, MeshCatalogEntry, NodeRole, OwnerRuntimeConfig,
-    PeerAnnouncement, PeerInfo, PropagatedLatencyObservation,
+    AttestedLogHead, DisplayLatency, DisplayLatencySource, MeshCatalogEntry, NodeRole,
+    OwnerRuntimeConfig, PeerAnnouncement, PeerInfo, PropagatedLatencyObservation,
+};
+pub(crate) use peer_state::{
+    ControlListenerLifecycle, DEAD_PEER_TTL, MeshState, PEER_DOWN_REPORTER_COOLDOWN_SECS,
+    PEER_STALE_SECS, resolve_peer_leaving,
 };
 pub(crate) use stage_transport::{
     ConnectionCaptureEvent, HttpCaptureEvent, MeshBiStream, PeerLifecycleCaptureEvent,

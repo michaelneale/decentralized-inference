@@ -61,6 +61,25 @@ message PeerAnnouncement {
   optional InferenceAdmissionState inference_admission_state = 49;
   // Positive, short-lived cache evidence. Digests are salted and contain no tokens.
   optional CacheAffinityAdvertisement cache_affinity = 50;
+  // An optional, signed attestation this node MAY advertise about its own
+  // append-only history. Advisory only: absent means the peer does not
+  // advertise one, or has not produced one yet. Never verified by mesh-llm
+  // itself — carried opaquely so a receiver MAY verify independently.
+  optional AttestedLogHead attested_log_head = 51;
+}
+
+// A minimal, self-contained, signed attestation of the current head of a
+// peer's append-only log. `signature` is an Ed25519 signature by the
+// announcing peer's own node key (the same key backing its `endpoint_id`)
+// over the canonical encoding of (log_id, size, root, timestamp_unix_ms).
+// mesh-llm carries this opaquely and never verifies `signature` itself.
+// `root` and `signature` are carried as-received; length is not enforced here.
+message AttestedLogHead {
+  string log_id = 1;
+  uint64 size = 2;
+  bytes root = 3;
+  uint64 timestamp_unix_ms = 4;
+  bytes signature = 5;
 }
 
 enum InferenceAdmissionState {

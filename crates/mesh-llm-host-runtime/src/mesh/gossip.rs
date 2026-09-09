@@ -1202,6 +1202,10 @@ impl Node {
             latency_age_ms: Some(latency.age_ms),
             latency_observer_id: latency.observer_id,
             inference_admission_state: peer.inference_admission_state,
+            // No live-mesh attested-log-head state is tracked on `PeerInfo` yet — a
+            // rebroadcast of a peer we already admitted carries no opinion on
+            // its attested log head.
+            attested_log_head: None,
         }
     }
 
@@ -1265,6 +1269,9 @@ impl Node {
             latency_age_ms: None,
             latency_observer_id: None,
             inference_admission_state: data.inference_admission_state,
+            // No local attested-log-head source is wired yet — this node never
+            // advertises its own until a companion process is plumbed in.
+            attested_log_head: None,
         }
     }
 
