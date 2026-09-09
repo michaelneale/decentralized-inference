@@ -33,6 +33,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use zeroize::Zeroizing;
 
+const CONTROL_KV_CACHE_MAX_ENDPOINTS: usize = 256;
+const CONTROL_KV_CACHE_CONCURRENCY: usize = 8;
+const CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS: u64 = 45;
+
 pub(super) async fn handle(
     stream: &mut TcpStream,
     state: &MeshApi,
@@ -585,7 +589,7 @@ async fn handle_control_kv_cache(
         )
         .await;
     }
-    if request.endpoints.len() > 256 {
+    if request.endpoints.len() > CONTROL_KV_CACHE_MAX_ENDPOINTS {
         return respond_error(
             stream,
             400,
@@ -599,7 +603,10 @@ async fn handle_control_kv_cache(
         "clear" => mesh_client::proto::node::OwnerControlKvCacheOperation::Clear,
         _ => return respond_error(stream, 400, "unknown kv-cache operation").await,
     };
-    let mut indexed_results = stream::iter(request.endpoints.into_iter().enumerate())
+    let endpoints = request.endpoints;
+    let timeout_endpoints = endpoints.clone();
+    let operation_label = request.operation.clone();
+    let mut operations = stream::iter(endpoints.into_iter().enumerate())
         .map(|(index, endpoint)| {
             execute_control_kv_cache_target(
                 state,
@@ -611,9 +618,50 @@ async fn handle_control_kv_cache(
             )
             .map(move |result| (index, result))
         })
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
+        .buffer_unordered(CONTROL_KV_CACHE_CONCURRENCY);
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS);
+    let mut indexed_results = Vec::with_capacity(timeout_endpoints.len());
+    loop {
+        match tokio::time::timeout_at(deadline, operations.next()).await {
+            Ok(Some(result)) => indexed_results.push(result),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    drop(operations);
+    if indexed_results.len() < timeout_endpoints.len() {
+        let completed = indexed_results
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<std::collections::HashSet<_>>();
+        indexed_results.extend(
+            timeout_endpoints
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !completed.contains(index))
+                .map(|(index, endpoint)| {
+                    (
+                        index,
+                        LocalControlKvCacheResult {
+                            endpoint,
+                            target_node_id: None,
+                            operation: operation_label.clone(),
+                            freed_bytes: None,
+                            status: None,
+                            error: Some(LocalControlErrorPayload {
+                                code: "control_timeout".to_string(),
+                                message: format!(
+                                    "kv-cache batch exceeded its {CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS}-second deadline before a receipt was returned"
+                                ),
+                                legacy_retry_allowed: false,
+                                current_revision: None,
+                            }),
+                        },
+                    )
+                }),
+        );
+    }
     indexed_results.sort_by_key(|(index, _)| *index);
     let results = indexed_results
         .into_iter()

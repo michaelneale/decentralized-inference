@@ -7,8 +7,8 @@
 
 use std::{
     fs,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    path::{Component, Path, PathBuf},
+    time::SystemTime,
 };
 
 use anyhow::{Context, Result, bail};
@@ -17,28 +17,35 @@ use anyhow::{Context, Result, bail};
 /// `path`. This is `f_bavail`, not `f_bfree`: the reserve check must not spend
 /// blocks only root can allocate.
 pub fn available_bytes(path: &Path) -> Result<u64> {
-    let stat = statvfs(path)?;
-    // Widths differ by platform (macOS reports a 32-bit block count, Linux a
-    // 64-bit one), so widen by cast rather than by a conversion that is
-    // identity on one target and fallible on the other.
-    let blocks = stat.f_bavail as u64;
-    let block_bytes = stat.f_frsize as u64;
-    Ok(blocks.saturating_mul(block_bytes))
+    fs2::available_space(path)
+        .with_context(|| format!("failed to stat available space for {}", path.display()))
 }
 
 /// Whether `path` sits on a filesystem the tier refuses to manage. Network
 /// filesystems break the atomic-rename and locking assumptions the store is
 /// built on, so §10.10 rejects them where they are reliably detectable.
 pub fn is_network_filesystem(path: &Path) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        return windows::is_network_filesystem(path);
+    }
+    #[cfg(not(windows))]
     let name = filesystem_type_name(path)?;
-    Ok(matches!(
-        name.as_str(),
-        "nfs" | "smbfs" | "afpfs" | "webdav" | "ftp" | "cifs" | "fuse" | "fuse.sshfs"
-    ))
+    #[cfg(not(windows))]
+    {
+        Ok(matches!(
+            name.as_str(),
+            "nfs" | "smbfs" | "afpfs" | "webdav" | "ftp" | "cifs" | "fuse" | "fuse.sshfs"
+        ))
+    }
 }
 
 /// The filesystem type as the kernel names it, for status reporting.
 pub fn filesystem_type_name(path: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        return windows::filesystem_type_name(path);
+    }
     #[cfg(target_os = "macos")]
     {
         let stat = statfs(path)?;
@@ -50,7 +57,7 @@ pub fn filesystem_type_name(path: &Path) -> Result<String> {
             .collect();
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         // Linux reports a magic number rather than a name. Only the values the
         // tier actually refuses are worth naming; anything else is local
@@ -73,38 +80,44 @@ pub fn filesystem_type_name(path: &Path) -> Result<String> {
 /// last write. One `utimensat` per cache hit is the bounded metadata update
 /// §13.4 allows; it writes no payload bytes and allocates no blocks.
 pub fn touch(path: &Path) -> Result<()> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before the unix epoch")?;
-    let times = [
-        libc::timespec {
-            tv_sec: now.as_secs() as libc::time_t,
-            tv_nsec: libc::c_long::from(now.subsec_nanos() as i32),
-        },
-        libc::timespec {
-            tv_sec: now.as_secs() as libc::time_t,
-            tv_nsec: libc::c_long::from(now.subsec_nanos() as i32),
-        },
-    ];
-    let c_path = c_path(path)?;
-    // SAFETY: `c_path` is a NUL-terminated path that outlives the call, and
-    // `times` is a two-element timespec array as utimensat requires.
-    let status = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-    if status != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to touch {}", path.display()));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(SystemTime::now())))
+        .with_context(|| format!("failed to touch {}", path.display()))
+}
+
+/// Publish a fully written temporary file at `destination`, replacing an
+/// existing entry when necessary. Windows `rename` does not replace an
+/// existing file, so use the platform primitive with explicit replacement.
+pub fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        return windows::replace_file(temp, destination);
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        fs::rename(temp, destination)
+            .with_context(|| format!("failed to publish {}", destination.display()))
+    }
 }
 
 /// Restrict a cache directory to its owner. The first release has no at-rest
 /// encryption, so local account permissions are the only confidentiality the
 /// tier offers and it must actually apply them.
 pub fn restrict_to_owner(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let permissions = fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("failed to restrict permissions on {}", path.display()))
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        return windows::restrict_to_owner(path);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(mode);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to restrict permissions on {}", path.display()))
+    }
 }
 
 /// Refuse a path that reaches the store through a symlink. Following one would
@@ -112,7 +125,7 @@ pub fn restrict_to_owner(path: &Path, mode: u32) -> Result<()> {
 /// bytes outside the managed root, past every budget and reserve check.
 pub fn refuse_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        Ok(metadata) if is_link_or_reparse_point(&metadata) => {
             bail!(
                 "{} is a symlink; the cache refuses to traverse it",
                 path.display()
@@ -122,6 +135,83 @@ pub fn refuse_symlink(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("failed to stat {}", path.display())),
     }
+}
+
+/// Create an absolute directory tree without traversing an untrusted link.
+/// Existing ancestors are inspected before any missing component is created,
+/// closing the gap where `create_dir_all` could follow a redirected parent.
+pub fn create_dir_all_without_links(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        if matches!(component, Component::Prefix(_)) {
+            current.push(component.as_os_str());
+            continue;
+        }
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if is_link_or_reparse_point(&metadata) => {
+                if current != path && is_trusted_platform_directory_link(&current) {
+                    continue;
+                }
+                bail!(
+                    "{} is a symlink; the cache refuses to traverse it",
+                    current.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                bail!("{} is not a directory", current.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata = fs::symlink_metadata(&current).with_context(|| {
+                            format!("failed to verify cache directory {}", current.display())
+                        })?;
+                        if is_link_or_reparse_point(&metadata) || !metadata.is_dir() {
+                            bail!(
+                                "{} appeared during creation but is not a safe directory",
+                                current.display()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to create cache directory {}", current.display())
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to stat {}", current.display()));
+            }
+        }
+    }
+    refuse_symlink(path)
+}
+
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn is_trusted_platform_directory_link(_path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(_path.to_str(), Some("/var" | "/tmp" | "/etc"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// Refuse a symlink anywhere in the portion of `path` below `root`.
@@ -147,26 +237,14 @@ pub fn refuse_symlinked_descendant(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn c_path(path: &Path) -> Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .with_context(|| format!("path {} contains an interior NUL", path.display()))
 }
 
-fn statvfs(path: &Path) -> Result<libc::statvfs> {
-    let c_path = c_path(path)?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `c_path` is NUL-terminated and outlives the call; `stat` is
-    // valid uninitialized storage the call fills on success.
-    let status = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if status != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to stat filesystem for {}", path.display()));
-    }
-    // SAFETY: statvfs returned 0, so `stat` is initialized.
-    Ok(unsafe { stat.assume_init() })
-}
-
+#[cfg(not(windows))]
 fn statfs(path: &Path) -> Result<libc::statfs> {
     let c_path = c_path(path)?;
     let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -178,6 +256,177 @@ fn statfs(path: &Path) -> Result<libc::statfs> {
     }
     // SAFETY: statfs returned 0, so `stat` is initialized.
     Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::ffi::c_void;
+    use std::mem::{align_of, size_of};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
+        DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation, InitializeAcl,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ALL_ACCESS, GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
+
+    pub(super) fn is_network_filesystem(path: &Path) -> Result<bool> {
+        let volume = volume_root(path)?;
+        Ok(unsafe { GetDriveTypeW(volume.as_ptr()) } == DRIVE_REMOTE)
+    }
+
+    pub(super) fn filesystem_type_name(path: &Path) -> Result<String> {
+        let volume = volume_root(path)?;
+        let mut filesystem = [0_u16; 64];
+        let ok = unsafe {
+            GetVolumeInformationW(
+                volume.as_ptr(),
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to inspect filesystem for {}", path.display()));
+        }
+        let length = filesystem
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(filesystem.len());
+        Ok(String::from_utf16_lossy(&filesystem[..length]).to_ascii_lowercase())
+    }
+
+    pub(super) fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
+        let temp_wide = to_wide(temp);
+        let destination_wide = to_wide(destination);
+        let result = unsafe {
+            MoveFileExW(
+                temp_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to publish {}", destination.display()));
+        }
+        Ok(())
+    }
+
+    fn volume_root(path: &Path) -> Result<Vec<u16>> {
+        let input = to_wide(path);
+        let mut volume = vec![0_u16; 260];
+        let ok =
+            unsafe { GetVolumePathNameW(input.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to resolve volume for {}", path.display()));
+        }
+        Ok(volume)
+    }
+
+    pub(super) fn restrict_to_owner(path: &Path) -> Result<()> {
+        with_current_user_sid(|sid| {
+            let acl_bytes = size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>()
+                + unsafe { GetLengthSid(sid) as usize };
+            let words = acl_bytes.div_ceil(size_of::<u64>());
+            let mut acl_storage = vec![0_u64; words];
+            let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+            let metadata = fs::metadata(path)?;
+            let ace_flags = if metadata.is_dir() {
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            } else {
+                0
+            };
+            unsafe {
+                if InitializeAcl(acl, acl_bytes as u32, ACL_REVISION) == 0
+                    || AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, sid)
+                        == 0
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            let mut wide = to_wide(path);
+            let result = unsafe {
+                SetNamedSecurityInfoW(
+                    wide.as_mut_ptr(),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION
+                        | DACL_SECURITY_INFORMATION
+                        | PROTECTED_DACL_SECURITY_INFORMATION,
+                    sid,
+                    null_mut(),
+                    acl,
+                    null(),
+                )
+            };
+            if result != 0 {
+                bail!("Windows ACL update failed with error {result}");
+            }
+            Ok(())
+        })
+        .with_context(|| format!("failed to restrict permissions on {}", path.display()))
+    }
+
+    fn with_current_user_sid<T>(f: impl FnOnce(PSID) -> Result<T>) -> Result<T> {
+        let mut token = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let _token = Handle(token);
+        let mut bytes = 0_u32;
+        unsafe {
+            let _ = GetTokenInformation(token, TokenUser, null_mut(), 0, &mut bytes);
+        }
+        if bytes == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let words = (bytes as usize).div_ceil(align_of::<usize>());
+        let mut buffer = vec![0_usize; words];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                bytes,
+                &mut bytes,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        f(token_user.User.Sid)
+    }
+
+    fn to_wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    struct Handle(windows_sys::Win32::Foundation::HANDLE);
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +460,7 @@ mod tests {
         fs::remove_dir_all(&directory).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_are_refused() {
         let directory =

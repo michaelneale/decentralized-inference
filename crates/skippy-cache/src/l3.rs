@@ -450,24 +450,14 @@ fn acquire_root_lock(root: &Path) -> Result<fs::File> {
         .with_context(|| format!("failed to open cache root lock {}", path.display()))?;
     fsinfo::restrict_to_owner(&path, 0o600)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-
-        // SAFETY: `file` owns a valid open descriptor for the lifetime of the
-        // store. `flock` neither retains the pointer nor accesses Rust memory.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                bail!(
-                    "cache root {} is already owned by another manager",
-                    root.display()
-                );
-            }
-            return Err(error)
-                .with_context(|| format!("failed to lock cache root {}", root.display()));
+    if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            bail!(
+                "cache root {} is already owned by another manager",
+                root.display()
+            );
         }
+        return Err(error).with_context(|| format!("failed to lock cache root {}", root.display()));
     }
 
     Ok(file)
@@ -492,9 +482,7 @@ impl HandoffSegmentStore {
         if !root.is_absolute() {
             bail!("cache root must be absolute: {}", root.display());
         }
-        fsinfo::refuse_symlink(&root)?;
-        fs::create_dir_all(&root)
-            .with_context(|| format!("failed to create cache root {}", root.display()))?;
+        fsinfo::create_dir_all_without_links(&root)?;
         // Anchor everything below to the resolved root, so a symlink crossed on
         // the way in cannot make containment checks disagree with where bytes
         // actually land.
@@ -675,11 +663,34 @@ impl HandoffSegmentStore {
         prefix_key: &str,
         payload_digest: &str,
     ) -> Result<()> {
-        // A new index file under the prefix tree.
-        self.invalidate_usage();
         let path = self.prefix_entry_path(namespace_key, token_len, prefix_key);
-        fs::create_dir_all(path.parent().context("prefix entry has no parent")?)?;
-        write_atomically(&path, payload_digest.as_bytes())
+        let bytes = payload_digest.as_bytes();
+        let replaced_bytes =
+            fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(0)
+                    } else {
+                        Err(error)
+                    }
+                })?;
+        let growth_bytes = (bytes.len() as u64).saturating_sub(replaced_bytes);
+        let reservation = match self.reserve_write(bytes.len() as u64, growth_bytes)? {
+            Ok(reservation) => reservation,
+            Err(refusal) => bail!("cannot store prefix link: {}", refusal.reason()),
+        };
+        let parent = path.parent().context("prefix entry has no parent")?;
+        fsinfo::create_dir_all_without_links(parent)?;
+        fsinfo::restrict_to_owner(parent, 0o700)?;
+        // Replacement can shrink or grow the entry, so rescan rather than
+        // trying to update the cached total from a racy pre-write stat.
+        self.invalidate_usage();
+        write_atomically(&path, bytes)?;
+        fsinfo::restrict_to_owner(&path, 0o600)?;
+        drop(reservation);
+        self.enforce_budget()?;
+        Ok(())
     }
 
     /// Recorded token lengths for a namespace, longest first, deduplicated.
@@ -793,8 +804,14 @@ impl HandoffSegmentStore {
             Ok(reservation) => reservation,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        write_atomically(&path, bytes)?;
-        fsinfo::restrict_to_owner(&path, 0o600)?;
+        if let Err(error) =
+            write_atomically(&path, bytes).and_then(|()| fsinfo::restrict_to_owner(&path, 0o600))
+        {
+            // A failed cleanup or a permissions failure may leave physical
+            // bytes behind. Force the next admission to reconcile with disk.
+            self.invalidate_usage();
+            return Err(error);
+        }
         self.add_usage_bytes(bytes.len() as u64);
         drop(reservation);
         Ok(Ok(StoredSegment {
@@ -928,9 +945,21 @@ impl HandoffSegmentStore {
         // while it lands: eviction triggered by its own admission check must
         // not remove the entry being committed.
         let _pin = self.pin(&manifest.payload_digest);
-        match self.reserve(serialized.len() as u64)? {
+        let manifest_path = self.manifest_path(&manifest.payload_digest);
+        let replaced_bytes = fs::metadata(&manifest_path)
+            .map(|metadata| metadata.len())
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(0)
+                } else {
+                    Err(error)
+                }
+            })?;
+        let growth_bytes = (serialized.len() as u64).saturating_sub(replaced_bytes);
+        match self.reserve_write(serialized.len() as u64, growth_bytes)? {
             Ok(_reservation) => {
-                write_atomically(&self.manifest_path(&manifest.payload_digest), &serialized)?;
+                write_atomically(&manifest_path, &serialized)?;
+                fsinfo::restrict_to_owner(&manifest_path, 0o600)?;
             }
             Err(refusal) => return Ok(Err(refusal)),
         }
@@ -1057,27 +1086,39 @@ impl HandoffSegmentStore {
     /// are mid-write. The returned guard releases the reservation on drop,
     /// including on the error paths.
     pub fn reserve(&self, bytes: u64) -> Result<Result<Reservation<'_>, WriteRefusal>> {
+        self.reserve_write(bytes, bytes)
+    }
+
+    /// Reserve free space for the temporary write and budget capacity only
+    /// for its projected net growth. Replacements need room for a complete
+    /// temporary file, but charging their full size against the cache cap
+    /// would evict healthy entries even when the final file has the same size.
+    fn reserve_write(
+        &self,
+        write_bytes: u64,
+        growth_bytes: u64,
+    ) -> Result<Result<Reservation<'_>, WriteRefusal>> {
         let _admission = self
             .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let limits = self.limits();
-        if limits.budget_bytes > 0 && bytes > limits.budget_bytes {
+        if limits.budget_bytes > 0 && growth_bytes > limits.budget_bytes {
             return Ok(Err(WriteRefusal::SkippedOversize));
         }
         let available = fsinfo::available_bytes(&self.root)?;
-        if available.saturating_sub(bytes) < limits.minimum_free_bytes {
+        if available.saturating_sub(write_bytes) < limits.minimum_free_bytes {
             return Ok(Err(WriteRefusal::ReadOnlyLowSpace));
         }
         if limits.budget_bytes > 0 {
             let used = self.managed_usage_bytes()?;
-            if used.saturating_add(bytes) > limits.budget_bytes {
+            if used.saturating_add(growth_bytes) > limits.budget_bytes {
                 // Make room from inactive entries before refusing: a full
                 // cache is the normal steady state, not an error. Clear to the
                 // low-water mark, or further when this write alone needs more.
                 let target = self
                     .low_water_bytes()
-                    .min(limits.budget_bytes.saturating_sub(bytes));
+                    .min(limits.budget_bytes.saturating_sub(growth_bytes));
                 self.enforce_budget_to(target)?;
                 // Never refuse on a cached figure: rescan so an incremental
                 // total that has drifted low cannot turn a writable cache into
@@ -1085,13 +1126,17 @@ impl HandoffSegmentStore {
                 let used = self
                     .rescan_usage_bytes()?
                     .saturating_add(self.reserved_inflight.load(Ordering::Acquire));
-                if used.saturating_add(bytes) > limits.budget_bytes {
+                if used.saturating_add(growth_bytes) > limits.budget_bytes {
                     return Ok(Err(WriteRefusal::InsufficientSpace));
                 }
             }
         }
-        self.reserved_inflight.fetch_add(bytes, Ordering::AcqRel);
-        Ok(Ok(Reservation { store: self, bytes }))
+        self.reserved_inflight
+            .fetch_add(growth_bytes, Ordering::AcqRel);
+        Ok(Ok(Reservation {
+            store: self,
+            bytes: growth_bytes,
+        }))
     }
 
     /// Pin a manifest for the duration of a read or write. Eviction, prune
@@ -1472,15 +1517,27 @@ fn directory_bytes_recursive(directory: &Path) -> Result<u64> {
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let directory = path.parent().context("path has no parent directory")?;
-    let mut temp = tempfile_in(directory)?;
-    temp.1
+    let (temp_path, mut temp_file) = tempfile_in(directory)?;
+    let write_result = temp_file
         .write_all(bytes)
-        .with_context(|| format!("failed to write {}", temp.0.display()))?;
-    temp.1
-        .sync_all()
-        .with_context(|| format!("failed to sync {}", temp.0.display()))?;
-    drop(temp.1);
-    fs::rename(&temp.0, path).with_context(|| format!("failed to publish {}", path.display()))?;
+        .with_context(|| format!("failed to write {}", temp_path.display()))
+        .and_then(|()| {
+            temp_file
+                .sync_all()
+                .with_context(|| format!("failed to sync {}", temp_path.display()))
+        });
+    drop(temp_file);
+    let publish_result = write_result.and_then(|()| fsinfo::replace_file(&temp_path, path));
+    if let Err(error) = publish_result {
+        return match fs::remove_file(&temp_path) {
+            Ok(()) => Err(error),
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
+            Err(cleanup) => Err(error.context(format!(
+                "also failed to remove temporary file {}: {cleanup}",
+                temp_path.display()
+            ))),
+        };
+    }
     Ok(())
 }
 

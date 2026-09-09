@@ -144,6 +144,7 @@ pub fn kv_page_growth(args: KvPageGrowthArgs) -> Result<()> {
         include_output: false,
         mtp_source: MtpSource::Disabled,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
         cache_type_k: GGML_TYPE_F16,
         cache_type_v: GGML_TYPE_F16,
         flash_attn_type: runtime_flash_attn(args.runtime.flash_attn),
@@ -235,6 +236,11 @@ pub fn kv_page_growth(args: KvPageGrowthArgs) -> Result<()> {
         // from the page descriptor, and read what it actually wrote.
         let geometry = page_geometry(&page.desc, payload.len() as u64, args.segment_bytes);
         let exact_state = ExactStatePayload::kv_recurrent(payload.clone(), Vec::new());
+        let geometry_rejected_before = tier
+            .status()
+            .context("tier status before spill")?
+            .activity
+            .geometry_rejected;
         tier.spill(
             "probe",
             &tokens[..cursor],
@@ -244,6 +250,9 @@ pub fn kv_page_growth(args: KvPageGrowthArgs) -> Result<()> {
         )
         .with_context(|| format!("tier spill failed on turn {turn}"))?;
         let activity = tier.status().context("tier status")?.activity;
+        let geometry_rejected_delta = activity
+            .geometry_rejected
+            .saturating_sub(geometry_rejected_before);
         let tier_physical_bytes = activity.bytes_written - tier_written;
         tier_written = activity.bytes_written;
         let tier_amplification = if ideal_bytes == 0 {
@@ -251,7 +260,7 @@ pub fn kv_page_growth(args: KvPageGrowthArgs) -> Result<()> {
         } else {
             tier_physical_bytes as f64 / ideal_bytes as f64
         };
-        let geometry_accepted = geometry.is_some() && activity.geometry_rejected == 0;
+        let geometry_accepted = geometry.is_some() && geometry_rejected_delta == 0;
 
         // The alternative design: store only the new window rather than
         // re-cutting the whole prefix. Turn 0 has no preceding window.

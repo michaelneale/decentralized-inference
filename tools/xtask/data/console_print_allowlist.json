@@ -725,27 +725,23 @@
   ],
   "crates/mesh-llm-commands/src/kv_cache.rs": [
     {
-      "line": 146,
+      "line": 151,
       "macro_name": "eprint!"
     },
     {
-      "line": 158,
+      "line": 163,
       "macro_name": "println!"
     },
     {
-      "line": 168,
+      "line": 173,
       "macro_name": "println!"
     },
     {
-      "line": 176,
+      "line": 181,
       "macro_name": "println!"
     },
     {
-      "line": 184,
-      "macro_name": "println!"
-    },
-    {
-      "line": 190,
+      "line": 189,
       "macro_name": "println!"
     },
     {
@@ -758,6 +754,10 @@
     },
     {
       "line": 205,
+      "macro_name": "println!"
+    },
+    {
+      "line": 210,
       "macro_name": "println!"
     }
   ],
@@ -3703,7 +3703,7 @@
   ],
   "crates/skippy-cache/src/l3/tests.rs": [
     {
-      "line": 461,
+      "line": 508,
       "macro_name": "println!"
     }
   ],
@@ -3731,11 +3731,11 @@
   ],
   "crates/skippy-correctness/src/runner/kv_page_growth.rs": [
     {
-      "line": 276,
+      "line": 285,
       "macro_name": "println!"
     },
     {
-      "line": 331,
+      "line": 340,
       "macro_name": "println!"
     }
   ],

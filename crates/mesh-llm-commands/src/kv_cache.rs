@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use mesh_llm_cli::KvCacheCommand;
 use serde_json::{Value, json};
 
+const KV_CACHE_HTTP_TIMEOUT_SECS: u64 = 60;
+
 pub async fn dispatch_kv_cache_command(command: &KvCacheCommand) -> Result<()> {
     match command {
         KvCacheCommand::Status {
@@ -108,7 +110,10 @@ async fn request(
     body: Option<Value>,
 ) -> Result<Value> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
+        // The runtime bounds a remote batch at 45 seconds and returns one
+        // result per requested endpoint, including explicit timeout receipts.
+        // Leave transport and JSON-decoding margin outside that server bound.
+        .timeout(std::time::Duration::from_secs(KV_CACHE_HTTP_TIMEOUT_SECS))
         .build()?;
     let url = format!("http://127.0.0.1:{port}{path}");
     let mut request = client.request(method, &url);

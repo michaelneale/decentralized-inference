@@ -2,6 +2,7 @@ mod administration;
 mod auth;
 mod benchmark;
 mod dispatch;
+mod kv_cache;
 mod models;
 mod runtime;
 

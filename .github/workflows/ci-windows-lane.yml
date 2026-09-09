@@ -36,6 +36,9 @@ on:
         required: false
         default: "[]"
         type: string
+    secrets:
+      HF_TOKEN:
+        required: false
   workflow_dispatch:
     inputs: *lane_inputs
 permissions:
@@ -98,6 +101,18 @@ jobs:
       max_parallel: ${{ fromJson(inputs.lane_plan_json).budgets.windows_max_parallel }}
       fail_fast: ${{ inputs.original_event_name == 'pull_request' }}
 
+  product_smoke:
+    name: Windows product smoke
+    needs: [runtime_product]
+    if: ${{ !cancelled() && needs.runtime_product.result == 'success' && fromJson(inputs.lane_plan_json).matrices.smoke[0] != null }}
+    uses: ./.github/workflows/ci-windows-product-smoke-slice.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      smoke_matrix: ${{ toJson(fromJson(inputs.lane_plan_json).matrices.smoke) }}
+      timeout_minutes: 45
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   platform_checks:
     name: Windows checks
     if: ${{ fromJson(inputs.lane_plan_json).matrices.platform_checks[0] != null }}
@@ -113,7 +128,7 @@ jobs:
 
   summary:
     name: CI / Windows
-    needs: [ui_artifact, hosts, native_runtimes, runtime_product, platform_checks]
+    needs: [ui_artifact, hosts, native_runtimes, runtime_product, product_smoke, platform_checks]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

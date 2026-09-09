@@ -81,7 +81,7 @@ class ValidateCiLaneResultsTests(unittest.TestCase):
         self.assertEqual(VALIDATOR._required_jobs(plan), expected)
         VALIDATOR.validate(plan, {job: state("success") for job in expected})
 
-    def test_windows_runtime_products_do_not_require_host_rows(self) -> None:
+    def test_windows_runtime_products_require_selected_product_smoke(self) -> None:
         plan = {
             "lane": "windows",
             "required": True,
@@ -90,9 +90,10 @@ class ValidateCiLaneResultsTests(unittest.TestCase):
                 "hosts": [],
                 "runtime_products": [{"id": "windows-cpu"}],
                 "platform_checks": [],
+                "smoke": [{"id": "product-integration-windows-cpu"}],
             },
         }
-        expected = {"native_runtimes", "runtime_product"}
+        expected = {"native_runtimes", "runtime_product", "product_smoke"}
 
         self.assertEqual(VALIDATOR._required_jobs(plan), expected)
         VALIDATOR.validate(plan, {job: state("success") for job in expected})

@@ -179,7 +179,7 @@ jobs:
       source_sha: ${{ inputs.source_sha }}
       smoke_matrix: ${{ toJson(fromJson(inputs.lane_plan_json).matrices.smoke) }}
       binary_target: target/release/mesh-llm
-      timeout_minutes: 30
+      timeout_minutes: 45
     secrets:
       HF_TOKEN: ${{ inputs.original_event_name == 'push' && secrets.HF_TOKEN || '' }}
 

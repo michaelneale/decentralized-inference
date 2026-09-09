@@ -161,10 +161,11 @@ credentials may differ.
 - ci-{linux,macos,windows}-product-slice.yml: platform-local composition after
   matching host and runtime producers succeed.
 - ci-platform-checks-slice.yml: macOS portable/unit and Windows checks.
-- ci-linux-product-smoke-slice.yml and ci-macos-product-smoke-slice.yml:
-  platform-local inference, backend, two-node, Metal and model-download
-  consumers using only composed artifacts. One Linux KV caching smoke job runs
-  a fixed dense SmolLM2 leg followed by a recurrent Qwen3.5 leg; both must pass.
+- ci-{linux,macos,windows}-product-smoke-slice.yml: platform-local inference,
+  backend, two-node, Metal, Windows CPU and model-download consumers using only
+  composed artifacts. Product integration includes a digest-bound durable-L3
+  phase for dense and recurrent models across a full process restart; Windows
+  runs that phase alone on a real product executor.
 - ci-linux-sdk-slice.yml and ci-macos-sdk-slice.yml: platform-local
   Rust/Kotlin/Swift consumers. Swift and Kotlin SDK artifacts are independent
   producers that start from the plan and static ABI respectively, before

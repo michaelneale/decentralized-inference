@@ -107,5 +107,15 @@ fn matches_port_prefix(prefix: &[&str]) -> bool {
             | ["mesh-llm", "runtime", "remote-model", "--json"]
             | ["mesh-llm", "runtime", "apply-config"]
             | ["mesh-llm", "runtime", "apply-config", "--json"]
+            | ["mesh-llm", "kv-cache", "status"]
+            | ["mesh-llm", "kv-cache", "status", "--json"]
+            | ["mesh-llm", "kv-cache", "prune"]
+            | ["mesh-llm", "kv-cache", "prune", "--yes"]
+            | ["mesh-llm", "kv-cache", "prune", "--json"]
+            | ["mesh-llm", "kv-cache", "prune", "--yes", "--json"]
+            | ["mesh-llm", "kv-cache", "clear"]
+            | ["mesh-llm", "kv-cache", "clear", "--yes"]
+            | ["mesh-llm", "kv-cache", "clear", "--json"]
+            | ["mesh-llm", "kv-cache", "clear", "--yes", "--json"]
     )
 }

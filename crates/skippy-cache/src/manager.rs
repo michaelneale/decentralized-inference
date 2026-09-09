@@ -587,7 +587,6 @@ mod tests {
         assert!(stage_a.store().load_manifest(&key).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn root_lock_rejects_an_independent_store_owner() {
         let root = temp_root("root-lock");

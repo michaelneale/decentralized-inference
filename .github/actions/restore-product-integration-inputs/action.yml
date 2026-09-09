@@ -11,6 +11,10 @@ inputs:
   staged_binary_path:
     required: true
     description: Stable executable path used by the product suite.
+  binary_name:
+    required: false
+    default: mesh-llm
+    description: Host executable filename inside the composed product.
   model_cadence:
     required: true
     description: Authorized registry cadence for this invocation.
@@ -50,6 +54,7 @@ runs:
       with:
         artifact_name: ${{ inputs.artifact_name }}
         artifact_path: ${{ inputs.artifact_path }}
+        binary_name: ${{ inputs.binary_name }}
         staged_binary_path: ${{ inputs.staged_binary_path }}
 
     - name: Resolve pinned product-integration fixtures

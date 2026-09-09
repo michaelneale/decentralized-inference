@@ -99,6 +99,8 @@ def _required_jobs(lane_plan: dict[str, Any]) -> set[str]:
             jobs.update({"native_runtimes", "runtime_product"})
         if _ids(lane_plan, "platform_checks"):
             jobs.add("platform_checks")
+        if _ids(lane_plan, "smoke"):
+            jobs.add("product_smoke")
     else:
         raise LaneResultError(f"unknown CI lane {lane!r}")
     return jobs

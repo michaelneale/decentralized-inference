@@ -138,7 +138,7 @@ class CiLaneWorkflowTests(unittest.TestCase):
             "ci-website-lane.yml": 2,
             "ci-linux-lane.yml": 10,
             "ci-macos-lane.yml": 9,
-            "ci-windows-lane.yml": 6,
+            "ci-windows-lane.yml": 7,
         }
         for workflow_name, expected_calls in lane_workflows.items():
             with self.subTest(workflow=workflow_name):
@@ -215,11 +215,15 @@ class CiLaneWorkflowTests(unittest.TestCase):
         for platform in ("linux", "macos", "windows"):
             self.assertIn(f'select(.platform == "{platform}")', action)
         self.assertIn(
-            'smoke: [.matrices.smoke[] | select(.id != "metal-model-load")]',
+            'smoke: [.matrices.smoke[] | select(.id != "metal-model-load" and .id != "product-integration-metal" and .id != "product-integration-windows-cpu")]',
             action,
         )
         self.assertIn(
-            'smoke: [.matrices.smoke[] | select(.id == "metal-model-load")]',
+            'smoke: [.matrices.smoke[] | select(.id == "metal-model-load" or .id == "product-integration-metal")]',
+            action,
+        )
+        self.assertIn(
+            'smoke: [.matrices.smoke[] | select(.id == "product-integration-windows-cpu")]',
             action,
         )
 
@@ -327,6 +331,9 @@ class CiLaneWorkflowTests(unittest.TestCase):
             "ci-macos-product-smoke-slice.yml": (
                 "metal-model-load",
                 "product-integration-metal",
+            ),
+            "ci-windows-product-smoke-slice.yml": (
+                "product-integration-windows-cpu",
             ),
         }
         for workflow_name, smoke_ids in smoke_workflows.items():

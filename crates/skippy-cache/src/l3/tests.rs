@@ -274,6 +274,53 @@ fn managed_usage_counts_more_than_segments() {
 }
 
 #[test]
+fn prefix_links_obey_the_hard_budget_before_creating_the_index_tree() {
+    let root = temp_root("prefix-budget");
+    let store = store(&root, 0);
+    let manifest = commit_payload(&store, &vec![5u8; 4096], 4096);
+    let pin = store.pin(&manifest.payload_digest);
+    let used = store.managed_usage_bytes().expect("usage before link");
+    store
+        .update_limits(StoreLimits::new(used, 0))
+        .expect("set exact hard cap");
+
+    let error = store
+        .link_prefix("namespace", 128, "prefix", &manifest.payload_digest)
+        .expect_err("prefix link exceeded the hard budget");
+    assert!(
+        format!("{error:#}").contains("insufficient_space"),
+        "unexpected refusal: {error:#}"
+    );
+    assert!(
+        !store.namespace_dir("namespace").exists(),
+        "a refused prefix link created index directories"
+    );
+    assert_eq!(store.managed_usage_bytes().expect("usage after link"), used);
+    drop(pin);
+}
+
+#[test]
+fn atomic_publish_removes_temporary_file_after_rename_failure() {
+    let root = temp_root("atomic-cleanup");
+    fs::create_dir_all(&root).expect("create root");
+    let destination = root.join("destination");
+    fs::create_dir(&destination).expect("create blocking directory");
+
+    write_atomically(&destination, b"partial bytes")
+        .expect_err("publishing a file over a directory succeeded");
+
+    let leftovers: Vec<_> = fs::read_dir(&root)
+        .expect("read root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files survived: {leftovers:?}"
+    );
+}
+
+#[test]
 fn a_pinned_manifest_outranks_a_new_write() {
     // Under pressure the store refuses the incoming write rather than
     // pulling state out from under an operation still using it. The new

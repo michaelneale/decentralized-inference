@@ -17,6 +17,7 @@
 //! validate` agrees with real runtime support instead of drifting from it.
 
 mod checkpoint;
+mod runtime;
 mod topology;
 
 /// The wiring status of one canonical config path, matching the `Status`
@@ -503,34 +504,10 @@ pub const WIRING_MANIFEST: &[WiringEntry] = &[
         reason: "",
         behavior: WiringBehavior::None,
     },
-    WiringEntry {
-        path: "runtime.kv_cache.disk.mode",
-        status: WiringStatus::Wired,
-        owner: "#1576",
-        reason: "",
-        behavior: WiringBehavior::None,
-    },
-    WiringEntry {
-        path: "runtime.kv_cache.disk.directory",
-        status: WiringStatus::Wired,
-        owner: "#1576",
-        reason: "",
-        behavior: WiringBehavior::None,
-    },
-    WiringEntry {
-        path: "runtime.kv_cache.disk.budget_mib",
-        status: WiringStatus::Wired,
-        owner: "#1576",
-        reason: "",
-        behavior: WiringBehavior::None,
-    },
-    WiringEntry {
-        path: "runtime.kv_cache.disk.minimum_free_mib",
-        status: WiringStatus::Wired,
-        owner: "#1576",
-        reason: "",
-        behavior: WiringBehavior::None,
-    },
+    runtime::KV_CACHE_DISK_MODE,
+    runtime::KV_CACHE_DISK_DIRECTORY,
+    runtime::KV_CACHE_DISK_BUDGET_MIB,
+    runtime::KV_CACHE_DISK_MINIMUM_FREE_MIB,
     WiringEntry {
         path: "runtime.model_target_demand_upgrade_min_requests",
         status: WiringStatus::Wired,
