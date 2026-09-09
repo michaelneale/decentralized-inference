@@ -71,12 +71,6 @@ struct SubmittedJob {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SplitCompatibility {
-    Compatible,
-    Incompatible(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum QueueStatus {
     Missing,
     Published { repo: String },
@@ -683,10 +677,6 @@ async fn build_candidate(
         eprintln!("skip {}: source repo no longer exists", model.repo_id);
         return Ok(None);
     };
-    if let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&source_info) {
-        eprintln!("skip {}: {reason}", model.repo_id);
-        return Ok(None);
-    }
     let Some(source_revision) = source_info.sha.clone() else {
         eprintln!(
             "skip {}: source repo info has no immutable commit SHA",
@@ -694,8 +684,12 @@ async fn build_candidate(
         );
         return Ok(None);
     };
+    // GGUF layer packages wrap upstream bytes verbatim, so any GGUF repo is
+    // wrappable regardless of its pipeline_tag; the job-side prepare step
+    // already defaults a missing tag to text-generation. The tag is recorded
+    // for provenance only.
     let source_pipeline_tag =
-        model_pipeline_tag(&source_info).expect("compatible model must have a pipeline tag");
+        model_pipeline_tag(&source_info).unwrap_or_else(|| "text-generation".to_string());
 
     let inventory =
         match prepare::list_inventory(client, &model.repo_id, Some(&source_revision)).await {
@@ -855,30 +849,6 @@ async fn candidate_status(
     Ok(exact_status)
 }
 
-fn model_split_compatibility(info: &ModelInfo) -> SplitCompatibility {
-    if let Some(tag) = first_incompatible_media_tag(info) {
-        return SplitCompatibility::Incompatible(format!(
-            "unsupported media-generation tag '{tag}'; layer packages currently target text-generation GGUFs"
-        ));
-    }
-
-    let Some(pipeline_tag) = model_pipeline_tag(info) else {
-        return SplitCompatibility::Incompatible(
-            "missing text-generation pipeline_tag".to_string(),
-        );
-    };
-    if pipeline_tag.eq_ignore_ascii_case("text-generation")
-        || (pipeline_tag.eq_ignore_ascii_case("image-text-to-text")
-            && info.id.to_ascii_lowercase().contains("inkling"))
-    {
-        return SplitCompatibility::Compatible;
-    }
-
-    SplitCompatibility::Incompatible(format!(
-        "unsupported pipeline_tag '{pipeline_tag}'; automated layer packages currently require text-generation or a supported multimodal family"
-    ))
-}
-
 fn model_pipeline_tag(info: &ModelInfo) -> Option<String> {
     info.pipeline_tag
         .as_deref()
@@ -891,52 +861,11 @@ fn model_pipeline_tag(info: &ModelInfo) -> Option<String> {
         .or_else(|| card_string_value(info.card_data.as_ref(), "pipeline_tag"))
 }
 
-fn first_incompatible_media_tag(info: &ModelInfo) -> Option<String> {
-    collect_model_tags(info)
-        .into_iter()
-        .find(|tag| is_incompatible_media_tag(tag))
-}
-
-fn collect_model_tags(info: &ModelInfo) -> Vec<String> {
-    let mut tags = info.tags.clone().unwrap_or_default();
-    if let Some(card_tags) = info.card_data.as_ref().and_then(|card| card.get("tags")) {
-        match card_tags {
-            Value::Array(values) => {
-                tags.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
-            }
-            Value::String(tag) => tags.push(tag.clone()),
-            _ => {}
-        }
-    }
-    tags
-}
-
 fn card_string_value(card_data: Option<&Value>, key: &str) -> Option<String> {
     card_data?
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
-}
-
-fn is_incompatible_media_tag(tag: &str) -> bool {
-    let tag = tag.to_ascii_lowercase();
-    matches!(
-        tag.as_str(),
-        "image-to-video"
-            | "text-to-video"
-            | "video-to-video"
-            | "image-text-to-video"
-            | "audio-to-video"
-            | "text-to-audio"
-            | "video-to-audio"
-            | "audio-to-audio"
-            | "text-to-audio-video"
-            | "image-to-audio-video"
-            | "image-text-to-audio-video"
-            | "image-to-image"
-            | "text-to-image"
-            | "image-generation"
-    ) || tag.contains("diffusion")
 }
 
 async fn model_repo_info(client: &HFClient, repo_id: &str) -> Result<Option<ModelInfo>> {
@@ -1372,17 +1301,11 @@ mod tests {
 
     use model_package::jobs::CpuJobPlan;
 
-    use hf_hub::repository::ModelInfo;
-
     use super::{
-        Args, Candidate, DiscoveredProjector, DiscoveredQuant, RankedModel, SplitCompatibility,
+        Args, Candidate, DiscoveredProjector, DiscoveredQuant, RankedModel,
         estimated_bucket_workspace_bytes, job_spec_with_token, json_layer_package_repo,
-        model_family_key, model_layer_repos, model_split_compatibility,
+        model_family_key, model_layer_repos,
     };
-
-    fn model_info(value: serde_json::Value) -> ModelInfo {
-        serde_json::from_value(value).unwrap()
-    }
 
     #[test]
     fn model_family_key_collapses_common_unsloth_families() {
@@ -1407,80 +1330,6 @@ mod tests {
         assert_eq!(
             model_family_key("unsloth/NVIDIA-Nemotron-3-Super-120B-GGUF"),
             "nemotron"
-        );
-    }
-
-    #[test]
-    fn split_compatibility_accepts_text_generation_models() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Qwen-AgentWorld-35B-A3B-GGUF",
-            "pipeline_tag": "text-generation",
-            "tags": ["gguf", "qwen", "text-generation"]
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
-        );
-    }
-
-    #[test]
-    fn split_compatibility_accepts_inkling_multimodal_pipeline() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/inkling-GGUF",
-            "pipeline_tag": "image-text-to-text",
-            "tags": ["gguf", "multimodal"]
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
-        );
-    }
-
-    #[test]
-    fn split_compatibility_rejects_media_generation_pipeline() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/LTX-2-GGUF",
-            "pipeline_tag": "image-to-video",
-            "tags": ["gguf", "image-to-video", "text-to-video"]
-        }));
-
-        let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&info) else {
-            panic!("LTX media model should not be split queued");
-        };
-        assert!(reason.contains("image-to-video"));
-    }
-
-    #[test]
-    fn split_compatibility_rejects_media_generation_card_tags() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Qwen-Image-Edit-2511-GGUF",
-            "pipeline_tag": "text-generation",
-            "cardData": {
-                "tags": ["gguf", "image-to-image"]
-            }
-        }));
-
-        let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&info) else {
-            panic!("image generation model should not be split queued");
-        };
-        assert!(reason.contains("image-to-image"));
-    }
-
-    #[test]
-    fn split_compatibility_uses_model_card_pipeline_tag() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Text-Only-GGUF",
-            "tags": ["gguf"],
-            "cardData": {
-                "pipeline_tag": "text-generation"
-            }
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
         );
     }
 

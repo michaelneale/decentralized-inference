@@ -23,6 +23,18 @@ use mesh_llm_events::{ModelProgressStatus, OutputEvent, emit_event, interactive_
 #[path = "cache_resolution.rs"]
 mod cache_resolution;
 
+// Stage preparation can be superseded while a blocking HF transfer is still
+// finishing. Serialise package downloads inside one Mesh process so the
+// replacement task reuses the completed cache entry instead of racing the HF
+// cache's per-blob file lock.
+static LAYER_PACKAGE_DOWNLOAD_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_layer_package_downloads() -> std::sync::MutexGuard<'static, ()> {
+    LAYER_PACKAGE_DOWNLOAD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StagePackageRef {
     LocalPackage(PathBuf),
@@ -918,6 +930,7 @@ fn download_hf_package_to_local_sync(
     include_embeddings: bool,
     include_output: bool,
 ) -> Result<String> {
+    let _download_guard = lock_layer_package_downloads();
     let api = crate::models::build_hf_api(false)?;
     let (owner, name) = repo.split_once('/').context("invalid HF repo format")?;
     let model_api = api.model(owner, name);
@@ -1168,6 +1181,7 @@ pub fn resolve_package_v2_stage_to_local(
     if let StagePackageRef::HuggingFacePackage { repo, revision } =
         StagePackageRef::parse(package_ref)?
     {
+        let _download_guard = lock_layer_package_downloads();
         let revision = revision.unwrap_or_else(|| "main".to_string());
         let missing = required
             .iter()

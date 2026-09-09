@@ -4,10 +4,14 @@ use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use skippy_package_format::{
+    PackageManifest as PackageManifestV2, TensorStorage, stage_admission::StageAdmissionDescriptor,
+};
 use skippy_runtime::package::{self, PackageIntegrityOptions, PackageStageRequest};
 
 use super::materialization::{
     StagePackageInfo, StagePackageRef, inspect_stage_package, resolve_hf_package_to_local,
+    resolve_package_v2_stage_to_local,
 };
 
 const RUNTIME_SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -135,6 +139,10 @@ fn materialize_certification_stages(
     model_id: &str,
     ranges: &[CertificationStageRange],
 ) -> Result<Vec<CertifiedStage>> {
+    let metadata_ref = resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    if super::package::is_package_v2_ref(&metadata_ref) {
+        return materialize_package_v2_certification_stages(package_ref, ranges);
+    }
     ranges
         .iter()
         .enumerate()
@@ -180,6 +188,110 @@ fn materialize_certification_stages(
                 verified_artifacts: selected.integrity.verified_artifacts,
                 cached_artifacts: selected.integrity.cached_artifacts,
                 materialized_path: materialized.output_path.display().to_string(),
+                materialized_bytes,
+            })
+        })
+        .collect()
+}
+
+fn materialize_package_v2_certification_stages(
+    package_ref: &str,
+    ranges: &[CertificationStageRange],
+) -> Result<Vec<CertifiedStage>> {
+    let local_ref = resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    let package_dir = PathBuf::from(&local_ref);
+    let manifest_path = package_dir.join("model-package.json");
+    let manifest: PackageManifestV2 = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+    let manifest =
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, &package_dir)
+            .context("resolve package-v2 metadata carrier")?;
+
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(index, range)| {
+            let resident_tensor_ids = manifest
+                .tensor_catalog
+                .entries
+                .iter()
+                .map(|tensor| -> Result<Option<String>> {
+                    let TensorStorage::Owned { artifact_id, .. } = &tensor.storage else {
+                        return Ok(None);
+                    };
+                    let selected = match tensor.layer_ordinal {
+                        Some(layer) => layer >= range.layer_start && layer < range.layer_end,
+                        None => {
+                            let artifact = manifest
+                                .artifact_catalog
+                                .entries
+                                .iter()
+                                .find(|artifact| artifact.id == *artifact_id)
+                                .with_context(|| {
+                                    format!(
+                                        "package-v2 tensor {:?} references missing artifact {:?}",
+                                        tensor.id, artifact_id
+                                    )
+                                })?;
+                            match artifact.path.as_str() {
+                                "shared/common.gguf" => true,
+                                "shared/embeddings.gguf" => range.include_embeddings,
+                                "shared/output.gguf" => range.include_output,
+                                path => bail!(
+                                    "package-v2 non-layer tensor {:?} references unsupported artifact path {:?}",
+                                    tensor.id,
+                                    path
+                                ),
+                            }
+                        }
+                    };
+                    Ok(selected.then(|| tensor.id.clone()))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            let descriptor = StageAdmissionDescriptor {
+                package_id: manifest.package_id.clone(),
+                resident_tensor_ids,
+                sidecars: if range.include_embeddings {
+                    manifest.sidecars.clone()
+                } else {
+                    Vec::new()
+                },
+            };
+            let (_stage_ref, model_parts, projector_path) =
+                resolve_package_v2_stage_to_local(package_ref, &descriptor)?;
+            let materialized_path = model_parts
+                .first()
+                .context("package-v2 certification stage has no primary model artifact")?
+                .display()
+                .to_string();
+            let selected_part_count = model_parts.len() + usize::from(projector_path.is_some());
+            let materialized_bytes = model_parts.iter().chain(projector_path.iter()).try_fold(
+                0_u64,
+                |total, path| {
+                    let bytes = fs::metadata(path)
+                        .with_context(|| format!("stat package-v2 artifact {}", path.display()))?
+                        .len();
+                    total
+                        .checked_add(bytes)
+                        .context("package-v2 certification byte count overflow")
+                },
+            )?;
+            Ok(CertifiedStage {
+                stage_id: format!("cert-stage-{index}"),
+                layer_start: range.layer_start,
+                layer_end: range.layer_end,
+                include_embeddings: range.include_embeddings,
+                include_output: range.include_output,
+                selected_part_count,
+                verified_artifacts: selected_part_count,
+                cached_artifacts: 0,
+                materialized_path,
                 materialized_bytes,
             })
         })
@@ -456,8 +568,9 @@ fn failed_gate_message(name: &str, details: String) -> CertificationGate {
 mod tests {
     use super::{
         CertificationGateStatus, aggregate_certification_status, certification_stage_ranges,
-        models_response_contains, response_has_chat_choice_content, response_has_responses_output,
-        smoke_chat_completions, smoke_responses,
+        materialize_package_v2_certification_stages, models_response_contains,
+        response_has_chat_choice_content, response_has_responses_output, smoke_chat_completions,
+        smoke_responses,
     };
     use crate::inference::skippy::materialization::{StagePackageInfo, StagePackageLayerInfo};
     use serde_json::json;
@@ -483,6 +596,77 @@ mod tests {
         let error = certification_stage_ranges(1).unwrap_err().to_string();
 
         assert!(error.contains("at least two transformer layers"), "{error}");
+    }
+
+    #[test]
+    fn package_v2_certification_selects_two_stage_artifact_closures() {
+        let root = tempfile::tempdir().unwrap();
+        crate::inference::skippy::write_test_package_v2_fixture(
+            root.path(),
+            "fixture/llama-1b",
+            &[
+                (
+                    "layer-00000",
+                    "layers/layer-00000.gguf",
+                    "blk.0.attn.weight",
+                ),
+                (
+                    "layer-00001",
+                    "layers/layer-00001.gguf",
+                    "blk.1.attn.weight",
+                ),
+            ],
+        )
+        .unwrap();
+        let ranges = certification_stage_ranges(2).unwrap();
+
+        let stages =
+            materialize_package_v2_certification_stages(&root.path().to_string_lossy(), &ranges)
+                .unwrap();
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].selected_part_count, 2);
+        assert_eq!(stages[1].selected_part_count, 2);
+        assert!(stages.iter().all(|stage| stage.verified_artifacts == 2));
+        assert!(stages.iter().all(|stage| {
+            let path = std::path::Path::new(&stage.materialized_path);
+            path.is_file() && path.ends_with("shared/metadata.gguf")
+        }));
+    }
+
+    #[test]
+    fn package_v2_certification_rejects_unclassified_non_layer_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        crate::inference::skippy::write_test_package_v2_fixture(
+            root.path(),
+            "fixture/llama-1b",
+            &[
+                (
+                    "renamed-embeddings",
+                    "shared/renamed.gguf",
+                    "token_embd.weight",
+                ),
+                (
+                    "layer-00000",
+                    "layers/layer-00000.gguf",
+                    "blk.0.attn.weight",
+                ),
+                (
+                    "layer-00001",
+                    "layers/layer-00001.gguf",
+                    "blk.1.attn.weight",
+                ),
+            ],
+        )
+        .unwrap();
+        let ranges = certification_stage_ranges(2).unwrap();
+
+        let error =
+            materialize_package_v2_certification_stages(&root.path().to_string_lossy(), &ranges)
+                .unwrap_err()
+                .to_string();
+
+        assert!(error.contains("unsupported artifact path"), "{error}");
     }
 
     #[test]
