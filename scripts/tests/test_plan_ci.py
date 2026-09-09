@@ -369,6 +369,9 @@ class PlanCiTests(unittest.TestCase):
                 "two-node-split",
                 "model-download",
                 "metal-model-load",
+                "product-integration-cpu",
+                "product-integration-metal",
+                "product-integration-windows-cpu",
             },
         )
         self.assertIn(
