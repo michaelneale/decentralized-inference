@@ -154,17 +154,18 @@ pub struct HardwareSurvey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuNameSource {
-    /// The system *default* Metal device at collection time (macOS) — the
-    /// device the runtime's enumeration reported, equivalent to what
-    /// `MTLCreateSystemDefaultDevice` names. On switchable-graphics Macs the
+    /// A Metal device name from `MTLDevice.name` (macOS). Assigned when the
+    /// native-runtime backend reports a device whose backend name starts with
+    /// `"MTL"`, or when `MTLCreateSystemDefaultDevice` is queried directly
+    /// via the DefaultCollector macOS path. On switchable-graphics Macs the
     /// default device is a moment-in-time fact: it can differ between
-    /// collections as the OS switches GPUs, and it names one adapter, not
-    /// the set of adapters present. Not a standalone Metal API query and not
-    /// a verification that the string matches Apple's own device name.
+    /// collections as the OS switches GPUs. Best-effort, OS-reported, not a
+    /// verified GPU identifier.
     MetalDefaultDevice,
-    /// macOS `sysctl -n machdep.cpu.brand_string`, reused as the GPU name on
-    /// Apple Silicon where CPU and GPU share one die. Names the CPU package
-    /// the OS reports — never a queried GPU identifier.
+    /// macOS `sysctl -n machdep.cpu.brand_string`, used before upstream
+    /// commit 6e16b84a2 (`fix(system): report the real macOS GPU name`). The
+    /// variant is kept in the vocabulary for consumers that may have recorded
+    /// it from earlier surveys; it will not be assigned by new collections.
     CpuBrandString,
     /// The skippy native-runtime's backend device enumeration reporting a
     /// non-Metal accelerator (CUDA, ROCm, Vulkan, SYCL, ...). Names whichever
@@ -382,6 +383,10 @@ fn query_metal_recommended_working_set_bytes() -> Option<u64> {
 /// "Apple M4 Max" or "AMD Radeon Pro 5500M") — best-effort, not a verified
 /// measurement, but sourced from the GPU device rather than the CPU.
 #[cfg(target_os = "macos")]
+#[cfg_attr(
+    all(feature = "skippy-devices", not(feature = "dynamic-native-runtime")),
+    allow(dead_code)
+)]
 fn query_metal_device_name() -> Option<String> {
     use std::ffi::{CStr, c_char, c_void};
 

@@ -894,6 +894,8 @@ fn test_healthy_gpu_probe_without_vram_metric_does_not_probe_system_ram() {
 // gpu_name_source is new; gpu_name is not.
 #[test]
 fn test_skippy_probe_gpu_name_unchanged_and_source_tagged() {
+    // synthetic_gpu uses "CUDA0" as backend_device — NativeRuntimeDevice on
+    // every platform, regardless of target OS.
     let mut survey = HardwareSurvey::default();
     let handled = apply_gpu_probe_outcome_to_survey(
         &mut survey,
@@ -903,12 +905,30 @@ fn test_skippy_probe_gpu_name_unchanged_and_source_tagged() {
     );
     assert!(handled);
     assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0"));
-    let expected_source = if cfg!(target_os = "macos") {
-        GpuNameSource::MetalDefaultDevice
-    } else {
-        GpuNameSource::NativeRuntimeDevice
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::NativeRuntimeDevice));
+}
+
+#[test]
+fn test_skippy_probe_metal_backend_device_tagged_metal_default_device() {
+    // A device whose backend_device name starts with "MTL" (as the skippy
+    // Metal backend uses) must be labelled MetalDefaultDevice regardless of
+    // the host OS, so a macOS host running MoltenVK (Vulkan backend) is not
+    // mislabelled.
+    let mut survey = HardwareSurvey::default();
+    let metal_gpu = GpuFacts {
+        backend_device: Some("MTL0".to_string()),
+        display_name: "Apple M4 Max".to_string(),
+        ..synthetic_gpu(0, None)
     };
-    assert_eq!(survey.gpu_name_source, Some(expected_source));
+    let handled = apply_gpu_probe_outcome_to_survey(
+        &mut survey,
+        &[Metric::GpuName],
+        Ok::<Vec<GpuFacts>, ()>(vec![metal_gpu]),
+        || 0,
+    );
+    assert!(handled);
+    assert_eq!(survey.gpu_name.as_deref(), Some("Apple M4 Max"));
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::MetalDefaultDevice));
 }
 
 #[cfg(target_os = "macos")]
