@@ -368,7 +368,6 @@ pub(crate) fn assert_passive_path_immediate_spawn_behavior() {
 pub(crate) fn assert_quitting_during_startup_cancels_without_late_ready_render() {
     let reporter = StartupReadyReporter::new(
         &["Qwen3-8B-Q4_K_M".to_string()],
-        "Qwen3-8B-Q4_K_M".to_string(),
         "http://127.0.0.1:9337".to_string(),
         Some("http://127.0.0.1:3131".to_string()),
         9337,
@@ -376,7 +375,9 @@ pub(crate) fn assert_quitting_during_startup_cancels_without_late_ready_render()
     );
     reporter.mark_shutdown_requested();
     assert!(
-        reporter.mark_ready_and_build_event(0).is_none(),
+        reporter
+            .mark_ready_and_build_event(0, "Qwen3-8B-Q4_K_M")
+            .is_none(),
         "startup shutdown should cancel any late RuntimeReady emission"
     );
 }
@@ -386,7 +387,6 @@ pub(crate) fn assert_startup_ready_reporter_waits_for_rust_owned_model_ready_edg
     let models = vec!["model-a".to_string(), "model-b".to_string()];
     let reporter = StartupReadyReporter::new(
         &models,
-        "model-a".to_string(),
         "http://127.0.0.1:9337".to_string(),
         Some("http://127.0.0.1:3131".to_string()),
         9337,
@@ -394,16 +394,16 @@ pub(crate) fn assert_startup_ready_reporter_waits_for_rust_owned_model_ready_edg
     );
 
     assert!(
-        reporter.mark_ready_and_build_event(0).is_none(),
+        reporter.mark_ready_and_build_event(0, "model-a").is_none(),
         "one model-ready edge must not replace the remaining Rust-owned readiness edges"
     );
     assert!(
-        reporter.mark_ready_and_build_event(0).is_none(),
+        reporter.mark_ready_and_build_event(0, "model-a").is_none(),
         "a repeated edge for one startup slot must not mark a different slot ready"
     );
     assert!(
         matches!(
-            reporter.mark_ready_and_build_event(1),
+            reporter.mark_ready_and_build_event(1, "model-b"),
             Some(OutputEvent::RuntimeReady { .. })
         ),
         "RuntimeReady should appear only after every startup model hits the Rust-owned ready path"
@@ -655,7 +655,6 @@ pub(super) async fn startup_ready_reporter_uses_bound_urls_for_runtime_ready() {
     let models = vec!["model-a".to_string()];
     let reporter = StartupReadyReporter::new(
         &models,
-        "model-a".to_string(),
         api_url.clone(),
         Some(console_url.clone()),
         api_port,
@@ -668,7 +667,7 @@ pub(super) async fn startup_ready_reporter_uses_bound_urls_for_runtime_ready() {
         api_port: reported_api_port,
         console_port: reported_console_port,
         ..
-    }) = reporter.mark_ready_and_build_event(0)
+    }) = reporter.mark_ready_and_build_event(0, "model-a")
     else {
         panic!("reporter should emit RuntimeReady when the model is ready");
     };
@@ -684,6 +683,56 @@ pub(super) async fn startup_ready_reporter_uses_bound_urls_for_runtime_ready() {
 #[test]
 pub(super) fn startup_ready_reporter_waits_for_rust_owned_model_ready_edges() {
     assert_startup_ready_reporter_waits_for_rust_owned_model_ready_edges();
+}
+
+#[test]
+fn startup_ready_commands_use_the_primary_served_model_in_either_load_order() {
+    let primary_id = "local-gguf/sha256-f90897d3a4d7e185";
+    for primary_first in [true, false] {
+        let models = vec![
+            "/models/primary.gguf".to_string(),
+            "other-model".to_string(),
+        ];
+        let reporter = StartupReadyReporter::new(
+            &models,
+            "http://127.0.0.1:9337".to_string(),
+            None,
+            9337,
+            None,
+        );
+        let (first, last) = if primary_first { (0, 1) } else { (1, 0) };
+        let served_models = [primary_id, "other-served-model"];
+        assert!(
+            reporter
+                .mark_ready_and_build_event(first, served_models[first])
+                .is_none()
+        );
+        let Some(OutputEvent::RuntimeReady {
+            pi_command,
+            goose_command,
+            ..
+        }) = reporter
+            .clone()
+            .mark_ready_and_build_event(last, served_models[last])
+        else {
+            panic!("both loaded models should make the runtime ready");
+        };
+        assert_eq!(
+            pi_command.unwrap(),
+            format!("mesh-llm pi --host 127.0.0.1:9337 --model '{primary_id}'")
+        );
+        assert_eq!(
+            goose_command.unwrap(),
+            format!(
+                "GOOSE_PROVIDER=openai OPENAI_HOST=http://127.0.0.1:9337 OPENAI_API_KEY=mesh GOOSE_MODEL={primary_id} goose session"
+            )
+        );
+        assert!(
+            reporter
+                .mark_ready_and_build_event(last, served_models[last])
+                .is_none()
+        );
+    }
 }
 
 #[cfg(test)]

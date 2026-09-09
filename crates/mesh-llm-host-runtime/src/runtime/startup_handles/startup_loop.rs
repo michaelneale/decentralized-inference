@@ -918,7 +918,7 @@ pub(in crate::runtime) async fn startup_publish_loaded_runtime(
         cs.update(true, true).await;
     }
     update_pi_models_json(loaded_name, ctx.api_port);
-    startup_ready_reporter.mark_ready_and_maybe_emit(ctx.readiness_index);
+    startup_ready_reporter.mark_ready_and_maybe_emit(ctx.readiness_index, loaded_name);
     let _ = emit_event(OutputEvent::ModelReady {
         model: loaded_name.to_string(),
         internal_port: Some(handle.port),
