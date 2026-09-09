@@ -579,6 +579,13 @@ Do not rerun otherwise unchanged validation solely because a commit is about to 
 - Format Rust files in a way that preserves the owning crate's edition metadata. Prefer `cargo fmt -p <crate> -- path/to/file.rs` for a narrow edit, or `cargo fmt --all` when changes span packages. Do not use `cargo fmt --all -- path/to/file.rs`: workspace-level file arguments can be parsed without the owning crate's Rust 2024 edition metadata and fail on let-chains.
 - If you must invoke `rustfmt` directly on a standalone file, pass the edition resolved from that manifest lookup, for example `--edition 2024` for the current workspace default; otherwise use `cargo fmt` through the owning package.
 - Before committing Rust changes, ensure the formatting check passes with `cargo fmt --all --check`.
+- After Rust changes, run `just no-console-print`. The allowlist records source
+  locations, so adding or removing unrelated lines can move an existing
+  approved occurrence and invalidate the ratchet. If the check reports only
+  moved existing occurrences, regenerate it with
+  `cargo run -p xtask -- repo-consistency no-console-print --regen`, review the
+  allowlist diff to confirm that no new console prints were approved, and
+  commit the regenerated allowlist with the source change.
 - After Rust changes, run `cargo check` and `cargo clippy --all-targets -- -D warnings` for each touched crate (`-p <crate>`), and at least `cargo check -p mesh-llm` plus `cargo clippy -p mesh-llm --all-targets -- -D warnings` if the change is reachable from the shipped binary.
 - Treat Clippy as a required local gate, not a CI-only cleanup step. `cargo check`, `just build`, and formatter success do not catch lints such as `clippy::collapsible-if`; run the warning-denying Clippy command before opening or updating a PR.
 - If you touched tests, public APIs, routing, inference, gossip, plugin protocol, skippy ABI, or CLI behavior, run the relevant tests before committing.
