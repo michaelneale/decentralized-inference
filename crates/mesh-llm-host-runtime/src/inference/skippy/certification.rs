@@ -218,29 +218,41 @@ fn materialize_package_v2_certification_stages(
                 .tensor_catalog
                 .entries
                 .iter()
-                .filter_map(|tensor| {
+                .map(|tensor| -> Result<Option<String>> {
                     let TensorStorage::Owned { artifact_id, .. } = &tensor.storage else {
-                        return None;
+                        return Ok(None);
                     };
-                    let selected = tensor.layer_ordinal.map_or_else(
-                        || {
-                            let artifact_path = manifest
+                    let selected = match tensor.layer_ordinal {
+                        Some(layer) => layer >= range.layer_start && layer < range.layer_end,
+                        None => {
+                            let artifact = manifest
                                 .artifact_catalog
                                 .entries
                                 .iter()
                                 .find(|artifact| artifact.id == *artifact_id)
-                                .map(|artifact| artifact.path.as_str())
-                                .unwrap_or_default();
-                            match artifact_path {
+                                .with_context(|| {
+                                    format!(
+                                        "package-v2 tensor {:?} references missing artifact {:?}",
+                                        tensor.id, artifact_id
+                                    )
+                                })?;
+                            match artifact.path.as_str() {
+                                "shared/common.gguf" => true,
                                 "shared/embeddings.gguf" => range.include_embeddings,
                                 "shared/output.gguf" => range.include_output,
-                                _ => true,
+                                path => bail!(
+                                    "package-v2 non-layer tensor {:?} references unsupported artifact path {:?}",
+                                    tensor.id,
+                                    path
+                                ),
                             }
-                        },
-                        |layer| layer >= range.layer_start && layer < range.layer_end,
-                    );
-                    selected.then(|| tensor.id.clone())
+                        }
+                    };
+                    Ok(selected.then(|| tensor.id.clone()))
                 })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
                 .collect();
             let descriptor = StageAdmissionDescriptor {
                 package_id: manifest.package_id.clone(),
@@ -251,8 +263,13 @@ fn materialize_package_v2_certification_stages(
                     Vec::new()
                 },
             };
-            let (stage_ref, model_parts, projector_path) =
+            let (_stage_ref, model_parts, projector_path) =
                 resolve_package_v2_stage_to_local(package_ref, &descriptor)?;
+            let materialized_path = model_parts
+                .first()
+                .context("package-v2 certification stage has no primary model artifact")?
+                .display()
+                .to_string();
             let selected_part_count = model_parts.len() + usize::from(projector_path.is_some());
             let materialized_bytes = model_parts.iter().chain(projector_path.iter()).try_fold(
                 0_u64,
@@ -274,7 +291,7 @@ fn materialize_package_v2_certification_stages(
                 selected_part_count,
                 verified_artifacts: selected_part_count,
                 cached_artifacts: 0,
-                materialized_path: stage_ref,
+                materialized_path,
                 materialized_bytes,
             })
         })
@@ -611,6 +628,45 @@ mod tests {
         assert_eq!(stages[0].selected_part_count, 2);
         assert_eq!(stages[1].selected_part_count, 2);
         assert!(stages.iter().all(|stage| stage.verified_artifacts == 2));
+        assert!(stages.iter().all(|stage| {
+            let path = std::path::Path::new(&stage.materialized_path);
+            path.is_file() && path.ends_with("shared/metadata.gguf")
+        }));
+    }
+
+    #[test]
+    fn package_v2_certification_rejects_unclassified_non_layer_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        crate::inference::skippy::write_test_package_v2_fixture(
+            root.path(),
+            "fixture/llama-1b",
+            &[
+                (
+                    "renamed-embeddings",
+                    "shared/renamed.gguf",
+                    "token_embd.weight",
+                ),
+                (
+                    "layer-00000",
+                    "layers/layer-00000.gguf",
+                    "blk.0.attn.weight",
+                ),
+                (
+                    "layer-00001",
+                    "layers/layer-00001.gguf",
+                    "blk.1.attn.weight",
+                ),
+            ],
+        )
+        .unwrap();
+        let ranges = certification_stage_ranges(2).unwrap();
+
+        let error =
+            materialize_package_v2_certification_stages(&root.path().to_string_lossy(), &ranges)
+                .unwrap_err()
+                .to_string();
+
+        assert!(error.contains("unsupported artifact path"), "{error}");
     }
 
     #[test]
