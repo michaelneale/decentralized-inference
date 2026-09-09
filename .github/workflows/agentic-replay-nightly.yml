@@ -87,6 +87,37 @@ jobs:
           }))
           PY
 
+      - name: Verify pinned model artifacts
+        run: |
+          set -euo pipefail
+          python3 - "$MATRIX_FILE" <<'PY' > "$RUNNER_TEMP/agentic-replay-models.tsv"
+          import json, pathlib, re, sys
+          matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          for model in matrix["models"]:
+              revision = model.get("revision", "")
+              digest = model.get("sha256", "")
+              if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                  raise SystemExit(f"{model.get('family')}: revision must be an immutable 40-hex commit")
+              if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                  raise SystemExit(f"{model.get('family')}: sha256 must be a 64-hex digest")
+              print("\t".join((model["family"], model["repo"], revision, model["file"], digest)))
+          PY
+          while IFS=$'\t' read -r family repo revision file expected_sha; do
+            model_path=$(hf download "$repo" "$file" --revision "$revision")
+            python3 - "$model_path" "$expected_sha" "$family" <<'PY'
+          import hashlib, pathlib, sys
+          path, expected, family = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          digest = hashlib.sha256()
+          with path.open("rb") as model_file:
+              for chunk in iter(lambda: model_file.read(8 * 1024 * 1024), b""):
+                  digest.update(chunk)
+          actual = digest.hexdigest()
+          if actual != expected:
+              raise SystemExit(f"{family}: model SHA-256 mismatch: expected={expected} actual={actual}")
+          print(f"verified {family}: {actual}")
+          PY
+          done < "$RUNNER_TEMP/agentic-replay-models.tsv"
+
       - name: Replay each pinned model
         run: |
           set -euo pipefail
@@ -106,7 +137,7 @@ jobs:
           fi
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
-            model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
+            model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
             if ! python3 evals/agentic-replay.py run \
                 --ref main=origin/main \
                 --ref pr=HEAD \

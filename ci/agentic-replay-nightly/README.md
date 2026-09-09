@@ -19,6 +19,11 @@ JSONL shard per model/concurrency cohort under `data/runs/<date>/`. The schema
 is versioned in `schema.json`. A companion `report.md` shard carries the
 human-readable card-format report for each run.
 
+Each model entry pins a Hugging Face commit and SHA-256 digest. The workflow
+resolves those exact revisions from the pre-warmed cache and hashes every GGUF
+before it starts the replay, so upstream repository changes cannot alter a
+benchmark cohort silently.
+
 The dataset contains performance metrics and content-addressed provenance
 only: no prompts, completions, model weights, credentials, or local paths.
 

@@ -82,6 +82,7 @@
       "required": [
         "family",
         "repo",
+        "revision",
         "file",
         "quant",
         "sha256",
@@ -94,6 +95,10 @@
         "repo": {
           "type": "string"
         },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
         "file": {
           "type": "string"
         },
@@ -101,10 +106,8 @@
           "type": "string"
         },
         "sha256": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "class": {
           "enum": [

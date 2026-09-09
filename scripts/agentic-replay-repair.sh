@@ -40,7 +40,7 @@ Co-authored-by: opencode <opencode@meshllm.invalid>"
   for level in $LEVELS; do LEVEL_ARGS="$LEVEL_ARGS --concurrency $level"; done
   RERUN_FAILED=0
   for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models']))"); do
-    model_uri=$(python3 -c "import json;m=[m for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
+    model_uri=$(python3 -c "import json;m=[m for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
     python3 evals/agentic-replay.py run \
       --ref fixed=HEAD \
       --ref base=origin/main \

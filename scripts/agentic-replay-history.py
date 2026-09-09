@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -27,6 +28,17 @@ BASELINE_MIN_RUNS = 3
 # Relative + absolute tolerance, both must be exceeded to fail (mirrors the
 # reviewed-budget rule; tuned per metric after bootstrap evidence exists).
 DEFAULT_TOLERANCE = {"pct": 5.0, "abs": 0.0}
+
+
+def validate_model_pin(model: dict[str, Any]) -> None:
+    """Reject mutable or unverifiable model entries before emitting history."""
+    family = model.get("family", "unknown")
+    revision = model.get("revision")
+    digest = model.get("sha256")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError(f"{family}: revision must be an immutable 40-hex commit")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"{family}: sha256 must be a 64-hex digest")
 
 
 def stable_hash(value: object) -> str:
@@ -59,6 +71,7 @@ def build_rows(
     backend_binary_sha256: str | None,
 ) -> list[dict[str, Any]]:
     """Group cells by concurrency and emit one history row per level."""
+    validate_model_pin(model)
     by_concurrency: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for cell in cells:
         by_concurrency[int(cell["concurrency"])].append(cell)
@@ -101,6 +114,7 @@ def build_rows(
                         "cohort": cohort,
                         "source": source_sha,
                         "replay": replay_params,
+                        "model_revision": model["revision"],
                         "model_sha": model.get("sha256"),
                     }
                 ),
@@ -240,9 +254,9 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             prior = [
                 r for r in baseline.get(baseline_key(row), [])
-                # Cohort contract from build_rows: repo/file moves are not a
-                # cohort change; exact identity is enforced via replay params
-                # embedded in cohort_key by producers of those rows.
+                # Keep the benchmark shape stable here. compare() separately
+                # requires the same model digest while allowing source SHA to
+                # change between the baseline and candidate.
                 if r.get("replay", {}).get("trajectories_per_framework")
                 == row["replay"].get("trajectories_per_framework")
                 and r.get("replay", {}).get("passes") == row["replay"].get("passes")

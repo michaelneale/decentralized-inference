@@ -38,7 +38,7 @@ def make_row(
         "cohort": {"model": model, "concurrency": 4},
         "backend_binary_sha256": None,
         "hardware_fingerprint": {},
-        "model": {"family": model, "quant": "Q4_K_M", "repo": "r", "file": "f", "sha256": None, "class": "dense"},
+        "model": {"family": model, "quant": "Q4_K_M", "repo": "r", "revision": "b" * 40, "file": "f", "sha256": "c" * 64, "class": "dense"},
         "replay": {"mode": "checkpoint", "dataset": "d", "trajectories_per_framework": 4, "passes": 2, "warmup_turns": 4, "concurrency": 4, "max_output_tokens": 2048},
         "prompt_count": 36,
         "successful_requests": 36 if complete else 30,
@@ -57,6 +57,19 @@ def make_row(
 
 
 class GateTests(unittest.TestCase):
+    def test_history_rejects_unpinned_model(self):
+        model = make_row("2026-09-09")["model"]
+        model["sha256"] = None
+        with self.assertRaisesRegex(ValueError, "sha256 must be a 64-hex digest"):
+            history.build_rows(
+                [],
+                model=model,
+                replay={},
+                hardware={},
+                source_sha="a" * 40,
+                backend_binary_sha256=None,
+            )
+
     def test_bootstrap_does_not_gate(self):
         baseline = [make_row(f"2026-09-0{d}") for d in (1, 2)]
         candidate = make_row("2026-09-09", decode=10.0)
