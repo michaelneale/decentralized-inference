@@ -158,8 +158,8 @@ def git(repo: Path, *args: str) -> str:
 
 
 def parse_ref_specs(repo: Path, values: Sequence[str]) -> list[RefSpec]:
-    if len(values) < 2:
-        raise ValueError("at least two --ref LABEL=GIT_REF values are required")
+    if not values:
+        raise ValueError("at least one --ref LABEL=GIT_REF value is required")
     specs: list[RefSpec] = []
     labels: set[str] = set()
     commits: set[str] = set()
@@ -745,6 +745,7 @@ def stream_request(
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_call_parts: dict[int, dict[str, Any]] = {}
+    finish_reason: str | None = None
     saw_done = False
     connection = http.client.HTTPConnection(DEFAULT_HOST, DEFAULT_PORT, timeout=timeout)
     payload = {
@@ -808,7 +809,11 @@ def stream_request(
             choices = event.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
-            delta = choices[0].get("delta")
+            choice = choices[0]
+            candidate_finish_reason = choice.get("finish_reason")
+            if isinstance(candidate_finish_reason, str):
+                finish_reason = candidate_finish_reason
+            delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
             content = delta.get("content")
@@ -867,6 +872,7 @@ def stream_request(
         "prompt_tokens": prompt_tokens,
         "cached_tokens": cached_tokens,
         "content_events": content_events,
+        "finish_reason": finish_reason,
         "content_sha256": response_content_sha256(
             content_parts, reasoning_parts, tool_call_parts
         ),
@@ -1067,6 +1073,9 @@ def summarize_requests(
         "budget_exhausted_requests": sum(
             request.get("completion_tokens") == request.get("requested_output_tokens")
             for request in successful
+        ),
+        "finish_reason_length_requests": sum(
+            request.get("finish_reason") == "length" for request in successful
         ),
         "ttft_samples": ttft,
         "ttft_p50_seconds": statistics.median(ttft) if ttft else None,
@@ -2318,7 +2327,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--ref",
         action="append",
         required=True,
-        help="repeatable LABEL=GIT_REF; at least two distinct commits",
+        help=(
+            "repeatable LABEL=GIT_REF; use one ref for absolute measurements; "
+            "multiple labels must resolve to distinct commits"
+        ),
     )
     parser.add_argument("--model", required=True, help="model URI or local package path")
     parser.add_argument(
