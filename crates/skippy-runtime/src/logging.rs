@@ -98,6 +98,29 @@ impl ProgressTracker {
     }
 }
 
+/// Latest measured buffer sizes parsed from native log lines, keyed by the
+/// line's kind (compute vs KV). These are what llama.cpp actually allocated
+/// during `sched_reserve`, and are the ground truth the memory planner should
+/// charge instead of the KV-scaled estimate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeasuredNativeBuffers {
+    pub compute_mib: Option<f64>,
+    pub kv_mib: Option<f64>,
+}
+
+/// Snapshot of the measured native buffer sizes observed so far in this
+/// process. The native log callback is synchronous with model open, so by the
+/// time `skippy_model_open` returns, the `sched_reserve` buffer lines have
+/// already been parsed. Returns `None` when no buffer lines were observed
+/// (e.g. native log forwarding disabled).
+pub fn measured_native_buffers() -> Option<MeasuredNativeBuffers> {
+    let aggregator = native_log_aggregator().lock().ok()?;
+    Some(MeasuredNativeBuffers {
+        compute_mib: aggregator.measured_compute_mib,
+        kv_mib: aggregator.measured_kv_mib,
+    })
+}
+
 #[derive(Debug, Default)]
 struct ModelMetadataHighlights {
     architecture: Option<String>,
@@ -192,6 +215,11 @@ struct NativeLogAggregator {
     tensor_groups: Vec<(String, usize)>,
     tensor_groups_emitted: bool,
     kv_layers_seen: BTreeSet<usize>,
+    /// Latest measured buffer sizes parsed from native log lines. Updated by
+    /// the memory/kv_cache arms of `summarize_native_log_line`; read via
+    /// [`measured_native_buffers`] after model open completes.
+    measured_compute_mib: Option<f64>,
+    measured_kv_mib: Option<f64>,
 }
 
 fn native_log_file() -> &'static Mutex<Option<LineWriter<File>>> {
@@ -346,11 +374,37 @@ impl NativeLogAggregator {
             return events;
         }
 
+        self.record_measured_buffer_size(s);
+
         if let Some(event) = summarize_native_log_line(s) {
             events.push(event);
         }
 
         events
+    }
+
+    /// Track the largest measured buffer size per kind. A later, smaller line
+    /// (e.g. a per-graph reserve for a shorter context) must not lower the
+    /// high-water mark recorded at full context init. CPU-offload lines are
+    /// skipped: the snapshot feeds VRAM planning, and a CPU-resident buffer
+    /// larger than the accelerator's must not be charged against VRAM.
+    fn record_measured_buffer_size(&mut self, line: &str) {
+        if !line.contains("buffer size") || line.to_ascii_uppercase().contains("CPU") {
+            return;
+        }
+        if let Some(mib) = parse_buffer_size_mib(line) {
+            if line.contains("compute buffer size") {
+                self.measured_compute_mib = match self.measured_compute_mib {
+                    Some(seen) if seen >= mib => Some(seen),
+                    _ => Some(mib),
+                };
+            } else if line.contains("KV buffer size") {
+                self.measured_kv_mib = match self.measured_kv_mib {
+                    Some(seen) if seen >= mib => Some(seen),
+                    _ => Some(mib),
+                };
+            }
+        }
     }
 
     fn flush_metadata_summary(&mut self) -> Vec<NativeLogEvent> {
@@ -1143,6 +1197,39 @@ mod tests {
                     .iter()
                     .any(|(key, value)| key == "q4_K" && value == &Value::from(70_u64))
         }));
+    }
+
+    #[test]
+    fn aggregator_records_measured_buffers_for_snapshot_api() {
+        let mut aggregator = NativeLogAggregator::default();
+        aggregator.process_line("sched_reserve:        CUDA0 compute buffer size =   579.83 MiB");
+        aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // A later, smaller reserve for a shorter context must not lower the
+        // recorded high-water mark for either kind.
+        aggregator.process_line("sched_reserve:        CUDA0 compute buffer size =   512.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1024.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // CPU-offloaded buffers must stay excluded even when larger: the
+        // planner charges accelerator memory, not system RAM.
+        aggregator.process_line("load_tensors: CPU_Mapped model buffer size =  2048.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CPU KV buffer size =  4096.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CPU compute buffer size =  8192.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // Model-agnostic summary lines carry no buffer size to record.
+        aggregator.process_line("VRAM used: 12.4 GB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+
+        // register/unregister reset clears the snapshot for the next model.
+        aggregator.reset();
+        assert_eq!(aggregator.measured_compute_mib, None);
+        assert_eq!(aggregator.measured_kv_mib, None);
     }
 
     #[test]
