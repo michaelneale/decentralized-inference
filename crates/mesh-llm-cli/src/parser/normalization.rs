@@ -4,6 +4,7 @@ use super::commands::Cli;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSurface {
+    Share,
     Serve,
     Client,
 }
@@ -122,6 +123,21 @@ where
             }
             _ => {}
         },
+        // `share <url>` becomes `--shared-endpoint <url>` so runtime flags
+        // parse on either side of the URL. When no URL follows, the `share`
+        // subcommand is left in place so clap reports the missing argument
+        // and renders help.
+        Some("share") => {
+            explicit_surface = Some(RuntimeSurface::Share);
+            if original
+                .get(pos + 1)
+                .and_then(|arg| arg.to_str())
+                .is_some_and(|arg| !arg.starts_with('-'))
+            {
+                normalized.remove(pos);
+                normalized.insert(pos, OsString::from("--shared-endpoint"));
+            }
+        }
         Some("client") => {
             normalized.remove(pos);
             normalized.insert(pos, OsString::from("--client"));
@@ -225,6 +241,50 @@ mod tests {
     use mesh_llm_events::LogFormat;
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    #[test]
+    fn share_accepts_runtime_flags_before_and_after_url() {
+        for args in [
+            vec![
+                "mesh-llm",
+                "share",
+                "http://localhost:11434",
+                "--port",
+                "9447",
+            ],
+            vec![
+                "mesh-llm",
+                "--port",
+                "9447",
+                "share",
+                "http://localhost:11434",
+            ],
+        ] {
+            let normalized = normalize_runtime_surface_args(args);
+            assert_eq!(normalized.explicit_surface, Some(RuntimeSurface::Share));
+            let cli = Cli::try_parse_from(normalized.normalized).unwrap();
+            assert_eq!(
+                cli.shared_endpoint.as_deref(),
+                Some("http://localhost:11434")
+            );
+            assert_eq!(cli.port, 9447);
+            assert!(!cli.client);
+        }
+    }
+
+    #[test]
+    fn share_requires_url_and_has_help() {
+        for args in [
+            vec!["mesh-llm", "share"],
+            vec!["mesh-llm", "share", "--port", "9447"],
+        ] {
+            let normalized = normalize_runtime_surface_args(args);
+            assert!(Cli::try_parse_from(normalized.normalized).is_err());
+        }
+        let normalized = normalize_runtime_surface_args(["mesh-llm", "share", "--help"]);
+        let error = Cli::try_parse_from(normalized.normalized).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
 
     #[test]
     fn normalize_runtime_surface_args_rewrites_serve_invocation() {

@@ -78,10 +78,55 @@ name = "openai-endpoint"
 url = "http://127.0.0.1:8000/v1"
 ```
 
-## External-endpoint-only workflow
+## Share an LLM server already running on this machine
 
-Mesh can expose an existing OpenAI-compatible provider without loading any
-local model or adding a placeholder model.
+If you already run Ollama, LM Studio, a LiteLLM proxy, vLLM, or any other
+OpenAI-compatible server, Mesh can publish its models to your mesh with one
+command. No plugin to install, no config file to edit:
+
+```bash
+mesh-llm share http://localhost:11434
+```
+
+Ollama keeps running the models. Mesh forwards requests to it and advertises
+its models to the mesh under their own names. This node never loads a native
+inference runtime and never loads a model of its own.
+
+Like `mesh-llm serve`, this starts a **private** mesh by default. Nothing is
+advertised publicly and no peer can reach it until you make an explicit choice:
+
+```bash
+# join an existing mesh with an invite token
+mesh-llm share http://localhost:11434 --join <token>
+
+# or publish this mesh for discovery
+mesh-llm share http://localhost:11434 --publish
+```
+
+Confirm the upstream's models are being served:
+
+```bash
+curl -s http://localhost:9337/v1/models | jq '.data[].id'
+```
+
+The model list refreshes periodically, so `ollama pull` on a new model makes it
+available without restarting Mesh.
+
+### Limits
+
+- **One upstream per node, fixed for the run.** To point at a different server,
+  stop the command and start it again with the new URL.
+- **HTTP only.** `https://` upstreams are rejected, so authenticated cloud
+  providers are not supported yet.
+- **Ctrl-C stops sharing; it does not stop the upstream.** Ollama keeps running
+  and keeps serving its own clients.
+
+## External-endpoint-only workflow (plugin)
+
+`mesh-llm share` above is the simpler way to expose one already-running
+OpenAI-compatible server. The `openai-endpoint` plugin remains supported and is
+still the right choice when you want the provider recorded durably in
+`config.toml` so it is restored on every start.
 
 1. Install the endpoint plugin:
 

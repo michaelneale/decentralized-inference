@@ -2,6 +2,18 @@ use super::normalization::RuntimeSurface;
 
 pub fn runtime_surface_help(surface: RuntimeSurface) -> String {
     match surface {
+        RuntimeSurface::Share => concat!(
+            "Share an already-running OpenAI-compatible HTTP server through Mesh.\n\n",
+            "Usage: mesh-llm share <URL> [OPTIONS]\n\n",
+            "Example: mesh-llm share http://localhost:11434\n\n",
+            "      --join <TOKEN>          Join an existing mesh\n",
+            "      --publish               Publish this mesh for discovery\n",
+            "      --port <PORT>           Local OpenAI proxy port [default: 9337]\n",
+            "      --console <PORT>        Management API port [default: 3131]\n\n",
+            "Stays running until stopped. Ctrl-C stops sharing, not the upstream server.\n",
+            "No model downloads, native inference runtime, plugin process, or config edits.\n",
+            "HTTP upstreams only; HTTPS and upstream authentication are not supported yet.\n"
+        ).to_string(),
         RuntimeSurface::Serve => concat!(
             "Serve local models and join or publish a mesh.\n\n",
             "Usage: mesh-llm serve [OPTIONS]\n\n",

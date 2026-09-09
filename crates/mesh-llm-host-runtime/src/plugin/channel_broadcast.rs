@@ -146,6 +146,7 @@ mod tests {
     #[tokio::test]
     async fn broadcast_channel_message_is_a_no_op_with_no_plugins_loaded() {
         let specs = ResolvedPlugins {
+            shared_endpoint: None,
             externals: Vec::new(),
             inactive: Vec::new(),
         };

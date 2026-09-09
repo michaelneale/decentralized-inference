@@ -63,6 +63,7 @@ async fn run_cli_entrypoint() -> anyhow::Result<()> {
     let explicit_surface = normalized_args
         .explicit_surface
         .or(match cli.command.as_ref() {
+            Some(mesh_llm_cli::Command::Share { .. }) => Some(mesh_llm_cli::RuntimeSurface::Share),
             Some(mesh_llm_cli::Command::Serve) => Some(mesh_llm_cli::RuntimeSurface::Serve),
             Some(mesh_llm_cli::Command::Client) => Some(mesh_llm_cli::RuntimeSurface::Client),
             _ => None,
@@ -77,7 +78,9 @@ async fn run_cli_entrypoint() -> anyhow::Result<()> {
     if cli.command.as_ref().is_some_and(|c| {
         !matches!(
             c,
-            mesh_llm_cli::Command::Serve | mesh_llm_cli::Command::Client
+            mesh_llm_cli::Command::Serve
+                | mesh_llm_cli::Command::Client
+                | mesh_llm_cli::Command::Share { .. }
         )
     }) {
         // Install the durable audit bridge before command dispatch. This
@@ -371,6 +374,8 @@ where
     }
 
     match positional.as_slice() {
+        ["help", "share", ..] => Some(mesh_llm_cli::RuntimeSurface::Share),
+        ["share", ..] if has_help_flag => Some(mesh_llm_cli::RuntimeSurface::Share),
         ["help", "serve", ..] => Some(mesh_llm_cli::RuntimeSurface::Serve),
         ["help", "client", ..] => Some(mesh_llm_cli::RuntimeSurface::Client),
         ["serve", ..] if has_help_flag => Some(mesh_llm_cli::RuntimeSurface::Serve),
@@ -417,6 +422,10 @@ fn runtime_help_text() -> Option<String> {
 
 fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::RuntimeOptions {
     let speculative_overrides = speculative_overrides_from_cli(&cli);
+    let shared_endpoint = cli.shared_endpoint.clone().or_else(|| match &cli.command {
+        Some(mesh_llm_cli::Command::Share { url }) => Some(url.clone()),
+        _ => None,
+    });
     mesh_llm_host_runtime::RuntimeOptions {
         log_format: cli.log_format,
         debug: cli.debug,
@@ -439,6 +448,7 @@ fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::Ru
         native_serving_plugin_state: cli.native_serving_plugin_state,
         native_serving_plugin_deadline_ms: cli.native_serving_plugin_deadline_ms,
         client: cli.client,
+        shared_endpoint,
         console: cli.console,
         headless: cli.headless,
         swarm_capture: cli.swarm_capture,
@@ -544,6 +554,7 @@ fn map_runtime_surface(
     surface: mesh_llm_cli::RuntimeSurface,
 ) -> mesh_llm_host_runtime::RuntimeSurface {
     match surface {
+        mesh_llm_cli::RuntimeSurface::Share => mesh_llm_host_runtime::RuntimeSurface::Share,
         mesh_llm_cli::RuntimeSurface::Serve => mesh_llm_host_runtime::RuntimeSurface::Serve,
         mesh_llm_cli::RuntimeSurface::Client => mesh_llm_host_runtime::RuntimeSurface::Client,
     }

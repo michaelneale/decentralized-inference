@@ -118,6 +118,13 @@ pub(super) struct RunAutoRuntimeLifecycleContext<'a> {
 }
 
 pub(super) async fn run_auto_reconcile_model_targets(ctx: &mut RunAutoRuntimeLoopContext<'_>) {
+    // Reconciliation exists to drive local models toward a desired set. A
+    // sharing node has no such set and no way to act on one, so running it
+    // would only produce load attempts that must fail. Scoped to sharing
+    // rather than `allows_local_inference()` so client startup is unchanged.
+    if ctx.options.shared_endpoint.is_some() {
+        return;
+    }
     reconcile_model_targets_once(ReconcileModelTargetsContext {
         policy: &ctx.model_target_reconciliation_policy,
         state: &mut ctx.model_target_reconciliation_state,

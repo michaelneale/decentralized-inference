@@ -2,6 +2,7 @@ use super::*;
 
 async fn build_mesh_api_for_control_tests(node: Node) -> api::MeshApi {
     let resolved_plugins = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![],
         inactive: vec![],
     };

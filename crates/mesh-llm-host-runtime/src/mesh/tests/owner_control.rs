@@ -175,8 +175,8 @@ fn write_hf_package_v2_artifact_stream_package(
     root: &std::path::Path,
 ) -> (std::path::PathBuf, String, String, String) {
     use skippy_package_format::{
-        Artifact, ArtifactCatalog, PackageManifest, SourceFile, SourceModel, Tensor,
-        TensorCatalog, TensorIntegrity, TensorStorage,
+        Artifact, ArtifactCatalog, PackageManifest, SourceFile, SourceModel, Tensor, TensorCatalog,
+        TensorIntegrity, TensorStorage,
     };
 
     let package_dir = root
@@ -287,6 +287,7 @@ fn verified_owner_summary(owner_id: &str) -> OwnershipSummary {
 async fn external_inference_endpoint_models_are_advertised_in_gossip() -> anyhow::Result<()> {
     let node = Node::new_for_tests(super::NodeRole::Worker).await?;
     let resolved_plugins = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![],
         inactive: vec![],
     };
@@ -301,6 +302,7 @@ async fn external_inference_endpoint_models_are_advertised_in_gossip() -> anyhow
     .await?;
     plugin_manager
         .set_test_inference_endpoints(vec![plugin::InferenceEndpointRoute {
+            strip_caller_credentials: false,
             plugin_name: "endpoint-plugin".into(),
             endpoint_id: "endpoint-plugin".into(),
             address: "http://127.0.0.1:8000/v1".into(),

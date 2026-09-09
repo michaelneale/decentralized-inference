@@ -191,6 +191,7 @@ pub async fn shutdown_logging_for_one_shot_cli() -> bool {
 }
 
 pub async fn initialize_host_runtime_for_options(options: &RuntimeOptions) -> Result<()> {
+    options.validate_shared_endpoint_args()?;
     configure_hf_tls_provider();
     if options.plugin.is_some() {
         return Ok(());
@@ -201,8 +202,16 @@ pub async fn initialize_host_runtime_for_options(options: &RuntimeOptions) -> Re
     initialize_host_runtime_with_config(options.config.as_deref()).await
 }
 
+/// Whether this startup must resolve a native inference runtime.
+///
+/// A client never serves, and a sharing node serves only by forwarding to an
+/// already-running external server, so neither needs the native runtime
+/// resolved or loaded. For sharing this is a requirement rather than a
+/// tolerated failure: skipping initialization entirely is what distinguishes
+/// "deliberately sharing an external endpoint" from "the runtime install is
+/// broken", which a downgraded warning cannot express.
 fn runtime_options_require_native_runtime(options: &RuntimeOptions) -> bool {
-    !options.client && options.plugin.is_none()
+    options.allows_local_inference() && options.plugin.is_none()
 }
 
 pub async fn initialize_host_runtime_with_config(config_path: Option<&Path>) -> Result<()> {
@@ -344,6 +353,39 @@ pub(crate) async fn initialize_logging_foundation_with_store_clock_for_test(
 
 fn logging_foundation_from_config(config: &mesh_llm_config::LoggingConfig) -> LoggingFoundation {
     LoggingFoundation::init(config.enabled, config.application_state_root.as_ref())
+}
+
+#[cfg(test)]
+mod native_runtime_gate_tests {
+    use super::*;
+
+    fn sharing() -> RuntimeOptions {
+        RuntimeOptions {
+            shared_endpoint: Some("http://localhost:11434".to_string()),
+            ..RuntimeOptions::default()
+        }
+    }
+
+    #[test]
+    fn sharing_startup_skips_native_runtime_resolution() {
+        assert!(!runtime_options_require_native_runtime(&sharing()));
+    }
+
+    #[test]
+    fn plain_serve_still_requires_a_native_runtime() {
+        assert!(runtime_options_require_native_runtime(
+            &RuntimeOptions::default()
+        ));
+    }
+
+    #[test]
+    fn client_startup_still_skips_native_runtime_resolution() {
+        let options = RuntimeOptions {
+            client: true,
+            ..RuntimeOptions::default()
+        };
+        assert!(!runtime_options_require_native_runtime(&options));
+    }
 }
 
 #[cfg(test)]

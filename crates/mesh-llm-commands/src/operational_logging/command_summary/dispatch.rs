@@ -7,6 +7,10 @@ use super::{
 
 pub(super) fn format_command(command: &Command, assembly: &mut SummaryAssembly) {
     match command {
+        Command::Share { .. } => {
+            assembly.command.push_str(" share");
+            assembly.redact("url", true);
+        }
         Command::Serve => assembly.command.push_str(" serve"),
         Command::Client => assembly.command.push_str(" client"),
         Command::Models { command } => models::format_models(command, assembly),

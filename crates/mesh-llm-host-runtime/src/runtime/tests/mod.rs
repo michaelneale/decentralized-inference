@@ -49,6 +49,7 @@ async fn build_test_mesh_api() -> api::MeshApi {
         .await
         .expect("test node");
     let resolved_plugins = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![],
         inactive: vec![],
     };

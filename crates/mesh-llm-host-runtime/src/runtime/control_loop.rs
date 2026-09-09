@@ -507,11 +507,20 @@ pub(super) async fn run_auto_handle_model_intent(
             source,
             completion,
         } => {
-            if ctx.options.client {
+            // API and owner-control Load intents are rejected for any startup
+            // that cannot serve locally. A sharing node forwards to an
+            // external server; accepting a Load here would need a native
+            // runtime that startup deliberately never resolved.
+            if !ctx.options.allows_local_inference() {
                 if let Some(tx) = completion {
-                    let _ = tx.send(Err(anyhow::anyhow!(
-                        "runtime mode client does not allow local model loading"
-                    )));
+                    let _ = tx.send(Err(if ctx.options.shared_endpoint.is_some() {
+                        anyhow::anyhow!(
+                            "this node is sharing an external inference endpoint and does not \
+                             load models locally; restart with `serve` to load a local model"
+                        )
+                    } else {
+                        anyhow::anyhow!("runtime mode client does not allow local model loading")
+                    }));
                 }
                 return;
             }

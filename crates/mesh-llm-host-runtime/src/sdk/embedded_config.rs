@@ -8,6 +8,14 @@ pub const SIGNED_JOIN_TOKEN_MIN_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EmbeddedMeshNodeMode {
+    /// Full mesh participation serving one already-running OpenAI-compatible
+    /// HTTP server, with local inference disabled.
+    ///
+    /// The address is fixed for the node's lifetime — stop the node to stop
+    /// sharing. Mesh never starts or stops the upstream server.
+    SharedEndpoint {
+        address: String,
+    },
     Serve,
     Client,
 }
@@ -202,6 +210,15 @@ impl EmbeddedMeshNodeBuilder {
 
     pub fn serve(mut self) -> Self {
         self.config.mode = EmbeddedMeshNodeMode::Serve;
+        self
+    }
+
+    /// Serve one already-running OpenAI-compatible HTTP server, without
+    /// loading a native inference runtime or a local model.
+    pub fn share_endpoint(mut self, address: impl Into<String>) -> Self {
+        self.config.mode = EmbeddedMeshNodeMode::SharedEndpoint {
+            address: address.into(),
+        };
         self
     }
 

@@ -76,8 +76,12 @@ pub(super) struct RuntimeUnloadCandidate {
     pub(super) profile: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EmbeddedRuntimeMode {
+    /// Serve one already-running external OpenAI-compatible HTTP endpoint.
+    SharedEndpoint {
+        address: String,
+    },
     Serve,
     Client,
 }
@@ -124,6 +128,7 @@ pub(crate) struct EmbeddedRuntimeOptions {
 impl EmbeddedRuntimeOptions {
     pub(super) fn runtime_surface(&self) -> RuntimeSurface {
         match self.mode {
+            EmbeddedRuntimeMode::SharedEndpoint { .. } => RuntimeSurface::Share,
             EmbeddedRuntimeMode::Serve => RuntimeSurface::Serve,
             EmbeddedRuntimeMode::Client => RuntimeSurface::Client,
         }
@@ -200,6 +205,10 @@ pub(super) fn options_from_embedded_options(embedded: EmbeddedRuntimeOptions) ->
     RuntimeOptions {
         log_format: embedded.log_format,
         client: matches!(embedded.mode, EmbeddedRuntimeMode::Client),
+        shared_endpoint: match &embedded.mode {
+            EmbeddedRuntimeMode::SharedEndpoint { address } => Some(address.clone()),
+            _ => None,
+        },
         model: embedded.models.into_iter().map(PathBuf::from).collect(),
         join: embedded.join,
         auto: embedded.auto,
@@ -246,6 +255,7 @@ pub(super) async fn run_runtime_cli(
     embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 ) -> Result<()> {
     options.validate_discovery_mode_args()?;
+    options.validate_shared_endpoint_args()?;
 
     if let Some(warning) = legacy_warning {
         let _ = emit_event(OutputEvent::Warning {
@@ -546,6 +556,21 @@ pub(super) fn resolve_plugins_from_config(
     config: &plugin::MeshConfig,
     options: &RuntimeOptions,
 ) -> Result<plugin::ResolvedPlugins> {
+    // Sharing forwards to a server the user already runs. It must not launch
+    // plugin child processes: the whole point is that no helper program is
+    // installed or started. A configured `openai-endpoint` entry stays in
+    // config, untouched, and simply does not run for this invocation. The
+    // upstream travels here so the plugin manager can register it as a
+    // process-free source in the same endpoint inventory.
+    if let Some(address) = &options.shared_endpoint {
+        tracing::debug!("sharing an endpoint — not resolving configured plugin processes");
+        let address = plugin::shared_endpoint::normalize_shared_endpoint_url(address)?.to_string();
+        return Ok(plugin::ResolvedPlugins {
+            externals: Vec::new(),
+            inactive: Vec::new(),
+            shared_endpoint: Some(address),
+        });
+    }
     plugin::resolve_plugins(config, plugin_host_mode(options))
 }
 
@@ -680,6 +705,16 @@ pub(super) fn configure_run_auto_process_state(
         }
     }
 
+    // Native log bridging and the materialized stage cache exist for a native
+    // runtime this startup never loads. Setting them up would create cache
+    // directories and a log sink for an engine that is never initialized.
+    // Scoped to sharing rather than `allows_local_inference()` so client
+    // startup keeps its existing native logging behavior unchanged.
+    if options.shared_endpoint.is_some() {
+        tracing::debug!("sharing an endpoint — skipping native logging and stage cache setup");
+        return;
+    }
+
     let verbose_native_debug = options.debug
         && std::env::var("MESH_LLM_DEBUG_NATIVE_VERBOSE")
             .ok()
@@ -784,10 +819,13 @@ pub(super) async fn start_run_auto_node_and_plugins(
     if !options.headless && owner_config.keypair.is_none() {
         emit_configuration_ui_read_only_hint();
     }
-    let max_vram = if options.client {
-        Some(0.0)
-    } else {
+    // A sharing node has no local compute to offer. Advertising zero capacity
+    // keeps the planner from ever placing a model or a split stage on it, the
+    // same way a client advertises nothing.
+    let max_vram = if options.allows_local_inference() {
         options.max_vram
+    } else {
+        Some(0.0)
     };
     let relay_auths: std::collections::HashMap<String, String> =
         options.relay_auth.iter().cloned().collect();
@@ -803,7 +841,7 @@ pub(super) async fn start_run_auto_node_and_plugins(
             port: options.bind_port,
         },
         max_vram,
-        !options.no_enumerate_host,
+        options.shared_endpoint.is_none() && !options.no_enumerate_host,
         Some(owner_config),
         options.config.as_deref(),
         startup_mesh_creation_state.requirements.clone(),
@@ -811,11 +849,19 @@ pub(super) async fn start_run_auto_node_and_plugins(
     .await?;
     node.set_swarm_capture_recorder(swarm_capture);
     attach_local_release_attestation(&node).await?;
-    node.set_stage_control_handle(skippy::spawn_stage_control_loop(
-        Some(Arc::new(node.clone())),
-        skippy_telemetry_options(options),
-    ))
-    .await;
+    // Stage control exists to accept split-stage work onto local accelerators.
+    // A sharing node has none and advertises zero capacity, so starting the
+    // loop would offer a capability it can never honour. Scoped to sharing
+    // rather than `allows_local_inference()` so client startup is unchanged.
+    if options.shared_endpoint.is_none() {
+        node.set_stage_control_handle(skippy::spawn_stage_control_loop(
+            Some(Arc::new(node.clone())),
+            skippy_telemetry_options(options),
+        ))
+        .await;
+    } else {
+        tracing::debug!("sharing an endpoint — skipping stage control startup");
+    }
     node.start_accepting();
     node.set_display_name(node_display_name(options, &node))
         .await;
@@ -953,16 +999,21 @@ pub(super) fn start_relay_health_monitor_for_discovery_mode(
     }
 }
 
-pub(super) fn run_auto_survey_hardware(is_client: bool) -> hardware::HardwareSurvey {
-    if is_client {
-        hardware::HardwareSurvey::default()
-    } else {
+/// Survey local accelerators only for a node that may use them.
+///
+/// `serves_locally` is false for both client and sharing startups: a node that
+/// forwards to an external server has no use for a GPU inventory and must not
+/// advertise one.
+pub(super) fn run_auto_survey_hardware(serves_locally: bool) -> hardware::HardwareSurvey {
+    if serves_locally {
         hardware::query(&[
             hardware::Metric::GpuName,
             hardware::Metric::GpuCount,
             hardware::Metric::IsSoc,
             hardware::Metric::GpuFacts,
         ])
+    } else {
+        hardware::HardwareSurvey::default()
     }
 }
 
@@ -982,11 +1033,14 @@ pub(super) async fn build_run_auto_node_setup(
 ) -> Result<AutoRuntimeNodeSetup> {
     let console_port = Some(options.console);
     let is_client = options.client;
+    // Both client and sharing nodes forward rather than load, so neither scans
+    // the disk for models, surveys accelerators, or benchmarks memory.
+    let serves_locally = options.allows_local_inference();
     let skippy_telemetry = skippy_telemetry_options(options);
-    let local_models = if is_client {
-        vec![]
-    } else {
+    let local_models = if serves_locally {
         models::scan_local_models()
+    } else {
+        vec![]
     };
     tracing::info!("Local models on disk: {:?}", local_models);
     let (node, channels, plugin_manager) = start_run_auto_node_and_plugins(
@@ -997,13 +1051,13 @@ pub(super) async fn build_run_auto_node_setup(
         startup_mesh_creation_state,
     )
     .await?;
-    let survey_hardware = run_auto_survey_hardware(is_client);
+    let survey_hardware = run_auto_survey_hardware(serves_locally);
     let survey_telemetry = survey::SurveyTelemetry::start(
         config,
         survey_hardware,
         survey::SurveyTelemetrySource {
             node_id: node.id().fmt_short().to_string(),
-            node_role: if is_client { "client" } else { "worker" }.into(),
+            node_role: node_role_label(options).into(),
         },
     );
     attach_logging_metrics_to_survey(&survey_telemetry);
@@ -1020,10 +1074,10 @@ pub(super) async fn build_run_auto_node_setup(
     start_relay_health_monitor_for_discovery_mode(&node, options.mesh_discovery_mode);
     let lan_bootstrap_tasks = spawn_mdns_reverse_dial(options, &node);
 
-    if !is_client {
+    if serves_locally {
         spawn_node_benchmark_task(&node, bin_dir);
     } else {
-        tracing::debug!("client node — skipping memory bandwidth benchmark");
+        tracing::debug!("node does not serve locally — skipping memory bandwidth benchmark");
     }
 
     Ok(AutoRuntimeNodeSetup {
@@ -1456,6 +1510,40 @@ pub(super) struct RunAutoContext {
         Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 }
 
+/// Survey/telemetry label for this startup shape.
+fn node_role_label(options: &RuntimeOptions) -> &'static str {
+    match (options.client, options.shared_endpoint.is_some()) {
+        (true, _) => "client",
+        (false, true) => "endpoint",
+        (false, false) => "worker",
+    }
+}
+
+fn emit_passive_ready(options: &RuntimeOptions, node: &mesh::Node, local_models: Vec<String>) {
+    let serves_locally = options.allows_local_inference();
+    let _ = emit_event(OutputEvent::PassiveMode {
+        role: match (options.client, options.shared_endpoint.is_some()) {
+            (true, _) => "client",
+            (false, true) => "endpoint",
+            (false, false) => "standby",
+        }
+        .to_string(),
+        status: RuntimeStatus::Ready,
+        capacity_gb: serves_locally.then(|| node.vram_bytes() as f64 / 1e9),
+        models_on_disk: serves_locally.then_some(local_models),
+        detail: Some(match (options.client, options.shared_endpoint.is_some()) {
+            (true, _) => "Client daemon ready; local model loading is disabled".to_string(),
+            (false, true) => {
+                "Sharing daemon ready; serving an external inference endpoint, local model \
+                 loading is disabled"
+                    .to_string()
+            }
+            (false, false) => "Runtime daemon ready; no local models are loaded".to_string(),
+        }),
+    });
+    record_runtime_operational_event(RuntimeOperationalEvent::Ready);
+}
+
 #[expect(
     clippy::cognitive_complexity,
     reason = "run_auto is the top-level runtime orchestration path and preserves startup/shutdown ordering"
@@ -1624,6 +1712,16 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
     })
     .await?;
 
+    // Register the shared upstream before reporting ready. A failure here uses
+    // the ordinary shutdown path so a failed probe leaves no participant behind.
+    let sharing_startup_result =
+        super::shared_endpoint::start_from_options(&options, &plugin_manager).await;
+    if sharing_startup_result.is_err() {
+        let _ = control_tx.send(api::RuntimeControlRequest::Shutdown {
+            source: "shared endpoint startup failed",
+        });
+    }
+
     let primary_model_name = requested_model_names.first().cloned().unwrap_or_default();
     let startup_ready_reporter = StartupReadyReporter::new_with_failure_policy(
         &requested_model_names,
@@ -1634,19 +1732,8 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         ready_console_port,
         config.runtime.startup_failure_policy,
     );
-    if startup_specs.is_empty() {
-        let _ = emit_event(OutputEvent::PassiveMode {
-            role: if is_client { "client" } else { "standby" }.to_string(),
-            status: RuntimeStatus::Ready,
-            capacity_gb: (!is_client).then(|| node.vram_bytes() as f64 / 1e9),
-            models_on_disk: (!is_client).then_some(local_models),
-            detail: Some(if is_client {
-                "Client daemon ready; local model loading is disabled".to_string()
-            } else {
-                "Runtime daemon ready; no local models are loaded".to_string()
-            }),
-        });
-        record_runtime_operational_event(RuntimeOperationalEvent::Ready);
+    if startup_specs.is_empty() && sharing_startup_result.is_ok() {
+        emit_passive_ready(&options, &node, local_models);
     }
 
     // Discovery publish loop (if --publish) or Nostr watchdog (if --auto, to take over if publisher dies).
@@ -1684,8 +1771,97 @@ pub(super) async fn run_auto(ctx: RunAutoContext) -> Result<()> {
         runtime,
     })
     .await;
+    sharing_startup_result?;
     if let Some(summary) = startup_ready_reporter.fail_fast_summary() {
         anyhow::bail!("{summary}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod shared_endpoint_startup_guard_tests {
+    use super::*;
+
+    fn sharing_options() -> RuntimeOptions {
+        RuntimeOptions {
+            shared_endpoint: Some("http://localhost:11434".to_string()),
+            ..RuntimeOptions::default()
+        }
+    }
+
+    #[test]
+    fn sharing_surveys_no_accelerators() {
+        let survey = run_auto_survey_hardware(sharing_options().allows_local_inference());
+        assert_eq!(
+            survey.gpu_count, 0,
+            "a forwarding-only node must not advertise local accelerators"
+        );
+    }
+
+    #[test]
+    fn serve_still_surveys_hardware() {
+        // Only the gate is asserted here; the survey itself depends on the host.
+        assert!(RuntimeOptions::default().allows_local_inference());
+    }
+
+    #[test]
+    fn sharing_starts_no_configured_plugin_processes_and_carries_the_upstream() {
+        let mut config = plugin::MeshConfig::default();
+        config.plugins.push(mesh_llm_config::PluginConfigEntry {
+            name: "openai-endpoint".to_string(),
+            enabled: None,
+            web_ui_enabled: None,
+            command: None,
+            args: Vec::new(),
+            url: Some("http://localhost:11434/v1".to_string()),
+            settings: Default::default(),
+            startup: Default::default(),
+        });
+
+        let resolved = resolve_plugins_from_config(&config, &sharing_options())
+            .expect("sharing plugin resolution must succeed");
+
+        assert!(
+            resolved.externals.is_empty(),
+            "sharing must not launch plugin child processes"
+        );
+        assert!(resolved.inactive.is_empty());
+        assert_eq!(
+            resolved.shared_endpoint.as_deref(),
+            Some("http://localhost:11434/v1"),
+            "the upstream must reach the plugin manager, normalized to an API base"
+        );
+    }
+
+    #[test]
+    fn serve_resolution_carries_no_shared_endpoint() {
+        let resolved =
+            resolve_plugins_from_config(&plugin::MeshConfig::default(), &RuntimeOptions::default())
+                .expect("serve plugin resolution must succeed");
+        assert!(resolved.shared_endpoint.is_none());
+    }
+
+    #[test]
+    fn sharing_advertises_zero_capacity() {
+        let options = sharing_options();
+        let max_vram = if options.allows_local_inference() {
+            options.max_vram
+        } else {
+            Some(0.0)
+        };
+        assert_eq!(max_vram, Some(0.0));
+    }
+
+    #[test]
+    fn node_role_labels_distinguish_the_three_startups() {
+        assert_eq!(node_role_label(&RuntimeOptions::default()), "worker");
+        assert_eq!(node_role_label(&sharing_options()), "endpoint");
+        assert_eq!(
+            node_role_label(&RuntimeOptions {
+                client: true,
+                ..RuntimeOptions::default()
+            }),
+            "client"
+        );
+    }
 }

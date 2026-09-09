@@ -62,6 +62,7 @@ mesh-llm serve --model Qwen2.5-32B
 mesh-llm serve --join <token>
 mesh-llm serve --discover "my-mesh"
 mesh-llm serve --model MiniMax-M2.5-Q4_K_M --mesh-guardrails metrics
+mesh-llm share http://localhost:11434
 mesh-llm client --auto
 mesh-llm gpus
 mesh-llm discover
@@ -1054,6 +1055,50 @@ For package-authoring rules, see
 For strategy diagrams, CLI overrides, and the VerifyWindow telemetry used to
 evaluate a configuration, see
 [Pipelined VerifyWindow Decode](skippy/PIPELINED_VERIFY_WINDOW.md).
+
+## Share an LLM server you already run
+
+If Ollama, LM Studio, LiteLLM, vLLM, or any other OpenAI-compatible server is
+already running, publish its models to your mesh with one command:
+
+```bash
+mesh-llm share http://localhost:11434
+```
+
+The upstream server keeps running the models. Mesh forwards requests to it and
+advertises its models under their own names. This node does not install a
+plugin, does not load a native inference runtime, does not load a model of its
+own, and does not rewrite your config file.
+
+Like `serve`, this starts a **private** mesh. Make the choice explicit to go
+further:
+
+```bash
+mesh-llm share http://localhost:11434 --join <token>
+mesh-llm share http://localhost:11434 --publish
+```
+
+Check what is being served:
+
+```bash
+curl -s http://localhost:9337/v1/models | jq '.data[].id'
+```
+
+No native inference runtime is required, so this works on a machine with no
+supported GPU.
+
+Current limits:
+
+- One HTTP OpenAI-compatible upstream per node, fixed for the run. To change
+  it, stop the command and start it again with the new URL.
+- `https://` upstreams are rejected, so authenticated cloud providers are not
+  supported yet.
+- Ctrl-C stops sharing. It does not stop the upstream server, which keeps
+  running and serving its own clients.
+
+For a provider you want recorded durably in `config.toml` and restored on every
+start, use the `openai-endpoint` plugin instead — see
+[plugins/README.md](plugins/README.md).
 
 ## Lemonade integration
 

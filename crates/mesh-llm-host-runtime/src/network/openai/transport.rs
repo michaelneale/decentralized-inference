@@ -1521,15 +1521,21 @@ pub async fn route_to_target(
     }
 }
 
+pub struct HttpEndpointRequestTarget<'a> {
+    pub address: &'a str,
+    pub strip_caller_credentials: bool,
+}
+
 pub async fn route_http_endpoint_request(
     node: &mesh::Node,
     model: Option<&str>,
     route_metadata: RouteSelectionMetadata<'_>,
     tcp_stream: &mut ClientStream,
-    base_url: &str,
+    endpoint: HttpEndpointRequestTarget<'_>,
     request: &BufferedHttpRequest,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> RouteDispatchOutcome {
+    let base_url = endpoint.address;
     let started = Instant::now();
     route_observer.route_selected_with_metadata(
         model,
@@ -1542,6 +1548,7 @@ pub async fn route_http_endpoint_request(
         base_url,
         &request.raw,
         &request.path,
+        endpoint.strip_caller_credentials,
         RouteAttemptLoggingContext {
             request_id: request.request_id,
             retry_policy: ResponseRetryPolicy::next_target_available(false),

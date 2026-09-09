@@ -635,7 +635,10 @@ async fn try_route_plugin_model(
                     engine: Some(&endpoint.endpoint_id),
                 },
                 &mut tcp_stream,
-                &endpoint.address,
+                proxy::HttpEndpointRequestTarget {
+                    address: &endpoint.address,
+                    strip_caller_credentials: endpoint.strip_caller_credentials,
+                },
                 request,
                 route_observer,
             )

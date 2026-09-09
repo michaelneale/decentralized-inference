@@ -536,6 +536,14 @@ pub struct Cli {
     #[arg(long)]
     pub client: bool,
 
+    /// Normalization target for the `share <url>` positional.
+    ///
+    /// `share` is rewritten to this flag before clap parsing so ordinary
+    /// runtime flags work on either side of the URL, the same way `client` is
+    /// rewritten to `--client`. Not part of the documented surface.
+    #[arg(long, hide = true)]
+    pub shared_endpoint: Option<String>,
+
     /// Web console port (default: 3131).
     #[arg(long, default_value = "3131")]
     pub console: u16,
@@ -785,6 +793,11 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Share an already-running OpenAI-compatible HTTP server. No local inference runtime.
+    Share {
+        /// Existing API base URL, for example http://localhost:11434.
+        url: String,
+    },
     /// Serve local models and join or publish a mesh.
     Serve,
     /// Run as a client-only mesh node with no local model required.

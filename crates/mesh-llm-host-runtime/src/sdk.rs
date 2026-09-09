@@ -210,7 +210,12 @@ fn embedded_runtime_options(
     control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::api::RuntimeControlRequest>>,
 ) -> crate::runtime::EmbeddedRuntimeOptions {
     crate::runtime::EmbeddedRuntimeOptions {
-        mode: match config.mode {
+        mode: match &config.mode {
+            EmbeddedMeshNodeMode::SharedEndpoint { address } => {
+                crate::runtime::EmbeddedRuntimeMode::SharedEndpoint {
+                    address: address.clone(),
+                }
+            }
             EmbeddedMeshNodeMode::Serve => crate::runtime::EmbeddedRuntimeMode::Serve,
             EmbeddedMeshNodeMode::Client => crate::runtime::EmbeddedRuntimeMode::Client,
         },

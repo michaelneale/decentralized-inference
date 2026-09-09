@@ -742,8 +742,11 @@ impl Node {
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
         let (stage_transport_tx, stage_transport_rx) = tokio::sync::mpsc::channel(256);
 
-        let hardware =
-            hardware_snapshot_for_start(crate::system::hardware::survey(), &role, max_vram_gb);
+        let hardware = hardware_snapshot_for_start(
+            startup::hardware_survey_for_start(max_vram_gb, enumerate_host),
+            &role,
+            max_vram_gb,
+        );
         let owner_runtime = init_owner_runtime(
             owner_config.as_ref(),
             endpoint.id(),

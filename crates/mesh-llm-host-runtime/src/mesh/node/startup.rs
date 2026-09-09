@@ -103,6 +103,19 @@ pub(super) async fn wait_for_endpoint_online(
     }
 }
 
+/// A zero-capacity participant has no reason to initialize accelerator discovery.
+/// Keep hostname identity, but do not probe native runtimes or publish GPU inventory.
+pub(super) fn hardware_survey_for_start(
+    max_vram_gb: Option<f64>,
+    enumerate_host: bool,
+) -> crate::system::hardware::HardwareSurvey {
+    if max_vram_gb == Some(0.0) && !enumerate_host {
+        crate::system::hardware::query(&[crate::system::hardware::Metric::Hostname])
+    } else {
+        crate::system::hardware::survey()
+    }
+}
+
 pub(crate) fn hardware_snapshot_for_start(
     hw: crate::system::hardware::HardwareSurvey,
     role: &NodeRole,
@@ -224,5 +237,24 @@ pub(super) fn init_owner_runtime(
 pub(crate) fn default_plugin_event_source(endpoint_id: EndpointId, source_peer_id: &mut String) {
     if source_peer_id.is_empty() {
         *source_peer_id = endpoint_id_hex(endpoint_id);
+    }
+}
+
+#[cfg(test)]
+mod zero_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn zero_capacity_start_has_no_accelerator_inventory() {
+        let hw = hardware_survey_for_start(Some(0.0), false);
+        assert_eq!(hw.vram_bytes, 0);
+        assert!(hw.gpu_name.is_none());
+        assert!(hw.gpus.is_empty());
+        let snapshot = hardware_snapshot_for_start(hw, &NodeRole::Worker, Some(0.0));
+        assert_eq!(snapshot.vram_bytes, 0);
+        assert_eq!(snapshot.local_runtime_capacity_bytes, 0);
+        assert!(snapshot.gpu_name.is_none());
+        assert!(snapshot.gpu_vram.is_none());
+        assert!(snapshot.gpu_reserved_bytes.is_none());
     }
 }

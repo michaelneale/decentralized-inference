@@ -69,6 +69,17 @@ impl MeshNodeBuilder {
         self
     }
 
+    /// Serve one already-running OpenAI-compatible HTTP server instead of a
+    /// local model. This node forwards to `address` and never loads a native
+    /// inference runtime.
+    ///
+    /// Fixed for the node's lifetime: stop the node to stop sharing. The
+    /// upstream server is never started or stopped by Mesh.
+    pub fn share_endpoint(mut self, address: impl Into<String>) -> Self {
+        self.inner = self.inner.share_endpoint(address);
+        self
+    }
+
     pub fn client(mut self) -> Self {
         self.inner = self.inner.client();
         self
@@ -407,6 +418,20 @@ impl OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_endpoint_builder_starts_without_selecting_a_model() {
+        let config = MeshNode::builder()
+            .share_endpoint("http://localhost:11434")
+            .build();
+        assert_eq!(
+            config.mode,
+            EmbeddedMeshNodeMode::SharedEndpoint {
+                address: "http://localhost:11434".to_string()
+            }
+        );
+        assert!(config.serving.models.is_empty());
+    }
 
     #[test]
     fn builder_shapes_public_auto_join_serve_node() {

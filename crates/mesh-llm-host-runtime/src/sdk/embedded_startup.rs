@@ -6,7 +6,7 @@ use std::path::Path;
 pub(super) fn prepare_embedded_native_runtime(mode: &EmbeddedMeshNodeMode) -> Result<()> {
     #[cfg(feature = "dynamic-native-runtime")]
     {
-        if *mode == EmbeddedMeshNodeMode::Client || skippy_runtime::native_runtime_loaded() {
+        if *mode != EmbeddedMeshNodeMode::Serve || skippy_runtime::native_runtime_loaded() {
             return Ok(());
         }
         let cache = crate::system::native_runtime_install::default_native_runtime_cache()?;
@@ -42,7 +42,7 @@ fn ensure_embedded_native_runtime_ready(
     loaded: bool,
     requirement: EmbeddedNativeRuntimeRequirement<'_>,
 ) -> Result<()> {
-    if *mode == EmbeddedMeshNodeMode::Client || loaded {
+    if *mode != EmbeddedMeshNodeMode::Serve || loaded {
         return Ok(());
     }
     anyhow::bail!(missing_native_runtime_message(requirement));
@@ -91,6 +91,15 @@ mod tests {
     fn embedded_client_does_not_require_native_serving_runtime() {
         ensure_embedded_native_runtime_ready(&EmbeddedMeshNodeMode::Client, false, requirement())
             .expect("client-only embedding should not require a serving runtime");
+    }
+
+    #[test]
+    fn shared_endpoint_never_requires_a_native_runtime() {
+        let mode = EmbeddedMeshNodeMode::SharedEndpoint {
+            address: "http://localhost:11434".to_string(),
+        };
+        prepare_embedded_native_runtime(&mode).unwrap();
+        ensure_embedded_native_runtime_ready(&mode, false, requirement()).unwrap();
     }
 
     #[test]
