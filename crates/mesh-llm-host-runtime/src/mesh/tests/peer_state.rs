@@ -1832,3 +1832,47 @@ async fn connectivity_snapshot_does_not_treat_admitted_membership_as_connected()
         }
     );
 }
+
+/// `weights_digest` must be stripped when a local `PeerAnnouncement` is
+/// converted to its proto gossip form. A receiving peer has no way to verify
+/// a file-byte hash it didn't measure itself, so the field is deliberately
+/// absent from the proto `ServedModelIdentity` schema and must never cross
+/// the gossip wire.
+#[test]
+fn weights_digest_does_not_cross_the_gossip_wire() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x42; 32]).public());
+
+    let mut local_ann = peer_state_test_announcement(EndpointAddr {
+        id: peer_id,
+        addrs: Default::default(),
+    });
+    local_ann.served_model_descriptors = vec![ServedModelDescriptor {
+        identity: ServedModelIdentity {
+            model_name: "test-model".to_string(),
+            source_kind: ModelSourceKind::LocalGguf,
+            weights_digest: Some("sha256:abcdef1234567890".to_string()),
+            ..Default::default()
+        },
+        capabilities_known: false,
+        capabilities: crate::models::ModelCapabilities::default(),
+        topology: None,
+        metadata: None,
+    }];
+
+    let proto_pa = local_ann_to_proto_ann(&local_ann);
+
+    // The proto ServedModelIdentity has no weights_digest field at all --
+    // assert that the descriptor round-tripped through the proto conversion
+    // and the local view after roundtrip carries None.
+    let (_, roundtripped) = proto_ann_to_local(&proto_pa)
+        .expect("proto_ann_to_local must succeed on valid proto announcement");
+    let descriptor = roundtripped
+        .served_model_descriptors
+        .first()
+        .expect("descriptor must survive roundtrip");
+    assert_eq!(
+        descriptor.identity.weights_digest,
+        None,
+        "weights_digest must be None after gossip roundtrip: it must not cross the wire"
+    );
+}

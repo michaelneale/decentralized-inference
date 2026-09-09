@@ -279,7 +279,7 @@ fn descriptor_identity_to_proto(
         // `weights_digest` deliberately does NOT cross the gossip wire: it is
         // a hash of file bytes only THIS node can read, so a peer receiving
         // it over gossip could never verify it against anything -- it would
-        // be a claim, not a locally-checkable fact. It rides the
+        // be a claim, not a locally-checkable fact. It is intended to ride the
         // `openai.exchange.v1` serving-provenance event instead, straight to
         // whoever actually served the exchange.
     }

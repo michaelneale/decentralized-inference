@@ -621,7 +621,13 @@ pub(super) async fn start_runtime_local_model(
     let weights_digest =
         tokio::task::spawn_blocking(move || mesh::weights_digest_for_file(&model_path_for_digest))
             .await
-            .unwrap_or(None);
+            .unwrap_or_else(|join_err| {
+                tracing::warn!(
+                    error = %join_err,
+                    "weights digest thread panicked; treating as unreadable"
+                );
+                None
+            });
     set_local_model_weights_digest(spec.node, runtime_model_name, weights_digest).await;
 
     let local_capacity_bytes = spec
@@ -1077,6 +1083,7 @@ pub(super) fn local_process_snapshot(
 #[cfg(test)]
 mod tests {
     use super::unix_nanos_to_unix_ms;
+    use crate::mesh;
 
     #[test]
     fn unix_nanos_to_unix_ms_converts_a_real_capture_time() {
@@ -1092,5 +1099,83 @@ mod tests {
         // epoch". Callers must not project 1970 as a success timestamp.
         assert_eq!(unix_nanos_to_unix_ms(0), None);
         assert_eq!(unix_nanos_to_unix_ms(-1), None);
+    }
+
+    /// Branch 1: a descriptor already exists for the model; the digest is
+    /// recorded on the existing entry (overwrite path).
+    #[tokio::test]
+    async fn set_local_model_weights_digest_overwrites_existing_descriptor() {
+        let node = mesh::Node::new_for_tests(mesh::NodeRole::Worker)
+            .await
+            .unwrap();
+        let model_name = "test-model-overwrite";
+
+        // Pre-seed a descriptor so the function takes the overwrite branch.
+        node.upsert_served_model_descriptor(mesh::ServedModelDescriptor {
+            identity: mesh::ServedModelIdentity {
+                model_name: model_name.to_string(),
+                source_kind: mesh::ModelSourceKind::LocalGguf,
+                local_file_name: Some(format!("{model_name}.gguf")),
+                ..Default::default()
+            },
+            capabilities_known: false,
+            capabilities: crate::models::ModelCapabilities::default(),
+            topology: None,
+            metadata: None,
+        })
+        .await;
+
+        super::set_local_model_weights_digest(
+            &node,
+            model_name,
+            Some("sha256:abc123deadbeef".to_string()),
+        )
+        .await;
+
+        let descriptors = node.served_model_descriptors().await;
+        let descriptor = descriptors
+            .iter()
+            .find(|d| d.identity.model_name == model_name)
+            .expect("descriptor must exist after set_local_model_weights_digest");
+        assert_eq!(
+            descriptor.identity.weights_digest.as_deref(),
+            Some("sha256:abc123deadbeef"),
+            "weights_digest must be recorded on the existing descriptor"
+        );
+    }
+
+    /// Branch 2: no descriptor exists for the model; the function synthesizes
+    /// a minimal one and records the digest on it.
+    #[tokio::test]
+    async fn set_local_model_weights_digest_synthesizes_descriptor_when_absent() {
+        let node = mesh::Node::new_for_tests(mesh::NodeRole::Worker)
+            .await
+            .unwrap();
+        let model_name = "test-model-synthesize";
+
+        // Confirm no pre-existing descriptor for this name.
+        let before = node.served_model_descriptors().await;
+        assert!(
+            before.iter().all(|d| d.identity.model_name != model_name),
+            "test setup: no descriptor should exist yet"
+        );
+
+        super::set_local_model_weights_digest(
+            &node,
+            model_name,
+            Some("sha256:xyz789feedface".to_string()),
+        )
+        .await;
+
+        let descriptors = node.served_model_descriptors().await;
+        let descriptor = descriptors
+            .iter()
+            .find(|d| d.identity.model_name == model_name)
+            .expect("synthesized descriptor must exist after set_local_model_weights_digest");
+        assert_eq!(
+            descriptor.identity.weights_digest.as_deref(),
+            Some("sha256:xyz789feedface"),
+            "weights_digest must be present on the synthesized descriptor"
+        );
     }
 }
