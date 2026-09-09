@@ -1,0 +1,56 @@
+{
+  "runner": "micstudio",
+  "hardware_fingerprint": {
+    "machine_model": "Mac15,14",
+    "chip": "Apple M3 Ultra",
+    "gpu_cores": 80,
+    "unified_memory_bytes": 274877906944,
+    "os_version": "26.6.2"
+  },
+  "replay": {
+    "mode": "checkpoint",
+    "dataset": "thoughtworks/agentic-coding-trajectories",
+    "dataset_revision": "cef72d1f4d0caabf85937adf8337a14b7522c782",
+    "dataset_file": "sessions.parquet",
+    "dataset_sha256": "3dd8ec3546cf771ce4ab2ac6c51ccefdd621197fa997a2cefb430b50df808fb6",
+    "trajectories_per_framework": 8,
+    "passes": 2,
+    "warmup_turns": 4,
+    "max_output_tokens": 2048,
+    "concurrency": [
+      1,
+      2,
+      4,
+      8
+    ]
+  },
+  "models": [
+    {
+      "family": "qwen25-coder-14b",
+      "class": "dense",
+      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+      "revision": "d0a692ef765eefbf2fabb130b3cb2e8917e3d225",
+      "file": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+      "quant": "Q4_K_M",
+      "sha256": "c1e659736d89ac1065fb495330fb824d94001974a4bfa78e7270e43476a8d940"
+    },
+    {
+      "family": "gpt-oss-20b",
+      "class": "moe",
+      "repo": "ggml-org/gpt-oss-20b-GGUF",
+      "revision": "ef9b12f2ff56c69cf32153a02784e7a3c88bf524",
+      "file": "gpt-oss-20b-MXFP4.gguf",
+      "quant": "MXFP4",
+      "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901"
+    },
+    {
+      "family": "qwen3-next-80b-a3b",
+      "class": "hybrid-recurrent",
+      "repo": "bartowski/Qwen_Qwen3-Next-80B-A3B-Thinking-GGUF",
+      "revision": "c36ac5f15be18742fcd09baa61d48dfc016aae79",
+      "file": "Qwen_Qwen3-Next-80B-A3B-Thinking-Q4_K_M.gguf",
+      "quant": "Q4_K_M",
+      "sha256": "83481c75cc6c0837ba9afa52b59b4cd3f85f55dd7aa6c60e27230ff329c81367"
+    }
+  ]
+}

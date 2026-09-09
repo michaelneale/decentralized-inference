@@ -51,6 +51,19 @@ class AgenticReplayTest(unittest.TestCase):
             ],
         )
 
+    def test_single_ref_runs_once_per_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            with mock.patch.object(BENCH, "git", return_value="a" * 40):
+                specs = BENCH.parse_ref_specs(repo, ["main=HEAD"])
+
+        order = BENCH.ab_order(specs, 2)
+
+        self.assertEqual(
+            [(pass_index, spec.label) for pass_index, spec in order],
+            [(0, "main"), (1, "main")],
+        )
+
     def test_trajectory_replay_uses_recorded_history_in_strict_turn_order(self) -> None:
         trajectory = {
             "session_id": "session-1",
@@ -199,6 +212,45 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(
             result["error"], "stream ended without terminal [DONE] marker"
         )
+
+    def test_stream_request_records_terminal_finish_reason(self) -> None:
+        class CompleteResponse:
+            status = 200
+
+            def __iter__(self):
+                return iter(
+                    [
+                        b'data: {"choices":[{"delta":{"content":"done"}}]}\n',
+                        b'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":8,"prompt_tokens":10}}\n',
+                        b"data: [DONE]\n",
+                    ]
+                )
+
+        class CompleteConnection:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def request(self, *_args, **_kwargs):
+                pass
+
+            def getresponse(self):
+                return CompleteResponse()
+
+            def close(self):
+                pass
+
+        with mock.patch.object(BENCH.http.client, "HTTPConnection", CompleteConnection):
+            result = BENCH.stream_request(
+                "request-1",
+                [{"role": "user", "content": "task"}],
+                [],
+                {"session_id": "session-1"},
+                "model",
+                8,
+                10,
+            )
+
+        self.assertEqual(result["finish_reason"], "length")
 
     def test_output_hash_ignores_tool_call_chunking_and_generated_ids(self) -> None:
         chunked = {}
@@ -383,6 +435,19 @@ class AgenticReplayTest(unittest.TestCase):
             },
         )
 
+    def test_captured_message_omits_null_optional_fields(self) -> None:
+        recorded = {
+            "role": "user",
+            "content": "task",
+            "tool_call_id": None,
+            "tool_calls_json": None,
+        }
+
+        self.assertEqual(
+            BENCH.openai_message(recorded),
+            {"role": "user", "content": "task"},
+        )
+
     def test_captured_tool_call_sizes_the_generated_output_budget(self) -> None:
         recorded = {
             "role": "assistant",
@@ -516,6 +581,7 @@ class AgenticReplayTest(unittest.TestCase):
         )
 
         self.assertEqual(args.concurrency, [1, 2, 4])
+        self.assertEqual(args.minimum_worker_waves, 2)
         self.assertEqual(args.passes, 1)
         self.assertEqual(args.replay_mode, "checkpoints")
         self.assertEqual(args.trajectories_per_framework, 4)
@@ -671,6 +737,13 @@ class AgenticReplayTest(unittest.TestCase):
                 {"4": [{"session_id": str(index)} for index in range(7)]}, [4]
             )
 
+    def test_measured_cohort_can_explicitly_allow_one_worker_wave(self) -> None:
+        BENCH.validate_measured_cohort_capacity(
+            {"8": [{"session_id": str(index)} for index in range(8)]},
+            [8],
+            minimum_worker_waves=1,
+        )
+
     def test_required_frameworks_are_checked_in_every_measured_cohort(self) -> None:
         cohorts = {
             "1": [
@@ -701,6 +774,7 @@ class AgenticReplayTest(unittest.TestCase):
                 "prompt_tokens": 100,
                 "cached_tokens": 50,
                 "requested_output_tokens": 10,
+                "finish_reason": "length",
                 "request_id": "request-1",
                 "content_sha256": "a" * 64,
             },
@@ -715,6 +789,7 @@ class AgenticReplayTest(unittest.TestCase):
                 "prompt_tokens": 100,
                 "cached_tokens": 100,
                 "requested_output_tokens": 10,
+                "finish_reason": "stop",
                 "request_id": "request-2",
                 "content_sha256": "b" * 64,
             },
@@ -725,6 +800,7 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(summary["successful_requests"], 2)
         self.assertEqual(summary["failed_request_ids"], [])
         self.assertEqual(summary["budget_exhausted_requests"], 2)
+        self.assertEqual(summary["finish_reason_length_requests"], 1)
         self.assertEqual(summary["agent_steps_per_second"], 0.5)
         self.assertEqual(summary["workload_output_tokens_per_second"], 5)
         self.assertEqual(summary["decode_tokens_per_second"], 5)
@@ -1222,6 +1298,266 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(plan["selection"]["warmup_unique_trajectory_count"], 12)
         self.assertEqual(plan["workload"]["measured_requests_per_arm_pass"], 36)
         self.assertEqual(plan["workload"]["measured_requests_total"], 144)
+
+    def test_plan_appends_external_arms_to_the_same_abba_order(self) -> None:
+        args = SimpleNamespace(
+            repo=REPO,
+            backend="metal",
+            model="model-uri",
+            passes=2,
+            source_dataset=["swe-smith-claude-3-7-sonnet"],
+            framework=["swe-agent", "mini-swe-agent", "openhands"],
+            trajectories_per_framework=4,
+            min_isl=8192,
+            max_isl=65536,
+            min_turns=5,
+            concurrency=[1, 2, 4],
+            max_output_tokens=2048,
+            warmup_turns=4,
+            replay_mode="checkpoints",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 65536,
+                                "max_concurrency": 4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            engine_config = BENCH.load_engine_config(path)
+
+            plan = BENCH.benchmark_plan(args, self.specs(), engine_config)
+
+        self.assertEqual(
+            [item["label"] for item in plan["order"]],
+            ["rc8", "main", "vllm", "vllm", "main", "rc8"],
+        )
+        self.assertEqual(plan["workload"]["measured_requests_total"], 216)
+        self.assertIn("--max-num-seqs", plan["external_server_commands"][0])
+
+    def test_plan_order_uses_verified_engine_identity_when_supplied(self) -> None:
+        args = SimpleNamespace(
+            repo=REPO,
+            backend="metal",
+            model="model-uri",
+            passes=1,
+            source_dataset=["swe-smith-claude-3-7-sonnet"],
+            framework=["swe-agent", "mini-swe-agent", "openhands"],
+            trajectories_per_framework=4,
+            min_isl=8192,
+            max_isl=65536,
+            min_turns=5,
+            concurrency=[1, 2, 4],
+            max_output_tokens=2048,
+            warmup_turns=4,
+            replay_mode="checkpoints",
+        )
+        external_builds = [
+            {
+                "label": "rc8",
+                "engine": "mesh",
+                "version_sha256": "mesh-hash",
+            },
+            {
+                "label": "vllm",
+                "engine": "vllm",
+                "version_sha256": "c" * 64,
+            },
+        ]
+        verified = BENCH.verified_version_sha256_by_label(external_builds)
+        self.assertEqual(verified, {"vllm": "c" * 64})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 65536,
+                                "max_concurrency": 4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            engine_config = BENCH.load_engine_config(path)
+
+            plan = BENCH.benchmark_plan(
+                args, self.specs(), engine_config, version_sha256_by_label=verified
+            )
+
+        self.assertEqual(
+            [item["commit"] for item in plan["order"]],
+            ["a" * 40, "b" * 40, "c" * 64],
+        )
+        self.assertEqual(
+            [spec.commit for spec in BENCH.combined_specs(self.specs(), None)],
+            ["a" * 40, "b" * 40],
+        )
+
+    def test_build_resume_identity_compares_external_version_hashes(self) -> None:
+        mesh = {
+            "label": "rc8",
+            "engine": "mesh",
+            "commit": "a" * 40,
+            "binary_sha256": "x" * 64,
+            "runtime_sha256": "y" * 64,
+        }
+        external = {
+            "label": "vllm",
+            "engine": "vllm",
+            "version_sha256": "c" * 64,
+        }
+
+        self.assertEqual(
+            BENCH.build_resume_identity(mesh),
+            ("a" * 40, "x" * 64, "y" * 64),
+        )
+        self.assertEqual(
+            BENCH.build_resume_identity(external),
+            ("c" * 64,),
+        )
+
+    def test_resume_mismatch_message_reports_arm_identity_not_binary_claims(
+        self,
+    ) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("engine version_sha256 changed", source)
+        self.assertNotIn("built binary or runtime hashes differ", source)
+
+    def test_report_escapes_backticks_and_pipes_in_version_cells(self) -> None:
+        self.assertEqual(
+            BENCH.markdown_code_cell("v`0`|x"),
+            "<code>v&#96;0&#96;&#124;x</code>",
+        )
+        self.assertEqual(
+            BENCH.markdown_code_cell("a\\|b"),
+            "<code>a\\&#124;b</code>",
+        )
+        self.assertEqual(
+            BENCH.markdown_code_cell("multi\r\nline"),
+            "<code>multi  line</code>",
+        )
+
+    def test_command_for_build_launches_the_preflight_resolved_executable(
+        self,
+    ) -> None:
+        build = {
+            "engine": "vllm",
+            "worktree": "/engine",
+            "external_engine": {
+                "label": "vllm",
+                "engine": "vllm",
+                "executable": "vllm",
+                "model": "org/model",
+                "served_model": "org/model",
+                "context_size": 65536,
+                "max_concurrency": 4,
+                "tokenizer": None,
+                "hf_config": None,
+                "prefix_cache": True,
+                "batch_size": 2048,
+                "ubatch_size": 512,
+                "extra_args": [],
+                "cwd": "/engine",
+            },
+            "provenance": {
+                "resolved_executable": "/opt/vllm/bin/vllm-resolved",
+            },
+        }
+
+        command = BENCH.command_for_build(build, "model-uri")
+
+        self.assertEqual(command[0], "/opt/vllm/bin/vllm-resolved")
+
+    def test_external_config_reuses_the_validated_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 4096,
+                                "max_concurrency": 2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot = BENCH.load_engine_config(path)
+            args = SimpleNamespace(
+                engine_config=path, engine_config_snapshot=snapshot
+            )
+
+            with mock.patch.object(
+                BENCH,
+                "load_engine_config",
+                side_effect=AssertionError(
+                    "validated snapshot must be reused, not reloaded"
+                ),
+            ):
+                config = BENCH.external_config(args)
+
+            self.assertIs(config, snapshot)
+
+    def test_external_config_without_snapshot_loads_from_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "engines.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "comparison": {"model": "model-uri"},
+                        "arms": [
+                            {
+                                "label": "vllm",
+                                "engine": "vllm",
+                                "executable": "vllm",
+                                "model": "org/model",
+                                "context_size": 4096,
+                                "max_concurrency": 2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(engine_config=path)
+
+            config = BENCH.external_config(args)
+
+            self.assertEqual(config.path, path.resolve())
+            self.assertEqual(config.arms[0].label, "vllm")
 
 
 if __name__ == "__main__":

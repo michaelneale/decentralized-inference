@@ -5,7 +5,7 @@ mod dynamic_library;
 // without compiling the crate to determine native-runtime compatibility.
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 52;
+pub const ABI_VERSION_PATCH: u32 = 53;
 
 mod abi;
 mod activation;
@@ -126,7 +126,8 @@ pub use dynamic::{
     skippy_stage_plan_validate_chain_v1, skippy_stage_plan_value_at_v1,
     skippy_stage_planner_create_v1, skippy_stage_planner_free, skippy_stage_planner_realize_v1,
     skippy_token_is_eog, skippy_tokenize, skippy_trim_session, skippy_verify_tokens,
-    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts, skippy_write_slice_gguf,
+    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts,
+    skippy_write_gguf_metadata_from_parts, skippy_write_slice_gguf,
 };
 
 #[cfg(not(feature = "dynamic-runtime"))]
@@ -170,5 +171,6 @@ pub use static_bindings::{
     skippy_stage_plan_validate_chain_v1, skippy_stage_plan_value_at_v1,
     skippy_stage_planner_create_v1, skippy_stage_planner_free, skippy_stage_planner_realize_v1,
     skippy_token_is_eog, skippy_tokenize, skippy_trim_session, skippy_verify_tokens,
-    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts, skippy_write_slice_gguf,
+    skippy_verify_tokens_frame_sampled, skippy_write_gguf_from_parts,
+    skippy_write_gguf_metadata_from_parts, skippy_write_slice_gguf,
 };

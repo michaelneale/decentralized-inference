@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "comparison": {
+    "model": "hf://org/model"
+  },
+  "arms": [
+    {
+      "label": "llama-cpp",
+      "engine": "llama.cpp",
+      "executable": "/opt/llama.cpp/llama-server",
+      "model": "/models/model.gguf",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8,
+      "batch_size": 2048,
+      "ubatch_size": 128
+    },
+    {
+      "label": "vllm",
+      "engine": "vllm",
+      "executable": "/opt/vllm/bin/vllm",
+      "model": "/models/model-vllm",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8
+    },
+    {
+      "label": "sglang",
+      "engine": "sglang",
+      "executable": "/opt/sglang/bin/python",
+      "model": "/models/model-sglang",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8
+    }
+  ]
+}
