@@ -384,7 +384,7 @@ tuning_profile = "throughput"
     assert_eq!(resolved.model_fit.kv_offload, "true");
     assert_eq!(resolved.throughput.tuning_profile, "throughput");
     assert_eq!(resolved.model_fit.batch, 1024);
-    assert_eq!(resolved.model_fit.ubatch, 256);
+    assert_eq!(resolved.model_fit.ubatch, 1024);
     assert_eq!(resolved.throughput.parallel, 2);
     assert_eq!(resolved.throughput.continuous_batching, "true");
     assert_eq!(resolved.hardware.fit_target_mib, Some(10_752));

@@ -1,7 +1,7 @@
 use super::*;
 
 const BUILTIN_BATCH: u32 = 512;
-const BUILTIN_UBATCH: u32 = 128;
+const BUILTIN_UBATCH: u32 = 512;
 const BUILTIN_SAFETY_MARGIN_GB: f64 = 2.0;
 const LARGE_MODEL_MIN_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 const MIN_AUTO_CONTEXT_LENGTH: u32 = 512;

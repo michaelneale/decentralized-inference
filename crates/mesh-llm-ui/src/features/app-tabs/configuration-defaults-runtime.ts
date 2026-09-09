@@ -411,7 +411,8 @@ export const CONFIGURATION_DEFAULT_RUNTIME_SETTINGS = [
     categoryId: 'memory',
     icon: 'layers',
     label: 'Micro-batch size',
-    description: 'Set the default decode micro-batch size.',
+    description:
+      'Set the default micro-batch (physical prefill chunk) size. Values at or below 128 keep the CUDA SSM sequential-scan fallback; larger values enable the SSD chunked kernel for recurrent models.',
     inheritedLabel: 'Applied when a placement does not override micro-batch size',
     visibility: 'advanced',
     tomlSection: MODEL_FIT_TOML_SECTION,

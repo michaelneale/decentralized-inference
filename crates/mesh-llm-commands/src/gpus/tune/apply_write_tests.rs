@@ -72,7 +72,7 @@ fn gpu_tune_apply_preserves_comments_and_writes_nested_fields() {
             .lines()
             .any(|line| line.trim() == "flash_attention = \"enabled\"")
     );
-    assert!(!prefix.lines().any(|line| line.trim() == "ubatch = 128"));
+    assert!(!prefix.lines().any(|line| line.trim() == "ubatch = 512"));
     assert!(
         model_fit_section
             .lines()
@@ -91,7 +91,7 @@ fn gpu_tune_apply_preserves_comments_and_writes_nested_fields() {
     assert!(
         model_fit_section
             .lines()
-            .any(|line| line.trim() == "ubatch = 128")
+            .any(|line| line.trim() == "ubatch = 512")
     );
     assert!(
         !model_fit_section
@@ -246,5 +246,5 @@ fn gpu_tune_replace_existing_writes_nested_recommendations_over_legacy_manual_fi
     assert_eq!(model_fit.cache_type_v.as_deref(), Some("q8_0"));
     assert_eq!(model_fit.ctx_size, Some(65_536));
     assert_eq!(model_fit.batch, Some(512));
-    assert_eq!(model_fit.ubatch, Some(128));
+    assert_eq!(model_fit.ubatch, Some(512));
 }
