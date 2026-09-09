@@ -21,7 +21,7 @@ fn gpu_tune_recommends_stable_defaults() {
     assert_applied_flash_attention(&plan, TuneFlashAttentionValue::Enabled);
     assert_applied_context(&plan, 131_072);
     assert_applied_batch(&plan, 512);
-    assert_applied_ubatch(&plan, 128);
+    assert_applied_ubatch(&plan, 512);
     assert_applied_gpu_layers(&plan, TuneGpuLayersValue::All);
     assert_applied_fit_target(&plan, 22 * 1024);
 }

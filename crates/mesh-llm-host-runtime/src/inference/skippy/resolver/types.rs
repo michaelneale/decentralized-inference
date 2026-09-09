@@ -8,7 +8,13 @@ use crate::plugin::{MeshConfig, ReasoningBudget, ReasoningEnabled, RequestDefaul
 
 pub(super) const BUILTIN_CTX_SIZE: u32 = 4096;
 pub(super) const BUILTIN_BATCH: u32 = 512;
-pub(super) const BUILTIN_UBATCH: u32 = 128;
+/// Matches llama.cpp's own default (`LLAMA_SERVER_DEFAULT_N_UBATCH = 512`) and clears
+/// the CUDA SSM SSD kernel gate (`n_tok > SSM_SSD_MIN_TOKENS`, 128, strict), which the
+/// previous 128 default missed by exactly one token — forcing every recurrent (mamba)
+/// prefill onto the sequential scan fallback. Measured on granite-4.0-h-1b: TTFT p50
+/// 0.670 → 0.415 s (C1) and 6.38 → 3.97 s (C8); decode 22.2 → 39.4 tok/s at C8.
+/// See WHITE_UBATCH_512_FALSIFICATION_2026_09_08 in the 2026-09-08 competitive bench.
+pub(super) const BUILTIN_UBATCH: u32 = 512;
 pub(super) const BUILTIN_PARALLEL: usize = 32;
 pub(super) const BUILTIN_PREFILL_CHUNK_SIZE: usize = 64;
 pub(super) const BUILTIN_PREFILL_ADAPTIVE_START: usize = 64;

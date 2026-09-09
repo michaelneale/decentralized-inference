@@ -396,7 +396,7 @@ fn runtime_defaults_presentation(rendered: &str) -> Option<SettingPresentation> 
         .hint("range")),
         "defaults.model_fit.ubatch" => Some(sp(
             "Micro-batch size",
-            "Set the default decode micro-batch size.",
+            "Set the default micro-batch (physical prefill chunk) size. Values at or below 128 keep the CUDA SSM sequential-scan fallback; larger values enable the SSD chunked kernel for recurrent models.",
             MEMORY_CATEGORY,
             50,
         )

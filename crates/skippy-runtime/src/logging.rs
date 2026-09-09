@@ -472,6 +472,19 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         });
     }
 
+    if line.starts_with("llama_context: n_ubatch") || line.starts_with("llama_context: flash_attn")
+    {
+        // Forward the resolved micro-batch size and flash-attention mode so a live
+        // deployment can prove which values the runtime actually constructed with.
+        // These lines come from the llama_context parameter dump
+        // (llama-context.cpp, `n_ubatch = ...` / `flash_attn = ...`).
+        return Some(NativeLogEvent {
+            message: line.to_string(),
+            category: "runtime",
+            params: Vec::new(),
+        });
+    }
+
     if line.contains("VRAM")
         || line.contains("vram")
         || line.contains("mem_alloc")
@@ -938,6 +951,37 @@ mod tests {
                 category: "backend",
                 params: Vec::new(),
             }]
+        );
+    }
+
+    #[test]
+    fn aggregator_forwards_llama_context_config_lines() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator.process_line("llama_context: n_ubatch      = 512"),
+            vec![NativeLogEvent {
+                message: "llama_context: n_ubatch      = 512".to_string(),
+                category: "runtime",
+                params: Vec::new(),
+            }]
+        );
+        assert_eq!(
+            aggregator.process_line("llama_context: flash_attn    = enabled"),
+            vec![NativeLogEvent {
+                message: "llama_context: flash_attn    = enabled".to_string(),
+                category: "runtime",
+                params: Vec::new(),
+            }]
+        );
+        assert!(
+            aggregator
+                .process_line("llama_context: n_ctx         = 8192")
+                .is_empty()
+        );
+        assert!(
+            aggregator
+                .process_line("llama_context: causal_attn   = 1")
+                .is_empty()
         );
     }
 
