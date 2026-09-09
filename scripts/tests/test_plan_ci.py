@@ -255,14 +255,18 @@ class PlanCiTests(unittest.TestCase):
             plan["affected_crates"],
             ["mesh-llm-host-runtime", "mesh-llm"],
         )
-        self.assertEqual(plan["domains"], ["rust", "runtime-product"])
+        # mesh-llm-host-runtime holds cfg(windows) code, so it is claimed by
+        # the platform-windows domain and pulls the Windows rows in as well.
+        self.assertEqual(
+            plan["domains"], ["rust", "runtime-product", "platform-windows"]
+        )
         self.assertEqual(
             plan["required_slices"],
-            ["quality", "ui-artifact", "static-abi", "rust-tests", "runtime-product", "product-smoke"],
+            ["quality", "ui-artifact", "static-abi", "rust-tests", "runtime-product", "platform-checks", "product-smoke"],
         )
         self.assertEqual(
             [row["id"] for row in plan["matrices"]["runtime_products"]],
-            ["linux-cpu"],
+            ["linux-cpu", "windows-cpu"],
         )
         self.assertEqual(
             plan["dependencies"]["runtime-product"],
@@ -581,6 +585,46 @@ class PlanCiTests(unittest.TestCase):
             "profile pr-ready.budgets platform ceilings exceed total_max_workers",
         ):
             PLANNER._validate_manifests(ownership, slices)
+
+    def test_every_crate_with_windows_code_is_claimed_by_a_windows_domain(self) -> None:
+        """Windows-only code must pull the Windows lane into the plan.
+
+        The Windows lane runs only when the plan contains Windows rows, and
+        Windows rows come exclusively from the ``platform-windows*`` domains.
+        A crate holding ``cfg(windows)`` code but claimed only by the ``rust``
+        wildcard therefore gets a green Windows check that never compiled for
+        Windows.
+        """
+        ownership = json.loads((ROOT / "ci" / "ownership.yml").read_text())
+        windows_domains = {
+            domain
+            for domain in ownership["domains"]
+            if domain.startswith("platform-windows")
+        }
+        claimed = {
+            crate
+            for rule in ownership["crate_rules"]
+            if rule["domain"] in windows_domains
+            for crate in rule["crates"]
+        }
+
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "--", "crates/*/src/**/*.rs", "crates/*/src/*.rs"],
+            cwd=ROOT,
+            text=True,
+        ).splitlines()
+        needles = ("cfg(windows)", 'target_os = "windows"')
+        with_windows_code = set()
+        for path in tracked:
+            crate_dir = Path(path).parts[1]
+            if crate_dir in with_windows_code:
+                continue
+            source = (ROOT / path).read_text(encoding="utf-8", errors="ignore")
+            if any(needle in source for needle in needles):
+                with_windows_code.add(crate_dir)
+
+        # Crate directory names match package names across the workspace.
+        self.assertEqual(set(), with_windows_code - claimed)
 
     def test_manifest_domain_row_mapping_rejects_unknown_ids(self) -> None:
         ownership = json.loads((ROOT / "ci" / "ownership.yml").read_text())

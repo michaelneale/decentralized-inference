@@ -330,7 +330,21 @@
     },
     {
       "domain": "platform-windows",
-      "crates": ["mesh-llm-nodejs", "skippy-ffi"]
+      "crates": [
+        "mesh-llm-commands",
+        "mesh-llm-config",
+        "mesh-llm-events",
+        "mesh-llm-hardware-profile",
+        "mesh-llm-host-runtime",
+        "mesh-llm-identity",
+        "mesh-llm-native-runtime",
+        "mesh-llm-nodejs",
+        "mesh-llm-plugin",
+        "mesh-llm-system",
+        "mesh-llm-tui",
+        "skippy-ffi",
+        "skippy-runtime"
+      ]
     },
     {
       "domain": "platform-windows-storage",

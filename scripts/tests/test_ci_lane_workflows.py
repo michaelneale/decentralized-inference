@@ -479,6 +479,31 @@ class CiLaneWorkflowTests(unittest.TestCase):
                 self.assertIn("use_depot:", workflow)
                 self.assertIn("${{ inputs.use_depot }}", workflow)
 
+    def test_every_planned_smoke_id_has_a_matching_lane_job(self) -> None:
+        """Smoke jobs are selected by id, and a missed id skips silently.
+
+        Each smoke job gates on ``contains(fromJson(inputs.smoke_matrix).*.id,
+        '<id>')``. When a planned id matches no job the whole domain's smoke
+        coverage is skipped, and the lane summary fails the run with
+        ``planned job ... finished with "skipped"`` far from the cause.
+        """
+        slices = json.loads((ROOT / "ci" / "slices.yml").read_text())
+        planned = {row["id"] for row in slices["smoke_rows"]}
+        for domain, ids in slices["smoke_domain_rows"].items():
+            with self.subTest(domain=domain):
+                self.assertEqual(set(), set(ids) - planned)
+
+        gated = set()
+        for path in sorted(WORKFLOWS.glob("ci-*-product-smoke-slice.yml")):
+            gated |= set(
+                re.findall(
+                    r"contains\(fromJson\(inputs\.smoke_matrix\)\.\*\.id, '([^']+)'\)",
+                    path.read_text(encoding="utf-8"),
+                )
+            )
+
+        self.assertEqual(set(), planned - gated)
+
     def test_superseded_pr_runs_cancel_by_pull_request_identity(self) -> None:
         for lane in ("quality", "website", "linux", "macos", "windows"):
             pr_workflow = self.workflow(f"pr_{lane}.yml")
