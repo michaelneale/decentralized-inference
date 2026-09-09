@@ -247,24 +247,26 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn("-evidence", workflow)
         self.assertIn("if-no-files-found: error", workflow)
 
-    def test_protected_catalog_selects_cpu_metal_and_windows_product_integration(self):
+    def test_protected_catalog_defers_product_integration_rollout(self):
         slices = json.loads(SLICES.read_text())
         smoke_ids = {row["id"] for row in slices["smoke_rows"]}
         linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
+        windows = (WORKFLOWS / "ci-windows-product-smoke-slice.yml").read_text()
         product_workflow = (WORKFLOWS / "product-integration-smoke.yml").read_text()
 
-        self.assertIn("product-integration-cpu", smoke_ids)
-        self.assertIn("product-integration-metal", smoke_ids)
+        self.assertNotIn("product-integration-cpu", smoke_ids)
+        self.assertNotIn("product-integration-metal", smoke_ids)
+        self.assertNotIn("product-integration-windows-cpu", smoke_ids)
         self.assertNotIn("qwen-recurrent-gate", smoke_ids)
         self.assertIn("core", smoke_ids)
         self.assertIn("two-node-client", smoke_ids)
         self.assertIn("two-node-split", smoke_ids)
-        self.assertIn("product-integration-windows-cpu", smoke_ids)
         self.assertIn(
             "binary_name: ${{ inputs.platform == 'windows' && 'mesh-llm.exe' || 'mesh-llm' }}",
             product_workflow,
         )
-        for smoke_id in ("core", "two-node-client", "two-node-split", "product-integration-cpu"):
+        self.assertIn("product-integration-windows-cpu", windows)
+        for smoke_id in ("core", "two-node-client", "two-node-split"):
             self.assertIn(
                 f"contains(fromJson(inputs.smoke_matrix).*.id, '{smoke_id}')",
                 linux,
