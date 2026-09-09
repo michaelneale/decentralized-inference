@@ -1,12 +1,28 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::logging::{
     LoggingService, OpenAiLifecycleAttachment, RawMeshLifecycleOwners, RawMeshRequestLifecycle,
     TerminalOutcome,
 };
+use crate::plugin::openai_exchange::{OpenAiExchangeChannel, OpenAiExchangeEnvelope};
+use async_trait::async_trait;
 use mesh_llm_events::logging::{events::LifecycleEvent, identifiers::RequestId};
 
 use super::*;
+
+/// Recording double for `OpenAiExchangeChannel` — accumulates every published
+/// envelope so tests can assert on count, dispatch path, exchange id, and nonce.
+#[derive(Default)]
+struct RecordingChannel {
+    events: Mutex<Vec<OpenAiExchangeEnvelope>>,
+}
+
+#[async_trait]
+impl OpenAiExchangeChannel for RecordingChannel {
+    async fn publish(&self, event: &OpenAiExchangeEnvelope) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
 
 fn large_tokenize_request(model: &str) -> proxy::BufferedHttpRequest {
     proxy::BufferedHttpRequest {
@@ -245,6 +261,7 @@ async fn moa_single_worker_stays_in_gateway() {
             targets: &targets,
             affinity: &affinity,
             plugin_manager: None,
+            exchange_channel: None,
         },
     };
     let lifecycle = OpenAiLifecycleAttachment::unowned();
@@ -484,6 +501,7 @@ async fn api_proxy_tokenizer_route_ignores_generation_context_budget() {
         targets: &targets,
         affinity: &affinity,
         plugin_manager: None,
+        exchange_channel: None,
     };
     let raw_before_decision = request.raw.clone();
 
@@ -986,24 +1004,32 @@ fn test_remote_peer(seed: u32, model: &str) -> mesh::PeerInfo {
 }
 
 /// Verifies that `route_missing_local_model` enters the remote-mesh branch
-/// when at least one admitted peer serves the requested model.
+/// when at least one admitted peer serves the requested model, AND that the
+/// function publishes BOTH the effective-request and terminal envelopes on
+/// that branch via `IngressRouteContext::exchange_channel`.
 ///
-/// Setup: a `Node` seeded with one admitted `Host` peer via
-/// `insert_test_peer` so `hosts_for_model` returns the peer without gossip.
-/// A loopback `TcpListener`/`TcpStream` pair supplies a real `ClientStream`.
-/// The request carries a client-stamped nonce header so the function can
-/// read it from `capsule_nonce_headers()`. `plugin_manager` is `None` —
-/// `broadcast_channel_message` is a no-op with empty plugins, so omitting
-/// it avoids the overhead without changing the publish-call coverage; the
-/// envelope shapes are already pinned by the unit tests in `openai_exchange`.
+/// This test was previously defective (erlich review): it passed
+/// `plugin_manager: None`, so the two publish calls — both guarded by
+/// `if let Some(plugin_manager) = ctx.plugin_manager` — were never executed,
+/// and the test could not observe the publish pair it claimed to prove. The
+/// fix adds a `#[cfg(test)]` `exchange_channel` field to `IngressRouteContext`
+/// that accepts a recording double injected here without needing a live
+/// `PluginManager`.
 ///
-/// The peer's `EndpointAddr` has no reachable sockets, so the dispatch
-/// returns an error outcome — but the remote-mesh branch was entered, which
-/// is what this test pins. An outcome of `Responded(404)` would mean no
-/// remote-mesh target was found (the peer wasn't seen), which would be a
-/// test failure.
+/// erlich's four required assertions:
+///   (1) TWO messages published (effective + terminal)
+///   (2) `dispatch_path: RemoteMesh` on both envelopes
+///   (3) matching `exchange_id` across the pair
+///   (4) the SAME nonce on both (matches the nonce in the forwarded request)
+///
+/// Failure proof: if either publish call in `route_missing_local_model` is
+/// deleted, `events.len()` drops to 1 and assertion (1) fails. Run:
+///   `cargo test -p mesh-llm-host-runtime route_missing_local_model 2>&1`
+/// with one publish removed to confirm the test catches the defect.
 #[tokio::test]
 async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_model() {
+    use crate::plugin::openai_exchange::{OpenAiExchangeDispatchPath, OpenAiExchangePhase};
+
     let model = "acme/remote-model:Q4_K_M";
     let node = mesh::Node::new_for_tests(crate::mesh::NodeRole::Worker)
         .await
@@ -1012,6 +1038,9 @@ async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_mo
 
     let targets = election::ModelTargets::default();
     let affinity = affinity::AffinityRouter::new();
+
+    // Recording double — accumulates every envelope the publish calls emit.
+    let recording = RecordingChannel::default();
 
     // Loopback TCP pair — the server side becomes the ClientStream.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1024,7 +1053,8 @@ async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_mo
     let tcp_stream = server_side.expect("accept server side");
 
     // Build a minimal chat-completion request stamped with a client nonce so
-    // `capsule_nonce_headers()` returns `Some`.
+    // `capsule_nonce_headers()` returns `Some`. The nonce must survive into
+    // both published envelopes unchanged (assertion 4).
     let body =
         br#"{"model":"acme/remote-model:Q4_K_M","messages":[{"role":"user","content":"hi"}]}"#;
     let nonce = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
@@ -1055,7 +1085,8 @@ async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_mo
         correlation_id: None,
     };
 
-    // Confirm the nonce header round-trips through the raw bytes.
+    // Confirm the nonce header round-trips through the raw bytes before the
+    // function reads it — a prerequisite for assertion (4).
     let (parsed_nonce, _origin) = request.capsule_nonce_headers();
     assert_eq!(
         parsed_nonce.as_deref(),
@@ -1068,6 +1099,9 @@ async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_mo
         targets: &targets,
         affinity: &affinity,
         plugin_manager: None,
+        // Inject the recording double so both publish calls are observable
+        // even though plugin_manager is None.
+        exchange_channel: Some(&recording),
     };
     let lifecycle = OpenAiLifecycleAttachment::unowned();
 
@@ -1088,5 +1122,54 @@ async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_mo
         !matches!(outcome, proxy::RouteDispatchOutcome::Responded(404)),
         "expected remote-mesh branch (not 404), got {outcome:?} — \
          the test peer may not be visible to hosts_for_model()"
+    );
+
+    let events = recording.events.lock().unwrap();
+
+    // (1) TWO messages published — effective + terminal.
+    // If either publish call is deleted this assertion is the first to fail.
+    assert_eq!(
+        events.len(),
+        2,
+        "route_missing_local_model must publish both the effective-request \
+         and terminal envelopes on the remote-mesh branch; got {} event(s)",
+        events.len()
+    );
+
+    // (2) Both envelopes carry `RemoteMesh` as the dispatch path.
+    assert_eq!(
+        events[0].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "effective envelope must carry RemoteMesh dispatch path"
+    );
+    assert_eq!(
+        events[1].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "terminal envelope must carry RemoteMesh dispatch path"
+    );
+
+    // Sanity: correct phases.
+    assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+    assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+
+    // (3) Matching exchange_id across the pair.
+    assert!(
+        !events[0].exchange_id.is_empty(),
+        "exchange_id must be non-empty"
+    );
+    assert_eq!(
+        events[0].exchange_id, events[1].exchange_id,
+        "effective and terminal envelopes must share the same exchange_id"
+    );
+
+    // (4) The SAME nonce on both envelopes, matching the request's nonce header.
+    assert_eq!(
+        events[0].nonce.as_deref(),
+        Some(nonce),
+        "effective envelope must carry the forwarded client nonce"
+    );
+    assert_eq!(
+        events[0].nonce, events[1].nonce,
+        "effective and terminal envelopes must carry the same nonce"
     );
 }
