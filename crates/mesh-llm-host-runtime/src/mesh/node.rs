@@ -7,12 +7,13 @@ mod routing_telemetry;
 mod startup;
 
 pub use startup::detect_vram_bytes_capped;
+#[cfg(test)]
+pub(crate) use startup::hardware_snapshot_for_start;
 use startup::{
-    bind_mesh_endpoint, init_owner_runtime, startup_secret_key, wait_for_endpoint_online,
+    advertised_hardware_for_start, bind_mesh_endpoint, init_owner_runtime, startup_secret_key,
+    wait_for_endpoint_online,
 };
-pub(crate) use startup::{
-    default_plugin_event_source, hardware_snapshot_for_start, startup_transport_config,
-};
+pub(crate) use startup::{default_plugin_event_source, startup_transport_config};
 
 /// Upper bound on how long shutdown waits for one iroh endpoint to close.
 ///
@@ -160,6 +161,8 @@ pub struct Node {
     pub is_soc: Option<bool>,
     pub gpu_vram: Option<String>,
     pub gpu_reserved_bytes: Option<String>,
+    /// Itemized view of the advertised capacity, sent with the GPU inventory.
+    pub advertised_memory: AdvertisedMemory,
     pub gpu_mem_bandwidth_gbps: Arc<tokio::sync::Mutex<Option<Vec<f64>>>>,
     pub gpu_compute_tflops_fp32: Arc<tokio::sync::Mutex<Option<Vec<f64>>>>,
     pub gpu_compute_tflops_fp16: Arc<tokio::sync::Mutex<Option<Vec<f64>>>>,
@@ -742,8 +745,13 @@ impl Node {
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
         let (stage_transport_tx, stage_transport_rx) = tokio::sync::mpsc::channel(256);
 
+        let config_state_init = {
+            let path = crate::plugin::config_path(config_path)
+                .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
+            crate::runtime::config_state::ConfigState::load(&path)?
+        };
         let hardware =
-            hardware_snapshot_for_start(crate::system::hardware::survey(), &role, max_vram_gb);
+            advertised_hardware_for_start(config_state_init.config(), &role, max_vram_gb);
         let owner_runtime = init_owner_runtime(
             owner_config.as_ref(),
             endpoint.id(),
@@ -756,11 +764,6 @@ impl Node {
             TrustPolicy::Off,
             current_time_unix_ms(),
         );
-        let config_state_init = {
-            let path = crate::plugin::config_path(config_path)
-                .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
-            crate::runtime::config_state::ConfigState::load(&path)?
-        };
         let config_revision_init = config_state_init.revision();
         let runtime_data_collector = crate::runtime_data::RuntimeDataCollector::new();
         let runtime_data_producer =
@@ -878,6 +881,7 @@ impl Node {
             is_soc: hardware.is_soc,
             gpu_vram: hardware.gpu_vram,
             gpu_reserved_bytes: hardware.gpu_reserved_bytes,
+            advertised_memory: hardware.memory,
             gpu_mem_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
             gpu_compute_tflops_fp32: Arc::new(tokio::sync::Mutex::new(None)),
             gpu_compute_tflops_fp16: Arc::new(tokio::sync::Mutex::new(None)),
@@ -1022,6 +1026,7 @@ impl Node {
             )),
             vram_bytes: 0,
             local_runtime_capacity_bytes: 0,
+            advertised_memory: AdvertisedMemory::default(),
             peer_change_tx,
             peer_change_rx,
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

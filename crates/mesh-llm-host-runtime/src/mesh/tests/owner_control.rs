@@ -29,6 +29,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         is_soc: None,
         gpu_vram: None,
         gpu_reserved_bytes: None,
+        memory: None,
         gpu_mem_bandwidth_gbps: None,
         gpu_compute_tflops_fp32: None,
         gpu_compute_tflops_fp16: None,

@@ -132,6 +132,7 @@ use stage_artifacts::*;
 use stage_transport::*;
 use stun::*;
 
+pub use capacity::AdvertisedMemory;
 pub use connections::{QuicBindSelection, RelayConfig, RelayPolicy};
 pub(crate) use connectivity::MeshConnectivitySnapshot;
 pub use gossip::backfill_legacy_descriptors;

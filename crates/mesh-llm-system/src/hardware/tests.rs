@@ -729,6 +729,7 @@ fn test_empty_gpu_probe_applies_cpu_only_budget_only_when_vram_requested() {
     );
     assert!(handled);
     assert_eq!(survey.vram_bytes, 12_000_000_000);
+    assert_eq!(survey.system_ram_bytes, Some(16_000_000_000));
     assert!(survey.gpu_vram.is_empty());
     assert!(survey.gpus.is_empty());
 
@@ -741,6 +742,7 @@ fn test_empty_gpu_probe_applies_cpu_only_budget_only_when_vram_requested() {
     );
     assert!(handled);
     assert_eq!(survey.vram_bytes, 0);
+    assert_eq!(survey.system_ram_bytes, None);
 }
 
 #[test]
@@ -760,6 +762,7 @@ fn test_healthy_gpu_probe_credits_ram_offload_from_injected_source() {
     assert!(handled);
     assert_eq!(survey.vram_bytes, 30_000_000_000);
     assert_eq!(survey.gpu_vram, vec![12_000_000_000]);
+    assert_eq!(survey.system_ram_bytes, Some(32_000_000_000));
 }
 
 #[test]
@@ -777,6 +780,7 @@ fn test_healthy_gpu_probe_with_zero_ram_source_advertises_bare_vram() {
     );
     assert!(handled);
     assert_eq!(survey.vram_bytes, 12_000_000_000);
+    assert_eq!(survey.system_ram_bytes, None);
 }
 
 #[test]
@@ -795,7 +799,7 @@ fn test_healthy_gpu_probe_ram_below_vram_saturates_to_bare_vram() {
 }
 
 #[test]
-fn test_healthy_soc_probe_does_not_probe_system_ram() {
+fn test_healthy_soc_probe_records_system_ram_without_crediting_it() {
     let mut survey = HardwareSurvey::default();
     let mut gpu = synthetic_gpu(0, None);
     gpu.vram_bytes = 16_000_000_000;
@@ -805,9 +809,12 @@ fn test_healthy_soc_probe_does_not_probe_system_ram() {
         &mut survey,
         &[Metric::IsSoc, Metric::VramBytes],
         Ok::<Vec<GpuFacts>, ()>(vec![gpu]),
-        || panic!("system RAM must not be probed for a unified-memory survey"),
+        || 32_000_000_000,
     );
     assert!(handled);
+    assert!(survey.is_soc);
+    // Informational only: the budget stays the working set minus the reserve.
+    assert_eq!(survey.system_ram_bytes, Some(32_000_000_000));
     assert_eq!(survey.vram_bytes, 14_000_000_000);
 }
 
@@ -822,10 +829,11 @@ fn test_healthy_soc_probe_without_is_soc_metric_still_skips_ram_offload() {
         &mut survey,
         &[Metric::VramBytes],
         Ok::<Vec<GpuFacts>, ()>(vec![gpu]),
-        || panic!("system RAM must not be probed for unified memory, even without IsSoc"),
+        || 32_000_000_000,
     );
     assert!(handled);
     assert!(!survey.is_soc);
+    assert_eq!(survey.system_ram_bytes, Some(32_000_000_000));
     assert_eq!(survey.vram_bytes, 14_000_000_000);
 }
 
@@ -1180,4 +1188,75 @@ fn test_tegra_collector_sysfs_fixture() {
         parse_tegra_model_name("NVIDIA Jetson AGX Orin Developer Kit\0"),
         Some("Jetson AGX Orin".to_string())
     );
+}
+
+#[test]
+fn test_ram_offload_bytes_is_the_budget_beyond_device_vram_on_discrete_hosts() {
+    // 12 GB dGPU credited to 30 GB: the 18 GB beyond the device is RAM.
+    let survey = HardwareSurvey {
+        vram_bytes: 30_000_000_000,
+        gpu_vram: vec![12_000_000_000],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 18_000_000_000);
+}
+
+#[test]
+fn test_ram_offload_bytes_uses_gpu_facts_when_the_legacy_list_is_empty() {
+    let mut gpu = synthetic_gpu(0, None);
+    gpu.vram_bytes = 12_000_000_000;
+    let survey = HardwareSurvey {
+        vram_bytes: 30_000_000_000,
+        gpus: vec![gpu],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 18_000_000_000);
+}
+
+#[test]
+fn test_ram_offload_bytes_prefers_gpu_facts_over_the_legacy_list() {
+    // Both sources populated and disagreeing: the per-device facts win, the
+    // same precedence the host runtime applies when it itemizes capacity.
+    let mut gpu = synthetic_gpu(0, None);
+    gpu.vram_bytes = 12_000_000_000;
+    let survey = HardwareSurvey {
+        vram_bytes: 30_000_000_000,
+        gpu_vram: vec![16_000_000_000],
+        gpus: vec![gpu],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 18_000_000_000);
+}
+
+#[test]
+fn test_ram_offload_bytes_is_the_whole_budget_on_cpu_only_hosts() {
+    let survey = HardwareSurvey {
+        vram_bytes: 24_000_000_000,
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 24_000_000_000);
+}
+
+#[test]
+fn test_ram_offload_bytes_is_zero_on_unified_memory_hosts() {
+    let survey = HardwareSurvey {
+        vram_bytes: 96_000_000_000,
+        is_soc: true,
+        gpu_vram: vec![128_000_000_000],
+        gpu_reserved: vec![Some(16_000_000_000)],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 0);
+}
+
+#[test]
+fn test_ram_offload_bytes_never_underflows_when_the_budget_trails_device_vram() {
+    // A unified-memory probe answered without the IsSoc metric leaves is_soc
+    // false while the budget already sits below the enumerated memory.
+    let survey = HardwareSurvey {
+        vram_bytes: 96_000_000_000,
+        gpu_vram: vec![128_000_000_000],
+        ..HardwareSurvey::default()
+    };
+    assert_eq!(ram_offload_bytes(&survey), 0);
 }

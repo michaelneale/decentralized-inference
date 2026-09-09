@@ -463,6 +463,7 @@ async fn make_test_node_with_requirements(
         is_soc: None,
         gpu_vram: None,
         gpu_reserved_bytes: None,
+        advertised_memory: crate::mesh::AdvertisedMemory::default(),
         gpu_mem_bandwidth_gbps: Arc::new(tokio::sync::Mutex::new(None)),
         gpu_compute_tflops_fp32: Arc::new(tokio::sync::Mutex::new(None)),
         gpu_compute_tflops_fp16: Arc::new(tokio::sync::Mutex::new(None)),

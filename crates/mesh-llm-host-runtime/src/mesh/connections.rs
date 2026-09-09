@@ -14,6 +14,8 @@ pub(crate) struct NodeHardwareSnapshot {
     pub(crate) is_soc: Option<bool>,
     pub(crate) gpu_vram: Option<String>,
     pub(crate) gpu_reserved_bytes: Option<String>,
+    /// Itemized view of `vram_bytes`, announced alongside the GPU inventory.
+    pub(crate) memory: AdvertisedMemory,
 }
 
 pub(crate) struct OwnerRuntimeInit {

@@ -414,15 +414,59 @@ fn local_hardware_info_to_proto(
     ann: &PeerAnnouncement,
 ) -> Option<crate::proto::node::HardwareInfo> {
     let gpus = local_gpu_info_to_proto(ann);
-    if ann.hostname.is_none() && ann.is_soc.is_none() && gpus.is_empty() {
+    let memory = ann.memory.as_ref().map(local_memory_to_proto);
+    if ann.hostname.is_none() && ann.is_soc.is_none() && gpus.is_empty() && memory.is_none() {
         None
     } else {
         Some(crate::proto::node::HardwareInfo {
             is_soc: ann.is_soc,
             hostname: ann.hostname.clone(),
             gpus,
+            memory,
         })
     }
+}
+
+fn local_memory_to_proto(memory: &crate::mesh::AdvertisedMemory) -> crate::proto::node::MemoryInfo {
+    crate::proto::node::MemoryInfo {
+        total_bytes: Some(memory.total_bytes),
+        reserved_bytes: Some(memory.reserved_bytes),
+        configured_reserve_bytes: Some(memory.configured_reserve_bytes),
+        usable_bytes: Some(memory.usable_bytes),
+        system_ram_bytes: memory.system_ram_bytes,
+        ram_offload_bytes: Some(memory.ram_offload_bytes),
+        platform_reserve_bytes: Some(memory.platform_reserve_bytes),
+    }
+}
+
+/// A peer that itemizes its capacity always sends the full partition. A block
+/// missing its total or usable share, or whose reserves and usable share do
+/// not add up to its total, carries nothing the breakdown can trust and is
+/// dropped.
+fn proto_memory_to_local(
+    memory: &crate::proto::node::MemoryInfo,
+) -> Option<crate::mesh::AdvertisedMemory> {
+    let total_bytes = memory.total_bytes?;
+    let usable_bytes = memory.usable_bytes?;
+    let reserved_bytes = memory.reserved_bytes.unwrap_or(0);
+    let platform_reserve_bytes = memory.platform_reserve_bytes.unwrap_or(0);
+    let configured_reserve_bytes = memory.configured_reserve_bytes.unwrap_or(0);
+    let partition = reserved_bytes
+        .checked_add(platform_reserve_bytes)?
+        .checked_add(configured_reserve_bytes)?
+        .checked_add(usable_bytes)?;
+    if partition != total_bytes {
+        return None;
+    }
+    Some(crate::mesh::AdvertisedMemory {
+        total_bytes,
+        reserved_bytes,
+        platform_reserve_bytes,
+        configured_reserve_bytes,
+        usable_bytes,
+        system_ram_bytes: memory.system_ram_bytes,
+        ram_offload_bytes: memory.ram_offload_bytes.unwrap_or(0),
+    })
 }
 
 struct LegacyGpuFields {
@@ -947,6 +991,13 @@ pub(crate) fn proto_ann_to_local(
         gpu_reserved_bytes: legacy_gpu_fields
             .gpu_reserved_bytes
             .or_else(|| pa.gpu_reserved_bytes.clone()),
+        // The block explains the budget it travels with; a usable share
+        // larger than that budget contradicts it and is dropped, so it can
+        // neither be shown nor rebroadcast.
+        memory: hardware
+            .and_then(|hardware| hardware.memory.as_ref())
+            .and_then(proto_memory_to_local)
+            .filter(|memory| memory.usable_bytes <= pa.vram_bytes),
         gpu_mem_bandwidth_gbps: legacy_gpu_fields
             .gpu_mem_bandwidth_gbps
             .or_else(|| pa.gpu_mem_bandwidth_gbps.clone()),

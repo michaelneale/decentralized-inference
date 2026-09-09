@@ -3,11 +3,12 @@ use skippy_protocol::{FlashAttentionType, StageKvCacheMode, StageKvCachePayload}
 
 use super::super::KvCachePolicy;
 use super::types::{
-    BUILTIN_BATCH, BUILTIN_PARALLEL, BUILTIN_UBATCH, ResolvedStageKvCache,
-    ResolvedStageKvCacheTemplate,
+    BUILTIN_BATCH, BUILTIN_PARALLEL, BUILTIN_SAFETY_MARGIN_GB, BUILTIN_UBATCH,
+    ResolvedStageKvCache, ResolvedStageKvCacheTemplate,
 };
 use crate::plugin::{
-    BoolOrAuto, HardwareConfig, IntegerOrString, ModelFitConfig, SkippyConfig, StringOrStringList,
+    BoolOrAuto, HardwareConfig, IntegerOrString, ModelConfigDefaults, ModelFitConfig, SkippyConfig,
+    StringOrStringList,
 };
 
 pub(super) fn derive_fit_target_mib(
@@ -15,8 +16,26 @@ pub(super) fn derive_fit_target_mib(
     safety_margin_gb: f64,
 ) -> Option<u64> {
     let allocatable_mib = allocatable_memory_bytes?.checked_div(1024 * 1024)?;
-    let reserve_mib = (safety_margin_gb * 1024.0).round().max(0.0) as u64;
-    Some(allocatable_mib.saturating_sub(reserve_mib))
+    Some(allocatable_mib.saturating_sub(safety_margin_mib(safety_margin_gb)))
+}
+
+fn safety_margin_mib(safety_margin_gb: f64) -> u64 {
+    (safety_margin_gb * 1024.0).round().max(0.0) as u64
+}
+
+/// Bytes the local fit withholds on top of the driver reserve: the
+/// `safety_margin_gb` from the global hardware defaults, or the built-in
+/// default, rounded the way `derive_fit_target_mib` rounds it. The advertised
+/// capacity breakdown reports this same value as the configured reserve, so
+/// peers see the margin the fit actually applies.
+pub(crate) fn effective_safety_margin_bytes(defaults: Option<&ModelConfigDefaults>) -> u64 {
+    let safety_margin_gb = defaults
+        .and_then(|defaults| defaults.hardware.as_ref())
+        .and_then(|hardware| hardware.safety_margin_gb)
+        .unwrap_or(BUILTIN_SAFETY_MARGIN_GB);
+    // The float-to-integer cast saturates on absurd margins; saturate the
+    // byte conversion the same way instead of overflowing.
+    safety_margin_mib(safety_margin_gb).saturating_mul(1024 * 1024)
 }
 
 pub(super) fn effective_flash_attention(cache_type_v: &str) -> FlashAttentionType {

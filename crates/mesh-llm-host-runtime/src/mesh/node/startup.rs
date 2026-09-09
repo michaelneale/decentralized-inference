@@ -103,14 +103,34 @@ pub(super) async fn wait_for_endpoint_online(
     }
 }
 
+/// Surveys the host and derives the capacity this node will advertise. The
+/// advertised reserve mirrors what the local fit withholds, so the itemized
+/// capacity and the fit target agree on the configured margin.
+pub(super) fn advertised_hardware_for_start(
+    config: &crate::plugin::MeshConfig,
+    role: &NodeRole,
+    max_vram_gb: Option<f64>,
+) -> NodeHardwareSnapshot {
+    let safety_margin_bytes =
+        crate::inference::skippy::effective_safety_margin_bytes(config.defaults.as_ref());
+    hardware_snapshot_for_start(
+        crate::system::hardware::survey(),
+        role,
+        max_vram_gb,
+        safety_margin_bytes,
+    )
+}
+
 pub(crate) fn hardware_snapshot_for_start(
     hw: crate::system::hardware::HardwareSurvey,
     role: &NodeRole,
     max_vram_gb: Option<f64>,
+    safety_margin_bytes: u64,
 ) -> NodeHardwareSnapshot {
     let local_runtime_capacity_bytes =
         super::super::capacity::capped_capacity_bytes(hw.vram_bytes, max_vram_gb);
     let mut vram_bytes = super::super::capacity::advertised_capacity_bytes(&hw, max_vram_gb);
+    let memory = super::super::capacity::advertised_memory(&hw, max_vram_gb, safety_margin_bytes);
     let gpu_name = if matches!(role, NodeRole::Client) {
         None
     } else {
@@ -147,6 +167,7 @@ pub(crate) fn hardware_snapshot_for_start(
         is_soc,
         gpu_vram,
         gpu_reserved_bytes,
+        memory,
     }
 }
 

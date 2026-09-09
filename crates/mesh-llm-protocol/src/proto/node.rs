@@ -209,6 +209,9 @@ pub struct HardwareInfo {
     pub hostname: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "3")]
     pub gpus: ::prost::alloc::vec::Vec<GpuInfo>,
+    /// Introduced in v0.77.0; itemizes the capacity behind PeerAnnouncement.vram_bytes
+    #[prost(message, optional, tag = "4")]
+    pub memory: ::core::option::Option<MemoryInfo>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GpuInfo {
@@ -224,6 +227,34 @@ pub struct GpuInfo {
     pub compute_tflops_fp32: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "6")]
     pub compute_tflops_fp16: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// Itemized capacity behind `PeerAnnouncement.vram_bytes`. Additive and
+/// informational: `vram_bytes` stays the placement budget, this block explains
+/// how it was derived. Invariant: total_bytes = reserved_bytes +
+/// platform_reserve_bytes + configured_reserve_bytes + usable_bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MemoryInfo {
+    /// Enumerated accelerator memory (sum of device VRAM; the unified working set on SoCs)
+    #[prost(uint64, optional, tag = "1")]
+    pub total_bytes: ::core::option::Option<u64>,
+    /// Driver/runtime reserved or unavailable bytes, when the platform reports a true value
+    #[prost(uint64, optional, tag = "2")]
+    pub reserved_bytes: ::core::option::Option<u64>,
+    /// Withheld by the node owner: the effective safety margin plus any max_vram cap remainder
+    #[prost(uint64, optional, tag = "3")]
+    pub configured_reserve_bytes: ::core::option::Option<u64>,
+    /// What remains for mesh placement after both reserves
+    #[prost(uint64, optional, tag = "4")]
+    pub usable_bytes: ::core::option::Option<u64>,
+    /// Total system RAM, when the platform reports it
+    #[prost(uint64, optional, tag = "5")]
+    pub system_ram_bytes: ::core::option::Option<u64>,
+    /// Portion of the node's local fit budget backed by system RAM; never advertised as accelerator capacity
+    #[prost(uint64, optional, tag = "6")]
+    pub ram_offload_bytes: ::core::option::Option<u64>,
+    /// Withheld by platform policy on unified-memory hosts (for example the 10% of RAM the Tegra collector keeps back); zero for discrete GPUs
+    #[prost(uint64, optional, tag = "7")]
+    pub platform_reserve_bytes: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignedNodeOwnership {

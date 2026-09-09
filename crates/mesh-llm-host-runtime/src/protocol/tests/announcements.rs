@@ -27,6 +27,7 @@ fn owner_fields_roundtrip_through_proto_announcement() {
         is_soc: None,
         gpu_vram: None,
         gpu_reserved_bytes: None,
+        memory: None,
         gpu_mem_bandwidth_gbps: None,
         gpu_compute_tflops_fp32: None,
         gpu_compute_tflops_fp16: None,
@@ -167,6 +168,7 @@ fn advertised_model_throughput_roundtrips_through_proto_announcement() {
         is_soc: None,
         gpu_vram: None,
         gpu_reserved_bytes: None,
+        memory: None,
         gpu_mem_bandwidth_gbps: None,
         gpu_compute_tflops_fp32: None,
         gpu_compute_tflops_fp16: None,
@@ -375,6 +377,7 @@ fn inference_admission_state_roundtrips_through_proto_announcement() {
         is_soc: None,
         gpu_vram: None,
         gpu_reserved_bytes: None,
+        memory: None,
         gpu_mem_bandwidth_gbps: None,
         gpu_compute_tflops_fp32: None,
         gpu_compute_tflops_fp16: None,
@@ -629,6 +632,7 @@ fn test_proto_round_trip_with_bandwidth_and_tflops() {
         is_soc: Some(false),
         gpu_vram: Some("51539607552".to_string()),
         gpu_reserved_bytes: Some("1073741824".to_string()),
+        memory: None,
         gpu_mem_bandwidth_gbps: Some("1948.70".to_string()),
         gpu_compute_tflops_fp32: Some("19.50".to_string()),
         gpu_compute_tflops_fp16: Some("312.00".to_string()),
@@ -713,6 +717,7 @@ fn test_proto_backward_compat_missing_tflops() {
         gpu_name: Some("NVIDIA A100".to_string()),
         gpu_vram: Some("51539607552".to_string()),
         hardware: Some(crate::proto::node::HardwareInfo {
+            memory: None,
             is_soc: Some(false),
             hostname: None,
             gpus: vec![crate::proto::node::GpuInfo {
@@ -744,6 +749,7 @@ fn test_proto_gpu_info_preserves_legacy_fields_for_old_consumers() {
         endpoint_id: peer_id.as_bytes().to_vec(),
         role: NodeRole::Worker as i32,
         hardware: Some(crate::proto::node::HardwareInfo {
+            memory: None,
             is_soc: Some(false),
             hostname: Some("worker-01".to_string()),
             gpus: vec![
@@ -792,4 +798,206 @@ fn test_proto_gpu_info_preserves_legacy_fields_for_old_consumers() {
         Some("312.00,312.00")
     );
     assert_eq!(roundtripped.is_soc, Some(false));
+}
+
+#[test]
+fn advertised_memory_roundtrips_through_proto_announcement() {
+    let memory = crate::mesh::AdvertisedMemory {
+        total_bytes: 12_000_000_000,
+        reserved_bytes: 500_000_000,
+        platform_reserve_bytes: 0,
+        configured_reserve_bytes: 2_000_000_000,
+        usable_bytes: 9_500_000_000,
+        system_ram_bytes: Some(32_000_000_000),
+        ram_offload_bytes: 18_000_000_000,
+    };
+    // Start from a bare announcement with no GPU inventory, hostname or SoC
+    // flag: the memory block alone must carry the hardware envelope onto the
+    // wire.
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD0; 32]).public());
+    let bare = crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        vram_bytes: 9_500_000_000,
+        ..Default::default()
+    };
+    let (_, mut ann) = proto_ann_to_local(&bare).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None);
+    ann.memory = Some(memory);
+
+    let proto_pa = local_ann_to_proto_ann(&ann);
+    let wire = proto_pa
+        .hardware
+        .as_ref()
+        .and_then(|hardware| hardware.memory.as_ref())
+        .expect("memory block must be on the wire");
+    assert_eq!(wire.total_bytes, Some(12_000_000_000));
+    assert_eq!(wire.reserved_bytes, Some(500_000_000));
+    assert_eq!(wire.configured_reserve_bytes, Some(2_000_000_000));
+    assert_eq!(wire.usable_bytes, Some(9_500_000_000));
+    assert_eq!(wire.system_ram_bytes, Some(32_000_000_000));
+    assert_eq!(wire.ram_offload_bytes, Some(18_000_000_000));
+    assert_eq!(wire.platform_reserve_bytes, Some(0));
+
+    let (_, roundtripped) = proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
+    assert_eq!(roundtripped.memory, Some(memory));
+}
+
+#[test]
+fn platform_reserve_roundtrips_and_counts_in_the_partition() {
+    // A Tegra-shaped block: 64 GB total, 6.4 GB kept back by the platform,
+    // the rest usable, nothing configured by the owner.
+    let memory = crate::mesh::AdvertisedMemory {
+        total_bytes: 64_000_000_000,
+        reserved_bytes: 0,
+        platform_reserve_bytes: 6_400_000_000,
+        configured_reserve_bytes: 0,
+        usable_bytes: 57_600_000_000,
+        system_ram_bytes: Some(64_000_000_000),
+        ram_offload_bytes: 0,
+    };
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD1; 32]).public());
+    let bare = crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        vram_bytes: 57_600_000_000,
+        ..Default::default()
+    };
+    let (_, mut ann) = proto_ann_to_local(&bare).expect("proto_ann_to_local must succeed");
+    ann.memory = Some(memory);
+
+    let proto_pa = local_ann_to_proto_ann(&ann);
+    let wire = proto_pa
+        .hardware
+        .as_ref()
+        .and_then(|hardware| hardware.memory.as_ref())
+        .expect("memory block must be on the wire");
+    assert_eq!(wire.platform_reserve_bytes, Some(6_400_000_000));
+
+    let (_, roundtripped) = proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
+    assert_eq!(roundtripped.memory, Some(memory));
+
+    // The same block without the platform share no longer adds up and is
+    // dropped, so a peer cannot quietly move that share into usable.
+    let mut stripped = proto_pa.clone();
+    if let Some(block) = stripped
+        .hardware
+        .as_mut()
+        .and_then(|hardware| hardware.memory.as_mut())
+    {
+        block.platform_reserve_bytes = None;
+    }
+    let (_, dropped) = proto_ann_to_local(&stripped).expect("proto_ann_to_local must succeed");
+    assert_eq!(dropped.memory, None);
+}
+
+#[test]
+fn malformed_memory_blocks_are_dropped_at_ingest() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xCF; 32]).public());
+    let announce = |memory: crate::proto::node::MemoryInfo| crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        vram_bytes: 12_000_000_000,
+        hardware: Some(crate::proto::node::HardwareInfo {
+            is_soc: Some(false),
+            hostname: None,
+            gpus: vec![],
+            memory: Some(memory),
+        }),
+        ..Default::default()
+    };
+
+    let missing_total = announce(crate::proto::node::MemoryInfo {
+        usable_bytes: Some(9_500_000_000),
+        ..Default::default()
+    });
+    let (_, ann) = proto_ann_to_local(&missing_total).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None, "a block without its total is dropped");
+
+    let inverted = announce(crate::proto::node::MemoryInfo {
+        total_bytes: Some(12_000_000_000),
+        usable_bytes: Some(13_000_000_000),
+        ..Default::default()
+    });
+    let (_, ann) = proto_ann_to_local(&inverted).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None, "more usable than total is dropped");
+
+    let unbalanced = announce(crate::proto::node::MemoryInfo {
+        total_bytes: Some(12_000_000_000),
+        reserved_bytes: Some(10_000_000_000),
+        configured_reserve_bytes: Some(10_000_000_000),
+        usable_bytes: Some(1_000_000_000),
+        ..Default::default()
+    });
+    let (_, ann) = proto_ann_to_local(&unbalanced).expect("proto_ann_to_local must succeed");
+    assert_eq!(
+        ann.memory, None,
+        "reserves and usable share that do not add up to the total are dropped"
+    );
+
+    let overflowing = announce(crate::proto::node::MemoryInfo {
+        total_bytes: Some(u64::MAX),
+        reserved_bytes: Some(u64::MAX),
+        configured_reserve_bytes: Some(u64::MAX),
+        usable_bytes: Some(u64::MAX),
+        ..Default::default()
+    });
+    let (_, ann) = proto_ann_to_local(&overflowing).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None, "a partition that overflows is dropped");
+
+    let minimal = announce(crate::proto::node::MemoryInfo {
+        total_bytes: Some(12_000_000_000),
+        usable_bytes: Some(12_000_000_000),
+        ..Default::default()
+    });
+    let (_, ann) = proto_ann_to_local(&minimal).expect("proto_ann_to_local must succeed");
+    assert_eq!(
+        ann.memory,
+        Some(crate::mesh::AdvertisedMemory {
+            total_bytes: 12_000_000_000,
+            reserved_bytes: 0,
+            platform_reserve_bytes: 0,
+            configured_reserve_bytes: 0,
+            usable_bytes: 12_000_000_000,
+            system_ram_bytes: None,
+            ram_offload_bytes: 0,
+        }),
+        "absent reserves count as zero when the partition still adds up"
+    );
+}
+
+#[test]
+fn memory_block_exceeding_the_placement_budget_is_dropped_at_ingest() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD2; 32]).public());
+    let announce = |vram_bytes: u64| crate::proto::node::PeerAnnouncement {
+        endpoint_id: peer_id.as_bytes().to_vec(),
+        role: NodeRole::Worker as i32,
+        vram_bytes,
+        hardware: Some(crate::proto::node::HardwareInfo {
+            is_soc: Some(false),
+            hostname: None,
+            gpus: vec![],
+            memory: Some(crate::proto::node::MemoryInfo {
+                total_bytes: Some(12_000_000_000),
+                usable_bytes: Some(12_000_000_000),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+
+    // The block explains the budget it travels with: more usable than the
+    // announced budget is a contradiction, so the block is dropped and the
+    // budget itself is kept.
+    let (_, ann) =
+        proto_ann_to_local(&announce(9_500_000_000)).expect("proto_ann_to_local must succeed");
+    assert_eq!(ann.memory, None);
+    assert_eq!(ann.vram_bytes, 9_500_000_000);
+
+    let (_, ann) =
+        proto_ann_to_local(&announce(12_000_000_000)).expect("proto_ann_to_local must succeed");
+    assert!(
+        ann.memory.is_some(),
+        "usable equal to the budget is consistent"
+    );
 }

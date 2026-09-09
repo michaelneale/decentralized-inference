@@ -53,3 +53,46 @@ placement = "auto"
 
     assert!(error.contains("defaults.hardware.placement"));
 }
+
+#[test]
+fn effective_safety_margin_bytes_mirrors_the_fit_margin_rounding() {
+    use crate::plugin::{HardwareConfig, ModelConfigDefaults};
+
+    // Nothing configured: the built-in 2 GiB default the fit already applies.
+    assert_eq!(effective_safety_margin_bytes(None), 2 * 1024 * 1024 * 1024);
+
+    let half_gib = ModelConfigDefaults {
+        hardware: Some(HardwareConfig {
+            safety_margin_gb: Some(0.5),
+            ..HardwareConfig::default()
+        }),
+        ..ModelConfigDefaults::default()
+    };
+    assert_eq!(
+        effective_safety_margin_bytes(Some(&half_gib)),
+        512 * 1024 * 1024
+    );
+
+    let negative = ModelConfigDefaults {
+        hardware: Some(HardwareConfig {
+            safety_margin_gb: Some(-1.0),
+            ..HardwareConfig::default()
+        }),
+        ..ModelConfigDefaults::default()
+    };
+    assert_eq!(effective_safety_margin_bytes(Some(&negative)), 0);
+}
+
+#[test]
+fn effective_safety_margin_bytes_saturates_on_absurd_margins() {
+    use crate::plugin::{HardwareConfig, ModelConfigDefaults};
+
+    let absurd = ModelConfigDefaults {
+        hardware: Some(HardwareConfig {
+            safety_margin_gb: Some(f64::MAX),
+            ..HardwareConfig::default()
+        }),
+        ..ModelConfigDefaults::default()
+    };
+    assert_eq!(effective_safety_margin_bytes(Some(&absurd)), u64::MAX);
+}

@@ -139,6 +139,9 @@ pub struct PeerAnnouncement {
     pub(crate) is_soc: Option<bool>,
     pub(crate) gpu_vram: Option<String>,
     pub(crate) gpu_reserved_bytes: Option<String>,
+    /// Itemized view of `vram_bytes`; absent from peers that predate it or
+    /// that do not enumerate their hardware.
+    pub(crate) memory: Option<AdvertisedMemory>,
     pub(crate) gpu_mem_bandwidth_gbps: Option<String>,
     pub(crate) gpu_compute_tflops_fp32: Option<String>,
     pub(crate) gpu_compute_tflops_fp16: Option<String>,
@@ -243,6 +246,8 @@ pub struct PeerInfo {
     pub is_soc: Option<bool>,
     pub gpu_vram: Option<String>,
     pub gpu_reserved_bytes: Option<String>,
+    /// Itemized view of `vram_bytes` when the peer advertised one.
+    pub memory: Option<AdvertisedMemory>,
     pub gpu_mem_bandwidth_gbps: Option<String>,
     pub gpu_compute_tflops_fp32: Option<String>,
     pub gpu_compute_tflops_fp16: Option<String>,
@@ -331,6 +336,7 @@ impl PeerInfo {
             is_soc: ann.is_soc,
             gpu_vram: ann.gpu_vram.clone(),
             gpu_reserved_bytes: ann.gpu_reserved_bytes.clone(),
+            memory: ann.memory,
             gpu_mem_bandwidth_gbps: ann.gpu_mem_bandwidth_gbps.clone(),
             gpu_compute_tflops_fp32: ann.gpu_compute_tflops_fp32.clone(),
             gpu_compute_tflops_fp16: ann.gpu_compute_tflops_fp16.clone(),

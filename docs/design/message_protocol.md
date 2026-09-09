@@ -256,7 +256,8 @@ Each `PeerAnnouncement` describes one node's state. Fields:
 | `gpu_mem_bandwidth_gbps` | Comma-separated per-GPU memory-bandwidth values in GB/s (gigabytes/sec) when known; the field name is retained for wire compatibility |
 | `gpu_compute_tflops_fp32` | Comma-separated per-GPU FP32 compute-throughput hints when known |
 | `gpu_compute_tflops_fp16` | Comma-separated per-GPU FP16 compute-throughput hints when known |
-| `vram_bytes` | Total GPU VRAM in bytes |
+| `vram_bytes` | Advertised accelerator capacity in bytes: the placement budget peers size against |
+| `hardware.memory` | Itemized view of `vram_bytes` (`MemoryInfo`, tag 4 of `HardwareInfo`, additive): `total_bytes`, `reserved_bytes`, `platform_reserve_bytes`, `configured_reserve_bytes`, `usable_bytes`, plus the informational `system_ram_bytes` and `ram_offload_bytes`; sent only when host enumeration is enabled |
 | `model_source` | Source identifier for the model (e.g. HuggingFace repo) |
 | `primary_serving` | Primary model being served; backward-compat alias for `serving` |
 | `serving_models` | Models currently being served |
@@ -273,6 +274,8 @@ Each `PeerAnnouncement` describes one node's state. Fields:
 | `admission` | Optional coarse inference admission state (tag 49, additive) |
 
 These GPU telemetry fields are additive and optional. Older peers continue to interoperate by ignoring unknown `/1` protobuf fields, and the richer hardware reporting does not replace the existing model-metadata flow. For the shipped Skippy-enabled binary, GPU telemetry represents devices the embedded backend reports as runtime-selectable; platform probes are not a fallback source for advertised GPU count or usable capacity when Skippy reports no backend GPU. For clarity, `gpu_mem_bandwidth_gbps` values are serialized in GB/s (gigabytes/sec), matching benchmark output and CLI formatting; only the field name still carries the older `gbps` suffix for backward compatibility. ROCm `rocm-smi --showmeminfo` and Intel `xpu-smi` discovery expose used-memory counters rather than a true reserved/system-memory value, so `gpu_reserved_bytes` is intentionally omitted for those backends.
+
+`hardware.memory` itemizes the capacity behind `vram_bytes`. `total_bytes` is the enumerated accelerator memory (the sum of device VRAM, or the unified working set on SoCs), `reserved_bytes` the driver/runtime reserve when the platform reports a true value, `platform_reserve_bytes` what the platform keeps back by policy on unified-memory hosts (the Tegra collector budgets 90% of physical RAM; zero for discrete GPUs, and zero on Metal while the survey reports the working set as the device memory), `configured_reserve_bytes` what the node owner withholds (the effective `defaults.hardware.safety_margin_gb`, plus whatever a `max_vram_gb` cap leaves out), and `usable_bytes` the remainder, so that `total_bytes = reserved_bytes + platform_reserve_bytes + configured_reserve_bytes + usable_bytes`. `system_ram_bytes` and `ram_offload_bytes` describe the node's local fit budget (its total system RAM, and the share of that budget backed by RAM) and are never counted as accelerator capacity. `vram_bytes` remains the placement budget: the block explains it rather than replacing it, and peers that predate it ignore the field.
 
 ### Admission advertisement (tag 49)
 
