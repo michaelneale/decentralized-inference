@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Agentic Replay: compare Mesh commits or certify disk-L3 lifecycle behavior.
+"""Agentic Replay: compare inference engines or certify disk-L3 lifecycle behavior.
 
 The runner creates detached worktrees, builds the release host and native
 runtime for every requested ref, replays a deterministic subset of the pinned
 Thoughtworks agentic-coding-trajectories corpus, and writes raw evidence,
 tables, CSV, and dependency-free SVG charts.
 
-Mesh is deliberately launched without context-size, lane-count, KV-budget, or
-backend-tuning arguments. The only serving argument is ``--model``;
-``--log-format json`` is observational. Client concurrency is offered by this
-runner and is not a Mesh startup setting.
+Mesh ref arms are deliberately launched without context-size, lane-count,
+KV-budget, or backend-tuning arguments. The only serving argument is
+``--model``; ``--log-format json`` is observational. External llama.cpp, vLLM,
+and SGLang arms use an explicit engine configuration so their capacity and
+model choices are visible in the artifact. Their identity is the SHA-256 of
+the engine's reported version. Client concurrency is offered by this runner
+and is not a server startup setting.
 
 The ``l3-*`` commands run captured trajectories through disk-off, empty-root,
 same-process, post-restart, concurrent-fill, lifecycle-operation, and low-space
@@ -41,8 +44,34 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from agentic_replay_engines import (  # noqa: E402
+    EngineArm,
+    EngineConfig,
+    engine_order_specs,
+    engine_server_command,
+    external_server_environment,
+    labels_overlap,
+    load_engine_config,
+    verify_engine_arm,
+)
+
+
+def verified_version_sha256_by_label(
+    builds: Sequence[dict[str, Any]],
+) -> dict[str, str]:
+    return {
+        build["label"]: build["version_sha256"]
+        for build in builds
+        if build.get("engine", "mesh") != "mesh"
+    }
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -169,6 +198,50 @@ def parse_single_ref_spec(repo: Path, value: str) -> RefSpec:
     if not ref:
         raise ValueError(f"empty git ref for label {label}")
     return RefSpec(label=label, ref=ref, commit=git(repo, "rev-parse", f"{ref}^{{commit}}"))
+
+
+def external_config(args: argparse.Namespace) -> EngineConfig | None:
+    path = getattr(args, "engine_config", None)
+    if path is None:
+        return None
+    # validate_args already loaded and model-checked this file; reuse that
+    # snapshot so a file change after argument validation cannot make the run
+    # execute a different configuration than the one that was validated.
+    snapshot = getattr(args, "engine_config_snapshot", None)
+    if snapshot is not None:
+        return snapshot
+    return load_engine_config(path)
+
+
+def combined_specs(
+    mesh_specs: Sequence[RefSpec],
+    config: EngineConfig | None,
+    version_sha256_by_label: Mapping[str, str] | None = None,
+) -> list[RefSpec]:
+    if config is None:
+        return list(mesh_specs)
+    overlap = labels_overlap([spec.label for spec in mesh_specs], config)
+    if overlap:
+        raise ValueError(
+            f"Mesh and external engine labels overlap: {', '.join(sorted(overlap))}"
+        )
+    return [
+        *mesh_specs,
+        *(
+            RefSpec(**item)
+            for item in engine_order_specs(config, version_sha256_by_label)
+        ),
+    ]
+
+
+def build_resume_identity(build: dict[str, Any]) -> tuple[str, ...]:
+    if build.get("engine", "mesh") == "mesh":
+        return (
+            build["commit"],
+            build["binary_sha256"],
+            build["runtime_sha256"],
+        )
+    return (build["version_sha256"],)
 
 
 def ab_order(specs: Sequence[RefSpec], passes: int) -> list[tuple[int, RefSpec]]:
@@ -298,6 +371,7 @@ def build_ref(
         )
     return {
         "label": spec.label,
+        "engine": "mesh",
         "ref": spec.ref,
         "commit": spec.commit,
         "worktree": str(worktree),
@@ -508,15 +582,18 @@ def validate_warmup_capacity(
 
 
 def validate_measured_cohort_capacity(
-    cohorts: dict[str, list[dict[str, Any]]], concurrency_values: Sequence[int]
+    cohorts: dict[str, list[dict[str, Any]]],
+    concurrency_values: Sequence[int],
+    minimum_worker_waves: int = 2,
 ) -> None:
     for concurrency in concurrency_values:
         trajectories = len(cohorts[str(concurrency)])
-        required = 2 * concurrency
+        required = minimum_worker_waves * concurrency
         if trajectories < required:
             raise ValueError(
                 f"concurrency {concurrency} cohort has {trajectories} trajectories; "
-                f"{required} required for at least two worker waves"
+                f"{required} required for at least {minimum_worker_waves} worker "
+                f"wave{'s' if minimum_worker_waves != 1 else ''}"
             )
 
 
@@ -546,6 +623,38 @@ def server_command(binary: Path, model: str) -> list[str]:
     return command
 
 
+def command_for_build(build: dict[str, Any], model: str) -> list[str]:
+    if build.get("engine", "mesh") == "mesh":
+        return server_command(Path(build["binary"]), model)
+    # Launch the exact executable that preflight resolved and version-probed
+    # (arm.cwd-relative path or PATH hit), not the raw configured string.
+    arm = EngineArm(
+        label=build["external_engine"]["label"],
+        engine=build["external_engine"]["engine"],
+        executable=build["provenance"]["resolved_executable"],
+        model=build["external_engine"]["model"],
+        served_model=build["external_engine"]["served_model"],
+        context_size=build["external_engine"]["context_size"],
+        max_concurrency=build["external_engine"]["max_concurrency"],
+        tokenizer=(
+            build["external_engine"]["tokenizer"]
+            if build["external_engine"]["tokenizer"] is not None
+            else None
+        ),
+        hf_config=(
+            build["external_engine"]["hf_config"]
+            if build["external_engine"]["hf_config"] is not None
+            else None
+        ),
+        prefix_cache=build["external_engine"]["prefix_cache"],
+        batch_size=build["external_engine"]["batch_size"],
+        ubatch_size=build["external_engine"]["ubatch_size"],
+        extra_args=tuple(build["external_engine"]["extra_args"]),
+        cwd=Path(build["external_engine"]["cwd"]),
+    )
+    return engine_server_command(arm, DEFAULT_HOST, DEFAULT_PORT)
+
+
 def port_is_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
     with socket.socket() as connection:
         connection.settimeout(0.2)
@@ -558,13 +667,13 @@ def wait_for_model(
     process: Optional[subprocess.Popen[bytes]] = None,
 ) -> str:
     if base_url != DEFAULT_BASE_URL:
-        raise ValueError(f"default-startup runner requires {DEFAULT_BASE_URL}")
+        raise ValueError(f"agentic replay requires {DEFAULT_BASE_URL}")
     deadline = time.monotonic() + timeout
     last_error = "not ready"
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             raise RuntimeError(
-                f"Mesh exited before readiness with status {process.returncode}"
+                f"inference server exited before readiness with status {process.returncode}"
             )
         connection = http.client.HTTPConnection(DEFAULT_HOST, DEFAULT_PORT, timeout=5)
         try:
@@ -582,7 +691,9 @@ def wait_for_model(
         finally:
             connection.close()
         time.sleep(1)
-    raise TimeoutError(f"Mesh did not become ready after {timeout}s: {last_error}")
+    raise TimeoutError(
+        f"inference server did not become ready after {timeout}s: {last_error}"
+    )
 
 
 def percentile(values: Sequence[float], fraction: float) -> Optional[float]:
@@ -790,9 +901,13 @@ def stream_request(
 
 def openai_message(recorded: dict[str, Any]) -> dict[str, Any]:
     # ChatMessage preserves arbitrary OpenAI-compatible fields, so retain the
-    # captured object verbatim apart from the dataset-only JSON encoding below.
+    # captured object apart from null optional fields and the dataset-only JSON
+    # encoding below. Older OpenAI-compatible servers reject null fields that
+    # their schemas model as optional strings.
     message = {
-        key: value for key, value in recorded.items() if key != "tool_calls_json"
+        key: value
+        for key, value in recorded.items()
+        if key != "tool_calls_json" and value is not None
     }
     tool_calls_json = recorded.get("tool_calls_json")
     if tool_calls_json:
@@ -1171,18 +1286,30 @@ def start_server(
     log_path: Path,
     hf_home: Optional[Path],
 ) -> tuple[subprocess.Popen[bytes], list[str]]:
-    if port_is_open() or port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT):
+    external = build.get("engine", "mesh") != "mesh"
+    management_port_open = not external and port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT)
+    if port_is_open() or management_port_open:
         raise RuntimeError(
-            f"TCP {DEFAULT_PORT} or {MANAGEMENT_PORT} is already in use; "
-            "stop the existing Mesh instance"
+            (
+                f"TCP {DEFAULT_PORT} or {MANAGEMENT_PORT} is already in use; "
+                "stop the existing Mesh instance"
+                if not external
+                else f"TCP {DEFAULT_PORT} is already in use; stop the existing inference server"
+            )
         )
-    command = server_command(Path(build["binary"]), model)
+    command = command_for_build(build, model)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("wb")
     process = subprocess.Popen(
         command,
         cwd=Path(build["worktree"]),
-        env=isolated_server_env(Path(build["runtime_root"]), state_dir, hf_home),
+        env=(
+            external_server_environment(hf_home)
+            if external
+            else isolated_server_env(
+                Path(build["runtime_root"]), state_dir, hf_home
+            )
+        ),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -1191,7 +1318,9 @@ def start_server(
     return process, command
 
 
-def stop_server(process: subprocess.Popen[bytes]) -> None:
+def stop_server(
+    process: subprocess.Popen[bytes], *, include_management_port: bool = True
+) -> None:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGINT)
         try:
@@ -1205,7 +1334,8 @@ def stop_server(process: subprocess.Popen[bytes]) -> None:
                 process.wait(timeout=10)
     deadline = time.monotonic() + 10
     while (
-        port_is_open() or port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT)
+        port_is_open()
+        or (include_management_port and port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT))
     ) and time.monotonic() < deadline:
         time.sleep(0.2)
     occupied = [
@@ -1214,7 +1344,7 @@ def stop_server(process: subprocess.Popen[bytes]) -> None:
             (DEFAULT_HOST, DEFAULT_PORT),
             (MANAGEMENT_HOST, MANAGEMENT_PORT),
         )
-        if port_is_open(host, port)
+        if (port != MANAGEMENT_PORT or include_management_port) and port_is_open(host, port)
     ]
     if occupied:
         raise RuntimeError(f"Mesh stopped but TCP ports {occupied} are still occupied")
@@ -1464,10 +1594,12 @@ def run_arm_pass(
     state_dir = Path(
         tempfile.mkdtemp(prefix=f"agentic-replay-{label}-pass-{pass_index + 1}-")
     )
-    log_path = pass_dir / "mesh.log"
+    log_path = pass_dir / (
+        "mesh.log" if build.get("engine", "mesh") == "mesh" else "server.log"
+    )
     started_at = utc_now()
     process: Optional[subprocess.Popen[bytes]] = None
-    command = server_command(Path(build["binary"]), args.model)
+    command = command_for_build(build, args.model)
     cells: list[dict[str, Any]] = []
     warmup: Optional[dict[str, Any]] = None
     try:
@@ -1504,7 +1636,10 @@ def run_arm_pass(
     finally:
         try:
             if process is not None:
-                stop_server(process)
+                stop_server(
+                    process,
+                    include_management_port=build.get("engine", "mesh") == "mesh",
+                )
         finally:
             collect_runtime_logs(state_dir, pass_dir / "native-runtime")
             shutil.rmtree(state_dir, ignore_errors=True)
@@ -1882,6 +2017,28 @@ def escape(value: Any) -> str:
     return html.escape(str(value))
 
 
+def markdown_cell(value: Any) -> str:
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def markdown_code_cell(value: Any) -> str:
+    """Render an arbitrary string as a delimiter-safe Markdown code cell.
+
+    The report wraps these values in fixed backtick fences, so a literal
+    backtick would terminate the span, and backslash-pipe escaping is unsafe
+    when the value itself ends in a backslash (the pair would un-escape the
+    pipe and re-split the table cell). Render as an HTML code element with
+    every Markdown/HTML delimiter entity-escaped: table renderers honor HTML
+    escapes inside GitHub-flavored Markdown tables, and with no raw pipe,
+    backtick, or angle brackets left in the cell it cannot split the table or
+    re-enter Markdown syntax.
+    """
+    text = html.escape(str(value), quote=False)
+    text = text.replace("|", "&#124;").replace("`", "&#96;")
+    text = text.replace("\r", " ").replace("\n", " ")
+    return f"<code>{text}</code>"
+
+
 def svg_chart(
     title: str,
     rows: Sequence[dict[str, Any]],
@@ -1973,7 +2130,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
     selected_turns = sum(cohort["assistant_turns"] for cohort in measured_cohorts)
     warmup_cohort = cohort_metadata["warmup"]
     svg_chart(
-        "Decode throughput by commit",
+        "Decode throughput by arm",
         rows,
         labels,
         "decode_tokens_per_second",
@@ -1981,7 +2138,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
         charts / "decode-throughput.svg",
     )
     svg_chart(
-        "End-to-end workload output throughput by commit",
+        "End-to-end workload output throughput by arm",
         rows,
         labels,
         "workload_output_tokens_per_second",
@@ -1989,7 +2146,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
         charts / "workload-output-throughput.svg",
     )
     svg_chart(
-        "Median time to first token by commit",
+        "Median time to first token by arm",
         rows,
         labels,
         "ttft_p50_seconds",
@@ -2001,11 +2158,28 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
         "",
         f"Generated: `{utc_now()}`",
         "",
-        "## Trajectory selection",
+        "## Arm identities",
         "",
-        "| Client concurrency | Whole trajectories | Measured requests/pass | Recorded source steps | Framework trajectory / step breakdown |",
-        "|---:|---:|---:|---:|---|",
+        "| Arm | Engine | Reported version or ref | Identity |",
+        "|---|---|---|---|",
     ]
+    for build in run_document["builds"]:
+        engine = build.get("engine", "mesh")
+        version_or_ref = build.get("version") or build.get("ref", build["label"])
+        identity = build.get("commit", "unknown")
+        lines.append(
+            f"| {markdown_cell(build['label'])} | {markdown_cell(engine)} | "
+            f"{markdown_code_cell(version_or_ref)} | `{identity[:12]}` |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Trajectory selection",
+            "",
+            "| Client concurrency | Whole trajectories | Measured requests/pass | Recorded source steps | Framework trajectory / step breakdown |",
+            "|---:|---:|---:|---:|---|",
+        ]
+    )
     for concurrency in run_document["config"]["concurrency"]:
         cohort = cohort_metadata[str(concurrency)]
         breakdown = " · ".join(
@@ -2022,7 +2196,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
             "",
             "## Result table",
             "",
-            "| Ref | Commit | Offered C | Realized C | Slot use | Trajectories/pass | Measured requests | Prompt tokens | Failures | Output match | Decode tok/s | Pass range | vs baseline | E2E output tok/s | Pass range | TTFT p50 | Pass range | TTFT p95 | TTFT p50 vs baseline | Cached prompt | Budget exhausted |",
+            "| Arm | Identity | Offered C | Realized C | Slot use | Trajectories/pass | Measured requests | Prompt tokens | Failures | Output match | Decode tok/s | Pass range | vs baseline | E2E output tok/s | Pass range | TTFT p50 | Pass range | TTFT p95 | TTFT p50 vs baseline | Cached prompt | Budget exhausted |",
             "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -2068,6 +2242,17 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
                 budget=fmt(row["budget_exhausted_pct"], 1, "%"),
             )
         )
+    server_method = (
+        [
+            "- Mesh startup: `mesh-llm serve --model <model> --log-format json`.",
+            "- Mesh chooses context size, execution lanes, KV budget, and backend tuning.",
+        ]
+        if run_document["config"].get("engine_config") is None
+        else [
+            "- Mesh refs use product-default startup; external engines use the exact commands recorded in `plan.json` and each pass result.",
+            "- Each external engine reports its version before launch; the report records that string and its SHA-256 identity. Model/tokenizer paths are provenance, not file-hash gates.",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -2082,8 +2267,7 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
             "## Method",
             "",
             f"- Model: `{run_document['config']['model']}`",
-            "- Server startup: `mesh-llm serve --model <model> --log-format json`.",
-            "- Mesh chooses context size, execution lanes, KV budget, and backend tuning.",
+            *server_method,
             f"- Client concurrency: `{','.join(map(str, run_document['config']['concurrency']))}`.",
             f"- Pass order: `{' → '.join(item['label'] for item in run_document['order'])}`.",
             f"- Warm-up: `{run_document['config']['warmup_turns']}` discarded turns from a disjoint cohort after every model-ready event.",
@@ -2133,16 +2317,32 @@ def write_report(output: Path, run_document: dict[str, Any]) -> Path:
     return report_path
 
 
-def benchmark_plan(args: argparse.Namespace, specs: Sequence[RefSpec]) -> dict[str, Any]:
+def benchmark_plan(
+    args: argparse.Namespace,
+    specs: Sequence[RefSpec],
+    engine_config: EngineConfig | None = None,
+    version_sha256_by_label: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     config = load_competitive_config()
     dataset = config["thoughtworks"]["dataset"]
+    order_specs = combined_specs(specs, engine_config, version_sha256_by_label)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "repo": str(args.repo),
         "refs": [spec.__dict__ for spec in specs],
+        "engine_config": (
+            {
+                "path": str(engine_config.path),
+                "sha256": engine_config.sha256,
+                "comparison": engine_config.comparison.as_dict(),
+                "arms": [arm.plan_identity() for arm in engine_config.arms],
+            }
+            if engine_config is not None
+            else None
+        ),
         "order": [
             {"pass": pass_index + 1, "label": spec.label, "commit": spec.commit}
-            for pass_index, spec in ab_order(specs, args.passes)
+            for pass_index, spec in ab_order(order_specs, args.passes)
         ],
         "build_commands": [
             ["just", "release-host-build"],
@@ -2156,6 +2356,11 @@ def benchmark_plan(args: argparse.Namespace, specs: Sequence[RefSpec]) -> dict[s
             "--log-format",
             "json",
         ],
+        "external_server_commands": (
+            [engine_server_command(arm) for arm in engine_config.arms]
+            if engine_config is not None
+            else []
+        ),
         "dataset": dataset,
         "trajectory_manifest": (
             str(args.trajectory_manifest)
@@ -2185,6 +2390,7 @@ def benchmark_plan(args: argparse.Namespace, specs: Sequence[RefSpec]) -> dict[s
         "workload": {
             "concurrency": args.concurrency,
             "passes": args.passes,
+            "minimum_worker_waves": getattr(args, "minimum_worker_waves", 2),
             "replay_mode": args.replay_mode,
             "ordered_recorded_prefix_replay": True,
             "measured_requests_per_arm_pass": (
@@ -2199,7 +2405,7 @@ def benchmark_plan(args: argparse.Namespace, specs: Sequence[RefSpec]) -> dict[s
                 len(args.concurrency)
                 * len(args.framework)
                 * args.trajectories_per_framework
-                * len(specs)
+                * len(order_specs)
                 * args.passes
                 if args.replay_mode in {"checkpoints", "final"}
                 and args.trajectories_per_framework is not None
@@ -2238,7 +2444,23 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     if args.hf_home is not None:
         args.hf_home = args.hf_home.resolve()
     specs = parse_ref_specs(args.repo, args.ref)
-    plan = benchmark_plan(args, specs)
+    engine_config = external_config(args)
+    external_builds = (
+        [verify_engine_arm(arm) for arm in engine_config.arms]
+        if engine_config is not None
+        else []
+    )
+    plan = benchmark_plan(
+        args,
+        specs,
+        engine_config,
+        version_sha256_by_label=verified_version_sha256_by_label(external_builds),
+    )
+    order_specs = combined_specs(
+        specs,
+        engine_config,
+        version_sha256_by_label=verified_version_sha256_by_label(external_builds),
+    )
     args.output.mkdir(parents=True, exist_ok=True)
     existing = args.output / "run.json"
     if existing.exists() and not args.resume:
@@ -2249,7 +2471,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     expected_cohorts = ["warmup", *(str(value) for value in args.concurrency)]
     cohorts = load_trajectory_cohorts(Path(inputs["manifest"]), expected_cohorts)
     validate_warmup_capacity(cohorts["warmup"], args.warmup_turns)
-    validate_measured_cohort_capacity(cohorts, args.concurrency)
+    validate_measured_cohort_capacity(
+        cohorts, args.concurrency, args.minimum_worker_waves
+    )
     validate_required_frameworks(
         cohorts, args.concurrency, args.require_framework
     )
@@ -2262,8 +2486,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         builds.append(
             build_ref(spec, worktree, args.backend, args.output, commands, args.skip_build)
         )
+    builds.extend(external_builds)
     run_document: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "started_at": utc_now(),
         "host": {
             "hostname": socket.gethostname(),
@@ -2275,6 +2500,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             "backend": args.backend,
             "concurrency": args.concurrency,
             "passes": args.passes,
+            "minimum_worker_waves": args.minimum_worker_waves,
             "replay_mode": args.replay_mode,
             "max_output_tokens": args.max_output_tokens,
             "warmup_turns": args.warmup_turns,
@@ -2283,6 +2509,15 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             "min_cache_pct": args.min_cache_pct,
             "require_output_match": args.require_output_match,
             "max_ttft_regression_pct": args.max_ttft_regression_pct,
+            "engine_config": (
+                {
+                    "path": str(engine_config.path),
+                    "sha256": engine_config.sha256,
+                    "comparison": engine_config.comparison.as_dict(),
+                }
+                if engine_config is not None
+                else None
+            ),
         },
         "plan_sha256": stable_hash(plan),
         "inputs": inputs,
@@ -2300,27 +2535,23 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         if previous.get("plan_sha256") != run_document["plan_sha256"]:
             raise RuntimeError("cannot resume: plan differs from existing run.json")
         previous_builds = {
-            build["label"]: (
-                build["commit"],
-                build["binary_sha256"],
-                build["runtime_sha256"],
-            )
+            build["label"]: build_resume_identity(build)
             for build in previous.get("builds", [])
         }
         current_builds = {
-            build["label"]: (
-                build["commit"],
-                build["binary_sha256"],
-                build["runtime_sha256"],
-            )
+            build["label"]: build_resume_identity(build)
             for build in builds
         }
         if previous_builds != current_builds:
-            raise RuntimeError("cannot resume: built binary or runtime hashes differ")
+            raise RuntimeError(
+                "cannot resume: arm build identity differs from the existing "
+                "run.json (commit, binary or runtime hashes, or reported "
+                "engine version_sha256 changed)"
+            )
         if previous.get("inputs", {}).get("manifest_sha256") != inputs["manifest_sha256"]:
             raise RuntimeError("cannot resume: Thoughtworks trajectory manifest differs")
         run_document["results"] = previous["results"]
-    for pass_index, spec in ab_order(specs, args.passes):
+    for pass_index, spec in ab_order(order_specs, args.passes):
         key = (pass_index + 1, spec.label)
         if key in completed:
             continue
@@ -3044,6 +3275,11 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help="repeatable LABEL=GIT_REF; at least two distinct commits",
     )
     parser.add_argument("--model", required=True, help="model URI or local package path")
+    parser.add_argument(
+        "--engine-config",
+        type=Path,
+        help="JSON config for version-identified llama.cpp, vLLM, and SGLang arms",
+    )
     parser.add_argument("--backend", default="metal")
     parser.add_argument(
         "--passes",
@@ -3058,6 +3294,15 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help="measure one stage-balanced checkpoint, the final prefix, or every assistant turn",
     )
     parser.add_argument("--concurrency", type=int, action="append", default=[])
+    parser.add_argument(
+        "--minimum-worker-waves",
+        type=int,
+        default=2,
+        help=(
+            "minimum complete request waves required in each measured cohort; "
+            "set to 1 only for an exact captured single-wave workload"
+        ),
+    )
     parser.add_argument(
         "--trajectories-per-framework",
         type=int,
@@ -3219,6 +3464,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         args.warmup_turns,
         args.min_isl,
         args.min_turns,
+        args.minimum_worker_waves,
     )
     if any(value <= 0 for value in positive):
         parser.error("passes and workload sizes must be positive")
@@ -3249,16 +3495,26 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--framework values must be unique")
     if len(set(args.require_framework)) != len(args.require_framework):
         parser.error("--require-framework values must be unique")
+    if args.engine_config is not None:
+        try:
+            config = load_engine_config(args.engine_config)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            parser.error(f"invalid --engine-config: {error}")
+        if config.comparison.model != args.model:
+            parser.error(
+                "--model must exactly match engine config comparison.model"
+            )
+        args.engine_config_snapshot = config
     trajectories_per_cohort = (
         args.trajectories_per_framework * len(args.framework)
         if args.trajectories_per_framework is not None
         else None
     )
-    minimum_trajectories = 2 * max(args.concurrency)
+    minimum_trajectories = args.minimum_worker_waves * max(args.concurrency)
     if trajectories_per_cohort is not None and trajectories_per_cohort < minimum_trajectories:
         parser.error(
-            "each concurrency cohort must contain at least twice the maximum "
-            f"offered concurrency ({minimum_trajectories} trajectories required)"
+            "each concurrency cohort must contain the configured minimum worker "
+            f"waves ({minimum_trajectories} trajectories required)"
         )
 
 
@@ -3310,7 +3566,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "plan":
         args.repo = args.repo.resolve()
         specs = parse_ref_specs(args.repo, args.ref)
-        print(json.dumps(benchmark_plan(args, specs), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                benchmark_plan(args, specs, external_config(args)),
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "run":
         print(run_benchmark(args))

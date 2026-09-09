@@ -1,10 +1,11 @@
 # mesh-llm Router Evals
 
-## Compare Mesh commits with production defaults
+## Compare Mesh releases and inference engines
 
-`agentic-replay.py` is the durable entrypoint for comparing two or more
-Mesh refs on one model. It creates isolated detached worktrees, builds each
-release host and native runtime, replays a pinned subset of the Thoughtworks
+`agentic-replay.py` is the durable entrypoint for comparing two or more Mesh
+refs and, optionally, external llama.cpp, vLLM, and SGLang arms on one model.
+It creates isolated detached worktrees, builds each Mesh release host and native
+runtime, replays a pinned subset of the Thoughtworks
 agentic-coding trajectories, and produces raw JSONL, CSV/JSON/Markdown tables,
 SVG throughput and TTFT charts, logs, binary hashes, and an artifact inventory.
 
@@ -12,7 +13,7 @@ Inspect the exact build order and launch command without changing anything:
 
 ```bash
 python3 evals/agentic-replay.py plan \
-  --ref rc8=v0.76.0-rc8 \
+  --ref stable=v0.75.1 \
   --ref main=origin/main \
   --model '<model-uri>' \
   --trajectories-per-framework 4
@@ -23,7 +24,7 @@ Run the default fast A/B release gate after materializing the pinned parquet fro
 
 ```bash
 python3 evals/agentic-replay.py run \
-  --ref rc8=v0.76.0-rc8 \
+  --ref stable=v0.75.1 \
   --ref main=origin/main \
   --model '<model-uri>' \
   --trajectories-per-framework 4 \
@@ -167,6 +168,81 @@ binary/runtime hashes, a Markdown report, and an artifact hash inventory are
 retained. Run the same artifact recipe on every supported backend/model family
 and on each stage of the real two-machine split; the harness never treats a
 single-node pass as full-chain evidence.
+
+### Compare Mesh with llama.cpp, vLLM, and SGLang
+
+Pass `--engine-config` to append external OpenAI-compatible server arms to the
+same ordered replay. The two Mesh refs remain required, so release-versus-main
+and cross-engine comparisons share one manifest, client, request order,
+sampling parameters, warm-up policy, and report. Arms run sequentially on the
+same host and port.
+
+The JSON config is intentionally explicit. Each arm records its executable,
+model and tokenizer locations, context capacity, maximum server concurrency,
+cache policy, and extra launch arguments. Relative executable paths resolve the
+way the launch runs them: a path with a separator is read against the arm's
+`cwd`, a bare name is searched on the runner `PATH`. Before launch, the runner
+queries the engine's reported version (`--version`, or Python package metadata
+for SGLang, bounded by a 30-second timeout) on that same resolved executable
+and uses SHA-256 of that version string as the arm identity. It does not gate
+on executable, model, or tokenizer file hashes.
+
+```json
+{
+  "schema_version": 1,
+  "comparison": {"model": "hf://org/model"},
+  "arms": [
+    {
+      "label": "llama-cpp",
+      "engine": "llama.cpp",
+      "executable": "/opt/llama.cpp/llama-server",
+      "model": "/models/model.gguf",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8,
+      "batch_size": 2048,
+      "ubatch_size": 128
+    },
+    {
+      "label": "vllm",
+      "engine": "vllm",
+      "executable": "/opt/vllm/bin/vllm",
+      "model": "/models/model-vllm",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8
+    },
+    {
+      "label": "sglang",
+      "engine": "sglang",
+      "executable": "/opt/sglang/bin/python",
+      "model": "/models/model-sglang",
+      "tokenizer": "/models/tokenizer",
+      "context_size": 131072,
+      "max_concurrency": 8
+    }
+  ]
+}
+```
+
+Inspect the exact five-arm ABBA plan before running it:
+
+```bash
+python3 evals/agentic-replay.py plan \
+  --ref stable=v0.75.1 \
+  --ref main=origin/main \
+  --engine-config /path/to/engines.json \
+  --model 'hf://org/model' \
+  --trajectory-manifest /path/to/captured-harnesses.json \
+  --concurrency 8 \
+  --passes 2
+```
+
+Absolute latency and throughput remain visible for every arm. Relative deltas
+stay fail-closed unless successful request IDs, failed request IDs, and generated
+content hashes match the first arm, preventing output divergence from being
+presented as a paired speedup. vLLM and SGLang normally require a Linux/CUDA
+host; the config deliberately does not hide that environmental difference.
 
 For the pinned Mesh-versus-raw-llama.cpp scheduler matrix across CUDA, Metal,
 dense/MoE/recurrent/hybrid models, llama-benchy, and Thoughtworks agent traces, see
