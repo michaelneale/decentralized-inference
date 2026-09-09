@@ -28,6 +28,7 @@ struct Args {
     max_jobs: usize,
     max_per_family: usize,
     target_namespace: String,
+    target_suffix: String,
     job_namespace: String,
     flavor: String,
     timeout_seconds: u64,
@@ -59,6 +60,7 @@ struct Candidate {
     quant: DiscoveredQuant,
     projectors: Vec<DiscoveredProjector>,
     target_repo: String,
+    target_suffix: String,
     model_layer_repos: Vec<String>,
     model_id: String,
     family: String,
@@ -68,12 +70,6 @@ struct Candidate {
 struct SubmittedJob {
     candidate: Candidate,
     info: JobInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SplitCompatibility {
-    Compatible,
-    Incompatible(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +342,7 @@ impl Args {
             max_jobs: 5,
             max_per_family: 1,
             target_namespace: "meshllm".to_string(),
+            target_suffix: "layers".to_string(),
             job_namespace: "meshllm".to_string(),
             flavor: "auto".to_string(),
             timeout_seconds: parse_duration_seconds("1h")?,
@@ -373,6 +370,7 @@ impl Args {
                 "--max-jobs" => args.max_jobs = parse_next(&mut iter, &flag)?,
                 "--max-per-family" => args.max_per_family = parse_next(&mut iter, &flag)?,
                 "--target-namespace" => args.target_namespace = next_value(&mut iter, &flag)?,
+                "--target-suffix" => args.target_suffix = next_value(&mut iter, &flag)?,
                 "--job-namespace" => args.job_namespace = next_value(&mut iter, &flag)?,
                 "--flavor" => args.flavor = next_value(&mut iter, &flag)?,
                 "--timeout" => {
@@ -465,6 +463,7 @@ fn print_help() {
            --recent-limit N\n\
            --popular-limit N\n\
            --target-namespace NAME\n\
+           --target-suffix NAME (default: layers; e.g. package-v2)\n\
            --job-namespace NAME\n\
            --flavor HF_JOB_FLAVOR (default: auto CPU)\n\
            --timeout DURATION (requested; raised by size-based minimum)\n\
@@ -683,10 +682,6 @@ async fn build_candidate(
         eprintln!("skip {}: source repo no longer exists", model.repo_id);
         return Ok(None);
     };
-    if let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&source_info) {
-        eprintln!("skip {}: {reason}", model.repo_id);
-        return Ok(None);
-    }
     let Some(source_revision) = source_info.sha.clone() else {
         eprintln!(
             "skip {}: source repo info has no immutable commit SHA",
@@ -694,8 +689,12 @@ async fn build_candidate(
         );
         return Ok(None);
     };
+    // GGUF layer packages wrap upstream bytes verbatim, so any GGUF repo is
+    // wrappable regardless of its pipeline_tag; the job-side prepare step
+    // already defaults a missing tag to text-generation. The tag is recorded
+    // for provenance only.
     let source_pipeline_tag =
-        model_pipeline_tag(&source_info).expect("compatible model must have a pipeline tag");
+        model_pipeline_tag(&source_info).unwrap_or_else(|| "text-generation".to_string());
 
     let inventory =
         match prepare::list_inventory(client, &model.repo_id, Some(&source_revision)).await {
@@ -742,8 +741,8 @@ async fn build_candidate(
         return Ok(None);
     }
 
-    let target_repo = layer_target_repo(&quant, &args.target_namespace);
-    let model_layer_repos = model_layer_repos(&quants, &args.target_namespace);
+    let target_repo = layer_target_repo(&quant, &args.target_namespace, &args.target_suffix);
+    let model_layer_repos = model_layer_repos(&quants, &args.target_namespace, &args.target_suffix);
     let model_id =
         model_ref::format_gguf_selection_ref(&model.repo_id, &quant.first_file, &quant.name);
 
@@ -756,25 +755,34 @@ async fn build_candidate(
         quant,
         projectors: inventory.projectors,
         target_repo,
+        target_suffix: args.target_suffix.clone(),
         model_layer_repos,
         model_id,
         family,
     }))
 }
 
-fn model_layer_repos(quants: &[DiscoveredQuant], target_namespace: &str) -> Vec<String> {
+fn model_layer_repos(
+    quants: &[DiscoveredQuant],
+    target_namespace: &str,
+    target_suffix: &str,
+) -> Vec<String> {
     quants
         .iter()
-        .map(|quant| layer_target_repo(quant, target_namespace))
+        .map(|quant| layer_target_repo(quant, target_namespace, target_suffix))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
-fn layer_target_repo(quant: &DiscoveredQuant, target_namespace: &str) -> String {
+fn layer_target_repo(
+    quant: &DiscoveredQuant,
+    target_namespace: &str,
+    target_suffix: &str,
+) -> String {
     let distribution_id =
         model_ref::normalize_gguf_distribution_id(&quant.first_file).unwrap_or(quant.name.clone());
-    format!("{target_namespace}/{distribution_id}-layers")
+    format!("{target_namespace}/{distribution_id}-{target_suffix}")
 }
 
 fn select_preferred_quant(
@@ -855,30 +863,6 @@ async fn candidate_status(
     Ok(exact_status)
 }
 
-fn model_split_compatibility(info: &ModelInfo) -> SplitCompatibility {
-    if let Some(tag) = first_incompatible_media_tag(info) {
-        return SplitCompatibility::Incompatible(format!(
-            "unsupported media-generation tag '{tag}'; layer packages currently target text-generation GGUFs"
-        ));
-    }
-
-    let Some(pipeline_tag) = model_pipeline_tag(info) else {
-        return SplitCompatibility::Incompatible(
-            "missing text-generation pipeline_tag".to_string(),
-        );
-    };
-    if pipeline_tag.eq_ignore_ascii_case("text-generation")
-        || (pipeline_tag.eq_ignore_ascii_case("image-text-to-text")
-            && info.id.to_ascii_lowercase().contains("inkling"))
-    {
-        return SplitCompatibility::Compatible;
-    }
-
-    SplitCompatibility::Incompatible(format!(
-        "unsupported pipeline_tag '{pipeline_tag}'; automated layer packages currently require text-generation or a supported multimodal family"
-    ))
-}
-
 fn model_pipeline_tag(info: &ModelInfo) -> Option<String> {
     info.pipeline_tag
         .as_deref()
@@ -891,52 +875,11 @@ fn model_pipeline_tag(info: &ModelInfo) -> Option<String> {
         .or_else(|| card_string_value(info.card_data.as_ref(), "pipeline_tag"))
 }
 
-fn first_incompatible_media_tag(info: &ModelInfo) -> Option<String> {
-    collect_model_tags(info)
-        .into_iter()
-        .find(|tag| is_incompatible_media_tag(tag))
-}
-
-fn collect_model_tags(info: &ModelInfo) -> Vec<String> {
-    let mut tags = info.tags.clone().unwrap_or_default();
-    if let Some(card_tags) = info.card_data.as_ref().and_then(|card| card.get("tags")) {
-        match card_tags {
-            Value::Array(values) => {
-                tags.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
-            }
-            Value::String(tag) => tags.push(tag.clone()),
-            _ => {}
-        }
-    }
-    tags
-}
-
 fn card_string_value(card_data: Option<&Value>, key: &str) -> Option<String> {
     card_data?
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
-}
-
-fn is_incompatible_media_tag(tag: &str) -> bool {
-    let tag = tag.to_ascii_lowercase();
-    matches!(
-        tag.as_str(),
-        "image-to-video"
-            | "text-to-video"
-            | "video-to-video"
-            | "image-text-to-video"
-            | "audio-to-video"
-            | "text-to-audio"
-            | "video-to-audio"
-            | "audio-to-audio"
-            | "text-to-audio-video"
-            | "image-to-audio-video"
-            | "image-text-to-audio-video"
-            | "image-to-image"
-            | "text-to-image"
-            | "image-generation"
-    ) || tag.contains("diffusion")
 }
 
 async fn model_repo_info(client: &HFClient, repo_id: &str) -> Result<Option<ModelInfo>> {
@@ -980,25 +923,33 @@ async fn catalog_layer_package_repo(
         .split_once('/')
         .map(|(namespace, _)| namespace)
         .unwrap_or_default();
-    Ok(json_layer_package_repo(&value, target_namespace))
+    Ok(json_layer_package_repo(
+        &value,
+        target_namespace,
+        &candidate.target_suffix,
+    ))
 }
 
-fn json_layer_package_repo(value: &Value, target_namespace: &str) -> Option<String> {
+fn json_layer_package_repo(
+    value: &Value,
+    target_namespace: &str,
+    target_suffix: &str,
+) -> Option<String> {
     match value {
         Value::Object(map) => {
             if let Some(repo) = map.get("repo").and_then(Value::as_str).filter(|repo| {
                 repo.strip_prefix(target_namespace)
                     .is_some_and(|suffix| suffix.starts_with('/'))
-                    && repo.ends_with("-layers")
+                    && repo.ends_with(&format!("-{target_suffix}"))
             }) {
                 return Some(repo.to_string());
             }
             map.values()
-                .find_map(|value| json_layer_package_repo(value, target_namespace))
+                .find_map(|value| json_layer_package_repo(value, target_namespace, target_suffix))
         }
         Value::Array(items) => items
             .iter()
-            .find_map(|value| json_layer_package_repo(value, target_namespace)),
+            .find_map(|value| json_layer_package_repo(value, target_namespace, target_suffix)),
         _ => None,
     }
 }
@@ -1375,9 +1326,9 @@ mod tests {
     use hf_hub::repository::ModelInfo;
 
     use super::{
-        Args, Candidate, DiscoveredProjector, DiscoveredQuant, RankedModel, SplitCompatibility,
+        Args, Candidate, DiscoveredProjector, DiscoveredQuant, RankedModel,
         estimated_bucket_workspace_bytes, job_spec_with_token, json_layer_package_repo,
-        model_family_key, model_layer_repos, model_split_compatibility,
+        model_family_key, model_layer_repos,
     };
 
     fn model_info(value: serde_json::Value) -> ModelInfo {
@@ -1411,80 +1362,6 @@ mod tests {
     }
 
     #[test]
-    fn split_compatibility_accepts_text_generation_models() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Qwen-AgentWorld-35B-A3B-GGUF",
-            "pipeline_tag": "text-generation",
-            "tags": ["gguf", "qwen", "text-generation"]
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
-        );
-    }
-
-    #[test]
-    fn split_compatibility_accepts_inkling_multimodal_pipeline() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/inkling-GGUF",
-            "pipeline_tag": "image-text-to-text",
-            "tags": ["gguf", "multimodal"]
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
-        );
-    }
-
-    #[test]
-    fn split_compatibility_rejects_media_generation_pipeline() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/LTX-2-GGUF",
-            "pipeline_tag": "image-to-video",
-            "tags": ["gguf", "image-to-video", "text-to-video"]
-        }));
-
-        let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&info) else {
-            panic!("LTX media model should not be split queued");
-        };
-        assert!(reason.contains("image-to-video"));
-    }
-
-    #[test]
-    fn split_compatibility_rejects_media_generation_card_tags() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Qwen-Image-Edit-2511-GGUF",
-            "pipeline_tag": "text-generation",
-            "cardData": {
-                "tags": ["gguf", "image-to-image"]
-            }
-        }));
-
-        let SplitCompatibility::Incompatible(reason) = model_split_compatibility(&info) else {
-            panic!("image generation model should not be split queued");
-        };
-        assert!(reason.contains("image-to-image"));
-    }
-
-    #[test]
-    fn split_compatibility_uses_model_card_pipeline_tag() {
-        let info = model_info(serde_json::json!({
-            "id": "unsloth/Text-Only-GGUF",
-            "tags": ["gguf"],
-            "cardData": {
-                "pipeline_tag": "text-generation"
-            }
-        }));
-
-        assert_eq!(
-            model_split_compatibility(&info),
-            SplitCompatibility::Compatible
-        );
-    }
-
-    #[test]
     fn job_spec_uses_bucket_cache_without_model_volume() {
         let candidate = Candidate {
             model: RankedModel {
@@ -1507,6 +1384,7 @@ mod tests {
                 total_bytes: 183,
             }],
             target_repo: "meshllm/GLM-5-UD-Q4_K_XL-layers".to_string(),
+            target_suffix: "layers".to_string(),
             model_layer_repos: vec!["meshllm/GLM-5-UD-Q4_K_XL-layers".to_string()],
             model_id: "unsloth/GLM-5-GGUF:UD-Q4_K_XL".to_string(),
             family: "glm".to_string(),
@@ -1519,6 +1397,7 @@ mod tests {
             max_jobs: 1,
             max_per_family: 1,
             target_namespace: "meshllm".to_string(),
+            target_suffix: "layers".to_string(),
             job_namespace: "meshllm".to_string(),
             flavor: "cpu-upgrade".to_string(),
             timeout_seconds: 43_200,
@@ -1611,6 +1490,7 @@ mod tests {
                 },
             ],
             "meshllm",
+            "layers",
         );
 
         assert_eq!(
@@ -1636,7 +1516,7 @@ mod tests {
         });
 
         assert_eq!(
-            json_layer_package_repo(&catalog, "meshllm"),
+            json_layer_package_repo(&catalog, "meshllm", "layers"),
             Some("meshllm/Kimi-K2-Instruct-Q4_K_M-layers".to_string())
         );
     }
