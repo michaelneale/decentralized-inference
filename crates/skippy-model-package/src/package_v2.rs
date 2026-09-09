@@ -19,7 +19,7 @@ use crate::package::{
 };
 use crate::plan::StagePlan;
 use crate::progress::{PackageProgress, format_bytes};
-use crate::source_inventory::{SourceInventory, inspect};
+use crate::source_inventory::{SourceInventory, inspect, normalized_model_metadata};
 use crate::tensor_payload::{TensorLocation, compare_tensor_payload};
 use crate::write::{ModelSource, create_parent_dir, write_json_file, write_stage_artifact};
 
@@ -184,10 +184,7 @@ fn manifest_from_source(
         .iter()
         .find(|s| &s.source_file.path == primary)
         .context("primary source absent from independent inventory")?;
-    let mut model_metadata = inventory.shards[0].directory.metadata.clone();
-    for key in ["split.no", "split.count", "split.tensors.count"] {
-        model_metadata.remove(key);
-    }
+    let model_metadata = normalized_model_metadata(&inventory.shards[0]);
     Ok(PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION,
         package_id: String::new(),

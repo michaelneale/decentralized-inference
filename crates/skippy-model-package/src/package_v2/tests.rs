@@ -4,7 +4,7 @@ use skippy_package_format::TensorStorage;
 use skippy_package_format::stage_admission::StageAdmissionDescriptor;
 use std::collections::BTreeMap;
 
-use crate::test_gguf::{FixtureTensor, explicit, fixture, tensor};
+use crate::test_gguf::{FixtureTensor, explicit, fixture, fixture_without_alignment, tensor};
 
 fn tensor_info(name: &str) -> TensorInfo {
     TensorInfo {
@@ -96,6 +96,19 @@ fn writer_repacks_all_source_tensors_by_native_role() {
     assert!(json.get("model_metadata").is_none());
     assert!(json.get("tensor_catalog").is_none());
     assert_eq!(manifest.package_id, manifest.computed_package_id().unwrap());
+}
+
+#[test]
+fn writer_canonicalizes_an_implicit_default_alignment() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("model.gguf");
+    fixture_without_alignment(&source, &[tensor("unknown-global", 0)]);
+    let out = temp.path().join("package");
+
+    write(&source, &out, false).unwrap();
+
+    let manifest = read_manifest(&out);
+    assert_eq!(manifest.model_metadata["general.alignment"], 32);
 }
 
 #[test]

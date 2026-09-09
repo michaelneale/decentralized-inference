@@ -10,7 +10,7 @@ use skippy_model::package_carrier::resolve_package_carrier;
 use skippy_package_format::{Artifact, PackageManifest, SourceFile, Tensor, TensorStorage};
 
 use crate::hash::file_sha256;
-use crate::source_inventory::{SourceInventory, SourceShard, inspect};
+use crate::source_inventory::{SourceInventory, SourceShard, inspect, normalized_model_metadata};
 use crate::tensor_payload::{TensorLocation, compare_tensor_payload};
 
 #[derive(Debug, Serialize)]
@@ -267,10 +267,7 @@ fn verify_source_identity(
         manifest.layer_count == source.layer_count,
         "source block_count mismatch"
     );
-    let mut source_metadata = source.shards[0].directory.metadata.clone();
-    source_metadata.remove("split.no");
-    source_metadata.remove("split.count");
-    source_metadata.remove("split.tensors.count");
+    let source_metadata = normalized_model_metadata(&source.shards[0]);
     ensure!(
         manifest.model_metadata == source_metadata,
         "source model metadata mismatch"

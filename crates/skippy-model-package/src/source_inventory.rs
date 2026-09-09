@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use serde_json::Value;
 use skippy_model::gguf_catalog::{GgufCatalog, read_gguf_catalog};
 use skippy_package_format::{SourceFile, Tensor, TensorCatalog, TensorIntegrity, TensorStorage};
 use skippy_runtime::{ModelInfo, TensorInfo};
@@ -24,6 +25,17 @@ pub(crate) struct SourceShard {
     pub(crate) artifact_id: String,
     pub(crate) directory: GgufCatalog,
     pub(crate) tensors: TensorCatalog,
+}
+
+pub(crate) fn normalized_model_metadata(shard: &SourceShard) -> BTreeMap<String, Value> {
+    let mut metadata = shard.directory.metadata.clone();
+    for key in ["split.no", "split.count", "split.tensors.count"] {
+        metadata.remove(key);
+    }
+    metadata
+        .entry("general.alignment".to_string())
+        .or_insert_with(|| Value::from(shard.directory.alignment));
+    metadata
 }
 
 impl SourceInventory {
