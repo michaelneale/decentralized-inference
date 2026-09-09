@@ -1,14 +1,15 @@
-From 2f8577ee154597d361d23669211bb18a97e04311 Mon Sep 17 00:00:00 2001
+From bd0a187cc565f52fc9d4029bfb31eb5899633ac7 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 9 Sep 2026 13:19:51 +1000
-Subject: [PATCH] skippy: store payload locators in metadata carriers
+Subject: [PATCH 23/23] skippy: store payload locators in metadata carriers
 
 Keep tensor placement in the GGUF planning carrier so the JSON package root can omit its duplicated tensor catalog.
 
 Assisted-by: scama
 ---
- src/skippy/model_package.cpp | 44 ++++++++++++++++++++++++++++++++++--
- 1 file changed, 42 insertions(+), 2 deletions(-)
+ src/skippy/model_package.cpp                  | 44 ++++++++++++++++++-
+ .../tests/renamed_multishard_planning.cpp     | 34 +++++++++++++-
+ 2 files changed, 74 insertions(+), 4 deletions(-)
 
 diff --git a/src/skippy/model_package.cpp b/src/skippy/model_package.cpp
 index b2dce591b..6df18689e 100644
@@ -97,9 +98,6 @@ index b2dce591b..6df18689e 100644
  
      const size_t tensor_mem = ggml_tensor_overhead() * (selected.size() + 1) + 1024 * 1024;
      ggml_init_params ggml_params = {
--- 
-2.54.0 (Apple Git-157)
-
 diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
 index 783e7b869..103542e0a 100644
 --- a/src/skippy/tests/renamed_multishard_planning.cpp
@@ -160,3 +158,6 @@ index 783e7b869..103542e0a 100644
          const int dimensions = ggml_n_dims(tensor);
          if (expected.dimensions.size() != static_cast<size_t>(dimensions) ||
                  tensor->type != expected.type ||
+-- 
+2.55.0
+

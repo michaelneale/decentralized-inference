@@ -1,7 +1,7 @@
-From 3afabd10416a48175b38a5a52889031b7c7c4772 Mon Sep 17 00:00:00 2001
+From 550261cea6ab3c0e3d32731141bb191012476aa9 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 8 Sep 2026 00:47:32 +1000
-Subject: [PATCH] skippy: plan integrated MTP graph dependencies
+Subject: [PATCH 16/23] skippy: plan integrated MTP graph dependencies
 
 ---
  src/skippy/graph_identity.cpp         |  7 +++
@@ -260,5 +260,5 @@ index 30627b1c5..d4b5d6f2f 100644
      return result;
  }
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

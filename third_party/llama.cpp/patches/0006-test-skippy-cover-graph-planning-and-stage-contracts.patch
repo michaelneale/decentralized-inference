@@ -1,7 +1,7 @@
-From a85405855a560ceb6776b2822d68bb0b6e5bdfdf Mon Sep 17 00:00:00 2001
+From de48836cf64938a5077f03811ea350a667f9f536 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:13 +1000
-Subject: [PATCH] test(skippy): cover graph planning and stage contracts
+Subject: [PATCH 06/23] test(skippy): cover graph planning and stage contracts
 
 ---
  src/CMakeLists.txt                            |  310 +++++
@@ -22,7 +22,7 @@ Subject: [PATCH] test(skippy): cover graph planning and stage contracts
  create mode 100644 src/skippy/tests/stage_slice_plan.cpp
 
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 8922dc12a..3ba863063 100644
+index 221e14f7f..8bd1bd8ad 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -39,6 +39,32 @@ add_library(llama
@@ -58,7 +58,7 @@ index 8922dc12a..3ba863063 100644
              llama-vocab.cpp
              unicode-data.cpp
              unicode.cpp
-@@ -63,8 +89,292 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -60,8 +86,292 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -3784,3 +3784,6 @@ index 000000000..380cf4976
 +    if (result) { std::fprintf(stderr, "stage slice test failed: %d\n", result); }
 +    return result;
 +}
+-- 
+2.55.0
+

@@ -1,7 +1,7 @@
-From ed08cd540fd3f1b15fda63e76a6553f75af16261 Mon Sep 17 00:00:00 2001
+From d4a16f04be012b3b403ea45b4ca71f0b7635fc21 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:35 +1000
-Subject: [PATCH] ggml: optimize Apple Metal staging paths
+Subject: [PATCH 09/23] ggml: optimize Apple Metal staging paths
 
 ---
  ggml/src/ggml-metal/ggml-metal-device.m | 177 +++++++++++++++++++++++-
@@ -9,10 +9,10 @@ Subject: [PATCH] ggml: optimize Apple Metal staging paths
  2 files changed, 189 insertions(+), 22 deletions(-)
 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.m b/ggml/src/ggml-metal/ggml-metal-device.m
-index 41ce90dc8..2f9acd002 100644
+index afd6f5210..d6775211e 100644
 --- a/ggml/src/ggml-metal/ggml-metal-device.m
 +++ b/ggml/src/ggml-metal/ggml-metal-device.m
-@@ -9,6 +9,7 @@
+@@ -10,6 +10,7 @@
  #include <Metal/Metal.h>
  
  #include <stdatomic.h>
@@ -20,7 +20,7 @@ index 41ce90dc8..2f9acd002 100644
  
  #ifndef TARGET_OS_VISION
  #define TARGET_OS_VISION 0
-@@ -156,6 +157,11 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
+@@ -163,6 +164,11 @@ struct ggml_metal_library {
      ggml_metal_device_t dev;
      ggml_metal_pipelines_t pipelines; // cache of compiled pipelines
  
@@ -32,8 +32,8 @@ index 41ce90dc8..2f9acd002 100644
      NSLock * lock;
  };
  
-@@ -173,6 +179,98 @@ static void ggml_metal_library_build_index(ggml_metal_library_t lib) {
-     }
+@@ -192,6 +198,98 @@ static void ggml_metal_compile_options_set_lang(MTLCompileOptions * options, boo
+     options.languageVersion = (MTLLanguageVersion) MTLLanguageVersion4_0_GGML;
  }
  
 +// FNV-1a 64-bit, used to fingerprint the inputs that determine pipeline
@@ -131,7 +131,7 @@ index 41ce90dc8..2f9acd002 100644
  // Parse a `#include "name"` line. Returns the quoted name in *include_name on
  // success. Whitespace-tolerant; ignores `#include <...>` (system headers).
  static bool ggml_metal_library_parse_quoted_include(NSString * line, NSString ** include_name) {
-@@ -283,12 +381,14 @@ static bool ggml_metal_library_compile_all(
+@@ -302,12 +400,14 @@ static bool ggml_metal_library_compile_all(
          id<MTLDevice> device,
          NSDictionary * prep,
          NSString * (^source_for_kind)(int kind, NSError ** err),
@@ -147,7 +147,7 @@ index 41ce90dc8..2f9acd002 100644
  
      dispatch_group_t group = dispatch_group_create();
      dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-@@ -307,6 +407,11 @@ static bool ggml_metal_library_compile_all(
+@@ -326,6 +426,11 @@ static bool ggml_metal_library_compile_all(
                  return;
              }
  
@@ -159,7 +159,7 @@ index 41ce90dc8..2f9acd002 100644
              id<MTLLibrary> lib = nil;
  
              @autoreleasepool {
-@@ -340,6 +445,18 @@ static bool ggml_metal_library_compile_all(
+@@ -360,6 +465,18 @@ static bool ggml_metal_library_compile_all(
  
      const bool ok = !atomic_load(&any_failure);
  
@@ -178,7 +178,7 @@ index 41ce90dc8..2f9acd002 100644
      if (ok) {
          const int64_t t_total = ggml_time_us() - t_start;
          int64_t t_max = 0;
-@@ -407,19 +524,23 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+@@ -467,19 +584,23 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
  #undef X
      };
  
@@ -203,7 +203,7 @@ index 41ce90dc8..2f9acd002 100644
      return res;
  #else
  #ifdef SWIFT_PACKAGE
-@@ -478,6 +599,9 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+@@ -531,6 +652,9 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
          }
  
          GGML_LOG_INFO("%s: loaded in %.3f sec\n", __func__, (ggml_time_us() - t_start) / 1e6);
@@ -213,7 +213,7 @@ index 41ce90dc8..2f9acd002 100644
          return res;
      }
  
-@@ -512,10 +636,11 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+@@ -565,10 +689,11 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
          path_per_kind[kind] = [path_source retain];
      }
  
@@ -226,7 +226,7 @@ index 41ce90dc8..2f9acd002 100644
  
      for (int kind = 0; kind < GGML_METAL_LIB_COUNT; ++kind) {
          [path_per_kind[kind] release];
-@@ -527,6 +652,8 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
+@@ -580,6 +705,8 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
          return NULL;
      }
  
@@ -235,7 +235,7 @@ index 41ce90dc8..2f9acd002 100644
      return res;
  #endif
  }
-@@ -616,6 +743,13 @@ void ggml_metal_library_free(ggml_metal_library_t lib) {
+@@ -674,6 +801,13 @@ void ggml_metal_library_free(ggml_metal_library_t lib) {
  
      ggml_metal_pipelines_free(lib->pipelines);
  
@@ -249,7 +249,7 @@ index 41ce90dc8..2f9acd002 100644
      [lib->lock release];
  
      free(lib);
-@@ -707,7 +841,32 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+@@ -767,7 +901,32 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
          }
  
          id<MTLDevice> device = ggml_metal_device_get_obj(lib->dev);
@@ -283,7 +283,7 @@ index 41ce90dc8..2f9acd002 100644
  
          [mtl_function release];
  
-@@ -741,6 +900,12 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
+@@ -801,6 +960,12 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_compile_pipeline(ggml_
          res.pipeline->obj = obj;
  
          ggml_metal_pipelines_add(lib->pipelines, name, res.pipeline);
@@ -296,7 +296,7 @@ index 41ce90dc8..2f9acd002 100644
      }
  
      [lib->lock unlock];
-@@ -1181,7 +1346,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1249,7 +1414,7 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
  #endif
  
                  dev->props.use_shared_buffers = dev->props.has_unified_memory;
@@ -305,7 +305,7 @@ index 41ce90dc8..2f9acd002 100644
                  // In case of eGPU, shared memory may be preferable.
                  dev->props.use_shared_buffers |= [dev->mtl_device location] == MTLDeviceLocationExternal;
  #endif
-@@ -1241,12 +1406,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
+@@ -1309,12 +1474,14 @@ ggml_metal_device_t ggml_metal_device_init(int device, int n_devices) {
                          }
                      }
  
@@ -321,10 +321,10 @@ index 41ce90dc8..2f9acd002 100644
                      for (int i = MTLGPUFamilyMetal3_GGML + 5; i >= MTLGPUFamilyMetal3_GGML; --i) {
                          if ([dev->mtl_device supportsFamily:i]) {
 diff --git a/ggml/src/ggml-metal/ggml-metal-impl.h b/ggml/src/ggml-metal/ggml-metal-impl.h
-index 49102afe9..a018165de 100644
+index 1fe947633..90b26f01b 100644
 --- a/ggml/src/ggml-metal/ggml-metal-impl.h
 +++ b/ggml/src/ggml-metal/ggml-metal-impl.h
-@@ -994,6 +994,23 @@ typedef struct {
+@@ -1008,6 +1008,23 @@ typedef struct {
      uint64_t nb3;
  } ggml_metal_kargs_solve_tri;
  
@@ -348,7 +348,7 @@ index 49102afe9..a018165de 100644
  typedef struct {
      int32_t  ne00t;
      int32_t  ne00;
-@@ -1203,23 +1220,6 @@ typedef struct {
+@@ -1228,23 +1245,6 @@ typedef struct {
      int64_t val;
  } ggml_metal_kargs_memset;
  
@@ -372,3 +372,6 @@ index 49102afe9..a018165de 100644
  typedef struct {
      int32_t  n_tokens;
      int32_t  n_iter;
+-- 
+2.55.0
+

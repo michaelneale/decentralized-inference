@@ -9,7 +9,7 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/lfm2.cpp b/src/models/lfm2.cpp
-index 9a4295557053862f2aa768f906d4994532563994..d3ab714440f3d8ebcf47dccd0f0fe5ec3f5fb081 100644
+index 07b71ccd3a60f87a74f543d5bf637c8a67d9fa9f..7cb88eeb175e0308ce6e69d295184a880017b1bc 100644
 --- a/src/models/lfm2.cpp
 +++ b/src/models/lfm2.cpp
 @@ -233,7 +233,12 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_

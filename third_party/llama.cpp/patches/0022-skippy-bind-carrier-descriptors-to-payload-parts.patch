@@ -1,7 +1,7 @@
-From d855f437160584528d97356409b56e7e3115f169 Mon Sep 17 00:00:00 2001
+From 90cae5d566f4e9f50100458e603af77c80968576 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 9 Sep 2026 12:35:48 +1000
-Subject: [PATCH] skippy: bind carrier descriptors to payload parts
+Subject: [PATCH 22/23] skippy: bind carrier descriptors to payload parts
 
 Metadata-only carriers describe every tensor but contain no payload bytes. Exclude those descriptors from ordered runtime weight maps so admitted tensors bind to physical payload artifacts, while preserving carrier-only no-allocation planning.
 
@@ -14,7 +14,7 @@ Assisted-by: scama
  2 files changed, 70 insertions(+), 2 deletions(-)
 
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 5e4fe26eb..7a74096b3 100644
+index 203b869f8..24a444a3b 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -600,6 +600,17 @@ llama_model_loader::llama_model_loader(
@@ -130,5 +130,5 @@ index 3391f6342..783e7b869 100644
              "renamed multishard metadata planning: tensors=%zu dependencies=%zu payload_reads=%zu payload_bytes=%zu recurrent=%d\n",
              bindings.size(),
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

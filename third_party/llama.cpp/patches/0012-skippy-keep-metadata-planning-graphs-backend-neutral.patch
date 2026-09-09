@@ -1,7 +1,7 @@
-From 5a995c172c78f05e7edba3eb486b2f3f2e994a18 Mon Sep 17 00:00:00 2001
+From b7910fe2247529d44f342d9bbdcca75a4e6f9cef Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 15:34:55 +1000
-Subject: [PATCH] skippy: keep metadata planning graphs backend neutral
+Subject: [PATCH 12/23] skippy: keep metadata planning graphs backend neutral
 
 ---
  src/skippy/stage_plan.cpp | 11 +++++++++++
@@ -44,5 +44,5 @@ index f8ae80b65..701485f97 100644
          params.load_mode = LLAMA_LOAD_MODE_NONE;
          params.use_extra_bufts = false;
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

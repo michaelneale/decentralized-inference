@@ -1,7 +1,7 @@
-From c4b8bb5916bbb6959d592f3df734a732bc92e67b Mon Sep 17 00:00:00 2001
+From 91169c029c50a15f5de4093064c7fd7a2332ffe2 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:09 +1000
-Subject: [PATCH] skippy: derive and verify executable graph slices
+Subject: [PATCH 05/23] skippy: derive and verify executable graph slices
 
 ---
  src/skippy/block_boundaries.cpp   |   64 ++
@@ -4802,3 +4802,6 @@ index 000000000..b91d87021
 +
 +
 +} // extern "C"
+-- 
+2.55.0
+

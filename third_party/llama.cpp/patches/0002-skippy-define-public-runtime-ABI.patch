@@ -1,7 +1,7 @@
-From 0474f32dab1250ce1bd29b0d04562039b4ea6cd3 Mon Sep 17 00:00:00 2001
+From 137a585ebb37a6e115944a7c7e8b4b3ef29533e5 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:22:42 +1000
-Subject: [PATCH] skippy: define public runtime ABI
+Subject: [PATCH 02/23] skippy: define public runtime ABI
 
 ---
  include/skippy.h                      |  28 +++
@@ -1938,3 +1938,6 @@ index 000000000..c9697cf6c
 +#endif
 +
 +#endif // SKIPPY_TOKENIZATION_H
+-- 
+2.55.0
+

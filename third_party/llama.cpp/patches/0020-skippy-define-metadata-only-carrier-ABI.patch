@@ -1,10 +1,15 @@
-From e9610c5ce96ead1b18114b52ed4e74322331f66c Mon Sep 17 00:00:00 2001
-From: scama <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+From 8e98d119f4da41cf0fbe8857cee5a27f0a10b48d Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Wed, 9 Sep 2026 09:18:53 +1000
-Subject: [PATCH] skippy: define metadata-only carrier ABI
+Subject: [PATCH 20/23] skippy: define metadata-only carrier ABI
 
 Assisted-by: scama
 ---
+ include/skippy/common.h        | 2 +-
+ include/skippy/model_package.h | 7 +++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
 diff --git a/include/skippy/common.h b/include/skippy/common.h
 index b156cb5eb..65cfa2ce8 100644
 --- a/include/skippy/common.h
@@ -37,4 +42,5 @@ index 22639b8f5..6ea9b395f 100644
  LLAMA_API enum skippy_status skippy_write_gguf_from_parts(
          const char * const * input_paths,
 -- 
-2.50.1
+2.55.0
+
