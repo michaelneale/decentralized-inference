@@ -128,8 +128,10 @@ pub struct HardwareSurvey {
     pub gpu_name: Option<String>,
     /// Collection mechanism behind `gpu_name`. A source, not a verification —
     /// it names which probe produced the string, not that the string is a
-    /// confirmed-accurate GPU identifier. `None` when no naming probe ran
-    /// (`gpu_name` is then also `None`).
+    /// confirmed-accurate GPU identifier. `None` when no source is available
+    /// for `gpu_name`. Note this is not the same as `gpu_name` being `None`:
+    /// `hydrate_gpu_facts_with_identities` backfills placeholder `"GPU N"`
+    /// names with no naming probe behind them, tagged `GpuNameSource::Unknown`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name_source: Option<GpuNameSource>,
     pub gpu_count: u8,
@@ -933,6 +935,29 @@ impl Collector for DefaultCollector {
     }
 }
 
+/// Read the Tegra/Jetson model name from `model_path` and record it (with its
+/// `Sysfs` source) on `survey`. Leaves both `gpu_name` and `gpu_name_source`
+/// untouched when the path is absent or unparseable — never a guessed source
+/// for a name that was not actually read. Split out from `collect` so the path
+/// can be driven deterministically in tests rather than depending on host
+/// filesystem state.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        not(feature = "skippy-devices"),
+        feature = "dynamic-native-runtime",
+        test
+    )
+))]
+fn tegra_gpu_name_from_model_path(survey: &mut HardwareSurvey, model_path: &std::path::Path) {
+    survey.gpu_name = std::fs::read_to_string(model_path)
+        .ok()
+        .and_then(|model| parse_tegra_model_name(&model));
+    if survey.gpu_name.is_some() {
+        survey.gpu_name_source = Some(GpuNameSource::Sysfs);
+    }
+}
+
 #[cfg(all(
     target_os = "linux",
     any(
@@ -950,12 +975,10 @@ impl Collector for TegraCollector {
         }
 
         if metrics.contains(&Metric::GpuName) {
-            survey.gpu_name = std::fs::read_to_string("/sys/firmware/devicetree/base/model")
-                .ok()
-                .and_then(|model| parse_tegra_model_name(&model));
-            if survey.gpu_name.is_some() {
-                survey.gpu_name_source = Some(GpuNameSource::Sysfs);
-            }
+            tegra_gpu_name_from_model_path(
+                &mut survey,
+                std::path::Path::new("/sys/firmware/devicetree/base/model"),
+            );
         }
 
         if metrics.contains(&Metric::VramBytes) {

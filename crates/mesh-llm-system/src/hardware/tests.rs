@@ -395,14 +395,31 @@ fn test_hydrate_gpu_facts_backfill_tags_unknown_gpu_name_source() {
     assert_eq!(survey.gpu_name_source, Some(GpuNameSource::Unknown));
 }
 
-#[cfg(target_os = "linux")]
+// Mirrors the cfg on `tegra_gpu_name_from_model_path`: the Tegra collector only
+// compiles for Linux non-skippy / dynamic-native-runtime builds. The test now
+// drives the model path directly, so it no longer depends on host filesystem
+// state (the deterministic fix), only on the collector being present at all.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        not(feature = "skippy-devices"),
+        feature = "dynamic-native-runtime",
+        test
+    )
+))]
 #[test]
-#[serial(real_collector)]
 fn test_tegra_collector_gpu_name_absent_leaves_source_none() {
-    // This CI host has no /sys/firmware/devicetree/base/model, so both the
-    // name and its source must stay absent — never a guessed source for a
-    // name that was never actually read.
-    let survey = TegraCollector.collect(&[Metric::GpuName]);
+    // Drive the model read with a path guaranteed not to exist, so the result
+    // is independent of host filesystem state (a real Tegra host has the sysfs
+    // model file present, which made the old `TegraCollector.collect` form flip
+    // on such a host). With the model file absent, both the name and its source
+    // must stay absent — never a guessed source for a name that was never read.
+    let missing = std::path::Path::new("/nonexistent/mesh-llm/tegra/devicetree/base/model");
+    assert!(!missing.exists());
+
+    let mut survey = HardwareSurvey::default();
+    tegra_gpu_name_from_model_path(&mut survey, missing);
+
     assert_eq!(survey.gpu_name, None);
     assert_eq!(survey.gpu_name_source, None);
 }
