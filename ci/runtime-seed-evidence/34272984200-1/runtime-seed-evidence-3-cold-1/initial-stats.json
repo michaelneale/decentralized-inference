@@ -1,0 +1,31 @@
+{
+  "stats": {
+    "cache_errors": {
+      "adv_counts": {},
+      "counts": {}
+    },
+    "cache_hits": {
+      "adv_counts": {},
+      "counts": {}
+    },
+    "cache_misses": {
+      "adv_counts": {},
+      "counts": {}
+    },
+    "cache_read_errors": 0,
+    "cache_timeouts": 0,
+    "cache_write_errors": 0,
+    "cache_writes": 0,
+    "compilations": 0,
+    "compile_fails": 0,
+    "compile_requests": 0,
+    "dist_errors": 0,
+    "forced_recaches": 0,
+    "non_cacheable_compilations": 0,
+    "not_cached": {},
+    "requests_executed": 0,
+    "requests_not_cacheable": 0,
+    "requests_not_compile": 0,
+    "requests_unsupported_compiler": 0
+  }
+}
