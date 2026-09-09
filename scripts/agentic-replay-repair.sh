@@ -14,12 +14,17 @@ git config user.name "mesh-replay-bot"
 git config user.email "replay-bot@meshllm.invalid"
 git checkout -b "$BRANCH"
 
-# 1. opencode analyzes the regression evidence and attempts a fix.
-opencode run --mode agent \
+# 1. opencode analyzes the regression evidence and attempts a fix. It must not
+# see GitHub credentials.
+env -u GH_TOKEN -u GITHUB_TOKEN opencode run --mode agent \
   "The nightly agentic replay benchmark on micstudio regressed. Evidence: $OUTPUT_DIR/summary/history.jsonl and per-model artifacts in $OUTPUT_DIR. Analyze the regression, identify the offending change (git log origin/main is available), and attempt a minimal fix. Do not touch ci/agentic-replay-nightly baselines or thresholds." || true
 
 if git diff --quiet; then
-  echo "opencode produced no changes" >&2
+  echo "opencode produced no changes — needs-attention" >&2
+  git commit --allow-empty -m "chore: agentic replay nightly regression needs attention (run ${GITHUB_RUN_ID:-local})
+
+Automated repair produced no changes; PR opened for human triage with the
+run evidence attached."
 else
   git add -A
   git commit -m "fix: agentic replay nightly regression (run ${GITHUB_RUN_ID:-local})
@@ -27,14 +32,34 @@ else
 Attempted automated repair by opencode from nightly run evidence.
 
 Co-authored-by: opencode <opencode@meshllm.invalid>"
-  git push origin "$BRANCH"
 
-  # 2. Re-run the benchmark on the repaired tree (single pass, gate armed).
-  if python3 scripts/agentic-replay-history.py \
+  # 2. Re-run the benchmark on the repaired tree, then re-normalize + gate
+  # from the repaired summaries (single pass, gate armed).
+  LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('ci/agentic-replay-nightly/matrix.json'))['replay']['concurrency'])))")
+  LEVEL_ARGS=""
+  for level in $LEVELS; do LEVEL_ARGS="$LEVEL_ARGS --concurrency $level"; done
+  RERUN_FAILED=0
+  for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models']))"); do
+    model_uri=$(python3 -c "import json;m=[m for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
+    python3 evals/agentic-replay.py run \
+      --ref fixed=HEAD \
+      --ref base=origin/main \
+      --model "$model_uri" \
+      --backend metal \
+      --trajectories-per-framework 8 \
+      $LEVEL_ARGS \
+      --passes 1 \
+      --warmup-turns 4 \
+      --dataset-file "${MESH_AGENTIC_REPLAY_DATASET_FILE:-}" \
+      --output "$OUTPUT_DIR/repair/$family" || RERUN_FAILED=1
+  done
+  if [[ "$RERUN_FAILED" == "0" ]] && python3 scripts/agentic-replay-history.py \
       --matrix ci/agentic-replay-nightly/matrix.json \
-      --summary-dir "$OUTPUT_DIR/summary" \
+      --replay-dir "$OUTPUT_DIR/repair" \
+      --label fixed \
       --hardware "$OUTPUT_DIR/hardware.json" \
       --source-sha "$(git rev-parse HEAD)" \
+      --replay ci/agentic-replay-nightly/matrix.json \
       --output "$OUTPUT_DIR/summary/history-repair.jsonl" \
       $( [[ -d .replay-history-cache/data/runs ]] && echo --baseline .replay-history-cache/data/runs ) \
       --gate; then
@@ -55,6 +80,10 @@ else
   BODY=$'The nightly agentic replay regressed and the automated repair did not clear it. Review the evidence: history.jsonl, per-model artifacts, and the HF dataset shard for this run.'
 fi
 
+# Push with the token explicitly (no gh auth setup-git on this runner).
+PUSH_REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY:-Mesh-LLM/mesh-llm}.git"
+git push "$PUSH_REMOTE" "$BRANCH"
+
 # Fill the PR template from the run evidence where available; fall back to
 # the short body if the template or fill data is missing.
 BODY_FILE=$(mktemp)
@@ -64,13 +93,22 @@ if [[ -f "$TEMPLATE_FILE" ]]; then
       -e "s|{{RUN_DATE}}|$(date -u +%F)|g" \
       -e "s|{{RUN_ID}}|${GITHUB_RUN_ID:-local}|g" \
       -e "s|{{SOURCE_SHA}}|$(git rev-parse HEAD)|g" \
-      -e "s|{{DATASET_REPO}}|${MESH_AGENTIC_REPLAY_DATASET:-meshllm/agentic-replay-nightly}|g" \
+      -e "s|{{DATASET_REPO}}|${DATASET_REPO:-meshllm/agentic-replay-nightly}|g" \
+      -e "s|{{REGRESSING_COHORTS}}|${REPAIR_REGRESSING_COHORTS:-unavailable}|g" \
+      -e "s|{{GATE_OUTPUT}}|see run artifacts|g" \
+      -e "s|{{DIAGNOSIS}}|see opencode session log|g" \
+      -e "s|{{FIX_SUMMARY}}|$( git log -1 --format=%s HEAD )|g" \
+      -e "s|{{FILES_CHANGED}}|$( git diff --name-only HEAD~1..HEAD | tr '\n' ' ' )|g" \
+      -e "s|{{RATIONALE}}|automated repair attempt|g" \
+      -e "s|{{RESULT_ROWS}}|see history-repair.jsonl artifact|g" \
+      -e "s|{{RERUN_GATE_RESULT}}|$( [[ $RESOLVED == 1 ]] && echo 'pass' || echo 'fail' )|g" \
+      -e "s|{{BOOTSTRAP_STATE}}|${REPAIR_BOOTSTRAP_STATE:-unavailable}|g" \
       "$TEMPLATE_FILE" >> "$BODY_FILE"
   printf '\n---\n%s\n' "$BODY" >> "$BODY_FILE"
 else
   printf '%s\n' "$BODY" > "$BODY_FILE"
 fi
-gh pr create --title "$TITLE" --body-file "$BODY_FILE" --label "$LABELS" --base main || \
+gh pr create --title "$TITLE" --body-file "$BODY_FILE" --label "$LABELS" --base main --head "$BRANCH" || \
   echo "PR creation failed — evidence retained in run artifacts" >&2
 rm -f "$BODY_FILE"
 exit 0 # the nightly is red; the PR is the actionable output

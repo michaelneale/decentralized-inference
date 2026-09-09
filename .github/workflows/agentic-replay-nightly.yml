@@ -45,6 +45,8 @@ jobs:
       HF_HUB_OFFLINE: "1"
       HISTORY_LOCAL: ${{ github.workspace }}/.replay-history-cache
       OUTPUT_DIR: ${{ github.workspace }}/replay-artifacts
+      GATE_ENABLED: ${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}
+      PUBLISH_ENABLED: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
     steps:
       - name: Verify pinned replay runner
         shell: bash
@@ -106,6 +108,14 @@ jobs:
           LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
           LEVEL_ARGS=""
           for level in $LEVELS; do LEVEL_ARGS="$LEVEL_ARGS --concurrency $level"; done
+          DATASET_FILE="${MESH_AGENTIC_REPLAY_DATASET_FILE:-}"
+          if [[ -z "$DATASET_FILE" ]]; then
+            DATASET_FILE=$(ls "$HF_HUB_CACHE"/datasets--thoughtworks--agentic-coding-trajectories/snapshots/*/sessions.parquet 2>/dev/null | head -1 || true)
+          fi
+          if [[ -z "$DATASET_FILE" ]]; then
+            echo "sessions.parquet not found in the HF cache" >&2
+            exit 1
+          fi
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
@@ -118,7 +128,7 @@ jobs:
                 $LEVEL_ARGS \
                 --passes 2 \
                 --warmup-turns 4 \
-                --dataset-file "${MESH_AGENTIC_REPLAY_DATASET_FILE:-$HF_CACHE/datasets--thoughtworks--agentic-coding-trajectories/snapshots/*/sessions.parquet}" \
+                --dataset-file "$DATASET_FILE" \
                 --output "$OUTPUT_DIR/$family"; then
               FAILED=1
             fi
@@ -126,39 +136,84 @@ jobs:
           exit $FAILED # failures continue to the gate step via `if: always()`
 
       - name: Download cohort-matched history
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           rm -rf "$HISTORY_LOCAL"
-          HF_HUB_OFFLINE=0 hf download "$DATASET_REPO" \
-            --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" || \
+          if HF_HUB_OFFLINE=0 hf download "$DATASET_REPO" \
+            --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" 2> "$RUNNER_TEMP/hf-download.err"; then
+            exit 0
+          fi
+          # Only a genuinely missing dataset is a bootstrap run; auth,
+          # permission, and network failures must fail loudly.
+          python3 - "$DATASET_REPO" <<'PY' > "$RUNNER_TEMP/repo-exists.out" 2>&1
+          import os, sys
+          import huggingface_hub
+          repo = sys.argv[1]
+          try:
+              huggingface_hub.repo_info(repo, repo_type="dataset", token=os.environ.get("HF_TOKEN"))
+          except Exception as exc:
+              message = str(exc)
+              if "404" in message or "Entry Not Found" in message or "Repository Not Found" in message:
+                  sys.exit(3)
+              sys.exit(1)
+          PY
+          rc=$?
+          if [[ "$rc" == "0" ]]; then
+            echo "history dataset exists but download failed:" >&2
+            cat "$RUNNER_TEMP/hf-download.err" >&2; cat "$RUNNER_TEMP/repo-exists.out" >&2
+            exit 1
+          elif [[ "$rc" == "3" ]]; then
             echo "no history yet (bootstrap run)"
+          else
+            echo "history dataset lookup failed:" >&2
+            cat "$RUNNER_TEMP/hf-download.err" >&2; cat "$RUNNER_TEMP/repo-exists.out" >&2
+            exit 1
+          fi
 
       - name: Normalize history and gate on regression
         id: history
         if: always()
         run: |
           set -euo pipefail
+          BACKEND_SHA=$(python3 - "$OUTPUT_DIR" <<'PY'
+          import json, sys, pathlib
+          output = pathlib.Path(sys.argv[1])
+          digests = set()
+          for run_doc in output.glob("*/run.json"):
+              for build in json.loads(run_doc.read_text()).get("builds", []):
+                  if build.get("binary_sha256"):
+                      digests.add(build["binary_sha256"])
+          if len(digests) > 1:
+              print(f"multiple backend binaries: {sorted(digests)}", file=sys.stderr)
+              sys.exit(1)
+          print(digests.pop() if digests else "")
+          PY
+          )
           args=(
             --matrix "$MATRIX_FILE"
-            --summary-dir "$OUTPUT_DIR/summary"
+            --replay-dir "$OUTPUT_DIR"
+            --label pr
             --hardware "$OUTPUT_DIR/hardware.json"
             --source-sha "$(git rev-parse HEAD)"
             --replay <(python3 -c "import json;print(json.dumps(json.load(open('$MATRIX_FILE'))['replay']))")
             --output "$OUTPUT_DIR/summary/history.jsonl"
           )
+          if [[ -n "$BACKEND_SHA" ]]; then
+            args+=(--backend-binary-sha256 "$BACKEND_SHA")
+          fi
           if [[ -d "$HISTORY_LOCAL/data/runs" ]]; then
             args+=(--baseline "$HISTORY_LOCAL/data/runs")
           fi
-          if [[ "${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}" == "1" && github.event_name != 'pull_request' ]]; then
+          if [[ "$GATE_ENABLED" == "1" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             args+=(--gate)
           fi
           python3 scripts/agentic-replay-history.py "${args[@]}"
 
       - name: Publish immutable run shard and card
-        if: always() && steps.history.outcome != 'skipped'
+        if: always() && steps.history.outcome != 'skipped' && github.event_name != 'pull_request'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -177,6 +232,10 @@ jobs:
 
       - name: Open repair PR on regression (opencode loop)
         if: failure() && github.event_name != 'pull_request'
+        permissions:
+          # The repair script pushes its branch and opens a PR via GH_TOKEN.
+          contents: write
+          pull-requests: write
         env:
           # Same token as the llama canary repair loop, per James 2026-09-08.
           GH_TOKEN: ${{ secrets.CANARY_REPAIR_TOKEN }}
