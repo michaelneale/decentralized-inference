@@ -909,3 +909,184 @@ fn disconnect_is_dropped_and_cannot_audit_model_access_as_success() {
         proxy::RouteDispatchOutcome::Responded(200)
     ));
 }
+
+// --- #1668 round-2: call-site test for route_missing_local_model ---
+
+/// Seed a `mesh::Node` with one admitted `Host` peer serving `model` at a
+/// fake address. `hosts_for_model` returns the peer's `EndpointId` without
+/// any gossip round trip, so `remote_mesh_targets` returns `Some` and
+/// `route_missing_local_model` takes the remote-mesh branch.
+fn test_remote_peer(seed: u32, model: &str) -> mesh::PeerInfo {
+    // Deterministic fake id derived from seed so callers can build multiple
+    // non-colliding peers.
+    let secret = {
+        let mut bytes = [0u8; 32];
+        let seed_bytes = seed.to_le_bytes();
+        bytes[..4].copy_from_slice(&seed_bytes);
+        bytes[4] = 0xde;
+        bytes[5] = 0xad;
+        iroh::SecretKey::try_from(bytes).expect("fixed-length test key")
+    };
+    let peer_id = iroh::EndpointId::from(secret.public());
+    mesh::PeerInfo {
+        id: peer_id,
+        addr: iroh::EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        },
+        mesh_id: None,
+        mesh_policy_hash: None,
+        genesis_policy: None,
+        // Host role is required for `accepts_http_inference()` and
+        // therefore for `routes_http_model()` and `hosts_for_model()`.
+        role: mesh::NodeRole::Host { http_port: 9337 },
+        first_joined_mesh_ts: None,
+        models: vec![model.to_string()],
+        vram_bytes: 16 * 1024 * 1024 * 1024,
+        rtt_ms: None,
+        model_source: None,
+        // admitted: true required for `is_admitted()`.
+        admitted: true,
+        serving_models: vec![model.to_string()],
+        hosted_models: vec![model.to_string()],
+        hosted_models_known: true,
+        available_models: vec![],
+        requested_models: vec![],
+        explicit_model_interests: vec![],
+        last_seen: std::time::Instant::now(),
+        last_mentioned: std::time::Instant::now(),
+        version: None,
+        gpu_name: None,
+        hostname: None,
+        is_soc: None,
+        gpu_vram: None,
+        gpu_reserved_bytes: None,
+        gpu_mem_bandwidth_gbps: None,
+        gpu_compute_tflops_fp32: None,
+        gpu_compute_tflops_fp16: None,
+        available_model_metadata: vec![],
+        experts_summary: None,
+        available_model_sizes: std::collections::HashMap::new(),
+        served_model_descriptors: vec![],
+        served_model_runtime: vec![],
+        owner_attestation: None,
+        release_attestation_summary: crate::ReleaseAttestationSummary::default(),
+        artifact_transfer_supported: false,
+        stage_protocol_generation_supported: false,
+        stage_status_list_supported: false,
+        local_gguf_content_id_supported: false,
+        advertised_model_throughput: vec![],
+        cache_affinity: None,
+        display_rtt: None,
+        selected_path: None,
+        propagated_latency: None,
+        owner_summary: crate::crypto::OwnershipSummary::default(),
+        inference_admission_state: None,
+    }
+}
+
+/// Verifies that `route_missing_local_model` enters the remote-mesh branch
+/// when at least one admitted peer serves the requested model.
+///
+/// Setup: a `Node` seeded with one admitted `Host` peer via
+/// `insert_test_peer` so `hosts_for_model` returns the peer without gossip.
+/// A loopback `TcpListener`/`TcpStream` pair supplies a real `ClientStream`.
+/// The request carries a client-stamped nonce header so the function can
+/// read it from `capsule_nonce_headers()`. `plugin_manager` is `None` —
+/// `broadcast_channel_message` is a no-op with empty plugins, so omitting
+/// it avoids the overhead without changing the publish-call coverage; the
+/// envelope shapes are already pinned by the unit tests in `openai_exchange`.
+///
+/// The peer's `EndpointAddr` has no reachable sockets, so the dispatch
+/// returns an error outcome — but the remote-mesh branch was entered, which
+/// is what this test pins. An outcome of `Responded(404)` would mean no
+/// remote-mesh target was found (the peer wasn't seen), which would be a
+/// test failure.
+#[tokio::test]
+async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_model() {
+    let model = "acme/remote-model:Q4_K_M";
+    let node = mesh::Node::new_for_tests(crate::mesh::NodeRole::Worker)
+        .await
+        .expect("test node");
+    node.insert_test_peer(test_remote_peer(1, model)).await;
+
+    let targets = election::ModelTargets::default();
+    let affinity = affinity::AffinityRouter::new();
+
+    // Loopback TCP pair — the server side becomes the ClientStream.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("local addr");
+    let client_connect = tokio::net::TcpStream::connect(addr);
+    let server_accept = async { listener.accept().await.map(|(s, _)| s) };
+    let (_client_side, server_side) = tokio::join!(client_connect, server_accept);
+    let tcp_stream = server_side.expect("accept server side");
+
+    // Build a minimal chat-completion request stamped with a client nonce so
+    // `capsule_nonce_headers()` returns `Some`.
+    let body =
+        br#"{"model":"acme/remote-model:Q4_K_M","messages":[{"role":"user","content":"hi"}]}"#;
+    let nonce = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    let raw = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nx-capsule-client-nonce: {nonce}\r\n\r\n",
+        len = body.len(),
+        nonce = nonce,
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(body.iter().copied())
+    .collect::<Vec<u8>>();
+    let request = proxy::BufferedHttpRequest {
+        raw,
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: body.len(),
+        completion_tokens: None,
+        stream: None,
+        model_name: Some(model.to_owned()),
+        request_object_request_ids: Vec::new(),
+        response_adapter: proxy::ResponseAdapter::OpenAiChatCompletionsJson,
+        correlation_id: None,
+    };
+
+    // Confirm the nonce header round-trips through the raw bytes.
+    let (parsed_nonce, _origin) = request.capsule_nonce_headers();
+    assert_eq!(
+        parsed_nonce.as_deref(),
+        Some(nonce),
+        "nonce header must be readable from the raw request bytes"
+    );
+
+    let ctx = IngressRouteContext {
+        node: &node,
+        targets: &targets,
+        affinity: &affinity,
+        plugin_manager: None,
+    };
+    let lifecycle = OpenAiLifecycleAttachment::unowned();
+
+    let outcome = route_missing_local_model(
+        tcp_stream.into(),
+        &request,
+        &ctx,
+        model,
+        None,
+        lifecycle.route_observer(),
+    )
+    .await;
+
+    // A 404 would mean remote_mesh_targets returned None (peer not seen).
+    // Any other outcome — Failed, Dropped, or a non-404 status — proves the
+    // remote-mesh branch was entered, which is what this test pins.
+    assert!(
+        !matches!(outcome, proxy::RouteDispatchOutcome::Responded(404)),
+        "expected remote-mesh branch (not 404), got {outcome:?} — \
+         the test peer may not be visible to hosts_for_model()"
+    );
+}
