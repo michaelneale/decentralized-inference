@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
+use skippy_model::package_carrier::resolve_package_carrier;
 use skippy_package_format::{
     Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, PackageManifest, Sidecar, SidecarKind,
     SourceModel, Tensor, TensorCatalog,
@@ -51,21 +52,7 @@ pub(crate) fn write_package(
         "output already contains model-package.json; use a new directory for v2 creation"
     );
     let mut progress = PackageProgress::new(planned.len() + projectors.len() + 2);
-    progress.start_step("shared/metadata.gguf")?;
-    let metadata_artifact = emit_metadata_artifact(
-        &source,
-        &inventory,
-        &out_dir,
-        &artifact_hook,
-        resume_existing_artifacts,
-    )?;
-    progress.finish_step(&format!(
-        "{} {}",
-        metadata_artifact.path,
-        format_bytes(metadata_artifact.byte_size)
-    ))?;
-    manifest.artifact_catalog.entries.push(metadata_artifact);
-
+    let no_hook = ArtifactHook { command: None };
     let source_tensors = source_tensors_by_name(&inventory)?;
     let common_names = planned
         .iter()
@@ -83,7 +70,7 @@ pub(crate) fn write_package(
             inventory.layer_count,
             stage_index,
             &out_dir,
-            &artifact_hook,
+            &no_hook,
             resume_existing_artifacts,
         )?;
         progress.finish_step(&format!(
@@ -107,6 +94,39 @@ pub(crate) fn write_package(
         "emitted payload tensor catalog differs from independent source inventory"
     );
     manifest.tensor_catalog = TensorCatalog { entries: catalog };
+    progress.start_step("shared/metadata.gguf")?;
+    let metadata_artifact = emit_metadata_artifact(
+        &source,
+        &inventory,
+        &manifest,
+        &out_dir,
+        &no_hook,
+        resume_existing_artifacts,
+    )?;
+    progress.finish_step(&format!(
+        "{} {}",
+        metadata_artifact.path,
+        format_bytes(metadata_artifact.byte_size)
+    ))?;
+    manifest
+        .artifact_catalog
+        .entries
+        .insert(0, metadata_artifact);
+    manifest.package_id = manifest.computed_package_id()?;
+    let resolved = resolve_package_carrier(manifest.clone(), out_dir.join("shared/metadata.gguf"))?;
+    ensure!(
+        resolved.model_metadata == manifest.model_metadata,
+        "metadata carrier model metadata differs from the independent source"
+    );
+    ensure!(
+        resolved.tensor_catalog == manifest.tensor_catalog,
+        "metadata carrier tensor inventory differs from the independently verified payloads"
+    );
+    for artifact in &manifest.artifact_catalog.entries {
+        let path = out_dir.join(&artifact.path);
+        run_artifact_hook(&artifact_hook, &path, &artifact.path)?;
+        verify_hook_result(artifact, &path, &artifact_hook)?;
+    }
     for (index, projector) in projectors.iter().enumerate() {
         let artifact = copy_projector(projector, index, &out_dir, resume_existing_artifacts)?;
         progress.start_step(&artifact.path)?;
@@ -164,6 +184,10 @@ fn manifest_from_source(
         .iter()
         .find(|s| &s.source_file.path == primary)
         .context("primary source absent from independent inventory")?;
+    let mut model_metadata = inventory.shards[0].directory.metadata.clone();
+    for key in ["split.no", "split.count", "split.tensors.count"] {
+        model_metadata.remove(key);
+    }
     Ok(PackageManifest {
         schema_version: PACKAGE_SCHEMA_VERSION,
         package_id: String::new(),
@@ -184,7 +208,7 @@ fn manifest_from_source(
         },
         format: "gguf".to_string(),
         layer_count: inventory.layer_count,
-        model_metadata: inventory.shards[0].directory.metadata.clone(),
+        model_metadata,
         artifact_catalog: ArtifactCatalog {
             entries: Vec::new(),
         },
@@ -259,6 +283,7 @@ fn source_tensors_by_name(inventory: &SourceInventory) -> Result<BTreeMap<String
 fn emit_metadata_artifact(
     source: &ModelSource,
     inventory: &SourceInventory,
+    manifest: &PackageManifest,
     out_dir: &Path,
     artifact_hook: &ArtifactHook,
     resume: bool,
@@ -268,7 +293,26 @@ fn emit_metadata_artifact(
     create_parent_dir(&path)?;
     ensure_not_source_file(source, &path)?;
     if !path.exists() {
-        write_gguf_metadata_from_parts(&source.paths, &path)
+        let sidecars = manifest
+            .sidecars
+            .iter()
+            .map(|sidecar| sidecar.artifact_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut payloads = manifest
+            .artifact_catalog
+            .entries
+            .iter()
+            .filter(|artifact| {
+                artifact.id != manifest.source_model.metadata_artifact_id
+                    && !sidecars.contains(artifact.id.as_str())
+            })
+            .collect::<Vec<_>>();
+        payloads.sort_by(|left, right| left.id.cmp(&right.id));
+        let payload_paths = payloads
+            .iter()
+            .map(|artifact| out_dir.join(&artifact.path))
+            .collect::<Vec<_>>();
+        write_gguf_metadata_from_parts(&payload_paths, &path)
             .with_context(|| format!("write GGUF metadata carrier {}", path.display()))?;
     } else {
         ensure!(

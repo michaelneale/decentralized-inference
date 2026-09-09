@@ -10,8 +10,10 @@ declaring private copies of the manifest.
 ## Purpose
 
 Package v2 describes the complete model inventory without assigning tensors to
-runtime stages. A graph-derived `StageSlicePlan` selects exact tensor ids from
-the catalog after the normal model graph is built in metadata-only mode.
+runtime stages. A small JSON root binds the package artifacts, while a
+payload-free GGUF carrier holds the complete model metadata, tensor directory,
+and payload locators. A graph-derived `StageSlicePlan` selects exact tensor ids
+after the normal model graph is built in metadata-only mode.
 
 The package format has no model-family staging policy, endpoint ownership, or
 cut-specific artifacts. Per-layer GGUF files remain valid physical containers,
@@ -27,17 +29,20 @@ provenance and verification.
 
 ## Top-Level Contract
 
-`PackageManifest` contains:
+The serialized `model-package.json` root contains:
 
 - `schema_version`: exactly `2`;
 - `package_id`: canonical `sha256:<lowercase-hex>` identity;
 - source and model identities;
-- complete graph-construction metadata;
 - an artifact catalog;
-- a tensor catalog;
-- optional tokenizer, projector, and generation sidecars;
+- optional projector and generation sidecars;
 - native ABI and package-generator versions;
 - creation time for provenance.
+
+`model_metadata` and `tensor_catalog` are runtime fields reconstructed from the
+metadata carrier. They are rejected if they appear in the JSON root. This keeps
+tokenizer arrays and tensor descriptors in their native GGUF representation and
+prevents two serialized copies from disagreeing.
 
 Unknown fields are rejected. Schema evolution therefore requires a deliberate
 schema-version change rather than silently changing the meaning of an existing
@@ -48,15 +53,16 @@ package.
 The package id is computed by the shared crate as follows:
 
 1. Clone the manifest and replace `package_id` with the empty string.
-2. Sort source files by path, artifacts by id, tensors by id, and sidecars by
+2. Sort source files by path, artifacts by id, and sidecars by
    `(kind, name, artifact_id)`.
-3. Serialize the normalized manifest with the shared Rust schema.
+3. Serialize the normalized root with the shared Rust schema.
 4. Hash the serialized bytes with SHA-256 and prefix the lowercase digest with
    `sha256:`.
 
-Validation recomputes this identity. Changing metadata, an artifact digest, a
-tensor record, ABI requirements, or generator provenance changes the package
-identity. Enumeration order alone does not.
+Validation recomputes this identity. Changing the carrier digest, a payload
+artifact digest, ABI requirements, or generator provenance changes the package
+identity. The carrier digest transitively binds its model metadata, tensor
+directory, and payload locator plane. Enumeration order alone does not.
 
 ## Artifact Catalog
 
@@ -69,25 +75,43 @@ The artifact digest binds the complete file, including its metadata and tensor
 directory. Tensor records may rely on that digest or additionally provide a
 tensor-level SHA-256 digest.
 
-## Tensor Catalog
+## Metadata Carrier
 
-Each logical source tensor appears once and contains:
+`source_model.metadata_artifact_id` selects a zero-payload GGUF artifact. Its
+file length equals its GGUF data offset. The carrier contains the source model's
+normalized GGUF metadata and complete tensor directory plus these typed Skippy
+keys:
+
+- `skippy.package.metadata_only = true`;
+- `skippy.package.part_count`: number of payload GGUF artifacts;
+- `skippy.package.locator_schema = 1`;
+- `skippy.package.tensor_part`: `uint32[]` payload artifact indices;
+- `skippy.package.tensor_offset`: `uint64[]` absolute payload offsets;
+- `skippy.package.tensor_size`: `uint64[]` stored payload lengths;
+- `skippy.package.tensor_alignment`: `uint32[]` required alignments.
+
+Each locator array has exactly one entry per carrier tensor and follows GGUF
+tensor-directory order. Payload artifacts are indexed by artifact id after
+excluding the metadata carrier and sidecars. The runtime rejects an unknown
+locator version, wrong array type or length, invalid part index, invalid
+alignment, or an extent outside the declared artifact size.
+
+## Runtime Tensor Catalog
+
+Carrier resolution reconstructs one runtime record for each logical source
+tensor with:
 
 - stable tensor id and native tensor name;
 - GGML type number;
 - dimensions in native GGUF order;
 - optional stage-independent layer ordinal for physical grouping and
   diagnostics only;
-- owned storage or an explicit alias.
+- owned storage in one payload artifact.
 
 Owned storage records use an absolute byte offset within the artifact, stored
 byte length, power-of-two alignment, and integrity mode. Validation rejects
 unknown artifacts, misalignment, integer overflow, out-of-bounds ranges, and
 overlap between independently owned tensor records.
-
-Alias records point directly to an owned tensor. Alias chains are rejected.
-Alias GGML type and dimensions must match the target. This makes shared storage
-explicit without allowing overlapping owned ranges to masquerade as aliases.
 
 Tensor ids and names are both unique. Layer ordinals must be less than the
 manifest layer count and dimensions must be non-zero.
@@ -103,10 +127,12 @@ a typed manifest field rather than a generic sidecar.
 
 ## Loading Rule
 
-The runtime must validate the manifest before resolving a graph plan. It then
-maps `StageSlicePlan.tensor_dependencies` to catalog entries by exact tensor id,
-verifies artifact integrity, and reads only owned storage required by the
-closure. Aliases resolve to their owned target before allocation.
+The runtime validates the JSON root, fetches and verifies its declared metadata
+carrier, resolves the runtime model metadata and tensor catalog, and validates
+the complete package inventory before graph planning. It then maps
+`StageSlicePlan.tensor_dependencies` to catalog entries by exact tensor id,
+verifies payload artifact integrity, and reads only storage required by the
+closure.
 
 No runtime path accepts package v1 after the atomic v2 cutover. A v1 converter
 is offline tooling only and may certify completeness only against the original

@@ -177,8 +177,13 @@ fn manifest_round_trip_is_stable() {
     let manifest = fixture();
     let encoded = serde_json::to_string_pretty(&manifest).unwrap();
     let decoded: PackageManifest = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, manifest);
-    decoded.validate().unwrap();
+    assert!(decoded.model_metadata.is_empty());
+    assert!(decoded.tensor_catalog.entries.is_empty());
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        serde_json::to_value(&manifest).unwrap()
+    );
+    decoded.validate_root().unwrap();
 }
 
 #[test]
@@ -229,10 +234,10 @@ fn package_identity_ignores_catalog_enumeration_order() {
 }
 
 #[test]
-fn package_identity_binds_tensor_metadata() {
+fn package_identity_binds_metadata_carrier() {
     let manifest = fixture();
     let mut changed = manifest.clone();
-    changed.tensor_catalog.entries[0].dimensions = vec![32, 16];
+    changed.artifact_catalog.entries[0].sha256 = "1".repeat(64);
 
     let error = changed.validate().unwrap_err();
     assert!(
@@ -391,8 +396,13 @@ fn generation_with_all_variants_round_trips_and_passes() {
 
     let encoded = serde_json::to_string_pretty(&manifest).unwrap();
     let decoded: PackageManifest = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, manifest);
-    decoded.validate().unwrap();
+    assert!(decoded.model_metadata.is_empty());
+    assert!(decoded.tensor_catalog.entries.is_empty());
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        serde_json::to_value(&manifest).unwrap()
+    );
+    decoded.validate_root().unwrap();
 
     let value = serde_json::to_value(&manifest).unwrap();
     let strategy = &value["generation"]["speculative_decoding"]["strategies"]["mtp"];
@@ -513,12 +523,18 @@ fn accepts_inline_native_mtp_strategy_with_window_policy() {
     });
     let decoded: PackageManifest = serde_json::from_value(encoded).unwrap();
     assert!(decoded.generation.is_some());
-    let mut decoded = decoded;
+    let mut decoded = decoded.resolve_inventory(
+        encoded_manifest.model_metadata.clone(),
+        encoded_manifest.tensor_catalog.clone(),
+    );
     decoded.package_id = decoded.computed_package_id().unwrap();
     decoded.validate().unwrap();
     let redecoded: PackageManifest =
         serde_json::from_str(&serde_json::to_string(&decoded).unwrap()).unwrap();
-    assert_eq!(redecoded, decoded);
+    assert_eq!(
+        serde_json::to_value(redecoded).unwrap(),
+        serde_json::to_value(&decoded).unwrap()
+    );
     let mut with_generation = encoded_manifest;
     with_generation.generation = decoded.generation;
     with_generation.package_id = with_generation.computed_package_id().unwrap();
@@ -596,6 +612,10 @@ fn rejects_native_mtp_strategy_with_neither_nor_both_forms() {
 fn rejects_proposer_kind_mismatches() {
     let build = |strategies: serde_json::Value, proposers: serde_json::Value| {
         let manifest = fixture();
+        let inventory = (
+            manifest.model_metadata.clone(),
+            manifest.tensor_catalog.clone(),
+        );
         let mut encoded = serde_json::to_value(manifest).unwrap();
         encoded["generation"] = serde_json::json!({
             "speculative_decoding": {
@@ -605,7 +625,7 @@ fn rejects_proposer_kind_mismatches() {
             }
         });
         let decoded: PackageManifest = serde_json::from_value(encoded).unwrap();
-        let mut decoded = decoded;
+        let mut decoded = decoded.resolve_inventory(inventory.0, inventory.1);
         decoded.package_id = decoded.computed_package_id().unwrap();
         decoded.validate().unwrap_err()
     };
@@ -692,6 +712,10 @@ fn rejects_proposer_kind_mismatches() {
     }
 
     let manifest = fixture();
+    let inventory = (
+        manifest.model_metadata.clone(),
+        manifest.tensor_catalog.clone(),
+    );
     let mut encoded = serde_json::to_value(manifest).unwrap();
     encoded["generation"] = serde_json::json!({
         "speculative_decoding": {
@@ -713,7 +737,7 @@ fn rejects_proposer_kind_mismatches() {
     encoded["generation"]["speculative_decoding"]["proposers"]["cache-head"] =
         cache_json["cache-head"].take();
     let decoded: PackageManifest = serde_json::from_value(encoded).unwrap();
-    let mut decoded = decoded;
+    let mut decoded = decoded.resolve_inventory(inventory.0, inventory.1);
     decoded.package_id = decoded.computed_package_id().unwrap();
     decoded.validate().unwrap();
 }

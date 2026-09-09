@@ -11,8 +11,7 @@ pub mod stage_admission;
 
 pub const PACKAGE_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageManifest {
     pub schema_version: u32,
     pub package_id: String,
@@ -23,13 +22,90 @@ pub struct PackageManifest {
     pub model_metadata: BTreeMap<String, Value>,
     pub artifact_catalog: ArtifactCatalog,
     pub tensor_catalog: TensorCatalog,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sidecars: Vec<Sidecar>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<Generation>,
     pub native_abi_version: String,
     pub generator_version: String,
     pub created_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackageRoot {
+    schema_version: u32,
+    package_id: String,
+    model_id: String,
+    source_model: SourceModel,
+    format: String,
+    layer_count: u32,
+    artifact_catalog: ArtifactCatalog,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sidecars: Vec<Sidecar>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<Generation>,
+    native_abi_version: String,
+    generator_version: String,
+    created_at_unix_secs: u64,
+}
+
+impl From<&PackageManifest> for PackageRoot {
+    fn from(manifest: &PackageManifest) -> Self {
+        Self {
+            schema_version: manifest.schema_version,
+            package_id: manifest.package_id.clone(),
+            model_id: manifest.model_id.clone(),
+            source_model: manifest.source_model.clone(),
+            format: manifest.format.clone(),
+            layer_count: manifest.layer_count,
+            artifact_catalog: manifest.artifact_catalog.clone(),
+            sidecars: manifest.sidecars.clone(),
+            generation: manifest.generation.clone(),
+            native_abi_version: manifest.native_abi_version.clone(),
+            generator_version: manifest.generator_version.clone(),
+            created_at_unix_secs: manifest.created_at_unix_secs,
+        }
+    }
+}
+
+impl PackageRoot {
+    fn into_unresolved(self) -> PackageManifest {
+        PackageManifest {
+            schema_version: self.schema_version,
+            package_id: self.package_id,
+            model_id: self.model_id,
+            source_model: self.source_model,
+            format: self.format,
+            layer_count: self.layer_count,
+            model_metadata: BTreeMap::new(),
+            artifact_catalog: self.artifact_catalog,
+            tensor_catalog: TensorCatalog {
+                entries: Vec::new(),
+            },
+            sidecars: self.sidecars,
+            generation: self.generation,
+            native_abi_version: self.native_abi_version,
+            generator_version: self.generator_version,
+            created_at_unix_secs: self.created_at_unix_secs,
+        }
+    }
+}
+
+impl Serialize for PackageManifest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        PackageRoot::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        PackageRoot::deserialize(deserializer).map(PackageRoot::into_unresolved)
+    }
 }
 
 impl PackageManifest {
@@ -37,18 +113,28 @@ impl PackageManifest {
     /// Creation/certification must separately compare with independent source
     /// directories and verify the artifact bytes; a manifest cannot certify itself.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
+        self.validate_with_inventory(true)
+    }
+
+    /// Validate the small on-disk root before its metadata carrier is opened.
+    pub fn validate_root(&self) -> Result<(), ValidationErrors> {
+        self.validate_with_inventory(false)
+    }
+
+    fn validate_with_inventory(&self, require_inventory: bool) -> Result<(), ValidationErrors> {
         let mut issues = Vec::new();
-        validate_manifest_fields(self, &mut issues);
+        validate_manifest_fields(self, require_inventory, &mut issues);
 
         let artifacts = collect_artifacts(&self.artifact_catalog.entries, &mut issues);
-        let tensors = collect_tensors(self, &mut issues);
-
         validate_metadata_artifact_binding(self, &artifacts, &mut issues);
-        validate_owned_tensor_storage(&self.tensor_catalog.entries, &artifacts, &mut issues);
-        validate_aliases(&self.tensor_catalog.entries, &tensors, &mut issues);
         validate_sidecars(&self.sidecars, &artifacts, &mut issues);
         if let Some(generation) = &self.generation {
             validate_generation(generation, self.layer_count, &mut issues);
+        }
+        if require_inventory {
+            let tensors = collect_tensors(self, &mut issues);
+            validate_owned_tensor_storage(&self.tensor_catalog.entries, &artifacts, &mut issues);
+            validate_aliases(&self.tensor_catalog.entries, &tensors, &mut issues);
         }
 
         if issues.is_empty() {
@@ -59,7 +145,7 @@ impl PackageManifest {
     }
 
     pub fn computed_package_id(&self) -> Result<String, serde_json::Error> {
-        let mut normalized = self.clone();
+        let mut normalized = PackageRoot::from(self);
         normalized.package_id.clear();
         normalized.created_at_unix_secs = 0;
         normalized
@@ -70,10 +156,6 @@ impl PackageManifest {
             .artifact_catalog
             .entries
             .sort_by(|left, right| left.id.cmp(&right.id));
-        normalized
-            .tensor_catalog
-            .entries
-            .sort_by(|left, right| left.id.cmp(&right.id));
         normalized.sidecars.sort();
         let digest = Sha256::digest(serde_json::to_vec(&normalized)?);
         let hex = digest
@@ -81,6 +163,17 @@ impl PackageManifest {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         Ok(format!("sha256:{hex}"))
+    }
+
+    /// Attach the inventory derived from the verified metadata carrier.
+    pub fn resolve_inventory(
+        mut self,
+        model_metadata: BTreeMap<String, Value>,
+        tensor_catalog: TensorCatalog,
+    ) -> Self {
+        self.model_metadata = model_metadata;
+        self.tensor_catalog = tensor_catalog;
+        self
     }
 }
 
@@ -379,7 +472,11 @@ impl fmt::Display for ValidationErrors {
 
 impl std::error::Error for ValidationErrors {}
 
-fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<ValidationIssue>) {
+fn validate_manifest_fields(
+    manifest: &PackageManifest,
+    require_inventory: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
     if manifest.schema_version != PACKAGE_SCHEMA_VERSION {
         push_issue(
             issues,
@@ -410,7 +507,7 @@ fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<Validat
         &manifest.source_model.metadata_artifact_id,
         issues,
     );
-    if manifest.model_metadata.is_empty() {
+    if require_inventory && manifest.model_metadata.is_empty() {
         push_issue(
             issues,
             ValidationCode::MissingValue,
@@ -418,7 +515,7 @@ fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<Validat
             "model metadata must not be empty",
         );
     }
-    if !manifest.model_metadata.contains_key("general.architecture") {
+    if require_inventory && !manifest.model_metadata.contains_key("general.architecture") {
         push_issue(
             issues,
             ValidationCode::MissingValue,
@@ -442,7 +539,7 @@ fn validate_manifest_fields(manifest: &PackageManifest, issues: &mut Vec<Validat
             "artifact catalog must not be empty",
         );
     }
-    if manifest.tensor_catalog.entries.is_empty() {
+    if require_inventory && manifest.tensor_catalog.entries.is_empty() {
         push_issue(
             issues,
             ValidationCode::MissingValue,

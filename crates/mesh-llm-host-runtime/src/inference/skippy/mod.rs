@@ -69,6 +69,8 @@ pub use materialization::{
     remove_materialized_stages_for_sources, resolve_hf_package_to_local,
     resolve_package_v2_full_model_to_local, resolve_stage_load_package,
 };
+#[cfg(test)]
+pub(crate) use package::write_test_package_v2_fixture;
 pub use package::{
     SkippyPackageIdentity, identity_from_layer_package, identity_from_package_v2,
     synthetic_direct_gguf_package,

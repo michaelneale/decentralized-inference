@@ -41,7 +41,8 @@ fn write(source: &Path, out: &Path, resume: bool) -> Result<()> {
 }
 
 fn read_manifest(out: &Path) -> PackageManifest {
-    serde_json::from_slice(&fs::read(out.join("model-package.json")).unwrap()).unwrap()
+    let root = serde_json::from_slice(&fs::read(out.join("model-package.json")).unwrap()).unwrap();
+    resolve_package_carrier(root, out.join("shared/metadata.gguf")).unwrap()
 }
 
 #[test]
@@ -91,11 +92,9 @@ fn writer_repacks_all_source_tensors_by_native_role() {
             _ => panic!("independent allocations are not aliases"),
         }
     }
-    let json = serde_json::to_string(&manifest).unwrap();
-    assert_eq!(
-        manifest,
-        serde_json::from_str::<PackageManifest>(&json).unwrap()
-    );
+    let json = serde_json::to_value(&manifest).unwrap();
+    assert!(json.get("model_metadata").is_none());
+    assert!(json.get("tensor_catalog").is_none());
     assert_eq!(manifest.package_id, manifest.computed_package_id().unwrap());
 }
 
@@ -437,9 +436,10 @@ fn upload_hook_can_delete_verified_copies_without_losing_inventory() {
         false,
     )
     .unwrap();
-    let manifest = read_manifest(&out);
-    manifest.validate().unwrap();
-    assert_eq!(manifest.tensor_catalog.entries.len(), 2);
+    let manifest: PackageManifest =
+        serde_json::from_slice(&fs::read(out.join("model-package.json")).unwrap()).unwrap();
+    manifest.validate_root().unwrap();
+    assert_eq!(manifest.artifact_catalog.entries.len(), 2);
     assert!(
         manifest
             .artifact_catalog

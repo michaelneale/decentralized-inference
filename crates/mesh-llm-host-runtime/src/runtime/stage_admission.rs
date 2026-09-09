@@ -366,10 +366,9 @@ pub fn realize_native_stage_chain(
             .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
     )
     .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
-    manifest
-        .validate()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("validate package-v2 manifest")?;
+    let manifest =
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, package_dir)
+            .context("resolve package-v2 metadata carrier")?;
     let computed_package_id = manifest
         .computed_package_id()
         .context("compute package-v2 identity")?;

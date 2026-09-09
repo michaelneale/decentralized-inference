@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use skippy_model::gguf_catalog::read_gguf_metadata_catalog;
+use skippy_model::package_carrier::resolve_package_carrier;
 use skippy_package_format::{Artifact, PackageManifest, SourceFile, Tensor, TensorStorage};
 
 use crate::hash::file_sha256;
@@ -34,11 +34,25 @@ pub(crate) fn verify_package(
     let manifest_path = contained_file(&root, "model-package.json")?;
     let manifest: PackageManifest = serde_json::from_slice(&fs::read(manifest_path)?)
         .context("read v2 manifest (v1 input is not supported)")?;
-    manifest.validate()?;
+    manifest.validate_root()?;
     ensure!(
         manifest.format == "gguf",
         "only GGUF v2 packages are supported"
     );
+    // The expected primary filename comes from the caller, never the manifest.
+    let primary = source_file
+        .or_else(|| source.file_name()?.to_str())
+        .context("source primary filename is required")?;
+    let inventory = SourceInventory::read_local(source, primary)?;
+    let projectors = read_projectors(source_projectors)?;
+    let sources: Vec<_> = inventory.shards.iter().chain(&projectors).collect();
+    let artifacts = verify_artifact_files(&root, &manifest, &sources)?;
+    let metadata_artifact_id = manifest.source_model.metadata_artifact_id.clone();
+    let metadata_path = artifacts
+        .get(metadata_artifact_id.as_str())
+        .context("validated metadata artifact is absent")?;
+    let manifest = resolve_package_carrier(manifest, metadata_path)?;
+    verify_source_identity(&manifest, &inventory, primary)?;
     ensure!(
         manifest
             .tensor_catalog
@@ -47,15 +61,6 @@ pub(crate) fn verify_package(
             .all(|t| matches!(t.storage, TensorStorage::Owned { .. })),
         "alias claims cannot be proven by the pinned native GGUF inspector"
     );
-    // The expected primary filename comes from the caller, never the manifest.
-    let primary = source_file
-        .or_else(|| source.file_name()?.to_str())
-        .context("source primary filename is required")?;
-    let inventory = SourceInventory::read_local(source, primary)?;
-    verify_source_identity(&manifest, &inventory, primary)?;
-    let projectors = read_projectors(source_projectors)?;
-    let sources: Vec<_> = inventory.shards.iter().chain(&projectors).collect();
-    let artifacts = verify_artifact_files(&root, &manifest, &sources)?;
     let expected = source_tensor_locations(&inventory)?;
     let declared: BTreeMap<_, _> = manifest
         .tensor_catalog
@@ -80,12 +85,7 @@ pub(crate) fn verify_package(
     let mut written = BTreeMap::new();
     let mut written_layer_ordinals = BTreeMap::new();
     let mut used = BTreeSet::new();
-    let metadata_artifact_id = manifest.source_model.metadata_artifact_id.as_str();
-    let metadata_path = artifacts
-        .get(metadata_artifact_id)
-        .context("validated metadata artifact is absent")?;
-    verify_metadata_carrier(metadata_path, &inventory)?;
-    used.insert(metadata_artifact_id.to_string());
+    used.insert(metadata_artifact_id.clone());
     for artifact in &manifest.artifact_catalog.entries {
         if artifact.id == metadata_artifact_id || sidecar_ids.contains(artifact.id.as_str()) {
             continue;
@@ -167,65 +167,6 @@ pub(crate) fn verify_package(
         checked_tensors: expected.len(),
         checked_projectors: projectors.len(),
     })
-}
-
-fn verify_metadata_carrier(path: &Path, source: &SourceInventory) -> Result<()> {
-    let carrier = read_gguf_metadata_catalog(path)?;
-    ensure!(
-        carrier.artifact_bytes == carrier.data_start,
-        "metadata artifact contains tensor payload bytes"
-    );
-    ensure!(
-        carrier
-            .metadata
-            .get("skippy.package.metadata_only")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true),
-        "metadata artifact is missing the metadata-only marker"
-    );
-    ensure!(
-        carrier
-            .metadata
-            .get("skippy.package.part_count")
-            .and_then(serde_json::Value::as_u64)
-            == Some(source.shards.len() as u64),
-        "metadata artifact source part count differs from independent source"
-    );
-
-    let mut carrier_metadata = carrier.metadata.clone();
-    carrier_metadata.remove("skippy.package.metadata_only");
-    carrier_metadata.remove("skippy.package.part_count");
-    let mut source_metadata = source.shards[0].directory.metadata.clone();
-    source_metadata.remove("split.no");
-    source_metadata.remove("split.count");
-    source_metadata.remove("split.tensors.count");
-    ensure!(
-        carrier_metadata == source_metadata,
-        "metadata artifact key/value table differs from independent source"
-    );
-
-    let expected = source
-        .shards
-        .iter()
-        .flat_map(|shard| shard.directory.tensors.iter())
-        .map(|tensor| (tensor.name.as_str(), tensor))
-        .collect::<BTreeMap<_, _>>();
-    let actual = carrier
-        .tensors
-        .iter()
-        .map(|tensor| (tensor.name.as_str(), tensor))
-        .collect::<BTreeMap<_, _>>();
-    ensure!(
-        actual.len() == carrier.tensors.len()
-            && actual.len() == expected.len()
-            && actual.iter().all(|(name, tensor)| {
-                expected.get(name).is_some_and(|source| {
-                    tensor.ggml_type == source.ggml_type && tensor.dimensions == source.dimensions
-                })
-            }),
-        "metadata artifact descriptor table differs from independent source"
-    );
-    Ok(())
 }
 
 fn layer_ordinal_from_artifact_path(path: &str) -> Option<u32> {
@@ -326,8 +267,12 @@ fn verify_source_identity(
         manifest.layer_count == source.layer_count,
         "source block_count mismatch"
     );
+    let mut source_metadata = source.shards[0].directory.metadata.clone();
+    source_metadata.remove("split.no");
+    source_metadata.remove("split.count");
+    source_metadata.remove("split.tensors.count");
     ensure!(
-        manifest.model_metadata == source.shards[0].directory.metadata,
+        manifest.model_metadata == source_metadata,
         "source model metadata mismatch"
     );
     Ok(())
