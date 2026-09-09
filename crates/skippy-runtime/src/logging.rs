@@ -111,8 +111,9 @@ pub struct MeasuredNativeBuffers {
 /// Snapshot of the measured native buffer sizes observed so far in this
 /// process. The native log callback is synchronous with model open, so by the
 /// time `skippy_model_open` returns, the `sched_reserve` buffer lines have
-/// already been parsed. Returns `None` when no buffer lines were observed
-/// (e.g. native log forwarding disabled).
+/// already been parsed. The snapshot is returned whenever the aggregator is
+/// reachable; its fields stay `None` until a buffer line is observed (e.g.
+/// native log forwarding disabled).
 pub fn measured_native_buffers() -> Option<MeasuredNativeBuffers> {
     let aggregator = native_log_aggregator().lock().ok()?;
     Some(MeasuredNativeBuffers {

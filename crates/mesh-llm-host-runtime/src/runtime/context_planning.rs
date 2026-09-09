@@ -303,6 +303,58 @@ fn usable_kv_cache_budget(vram_bytes: u64, model_bytes: u64) -> u64 {
     budget.min(u128::from(u64::MAX)) as u64
 }
 
+/// Measured-vs-charged reconciliation, produced once the native context
+/// exists (after model open) and the `sched_reserve` buffer lines have been
+/// parsed.
+///
+/// `charged_compute_reserve_bytes` is the compute-buffer proxy the planner
+/// actually held back: the 15% slice of post-weight space implied by
+/// [`usable_kv_cache_budget`]'s 85% numerator. `measured_*` are what
+/// llama.cpp allocated. The gap between the charged proxy and the measured
+/// sizes is the memory Step-2's budget-driven planner can spend, and the
+/// residual is what a re-plan with actual free memory would see.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MemoryPlanReconciliation {
+    /// Post-weight space the 85% KV tax held back as a compute-buffer proxy.
+    pub(super) charged_compute_reserve_bytes: u64,
+    /// Measured compute buffer(s) at context init, if any were observed.
+    pub(super) measured_compute_bytes: Option<u64>,
+    /// Measured KV buffer(s) at context init, if any were observed.
+    pub(super) measured_kv_bytes: Option<u64>,
+    /// `vram - model - measured_compute - measured_kv` when both
+    /// measurements exist; the headroom a re-plan starts from.
+    pub(super) residual_free_bytes: Option<u64>,
+}
+
+pub(super) fn reconcile_memory_plan_with_measurements(
+    breakdown: &RuntimeResourcePlanBreakdown,
+    measured: Option<skippy_runtime::MeasuredNativeBuffers>,
+) -> MemoryPlanReconciliation {
+    let charged_compute_reserve_bytes = breakdown
+        .vram_bytes
+        .saturating_sub(breakdown.model_bytes)
+        .saturating_sub(breakdown.kv_budget_bytes);
+    let mib_to_bytes = |mib: Option<f64>| mib.map(|mib| (mib * 1024.0 * 1024.0).round() as u64);
+    let measured_compute_bytes = mib_to_bytes(measured.and_then(|m| m.compute_mib));
+    let measured_kv_bytes = mib_to_bytes(measured.and_then(|m| m.kv_mib));
+    let residual_free_bytes = match (measured_compute_bytes, measured_kv_bytes) {
+        (Some(compute), Some(kv)) => Some(
+            breakdown
+                .vram_bytes
+                .saturating_sub(breakdown.model_bytes)
+                .saturating_sub(compute)
+                .saturating_sub(kv),
+        ),
+        _ => None,
+    };
+    MemoryPlanReconciliation {
+        charged_compute_reserve_bytes,
+        measured_compute_bytes,
+        measured_kv_bytes,
+        residual_free_bytes,
+    }
+}
+
 fn fallback_context_length(input: &RuntimeResourcePlanInput<'_>) -> u32 {
     let free_bytes = input.vram_bytes.saturating_sub(input.model_bytes);
     if free_bytes >= FALLBACK_CONTEXT_64K_FREE_BYTES {
@@ -680,6 +732,54 @@ mod tests {
             q8_plan.slots, q4_plan.slots,
             "lane count must not depend on KV quant under unified KV: q4={}, q8={}",
             q4_plan.slots, q8_plan.slots
+        );
+    }
+
+    #[test]
+    fn reconciliation_exposes_overcharge_and_residual() {
+        let breakdown = RuntimeResourcePlanBreakdown {
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            model_bytes: 3 * 1024 * 1024 * 1024,
+            kv_budget_bytes: (13 * 1024 * 1024 * 1024) * 85 / 100,
+            planned_kv_bytes: 2 * 1024 * 1024 * 1024,
+            kv_bytes_per_token: 131_072,
+            slots: 4,
+            context_length: 16_384,
+            slots_auto: true,
+            context_auto: true,
+        };
+
+        // Without measurements the reconciliation still reports the charged
+        // proxy so the log line carries the plan side of the story. The proxy
+        // is what the 85% budget floor leaves behind, so derive it the same
+        // way rather than as a separate 15% floor (85+15 != 100 in integer
+        // math).
+        let post_weight_bytes = 13 * 1024 * 1024 * 1024;
+        let unmeasured = reconcile_memory_plan_with_measurements(&breakdown, None);
+        assert_eq!(
+            unmeasured.charged_compute_reserve_bytes,
+            post_weight_bytes - post_weight_bytes * 85 / 100
+        );
+        assert_eq!(unmeasured.measured_compute_bytes, None);
+        assert_eq!(unmeasured.residual_free_bytes, None);
+
+        // With measurements: compute 0.5 GiB, KV 2.0 GiB over a 16 GiB node
+        // holding 3 GiB of weights leaves 10.5 GiB residual — far above the
+        // ~2 GiB proxy tax the planner charged.
+        let measured = skippy_runtime::MeasuredNativeBuffers {
+            compute_mib: Some(512.0),
+            kv_mib: Some(2048.0),
+        };
+        let reconciled = reconcile_memory_plan_with_measurements(&breakdown, Some(measured));
+        assert_eq!(reconciled.measured_compute_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(reconciled.measured_kv_bytes, Some(2048 * 1024 * 1024));
+        assert_eq!(
+            reconciled.residual_free_bytes,
+            Some(10 * 1024 * 1024 * 1024 + 512 * 1024 * 1024)
+        );
+        assert_eq!(
+            reconciled.charged_compute_reserve_bytes,
+            unmeasured.charged_compute_reserve_bytes
         );
     }
 }

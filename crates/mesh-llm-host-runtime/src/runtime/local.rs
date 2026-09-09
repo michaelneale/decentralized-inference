@@ -1,7 +1,7 @@
 use super::capacity::runtime_model_required_bytes;
 use super::context_planning::{
     RuntimeResourcePlan, RuntimeResourcePlanInput, RuntimeResourcePlanningProfile,
-    plan_runtime_resources,
+    plan_runtime_resources, reconcile_memory_plan_with_measurements,
 };
 use super::split_planning::format_gb;
 use crate::api;
@@ -813,6 +813,7 @@ async fn start_local_skippy_model(
     })
     .await
     .context("join load skippy direct GGUF task")??;
+    emit_measured_memory_reconciliation(&model_name, &plan);
     let _ = emit_event(OutputEvent::ModelLoaded {
         model: model_name.clone(),
         bytes: None,
@@ -836,6 +837,34 @@ async fn start_local_skippy_model(
         },
         death_rx,
     ))
+}
+
+/// Reconcile the charged memory plan against the buffers llama.cpp actually
+/// allocated at context init, once the native model has finished opening.
+///
+/// The native log callback is synchronous with model open, so by the time the
+/// load future resolves the `sched_reserve` compute/KV buffer lines have been
+/// parsed and [`skippy_runtime::measured_native_buffers`] holds the measured
+/// sizes. Emitted for both start paths (direct GGUF and package-v2); split
+/// stage loads reconcile on their own seam.
+fn emit_measured_memory_reconciliation(model_name: &str, plan: &RuntimeResourcePlan) {
+    let Some(breakdown) = plan.breakdown.as_ref() else {
+        return;
+    };
+    let measured = skippy_runtime::measured_native_buffers();
+    let reconciliation = reconcile_memory_plan_with_measurements(breakdown, measured);
+    let memory_plan_measured =
+        measured.is_some_and(|m| m.compute_mib.is_some() || m.kv_mib.is_some());
+    tracing::info!(
+        model = model_name,
+        memory_plan.measured_available = memory_plan_measured,
+        memory_plan.charged_compute_reserve_bytes = reconciliation.charged_compute_reserve_bytes,
+        memory_plan.measured_compute_bytes = reconciliation.measured_compute_bytes.unwrap_or(0),
+        memory_plan.measured_kv_bytes = reconciliation.measured_kv_bytes.unwrap_or(0),
+        memory_plan.residual_free_bytes = reconciliation.residual_free_bytes.unwrap_or(0),
+        memory_plan.measured_residual_available = reconciliation.residual_free_bytes.is_some(),
+        "memory plan reconciled with measured native buffers"
+    );
 }
 
 async fn start_local_package_v2_model(
@@ -999,6 +1028,7 @@ async fn start_local_package_v2_model(
     })
     .await
     .context("join load skippy package-v2 task")??;
+    emit_measured_memory_reconciliation(&model_name, &plan);
     let _ = emit_event(OutputEvent::ModelLoaded {
         model: model_ref,
         bytes: None,
