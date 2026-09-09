@@ -110,7 +110,8 @@ jobs:
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print('hf://'+m['repo']+'/'+m['file'])")
             if ! python3 evals/agentic-replay.py run \
-                --ref main=main \
+                --ref main=origin/main \
+                --ref pr=$GITHUB_SHA \
                 --model "$model_uri" \
                 --backend metal \
                 --trajectories-per-framework 8 \
