@@ -28,7 +28,6 @@ struct Args {
     max_jobs: usize,
     max_per_family: usize,
     target_namespace: String,
-    target_suffix: String,
     job_namespace: String,
     flavor: String,
     timeout_seconds: u64,
@@ -60,7 +59,6 @@ struct Candidate {
     quant: DiscoveredQuant,
     projectors: Vec<DiscoveredProjector>,
     target_repo: String,
-    target_suffix: String,
     model_layer_repos: Vec<String>,
     model_id: String,
     family: String,
@@ -342,7 +340,6 @@ impl Args {
             max_jobs: 5,
             max_per_family: 1,
             target_namespace: "meshllm".to_string(),
-            target_suffix: "layers".to_string(),
             job_namespace: "meshllm".to_string(),
             flavor: "auto".to_string(),
             timeout_seconds: parse_duration_seconds("1h")?,
@@ -370,7 +367,6 @@ impl Args {
                 "--max-jobs" => args.max_jobs = parse_next(&mut iter, &flag)?,
                 "--max-per-family" => args.max_per_family = parse_next(&mut iter, &flag)?,
                 "--target-namespace" => args.target_namespace = next_value(&mut iter, &flag)?,
-                "--target-suffix" => args.target_suffix = next_value(&mut iter, &flag)?,
                 "--job-namespace" => args.job_namespace = next_value(&mut iter, &flag)?,
                 "--flavor" => args.flavor = next_value(&mut iter, &flag)?,
                 "--timeout" => {
@@ -463,7 +459,6 @@ fn print_help() {
            --recent-limit N\n\
            --popular-limit N\n\
            --target-namespace NAME\n\
-           --target-suffix NAME (default: layers; e.g. package-v2)\n\
            --job-namespace NAME\n\
            --flavor HF_JOB_FLAVOR (default: auto CPU)\n\
            --timeout DURATION (requested; raised by size-based minimum)\n\
@@ -741,8 +736,8 @@ async fn build_candidate(
         return Ok(None);
     }
 
-    let target_repo = layer_target_repo(&quant, &args.target_namespace, &args.target_suffix);
-    let model_layer_repos = model_layer_repos(&quants, &args.target_namespace, &args.target_suffix);
+    let target_repo = layer_target_repo(&quant, &args.target_namespace);
+    let model_layer_repos = model_layer_repos(&quants, &args.target_namespace);
     let model_id =
         model_ref::format_gguf_selection_ref(&model.repo_id, &quant.first_file, &quant.name);
 
@@ -755,34 +750,25 @@ async fn build_candidate(
         quant,
         projectors: inventory.projectors,
         target_repo,
-        target_suffix: args.target_suffix.clone(),
         model_layer_repos,
         model_id,
         family,
     }))
 }
 
-fn model_layer_repos(
-    quants: &[DiscoveredQuant],
-    target_namespace: &str,
-    target_suffix: &str,
-) -> Vec<String> {
+fn model_layer_repos(quants: &[DiscoveredQuant], target_namespace: &str) -> Vec<String> {
     quants
         .iter()
-        .map(|quant| layer_target_repo(quant, target_namespace, target_suffix))
+        .map(|quant| layer_target_repo(quant, target_namespace))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
-fn layer_target_repo(
-    quant: &DiscoveredQuant,
-    target_namespace: &str,
-    target_suffix: &str,
-) -> String {
+fn layer_target_repo(quant: &DiscoveredQuant, target_namespace: &str) -> String {
     let distribution_id =
         model_ref::normalize_gguf_distribution_id(&quant.first_file).unwrap_or(quant.name.clone());
-    format!("{target_namespace}/{distribution_id}-{target_suffix}")
+    format!("{target_namespace}/{distribution_id}-layers")
 }
 
 fn select_preferred_quant(
@@ -923,33 +909,25 @@ async fn catalog_layer_package_repo(
         .split_once('/')
         .map(|(namespace, _)| namespace)
         .unwrap_or_default();
-    Ok(json_layer_package_repo(
-        &value,
-        target_namespace,
-        &candidate.target_suffix,
-    ))
+    Ok(json_layer_package_repo(&value, target_namespace))
 }
 
-fn json_layer_package_repo(
-    value: &Value,
-    target_namespace: &str,
-    target_suffix: &str,
-) -> Option<String> {
+fn json_layer_package_repo(value: &Value, target_namespace: &str) -> Option<String> {
     match value {
         Value::Object(map) => {
             if let Some(repo) = map.get("repo").and_then(Value::as_str).filter(|repo| {
                 repo.strip_prefix(target_namespace)
                     .is_some_and(|suffix| suffix.starts_with('/'))
-                    && repo.ends_with(&format!("-{target_suffix}"))
+                    && repo.ends_with("-layers")
             }) {
                 return Some(repo.to_string());
             }
             map.values()
-                .find_map(|value| json_layer_package_repo(value, target_namespace, target_suffix))
+                .find_map(|value| json_layer_package_repo(value, target_namespace))
         }
         Value::Array(items) => items
             .iter()
-            .find_map(|value| json_layer_package_repo(value, target_namespace, target_suffix)),
+            .find_map(|value| json_layer_package_repo(value, target_namespace)),
         _ => None,
     }
 }
@@ -1323,17 +1301,11 @@ mod tests {
 
     use model_package::jobs::CpuJobPlan;
 
-    use hf_hub::repository::ModelInfo;
-
     use super::{
         Args, Candidate, DiscoveredProjector, DiscoveredQuant, RankedModel,
         estimated_bucket_workspace_bytes, job_spec_with_token, json_layer_package_repo,
         model_family_key, model_layer_repos,
     };
-
-    fn model_info(value: serde_json::Value) -> ModelInfo {
-        serde_json::from_value(value).unwrap()
-    }
 
     #[test]
     fn model_family_key_collapses_common_unsloth_families() {
@@ -1384,7 +1356,6 @@ mod tests {
                 total_bytes: 183,
             }],
             target_repo: "meshllm/GLM-5-UD-Q4_K_XL-layers".to_string(),
-            target_suffix: "layers".to_string(),
             model_layer_repos: vec!["meshllm/GLM-5-UD-Q4_K_XL-layers".to_string()],
             model_id: "unsloth/GLM-5-GGUF:UD-Q4_K_XL".to_string(),
             family: "glm".to_string(),
@@ -1397,7 +1368,6 @@ mod tests {
             max_jobs: 1,
             max_per_family: 1,
             target_namespace: "meshllm".to_string(),
-            target_suffix: "layers".to_string(),
             job_namespace: "meshllm".to_string(),
             flavor: "cpu-upgrade".to_string(),
             timeout_seconds: 43_200,
@@ -1490,7 +1460,6 @@ mod tests {
                 },
             ],
             "meshllm",
-            "layers",
         );
 
         assert_eq!(
@@ -1516,7 +1485,7 @@ mod tests {
         });
 
         assert_eq!(
-            json_layer_package_repo(&catalog, "meshllm", "layers"),
+            json_layer_package_repo(&catalog, "meshllm"),
             Some("meshllm/Kimi-K2-Instruct-Q4_K_M-layers".to_string())
         );
     }
