@@ -1,7 +1,8 @@
 use super::capacity::runtime_model_required_bytes;
 use super::context_planning::{
-    RuntimeResourcePlan, RuntimeResourcePlanInput, RuntimeResourcePlanningProfile,
-    plan_runtime_resources, reconcile_memory_plan_with_measurements,
+    MeasuredBufferFootprint, RuntimeResourcePlan, RuntimeResourcePlanInput,
+    RuntimeResourcePlanningProfile, plan_runtime_resources,
+    reconcile_memory_plan_with_measurements,
 };
 use super::split_planning::format_gb;
 use crate::api;
@@ -22,6 +23,7 @@ use skippy_server::serving_hooks::SharedModelServingHooksFactory;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::operational_logging::{
@@ -710,7 +712,9 @@ pub(super) async fn start_local_openai_model(
         kv_cache_quant,
         local_layer_fraction,
         planning_profile: spec.planning_profile,
+        measured_buffers: measured_buffers_footprint(),
     });
+    record_last_planned_context_length(plan.context_length);
 
     if let Some(package) = package {
         start_local_package_v2_model(spec, model_name, package, plan, compact_meta.as_ref()).await
@@ -837,6 +841,47 @@ async fn start_local_skippy_model(
         },
         death_rx,
     ))
+}
+
+/// Context length the measured buffers were observed at, recorded by the
+/// host planner when it resolves the plan that builds the native context.
+/// Zero until a plan resolves.
+static LAST_PLANNED_CONTEXT_LENGTH: AtomicU32 = AtomicU32::new(0);
+
+/// Record the context length the current plan is building the native context
+/// at, so measured buffer sizes can later be tied to their context length.
+pub(super) fn record_last_planned_context_length(ctx: u32) {
+    LAST_PLANNED_CONTEXT_LENGTH.store(ctx, Ordering::Relaxed);
+}
+
+/// Context length the measured native buffers were observed at. Zero until a
+/// plan resolves.
+pub(super) fn last_planned_context_length() -> u32 {
+    LAST_PLANNED_CONTEXT_LENGTH.load(Ordering::Relaxed)
+}
+
+/// Measured native buffer footprint for the budget-driven planner: the
+/// high-water compute/KV buffer sizes from this process's context init, read
+/// back after model open. The KV measurement is tied to the context length
+/// the plan actually built, so the budget-driven path can scale KV linearly
+/// when re-solving for a deeper context.
+fn measured_buffers_footprint() -> Option<MeasuredBufferFootprint> {
+    let measured = skippy_runtime::measured_native_buffers()?;
+    let compute_bytes = measured.compute_mib.map(mib_to_bytes)?;
+    let kv_bytes = measured.kv_mib.map(mib_to_bytes)?;
+    let context_length = last_planned_context_length();
+    if context_length == 0 {
+        return None;
+    }
+    Some(MeasuredBufferFootprint {
+        compute_bytes,
+        kv_bytes,
+        context_length,
+    })
+}
+
+fn mib_to_bytes(mib: f64) -> u64 {
+    (mib * 1024.0 * 1024.0).round() as u64
 }
 
 /// Reconcile the charged memory plan against the buffers llama.cpp actually

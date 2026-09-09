@@ -147,6 +147,24 @@ pub(super) struct RuntimeResourcePlanInput<'a> {
     /// `None` means the whole model is local (fraction = 1.0).
     pub(super) local_layer_fraction: Option<f64>,
     pub(super) planning_profile: RuntimeResourcePlanningProfile,
+    /// Measured native buffer footprint from a prior context init of the same
+    /// shape on this node (compute + KV buffer sizes and the context length
+    /// they were measured at). When present, the planner charges these
+    /// measured sizes instead of the 85% KV tax (budget-driven sizing); when
+    /// absent it falls back to the static tax ladder.
+    pub(super) measured_buffers: Option<MeasuredBufferFootprint>,
+}
+
+/// Measured native buffer sizes from one context init, the ground truth the
+/// budget-driven planner charges in place of the KV-scaled tax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MeasuredBufferFootprint {
+    /// Compute-graph buffer(s) at context init, bytes.
+    pub(super) compute_bytes: u64,
+    /// KV buffer at `context_length`, bytes.
+    pub(super) kv_bytes: u64,
+    /// The context length the KV buffer was measured at.
+    pub(super) context_length: u32,
 }
 
 /// Plan context length and parallel slots.
@@ -197,6 +215,9 @@ pub(super) fn plan_runtime_resources(input: RuntimeResourcePlanInput<'_>) -> Run
 }
 
 fn planned_context_length(input: &RuntimeResourcePlanInput<'_>) -> u32 {
+    if let Some(planned) = planned_context_length_budget_driven(input) {
+        return planned;
+    }
     let fallback_context = fallback_context_length(input);
     let Some(metadata) = input.metadata else {
         return fallback_context;
@@ -380,6 +401,66 @@ fn snap_context_length_down(value: u32) -> u32 {
         .unwrap_or(value)
 }
 
+/// Fraction of usable memory the budget-driven planner targets (Step 2).
+///
+/// vLLM reserves ~8% of free memory after weights (`gpu_memory_utilization`
+/// 0.92), SGLang ~10% (`mem-fraction-static` 0.9). Ours is deliberately a
+/// little more conservative: mesh nodes can co-host other stages, and Metal
+/// unified-memory nodes share the pool with the OS (where an over-commit
+/// page-out stalls decode rather than failing loudly like a CUDA OOM).
+const DEFAULT_UTILIZATION_TARGET_NUMERATOR: u64 = 88;
+const DEFAULT_UTILIZATION_TARGET_DENOMINATOR: u64 = 100;
+
+/// Budget-driven context planning (Step 2) over the measured footprint from a
+/// prior context init.
+///
+/// Model: `budget = (vram - model) × utilization - measured_compute`, then
+/// solve for the deepest context whose *scaled* KV cost fits the budget. KV
+/// scales linearly with context (unified pool of `n_ctx` cells), so the
+/// measured KV bytes at `measured_ctx` give `kv_bytes_per_token_measured =
+/// kv_bytes / measured_ctx`, and the deepest affordable context is
+/// `budget / kv_bytes_per_token_measured`.
+///
+/// Returns `None` when the measurement cannot support the model (zero
+/// context, or a KV per-token cost of zero), letting the static tax ladder
+/// answer instead. Compute buffers do not scale linearly with context
+/// (ubatch/graph shape dominates), so the measured value is charged as-is,
+/// unchanged from the probe context.
+fn planned_context_length_budget_driven(input: &RuntimeResourcePlanInput<'_>) -> Option<u32> {
+    let measured = input.measured_buffers?;
+    if measured.context_length == 0 || measured.kv_bytes == 0 {
+        return None;
+    }
+    let Some(metadata) = input.metadata else {
+        return None;
+    };
+    let native_context = metadata.context_length;
+    if native_context == 0 {
+        return None;
+    }
+    let native_context = native_context.min(MAX_AUTO_CONTEXT_LENGTH);
+
+    let post_weight = input.vram_bytes.saturating_sub(input.model_bytes);
+    let utilised = u128::from(post_weight) * u128::from(DEFAULT_UTILIZATION_TARGET_NUMERATOR)
+        / u128::from(DEFAULT_UTILIZATION_TARGET_DENOMINATOR);
+    let budget = utilised.saturating_sub(u128::from(measured.compute_bytes));
+    let kv_per_token = u128::from(measured.kv_bytes) / u128::from(measured.context_length);
+    if kv_per_token == 0 {
+        return None;
+    }
+    let max_affordable = (budget / kv_per_token).min(u128::from(u32::MAX)) as u32;
+    if max_affordable == 0 {
+        return None;
+    }
+    let planned = max_affordable.min(native_context);
+    let minimum = MIN_AUTO_CONTEXT_LENGTH.min(native_context);
+    Some(if planned < minimum {
+        minimum
+    } else {
+        snap_context_length_down(planned).max(minimum)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +489,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(plan.context_length, 16_384);
@@ -426,6 +508,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(
@@ -450,6 +533,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::F16,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
         let q8_plan = plan_runtime_resources(RuntimeResourcePlanInput {
             ctx_size_override: None,
@@ -460,6 +544,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert!(
@@ -481,6 +566,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(plan.context_length, 16_384);
@@ -504,6 +590,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: profile,
+            measured_buffers: None,
         };
         let dedicated_plan =
             plan_runtime_resources(input(RuntimeResourcePlanningProfile::DedicatedLocal));
@@ -531,6 +618,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::SharedMesh,
+            measured_buffers: None,
         });
 
         assert_eq!(
@@ -563,6 +651,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::SharedMesh,
+            measured_buffers: None,
         });
 
         assert_eq!(
@@ -589,6 +678,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(plan.context_length, 32_768);
@@ -621,6 +711,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(plan.context_length, 32_768);
@@ -645,6 +736,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert_eq!(plan.slots, 8);
@@ -676,6 +768,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         // With split awareness: local model ~174 GB, local KV fraction 0.66
@@ -688,6 +781,7 @@ mod tests {
             kv_cache_quant: GgufKvCacheQuant::Q8_0,
             local_layer_fraction: Some(local_fraction),
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
         });
 
         assert!(
@@ -722,6 +816,7 @@ mod tests {
                 kv_cache_quant: quant,
                 local_layer_fraction: None,
                 planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+                measured_buffers: None,
             })
         };
         let q8_plan = plan_with(GgufKvCacheQuant::Q8_0);
@@ -733,6 +828,118 @@ mod tests {
             "lane count must not depend on KV quant under unified KV: q4={}, q8={}",
             q4_plan.slots, q8_plan.slots
         );
+    }
+
+    #[test]
+    fn budget_driven_context_uses_measured_kv_and_compute() {
+        // Roomy node: 16 GiB VRAM, 3 GiB weights. Here the measured KV
+        // per-token cost (2 GiB / 16_384 = 131_072 B) is twice the q8
+        // estimate (~69_632 B) the ladder assumes, so the budget-driven plan
+        // correctly lands at 65_536 while the estimate-based ladder would
+        // clamp at native 131_072. Measured reality cuts both ways: when the
+        // real KV cost is higher than estimated, the correct plan is
+        // shallower, not deeper. (Conversely, charging measured compute under
+        // an 88% utilization target only buys depth over the 85% tax when
+        // compute is under ~3% of free memory — the estimate is what binds
+        // on roomy nodes, not the tax.)
+        let metadata = gqa_metadata(131_072);
+        let plan = plan_runtime_resources(RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: None,
+            model_bytes: 3 * 1024 * 1024 * 1024,
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::Q8_0,
+            local_layer_fraction: None,
+            planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: Some(MeasuredBufferFootprint {
+                compute_bytes: 512 * 1024 * 1024,
+                kv_bytes: 2 * 1024 * 1024 * 1024,
+                context_length: 16_384,
+            }),
+        });
+        assert_eq!(plan.context_length, 65_536);
+
+        // Tight node where the ladder's estimate binds: 5 GiB free, the q8
+        // estimate (65,536 B/tok for these dims) caps the ladder at 65_536,
+        // while a measured KV cost half the estimate (32,768 B/tok measured
+        // at 16_384) lets the budget-driven plan reach the full native
+        // window.
+        let tight = plan_runtime_resources(RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: None,
+            model_bytes: 1 * 1024 * 1024 * 1024,
+            vram_bytes: 6 * 1024 * 1024 * 1024,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::Q8_0,
+            local_layer_fraction: None,
+            planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: Some(MeasuredBufferFootprint {
+                compute_bytes: 128 * 1024 * 1024,
+                kv_bytes: 512 * 1024 * 1024,
+                context_length: 16_384,
+            }),
+        });
+        assert_eq!(tight.context_length, 131_072);
+
+        let tight_ladder = plan_runtime_resources(RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: None,
+            model_bytes: 1 * 1024 * 1024 * 1024,
+            vram_bytes: 6 * 1024 * 1024 * 1024,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::Q8_0,
+            local_layer_fraction: None,
+            planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
+        });
+        assert_eq!(tight_ladder.context_length, 65_536);
+    }
+
+    #[test]
+    fn budget_driven_context_degrades_to_ladder_when_measurement_is_unusable() {
+        let metadata = gqa_metadata(131_072);
+        let base = RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: None,
+            model_bytes: 5_000_000_000,
+            vram_bytes: 24_000_000_000,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::Q8_0,
+            local_layer_fraction: None,
+            planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+            measured_buffers: None,
+        };
+
+        // Zero-context or zero-KV measurements cannot drive the budget model;
+        // the plan must equal the static-ladder answer.
+        let ladder = plan_runtime_resources(base).context_length;
+        for unusable in [
+            MeasuredBufferFootprint {
+                compute_bytes: 512 * 1024 * 1024,
+                kv_bytes: 0,
+                context_length: 16_384,
+            },
+            MeasuredBufferFootprint {
+                compute_bytes: 512 * 1024 * 1024,
+                kv_bytes: 2 * 1024 * 1024 * 1024,
+                context_length: 0,
+            },
+            // Compute larger than the whole utilized budget saturates the
+            // budget to zero; the ladder answers rather than planning an
+            // empty context.
+            MeasuredBufferFootprint {
+                compute_bytes: u64::MAX,
+                kv_bytes: 2 * 1024 * 1024 * 1024,
+                context_length: 16_384,
+            },
+        ] {
+            let degraded = plan_runtime_resources(RuntimeResourcePlanInput {
+                measured_buffers: Some(unusable),
+                ..base
+            });
+            assert_eq!(degraded.context_length, ladder);
+        }
     }
 
     #[test]
