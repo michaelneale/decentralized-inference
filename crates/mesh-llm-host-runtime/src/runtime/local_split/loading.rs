@@ -385,15 +385,16 @@ pub(super) async fn stage0_runtime_options(
     runtime_options.config.model_id = spec.model_ref.to_string();
     runtime_options.config.package_ref = Some(spec.package.package_ref.clone());
     runtime_options.config.manifest_sha256 = Some(spec.package.manifest_sha256.clone());
-    let verified_stage0_model_path = if spec.local_source_required {
-        let mut verified_load = split_runtime_stage_load_request(
-            spec,
-            settings,
-            settings.stage0,
-            Some(downstream.clone()),
-            stage0_return_endpoint,
-            &HashMap::new(),
-        )?;
+    let stage0_load = split_runtime_stage_load_request(
+        spec,
+        settings,
+        settings.stage0,
+        Some(downstream.clone()),
+        stage0_return_endpoint,
+        &HashMap::new(),
+    )?;
+    let verified_stage0_load = if spec.local_source_required {
+        let mut verified_load = stage0_load.clone();
         let stage0_load = tokio::task::spawn_blocking(move || {
             let verified = skippy::apply_verified_local_source(&mut verified_load)?;
             anyhow::ensure!(verified, "local-required stage 0 was not content-verified");
@@ -401,11 +402,7 @@ pub(super) async fn stage0_runtime_options(
         })
         .await
         .context("join verify local-required stage 0 source task")??;
-        Some(
-            stage0_load
-                .model_path
-                .context("verified local-required stage 0 is missing its worker-local path")?,
-        )
+        Some(stage0_load)
     } else {
         None
     };
@@ -413,14 +410,7 @@ pub(super) async fn stage0_runtime_options(
         && settings.load_mode == LoadMode::RuntimeSlice
         && skippy::is_layer_package_ref(&spec.package.package_ref)
     {
-        let stage0_load = split_runtime_stage_load_request(
-            spec,
-            settings,
-            settings.stage0,
-            Some(downstream.clone()),
-            stage0_return_endpoint,
-            &HashMap::new(),
-        )?;
+        let stage0_load = stage0_load.clone();
         Some(
             tokio::task::spawn_blocking(move || skippy::resolve_stage_load_package(&stage0_load))
                 .await
@@ -430,18 +420,21 @@ pub(super) async fn stage0_runtime_options(
     } else {
         None
     };
-    let effective_model_path = verified_stage0_model_path.unwrap_or_else(|| {
-        resolved_stage0_package
-            .as_ref()
-            .map(|package| package.source_model_path.clone())
-            .unwrap_or_else(|| {
-                stage_load_model_path(
-                    settings.load_mode.clone(),
-                    &spec.package.package_ref,
-                    &spec.package.source_model_path,
-                )
-            })
-    });
+    let effective_model_path = verified_stage0_load
+        .as_ref()
+        .and_then(|load| load.model_path.clone())
+        .unwrap_or_else(|| {
+            resolved_stage0_package
+                .as_ref()
+                .map(|package| package.source_model_path.clone())
+                .unwrap_or_else(|| {
+                    stage_load_model_path(
+                        settings.load_mode.clone(),
+                        &spec.package.package_ref,
+                        &spec.package.source_model_path,
+                    )
+                })
+        });
     runtime_options.config.source_model_path = Some(effective_model_path.clone());
     runtime_options.config.source_model_sha256 = Some(
         resolved_stage0_package
@@ -483,6 +476,10 @@ pub(super) async fn stage0_runtime_options(
     runtime_options.config.activation_codec = spec.generation.activation_codec;
     runtime_options.config.activation_codec_policy = spec.generation.activation_codec_policy;
     runtime_options.config.filter_tensors_on_load = true;
+    runtime_options.config.resident_tensor_names = skippy::admitted_resident_tensor_names(
+        verified_stage0_load.as_ref().unwrap_or(&stage0_load),
+        resolved_stage0_package.as_ref(),
+    )?;
     apply_split_generation_pinned_device(
         &mut runtime_options.config,
         spec.pinned_gpu,
@@ -534,12 +531,7 @@ pub(super) async fn load_downstream_split_runtime_stages(
                 spec.node,
                 stage.node_id,
                 &load,
-                stage_source_prepare_timeout(
-                    spec.model_path,
-                    spec.package,
-                    stage,
-                    downstream.is_none(),
-                )?,
+                stage_source_prepare_timeout(spec.package, stage),
                 settings.readiness_interval,
             )
             .await
@@ -660,27 +652,10 @@ fn validate_activation_edge(
 }
 
 pub(super) fn stage_source_prepare_timeout(
-    model_path: &Path,
     package: &skippy::SkippyPackageIdentity,
     stage: &RuntimeSliceStagePlan,
-    include_output: bool,
-) -> Result<Duration> {
-    let assigned_bytes = if skippy::is_layer_package_ref(&package.package_ref)
-        && !skippy::is_package_v2_identity(package)
-    {
-        crate::models::artifact_transfer::required_stage_package_bytes(
-            model_path,
-            &package.package_ref,
-            &package.manifest_sha256,
-            crate::models::artifact_transfer::StageArtifactSelection {
-                layer_start: stage.layer_start,
-                layer_end: stage.layer_end,
-                include_embeddings: stage.layer_start == 0,
-                include_output,
-                include_projectors: stage.layer_start == 0,
-            },
-        )?
-    } else if package.layer_weight_bytes.len() == package.layer_count as usize {
+) -> Duration {
+    let assigned_bytes = if package.layer_weight_bytes.len() == package.layer_count as usize {
         package
             .layer_weight_bytes
             .get(stage.layer_start as usize..stage.layer_end as usize)
@@ -697,9 +672,9 @@ pub(super) fn stage_source_prepare_timeout(
             .div_ceil(package_layers)
     };
     let transfer_secs = assigned_bytes.div_ceil(STAGE_SOURCE_MIN_BYTES_PER_SEC);
-    Ok(Duration::from_secs(transfer_secs)
+    Duration::from_secs(transfer_secs)
         .saturating_add(STAGE_SOURCE_PREPARE_ALLOWANCE)
-        .max(MIN_STAGE_SOURCE_PREPARE_TIMEOUT))
+        .max(MIN_STAGE_SOURCE_PREPARE_TIMEOUT)
 }
 
 pub(super) fn split_runtime_stage_load_request(
@@ -937,14 +912,8 @@ pub(super) fn apply_split_generation_pinned_device(
     }
 }
 
-pub(super) fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
-    if skippy::is_layer_package_ref(&package.package_ref)
-        && !skippy::is_package_v2_identity(package)
-    {
-        LoadMode::LayerPackage
-    } else {
-        LoadMode::RuntimeSlice
-    }
+pub(super) fn split_generation_load_mode(_package: &skippy::SkippyPackageIdentity) -> LoadMode {
+    LoadMode::RuntimeSlice
 }
 
 pub(super) async fn claim_split_coordinator_lease(

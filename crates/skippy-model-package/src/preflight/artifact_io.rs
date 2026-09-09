@@ -1,8 +1,4 @@
-use std::{
-    fs::File,
-    io::Read,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -23,20 +19,6 @@ pub(super) fn safe_relative_path(path: &str) -> Result<PathBuf, String> {
         return Err("path escapes the package directory".to_string());
     }
     Ok(path.to_path_buf())
-}
-
-pub(super) fn file_sha256(path: &Path) -> anyhow::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex_lower(&hasher.finalize()))
 }
 
 pub(super) fn sha256_bytes(bytes: &[u8]) -> String {

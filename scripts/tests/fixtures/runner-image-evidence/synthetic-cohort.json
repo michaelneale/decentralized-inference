@@ -1,0 +1,364 @@
+{
+  "candidates": {
+    "candidate-index-public-cpu": {
+      "backend": {
+        "cuda_series": null,
+        "id": "cpu",
+        "name": "cpu",
+        "rocm_version": null
+      },
+      "children": [
+        {
+          "architecture": "amd64",
+          "digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+          "os": "linux"
+        }
+      ],
+      "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "environment": "public",
+      "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+      "mesh_revision": "1111111111111111111111111111111111111111",
+      "runner_images_revision": "2222222222222222222222222222222222222222",
+      "schema": 1,
+      "type": "mesh-llm-runner-image-candidate"
+    },
+    "candidate-index-public-vulkan": {
+      "backend": {
+        "cuda_series": null,
+        "id": "vulkan",
+        "name": "vulkan",
+        "rocm_version": null
+      },
+      "children": [
+        {
+          "architecture": "amd64",
+          "digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+          "os": "linux"
+        }
+      ],
+      "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "environment": "public",
+      "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+      "mesh_revision": "1111111111111111111111111111111111111111",
+      "runner_images_revision": "2222222222222222222222222222222222222222",
+      "schema": 1,
+      "type": "mesh-llm-runner-image-candidate"
+    }
+  },
+  "catalog_sha256": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+  "origin": {
+    "event": "push",
+    "mesh_revision": "1111111111111111111111111111111111111111",
+    "repository": "Mesh-LLM/mesh-llm-runner-images",
+    "repository_id": 123,
+    "run_attempt": 1,
+    "run_id": 789,
+    "runner_images_revision": "2222222222222222222222222222222222222222",
+    "timestamp": "20260908000000",
+    "workflow_id": 456,
+    "workflow_path": ".github/workflows/build-and-push.yml"
+  },
+  "platforms": {
+    "public-cpu-amd64": {
+      "candidate": {
+        "backend": {
+          "cuda_series": null,
+          "id": "cpu",
+          "name": "cpu",
+          "rocm_version": null
+        },
+        "child_digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+        "digest": "sha256:8c56394e20567a4268be3b81b8a278bd396540cbd9157442613e20344fb9a14e",
+        "environment": "public",
+        "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+        "mesh_revision": "1111111111111111111111111111111111111111",
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "runner_images_revision": "2222222222222222222222222222222222222222",
+        "schema": 1,
+        "type": "mesh-llm-runner-image-platform-candidate"
+      },
+      "index_base64": "eyJtYW5pZmVzdHMiOlt7ImRpZ2VzdCI6InNoYTI1NjpiNjZiZWJlYTBlZmRmM2I4ZmUxOTE4OThkZWRiNmU3MTQ4MTYxNmIyNDhlZjQyY2ZmZTg4N2E1MjI2MDFhYTM0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5tYW5pZmVzdC52MStqc29uIiwicGxhdGZvcm0iOnsiYXJjaGl0ZWN0dXJlIjoiYW1kNjQiLCJvcyI6ImxpbnV4In0sInNpemUiOjQwMH1dLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmluZGV4LnYxK2pzb24iLCJzY2hlbWFWZXJzaW9uIjoyfQ==",
+      "manifest_base64": "eyJjb25maWciOnsiZGlnZXN0Ijoic2hhMjU2OmI2YzYxYWJlYTJhMTNlZmQwNDkwNzhjY2UzYWQyNzZhMDNhNTIzYzE0N2FjZDUwOTFmMmY4ZjFhNjU3ZTNkMTQiLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmNvbmZpZy52MStqc29uIiwic2l6ZSI6MTUxfSwibGF5ZXJzIjpbeyJkaWdlc3QiOiJzaGEyNTY6OTQ4ZjhiMWEyY2VmYTI1MzgwMGY1YTcxMDJkZjI0ODI5Mjc2ZWM4MDQ3NWE2NzY4N2Y0M2IyMzFiM2M1M2FjNCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiLCJzaXplIjoxM31dLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLCJzY2hlbWFWZXJzaW9uIjoyfQ==",
+      "receipt": {
+        "backend_id": "cpu",
+        "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+        "layers": [
+          {
+            "compression": "gzip",
+            "digest": "sha256:948f8b1a2cefa253800f5a7102df24829276ec80475a67687f43b231b3c53ac4",
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 13
+          }
+        ],
+        "oci": {
+          "config": {
+            "digest": "sha256:b6c61abea2a13efd049078cce3ad276a03a523c147acd5091f2f8f1a657e3d14",
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 151
+          },
+          "manifest": {
+            "digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 400
+          },
+          "root": {
+            "digest": "sha256:8c56394e20567a4268be3b81b8a278bd396540cbd9157442613e20344fb9a14e",
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "size": 289
+          }
+        },
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "runtime": {
+          "cache": {
+            "epochs": {
+              "cargo": 1,
+              "pnpm": 1,
+              "python": 1,
+              "sccache": 1
+            },
+            "input_fingerprints": {
+              "cargo": "sha256:c817402101459334f3c45cbbae3ba9cfdb8af5e28a9dc3ea5d4410ee799a52b6",
+              "pnpm": "sha256:b426cecf8e75348e57f655fb4261f4d38e4a26e8908a42b2571ee779eb868553",
+              "python": "sha256:a697ad58751f2e6b52fbc137352e83bc547929cc381b02d6cde095a732376c68",
+              "sccache": "sha256:bf706d07e2051d896e8d55d96c79f943898665034c206eea6766949534beda8e"
+            },
+            "schema": 1,
+            "scope": "Partial runtime inputs only. Consumers must include native image/toolchain epoch, target, features and flags; no cross-image reuse is authorized."
+          },
+          "dependencies": {
+            "index_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "kind": "full",
+            "pnpm_lifecycle": "default",
+            "python_lock_sha256": "sha256:857b67a4b7dbc51059c57c3032b396e3fc013a1693266339b765d99a0cca285d"
+          },
+          "expected_tools": {
+            "just": "1.57.0",
+            "node_major": 24,
+            "openai_npm": "7.5.0",
+            "playwright": null,
+            "pnpm": "10.34.5",
+            "rust": "1.98.1",
+            "sccache": "0.16.0"
+          },
+          "family": {
+            "backend": "cpu",
+            "cuda_series": null,
+            "environment": "public",
+            "rocm_version": null
+          },
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          },
+          "schema": 1,
+          "source": {
+            "mesh_revision": "1111111111111111111111111111111111111111",
+            "runner_images_revision": "2222222222222222222222222222222222222222"
+          },
+          "tools": {
+            "cargo": {
+              "version": "1.98.1"
+            },
+            "just": {
+              "version": "1.57.0"
+            },
+            "node": {
+              "modules_abi": "137",
+              "version": "24.0.0"
+            },
+            "openai_npm": {
+              "version": "7.5.0"
+            },
+            "playwright": null,
+            "pnpm": {
+              "store_format": "v10",
+              "version": "10.34.5"
+            },
+            "python": {
+              "abi": "cpython-312-linux-gnu",
+              "packages_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "runtime": "venv",
+              "version": "3.12.3"
+            },
+            "rustc": {
+              "commit_hash": "4444444444444444444444444444444444444444",
+              "host": "x86_64-unknown-linux-gnu",
+              "llvm_version": "22.1.0",
+              "release": "1.98.1"
+            },
+            "sccache": {
+              "version": "0.16.0"
+            }
+          },
+          "type": "mesh-llm-runner-runtime-identity",
+          "verification": {
+            "cache_policy_sha256": "sha256:a72b1f6e47db899de86a4b04356af597a9e2bb13ed6e36d30769af908a30e542",
+            "tool_pins_sha256": "sha256:c95badc32387f080361ab87da964bde336e9d9ea247e6df6dd9c1926a00d34b6",
+            "verifier_revision": "2222222222222222222222222222222222222222"
+          }
+        },
+        "schema": 1,
+        "scope": "Runtime observations from exact-digest verification. OCI descriptor bytes are not pull savings. Receipt admission requires trusted workflow provenance.",
+        "type": "mesh-llm-runner-image-identity"
+      }
+    },
+    "public-vulkan-amd64": {
+      "candidate": {
+        "backend": {
+          "cuda_series": null,
+          "id": "vulkan",
+          "name": "vulkan",
+          "rocm_version": null
+        },
+        "child_digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+        "digest": "sha256:8c56394e20567a4268be3b81b8a278bd396540cbd9157442613e20344fb9a14e",
+        "environment": "public",
+        "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+        "mesh_revision": "1111111111111111111111111111111111111111",
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "runner_images_revision": "2222222222222222222222222222222222222222",
+        "schema": 1,
+        "type": "mesh-llm-runner-image-platform-candidate"
+      },
+      "index_base64": "eyJtYW5pZmVzdHMiOlt7ImRpZ2VzdCI6InNoYTI1NjpiNjZiZWJlYTBlZmRmM2I4ZmUxOTE4OThkZWRiNmU3MTQ4MTYxNmIyNDhlZjQyY2ZmZTg4N2E1MjI2MDFhYTM0IiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5tYW5pZmVzdC52MStqc29uIiwicGxhdGZvcm0iOnsiYXJjaGl0ZWN0dXJlIjoiYW1kNjQiLCJvcyI6ImxpbnV4In0sInNpemUiOjQwMH1dLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmluZGV4LnYxK2pzb24iLCJzY2hlbWFWZXJzaW9uIjoyfQ==",
+      "manifest_base64": "eyJjb25maWciOnsiZGlnZXN0Ijoic2hhMjU2OmI2YzYxYWJlYTJhMTNlZmQwNDkwNzhjY2UzYWQyNzZhMDNhNTIzYzE0N2FjZDUwOTFmMmY4ZjFhNjU3ZTNkMTQiLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmNvbmZpZy52MStqc29uIiwic2l6ZSI6MTUxfSwibGF5ZXJzIjpbeyJkaWdlc3QiOiJzaGEyNTY6OTQ4ZjhiMWEyY2VmYTI1MzgwMGY1YTcxMDJkZjI0ODI5Mjc2ZWM4MDQ3NWE2NzY4N2Y0M2IyMzFiM2M1M2FjNCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiLCJzaXplIjoxM31dLCJtZWRpYVR5cGUiOiJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLm1hbmlmZXN0LnYxK2pzb24iLCJzY2hlbWFWZXJzaW9uIjoyfQ==",
+      "receipt": {
+        "backend_id": "vulkan",
+        "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner",
+        "layers": [
+          {
+            "compression": "gzip",
+            "digest": "sha256:948f8b1a2cefa253800f5a7102df24829276ec80475a67687f43b231b3c53ac4",
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 13
+          }
+        ],
+        "oci": {
+          "config": {
+            "digest": "sha256:b6c61abea2a13efd049078cce3ad276a03a523c147acd5091f2f8f1a657e3d14",
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 151
+          },
+          "manifest": {
+            "digest": "sha256:b66bebea0efdf3b8fe191898dedb6e71481616b248ef42cffe887a522601aa34",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 400
+          },
+          "root": {
+            "digest": "sha256:8c56394e20567a4268be3b81b8a278bd396540cbd9157442613e20344fb9a14e",
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "size": 289
+          }
+        },
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "runtime": {
+          "cache": {
+            "epochs": {
+              "cargo": 1,
+              "pnpm": 1,
+              "python": 1,
+              "sccache": 1
+            },
+            "input_fingerprints": {
+              "cargo": "sha256:c817402101459334f3c45cbbae3ba9cfdb8af5e28a9dc3ea5d4410ee799a52b6",
+              "pnpm": "sha256:b426cecf8e75348e57f655fb4261f4d38e4a26e8908a42b2571ee779eb868553",
+              "python": "sha256:a697ad58751f2e6b52fbc137352e83bc547929cc381b02d6cde095a732376c68",
+              "sccache": "sha256:bf706d07e2051d896e8d55d96c79f943898665034c206eea6766949534beda8e"
+            },
+            "schema": 1,
+            "scope": "Partial runtime inputs only. Consumers must include native image/toolchain epoch, target, features and flags; no cross-image reuse is authorized."
+          },
+          "dependencies": {
+            "index_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "kind": "full",
+            "pnpm_lifecycle": "default",
+            "python_lock_sha256": "sha256:857b67a4b7dbc51059c57c3032b396e3fc013a1693266339b765d99a0cca285d"
+          },
+          "expected_tools": {
+            "just": "1.57.0",
+            "node_major": 24,
+            "openai_npm": "7.5.0",
+            "playwright": null,
+            "pnpm": "10.34.5",
+            "rust": "1.98.1",
+            "sccache": "0.16.0"
+          },
+          "family": {
+            "backend": "vulkan",
+            "cuda_series": null,
+            "environment": "public",
+            "rocm_version": null
+          },
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          },
+          "schema": 1,
+          "source": {
+            "mesh_revision": "1111111111111111111111111111111111111111",
+            "runner_images_revision": "2222222222222222222222222222222222222222"
+          },
+          "tools": {
+            "cargo": {
+              "version": "1.98.1"
+            },
+            "just": {
+              "version": "1.57.0"
+            },
+            "node": {
+              "modules_abi": "137",
+              "version": "24.0.0"
+            },
+            "openai_npm": {
+              "version": "7.5.0"
+            },
+            "playwright": null,
+            "pnpm": {
+              "store_format": "v10",
+              "version": "10.34.5"
+            },
+            "python": {
+              "abi": "cpython-312-linux-gnu",
+              "packages_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "runtime": "venv",
+              "version": "3.12.3"
+            },
+            "rustc": {
+              "commit_hash": "4444444444444444444444444444444444444444",
+              "host": "x86_64-unknown-linux-gnu",
+              "llvm_version": "22.1.0",
+              "release": "1.98.1"
+            },
+            "sccache": {
+              "version": "0.16.0"
+            }
+          },
+          "type": "mesh-llm-runner-runtime-identity",
+          "verification": {
+            "cache_policy_sha256": "sha256:a72b1f6e47db899de86a4b04356af597a9e2bb13ed6e36d30769af908a30e542",
+            "tool_pins_sha256": "sha256:c95badc32387f080361ab87da964bde336e9d9ea247e6df6dd9c1926a00d34b6",
+            "verifier_revision": "2222222222222222222222222222222222222222"
+          }
+        },
+        "schema": 1,
+        "scope": "Runtime observations from exact-digest verification. OCI descriptor bytes are not pull savings. Receipt admission requires trusted workflow provenance.",
+        "type": "mesh-llm-runner-image-identity"
+      }
+    }
+  },
+  "schema": 1,
+  "type": "mesh-llm-runner-staged-cohort"
+}

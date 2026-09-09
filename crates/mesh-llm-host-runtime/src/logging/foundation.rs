@@ -393,9 +393,9 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn resolve_default_falls_back_to_home() {
-        // Call the private resolver directly — avoids creating real dirs under $HOME.
-        let resolved = resolve_app_state_root(None).unwrap();
+    fn resolve_default_without_environment_override_falls_back_to_home() {
+        let resolved =
+            resolve_app_state_root_with(None, None, RootPlatform::NonWindows, || None).unwrap();
 
         if let Some(home) = dirs::home_dir() {
             assert!(resolved.starts_with(&home));

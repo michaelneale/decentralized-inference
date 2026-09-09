@@ -1227,6 +1227,43 @@ pub fn resolve_package_v2_stage_to_local(
     Ok((local_ref, model_parts, projector))
 }
 
+/// Resolve the complete tensor closure for single-node package-v2 serving.
+///
+/// Split stages arrive with an exact coordinator-produced admission descriptor.
+/// A local single-node load owns every tensor, so its admission descriptor is
+/// the manifest's complete, ordered tensor catalog.
+pub fn resolve_package_v2_full_model_to_local(
+    package_ref: &str,
+) -> Result<(Vec<PathBuf>, Option<PathBuf>)> {
+    let local_ref = resolve_hf_package_to_local(package_ref, 0, 0, false, false)?;
+    let manifest_path = Path::new(&local_ref).join("model-package.json");
+    let manifest: PackageManifestV2 = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
+    )
+    .context("parse package-v2 manifest")?;
+    let mut sidecars = manifest.sidecars.clone();
+    sidecars.sort();
+    let admission = PackageV2StageAdmissionDescriptor {
+        package_id: manifest.package_id.clone(),
+        resident_tensor_ids: manifest
+            .tensor_catalog
+            .entries
+            .iter()
+            .filter(|tensor| {
+                matches!(
+                    tensor.storage,
+                    skippy_package_format::TensorStorage::Owned { .. }
+                )
+            })
+            .map(|tensor| tensor.id.clone())
+            .collect(),
+        sidecars,
+    };
+    let (_, model_parts, projector) = resolve_package_v2_stage_to_local(package_ref, &admission)?;
+    Ok((model_parts, projector))
+}
+
 fn safe_manifest_file_path(path: &str) -> Result<PathBuf> {
     anyhow::ensure!(!path.is_empty(), "manifest file path is empty");
     let path = Path::new(path);

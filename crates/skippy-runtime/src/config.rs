@@ -184,6 +184,9 @@ impl RuntimeConfig {
         if self.n_threads_batch == Some(0) {
             return Err("n_threads_batch must be greater than zero when provided");
         }
+        if self.filter_tensors_on_load && self.resident_tensor_names.is_empty() {
+            return Err("filtered stage loading requires an explicit admitted resident tensor set");
+        }
         Ok(())
     }
 
@@ -321,7 +324,7 @@ impl RuntimeConfig {
             .unwrap_or_else(|| default_n_batch_for_lane_count(self.lane_count));
         let n_ubatch = self.n_ubatch.unwrap_or(LLAMA_SERVER_DEFAULT_N_UBATCH);
         format!(
-            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} mmap={} mlock={} repack={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} include_embeddings={} include_output={} mtp_source={:?} filter_tensors_on_load={} checkpoint_quantization={:?}",
+            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} mmap={} mlock={} repack={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} include_embeddings={} include_output={} mtp_source={:?} filter_tensors_on_load={} resident_tensor_count={} checkpoint_quantization={:?}",
             self.stage_index,
             self.layer_start,
             self.layer_end,
@@ -344,6 +347,7 @@ impl RuntimeConfig {
             self.include_output,
             self.mtp_source,
             self.filter_tensors_on_load,
+            self.resident_tensor_names.len(),
             self.checkpoint_quantization,
         )
     }
@@ -493,7 +497,7 @@ mod tests {
         let filtered = RuntimeConfig {
             mmap: None,
             filter_tensors_on_load: true,
-            resident_tensor_names: Vec::new(),
+            resident_tensor_names: vec!["output.weight".into()],
             ..RuntimeConfig::default()
         }
         .as_raw()?
@@ -501,7 +505,7 @@ mod tests {
         let explicitly_enabled = RuntimeConfig {
             mmap: Some(true),
             filter_tensors_on_load: true,
-            resident_tensor_names: Vec::new(),
+            resident_tensor_names: vec!["output.weight".into()],
             ..RuntimeConfig::default()
         }
         .as_raw()?
@@ -514,8 +518,7 @@ mod tests {
 
         let materialized = RuntimeConfig {
             mmap: None,
-            filter_tensors_on_load: true,
-            resident_tensor_names: Vec::new(),
+            filter_tensors_on_load: false,
             load_mode: LoadMode::LayerPackage,
             ..RuntimeConfig::default()
         }
@@ -572,6 +575,22 @@ mod tests {
             .expect_err("noncanonical resident tensor names must fail");
             assert!(error.to_string().contains("resident tensor name"));
         }
+    }
+
+    #[test]
+    fn runtime_config_rejects_filtered_load_without_admission() {
+        let error = RuntimeConfig {
+            filter_tensors_on_load: true,
+            resident_tensor_names: Vec::new(),
+            ..RuntimeConfig::default()
+        }
+        .as_raw()
+        .expect_err("filtered loads must carry an exact resident tensor set");
+        assert!(
+            error
+                .to_string()
+                .contains("explicit admitted resident tensor set")
+        );
     }
 
     #[test]
