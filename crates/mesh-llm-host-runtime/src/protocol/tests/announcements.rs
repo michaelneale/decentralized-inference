@@ -63,6 +63,7 @@ fn owner_fields_roundtrip_through_proto_announcement() {
         latency_age_ms: None,
         latency_observer_id: None,
         inference_admission_state: None,
+        attested_log_head: None,
     };
     let proto_pa = local_ann_to_proto_ann(&ann);
     let skippy = proto_pa
@@ -230,6 +231,7 @@ fn advertised_model_throughput_roundtrips_through_proto_announcement() {
         latency_age_ms: None,
         latency_observer_id: None,
         inference_admission_state: None,
+        attested_log_head: None,
     };
 
     let mut proto_pa = local_ann_to_proto_ann(&ann);
@@ -398,6 +400,7 @@ fn inference_admission_state_roundtrips_through_proto_announcement() {
         latency_age_ms: None,
         latency_observer_id: None,
         inference_admission_state: Some(expected_state),
+        attested_log_head: None,
     };
 
     let proto_pa = local_ann_to_proto_ann(&ann);
@@ -652,6 +655,7 @@ fn test_proto_round_trip_with_bandwidth_and_tflops() {
         latency_age_ms: None,
         latency_observer_id: None,
         inference_admission_state: None,
+        attested_log_head: None,
     };
 
     let proto_pa = local_ann_to_proto_ann(&ann);
@@ -792,4 +796,152 @@ fn test_proto_gpu_info_preserves_legacy_fields_for_old_consumers() {
         Some("312.00,312.00")
     );
     assert_eq!(roundtripped.is_soc, Some(false));
+}
+
+#[test]
+fn attested_log_head_roundtrips_through_proto_announcement() {
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xCF; 32]).public());
+    let expected = super::super::AttestedLogHead {
+        log_id: "log-abc".to_string(),
+        size: 42,
+        root: vec![0xAA; 32],
+        timestamp_unix_ms: 1_725_000_000_000,
+        signature: vec![0xBB; 64],
+    };
+    let ann = super::super::PeerAnnouncement {
+        addr: iroh::EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        },
+        role: super::super::NodeRole::Worker,
+        first_joined_mesh_ts: None,
+        models: vec![],
+        vram_bytes: 0,
+        model_source: None,
+        serving_models: vec![],
+        hosted_models: None,
+        available_models: vec![],
+        requested_models: vec![],
+        explicit_model_interests: vec![],
+        version: None,
+        model_demand: HashMap::new(),
+        mesh_id: None,
+        mesh_policy_hash: None,
+        gpu_name: None,
+        hostname: None,
+        is_soc: None,
+        gpu_vram: None,
+        gpu_reserved_bytes: None,
+        gpu_mem_bandwidth_gbps: None,
+        gpu_compute_tflops_fp32: None,
+        gpu_compute_tflops_fp16: None,
+        available_model_metadata: vec![],
+        experts_summary: None,
+        available_model_sizes: HashMap::new(),
+        served_model_descriptors: vec![],
+        served_model_runtime: vec![],
+        owner_attestation: None,
+        genesis_policy: None,
+        release_attestation: None,
+        direct_admission_proof: None,
+        artifact_transfer_supported: false,
+        stage_protocol_generation_supported: false,
+        stage_status_list_supported: false,
+        local_gguf_content_id_supported: false,
+        advertised_model_throughput: vec![],
+        cache_affinity: None,
+        latency_ms: None,
+        latency_source: None,
+        latency_age_ms: None,
+        latency_observer_id: None,
+        inference_admission_state: None,
+        attested_log_head: Some(expected.clone()),
+    };
+
+    let proto_pa = local_ann_to_proto_ann(&ann);
+    let proto_checkpoint = proto_pa
+        .attested_log_head
+        .as_ref()
+        .expect("attested_log_head must be present on the wire announcement");
+    assert_eq!(proto_checkpoint.log_id, expected.log_id);
+    assert_eq!(proto_checkpoint.size, expected.size);
+    assert_eq!(proto_checkpoint.root, expected.root);
+    assert_eq!(
+        proto_checkpoint.timestamp_unix_ms,
+        expected.timestamp_unix_ms
+    );
+    assert_eq!(proto_checkpoint.signature, expected.signature);
+
+    let (_, roundtripped) = proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
+    assert_eq!(roundtripped.attested_log_head, Some(expected));
+}
+
+/// Proves backward compatibility at the wire level: encoding an announcement
+/// that has no `attested_log_head` field and decoding it produces `None` for
+/// the field. This is the proto3 optional-field contract.
+#[test]
+fn proto_announcement_without_attested_log_head_decodes_as_absent() {
+    use prost::Message;
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0xD0; 32]).public());
+    // Build a local announcement with no attested_log_head.
+    let ann = super::super::PeerAnnouncement {
+        addr: iroh::EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        },
+        role: super::super::NodeRole::Worker,
+        first_joined_mesh_ts: None,
+        models: vec![],
+        vram_bytes: 0,
+        model_source: None,
+        serving_models: vec![],
+        hosted_models: None,
+        available_models: vec![],
+        requested_models: vec![],
+        explicit_model_interests: vec![],
+        version: None,
+        model_demand: HashMap::new(),
+        mesh_id: None,
+        mesh_policy_hash: None,
+        gpu_name: Some("NVIDIA A100".to_string()),
+        hostname: None,
+        is_soc: None,
+        gpu_vram: None,
+        gpu_reserved_bytes: None,
+        gpu_mem_bandwidth_gbps: None,
+        gpu_compute_tflops_fp32: None,
+        gpu_compute_tflops_fp16: None,
+        available_model_metadata: vec![],
+        experts_summary: None,
+        available_model_sizes: HashMap::new(),
+        served_model_descriptors: vec![],
+        served_model_runtime: vec![],
+        owner_attestation: None,
+        genesis_policy: None,
+        release_attestation: None,
+        direct_admission_proof: None,
+        artifact_transfer_supported: false,
+        stage_protocol_generation_supported: false,
+        stage_status_list_supported: false,
+        local_gguf_content_id_supported: false,
+        advertised_model_throughput: vec![],
+        cache_affinity: None,
+        latency_ms: None,
+        latency_source: None,
+        latency_age_ms: None,
+        latency_observer_id: None,
+        inference_admission_state: None,
+        attested_log_head: None,
+    };
+    // Encode to wire bytes, then decode back — this is what an old peer's
+    // message looks like on the wire when it has never set tag 51.
+    let proto_pa = local_ann_to_proto_ann(&ann);
+    let mut buf = Vec::new();
+    proto_pa.encode(&mut buf).expect("encode must succeed");
+    let decoded_proto =
+        crate::proto::node::PeerAnnouncement::decode(buf.as_slice()).expect("decode must succeed");
+    let (_, roundtripped) =
+        proto_ann_to_local(&decoded_proto).expect("proto_ann_to_local must succeed");
+    assert_eq!(roundtripped.attested_log_head, None);
+    assert_eq!(roundtripped.gpu_name.as_deref(), Some("NVIDIA A100"));
 }

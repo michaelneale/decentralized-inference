@@ -426,5 +426,6 @@ pub(super) fn requirement_peer_announcement(
         latency_age_ms: None,
         latency_observer_id: None,
         inference_admission_state: None,
+        attested_log_head: None,
     }
 }

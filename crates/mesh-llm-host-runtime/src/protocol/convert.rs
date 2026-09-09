@@ -835,6 +835,34 @@ pub(crate) fn local_ann_to_proto_ann(
             .cache_affinity
             .as_ref()
             .map(local_cache_affinity_to_proto),
+        attested_log_head: ann
+            .attested_log_head
+            .as_ref()
+            .map(local_attested_log_head_to_proto),
+    }
+}
+
+fn local_attested_log_head_to_proto(
+    checkpoint: &crate::mesh::AttestedLogHead,
+) -> crate::proto::node::AttestedLogHead {
+    crate::proto::node::AttestedLogHead {
+        log_id: checkpoint.log_id.clone(),
+        size: checkpoint.size,
+        root: checkpoint.root.clone(),
+        timestamp_unix_ms: checkpoint.timestamp_unix_ms,
+        signature: checkpoint.signature.clone(),
+    }
+}
+
+fn proto_attested_log_head_to_local(
+    checkpoint: &crate::proto::node::AttestedLogHead,
+) -> crate::mesh::AttestedLogHead {
+    crate::mesh::AttestedLogHead {
+        log_id: checkpoint.log_id.clone(),
+        size: checkpoint.size,
+        root: checkpoint.root.clone(),
+        timestamp_unix_ms: checkpoint.timestamp_unix_ms,
+        signature: checkpoint.signature.clone(),
     }
 }
 
@@ -1071,6 +1099,10 @@ pub(crate) fn proto_ann_to_local(
             .cache_affinity
             .as_ref()
             .and_then(proto_cache_affinity_to_local),
+        attested_log_head: pa
+            .attested_log_head
+            .as_ref()
+            .map(proto_attested_log_head_to_local),
     };
     crate::mesh::backfill_legacy_descriptors(&mut ann);
     ann.advertised_model_throughput = sanitize_model_throughput_hints_for_ann(&ann);

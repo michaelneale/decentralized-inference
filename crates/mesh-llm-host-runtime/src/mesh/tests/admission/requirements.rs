@@ -605,6 +605,7 @@ pub(crate) fn assert_mesh_requirements_add_peer_rejects_untrusted_release_signer
             latency_age_ms: None,
             latency_observer_id: None,
             inference_admission_state: None,
+            attested_log_head: None,
         };
 
         node.add_peer(
@@ -697,6 +698,7 @@ pub(crate) fn assert_mesh_requirements_add_peer_rejects_invalid_release_attestat
             latency_age_ms: None,
             latency_observer_id: None,
             inference_admission_state: None,
+            attested_log_head: None,
         };
 
         node.add_peer(
@@ -786,6 +788,7 @@ pub(crate) fn assert_mesh_requirements_add_peer_rejects_wrong_mesh_id() {
             latency_age_ms: None,
             latency_observer_id: None,
             inference_admission_state: None,
+            attested_log_head: None,
         };
 
         node.add_peer(
