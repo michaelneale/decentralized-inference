@@ -43,6 +43,12 @@ pub async fn dispatch(cli: &Cli) -> Result<bool> {
 async fn dispatch_command(cli: &Cli, cmd: &Command) -> Result<()> {
     match cmd {
         Command::Auth { command } => mesh_llm_commands::auth::run_auth_command(command),
+        Command::KvCache { command } => {
+            mesh_llm_commands::kv_cache::dispatch_kv_cache_command(command).await
+        }
+        Command::Runtime { command } => {
+            dispatch_runtime_command(command.as_ref(), cli.config.as_deref()).await
+        }
         Command::ModelPrepare { .. } => dispatch_model_prepare(cmd).await,
         _ => dispatch_general_command(cli, cmd).await,
     }
@@ -63,8 +69,8 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             mesh_llm_commands::gpus::dispatch_gpu_command(*json, command.as_ref())?;
             Ok(())
         }
-        Command::Runtime { command } => {
-            dispatch_runtime_command(command.as_ref(), cli.config.as_deref()).await
+        Command::Runtime { .. } | Command::KvCache { .. } => {
+            unreachable!("runtime and kv-cache commands are dispatched before general commands")
         }
         Command::Setup { .. } => dispatch_setup_command(cmd, cli.config.as_deref()).await,
         Command::Uninstall {

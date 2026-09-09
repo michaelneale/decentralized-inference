@@ -525,6 +525,7 @@ message OwnerControlRequest {
   OwnerControlUnloadModelRequest unload_model = 7;
   OwnerControlEnsureModelRequest ensure_model = 8;
   OwnerControlDrainModelRequest drain_model = 9;
+  OwnerControlKvCacheRequest kv_cache = 10;
 }
 
 message OwnerControlResponse {
@@ -537,6 +538,7 @@ message OwnerControlResponse {
   OwnerControlUnloadModelResponse unload_model = 7;
   OwnerControlEnsureModelResponse ensure_model = 8;
   OwnerControlDrainModelResponse drain_model = 9;
+  OwnerControlKvCacheResponse kv_cache = 10;
 }
 
 message OwnerControlError {
@@ -638,6 +640,21 @@ message OwnerControlDrainModelRequest {
   optional uint64 drain_timeout_secs = 4;
 }
 
+message OwnerControlKvCacheRequest {
+  bytes requester_node_id = 1;            // exactly 32 bytes
+  bytes target_node_id = 2;               // exactly 32 bytes
+  OwnerControlKvCacheOperation operation = 3;
+  optional uint64 target_bytes = 4;       // prune only; default is 85% of budget
+  optional string model_identity = 5;     // exact internal numerical identity
+}
+
+enum OwnerControlKvCacheOperation {
+  OWNER_CONTROL_KV_CACHE_OPERATION_UNSPECIFIED = 0;
+  OWNER_CONTROL_KV_CACHE_OPERATION_STATUS = 1;
+  OWNER_CONTROL_KV_CACHE_OPERATION_PRUNE = 2;
+  OWNER_CONTROL_KV_CACHE_OPERATION_CLEAR = 3;
+}
+
 message OwnerControlLoadModelResponse {
   string intent_id = 1;
   string accepted_state = 2;
@@ -660,6 +677,11 @@ message OwnerControlDrainModelResponse {
   string intent_id = 1;
   string accepted_state = 2;
   OwnerControlModelRef target = 3;
+}
+
+message OwnerControlKvCacheResponse {
+  bytes status_json = 1;                  // versioned KvCacheStatusPayload JSON
+  optional uint64 freed_bytes = 2;        // present for prune and clear
 }
 
 message OwnerControlRefreshInventoryResponse {

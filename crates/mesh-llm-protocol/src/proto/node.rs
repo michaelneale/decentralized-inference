@@ -615,6 +615,8 @@ pub struct OwnerControlRequest {
     pub ensure_model: ::core::option::Option<OwnerControlEnsureModelRequest>,
     #[prost(message, optional, tag = "9")]
     pub drain_model: ::core::option::Option<OwnerControlDrainModelRequest>,
+    #[prost(message, optional, tag = "10")]
+    pub kv_cache: ::core::option::Option<OwnerControlKvCacheRequest>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OwnerControlResponse {
@@ -636,6 +638,8 @@ pub struct OwnerControlResponse {
     pub ensure_model: ::core::option::Option<OwnerControlEnsureModelResponse>,
     #[prost(message, optional, tag = "9")]
     pub drain_model: ::core::option::Option<OwnerControlDrainModelResponse>,
+    #[prost(message, optional, tag = "10")]
+    pub kv_cache: ::core::option::Option<OwnerControlKvCacheResponse>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OwnerControlError {
@@ -801,6 +805,23 @@ pub struct OwnerControlDrainModelRequest {
     pub drain_timeout_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OwnerControlKvCacheRequest {
+    /// exactly 32 bytes
+    #[prost(bytes = "vec", tag = "1")]
+    pub requester_node_id: ::prost::alloc::vec::Vec<u8>,
+    /// exactly 32 bytes
+    #[prost(bytes = "vec", tag = "2")]
+    pub target_node_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(enumeration = "OwnerControlKvCacheOperation", tag = "3")]
+    pub operation: i32,
+    /// prune only; default is 85% of budget
+    #[prost(uint64, optional, tag = "4")]
+    pub target_bytes: ::core::option::Option<u64>,
+    /// exact internal numerical identity
+    #[prost(string, optional, tag = "5")]
+    pub model_identity: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OwnerControlLoadModelResponse {
     #[prost(string, tag = "1")]
     pub intent_id: ::prost::alloc::string::String,
@@ -835,6 +856,15 @@ pub struct OwnerControlDrainModelResponse {
     pub accepted_state: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "3")]
     pub target: ::core::option::Option<OwnerControlModelRef>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OwnerControlKvCacheResponse {
+    /// versioned KvCacheStatusPayload JSON
+    #[prost(bytes = "vec", tag = "1")]
+    pub status_json: ::prost::alloc::vec::Vec<u8>,
+    /// present for prune and clear
+    #[prost(uint64, optional, tag = "2")]
+    pub freed_bytes: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OwnerControlRefreshInventory {
@@ -1375,6 +1405,35 @@ impl OwnerControlErrorCode {
             "OWNER_CONTROL_ERROR_CODE_LEGACY_JSON_UNSUPPORTED" => Some(Self::LegacyJsonUnsupported),
             "OWNER_CONTROL_ERROR_CODE_INVALID_HANDSHAKE" => Some(Self::InvalidHandshake),
             "OWNER_CONTROL_ERROR_CODE_TARGET_NODE_MISMATCH" => Some(Self::TargetNodeMismatch),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OwnerControlKvCacheOperation {
+    Unspecified = 0,
+    Status = 1,
+    Prune = 2,
+    Clear = 3,
+}
+impl OwnerControlKvCacheOperation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "OWNER_CONTROL_KV_CACHE_OPERATION_UNSPECIFIED",
+            Self::Status => "OWNER_CONTROL_KV_CACHE_OPERATION_STATUS",
+            Self::Prune => "OWNER_CONTROL_KV_CACHE_OPERATION_PRUNE",
+            Self::Clear => "OWNER_CONTROL_KV_CACHE_OPERATION_CLEAR",
+        }
+    }
+
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OWNER_CONTROL_KV_CACHE_OPERATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "OWNER_CONTROL_KV_CACHE_OPERATION_STATUS" => Some(Self::Status),
+            "OWNER_CONTROL_KV_CACHE_OPERATION_PRUNE" => Some(Self::Prune),
+            "OWNER_CONTROL_KV_CACHE_OPERATION_CLEAR" => Some(Self::Clear),
             _ => None,
         }
     }

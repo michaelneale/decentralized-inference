@@ -132,6 +132,40 @@ fn command_summary_covers_plugin_config_and_doctor_values_without_defaults() {
 }
 
 #[test]
+fn command_summary_records_kv_cache_subcommands_and_redacts_values() {
+    assert_eq!(
+        parsed_summary(&[
+            "mesh-llm",
+            "kv-cache",
+            "status",
+            "--endpoint",
+            "secret-endpoint",
+            "--port",
+            "4444",
+            "--json",
+        ]),
+        "mesh-llm kv-cache status --json --port 4444 --endpoint [REDACTED]"
+    );
+    assert_eq!(
+        parsed_summary(&[
+            "mesh-llm",
+            "kv-cache",
+            "prune",
+            "--target",
+            "4GiB",
+            "--model-identity",
+            "private-model",
+            "--yes",
+        ]),
+        "mesh-llm kv-cache prune --yes --target [REDACTED] --model-identity [REDACTED]"
+    );
+    assert_eq!(
+        parsed_summary(&["mesh-llm", "kv-cache", "clear", "--yes"]),
+        "mesh-llm kv-cache clear --yes"
+    );
+}
+
+#[test]
 fn command_summary_covers_auth_trust_and_nested_command_families() {
     let auth = parsed_summary(&[
         "mesh-llm",

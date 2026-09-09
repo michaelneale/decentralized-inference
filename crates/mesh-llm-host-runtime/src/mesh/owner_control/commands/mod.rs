@@ -1,9 +1,12 @@
+pub(crate) mod kv_cache;
 pub(crate) mod model_lifecycle;
 pub(crate) mod scan_refresh;
 
+const OWNER_CONTROL_KV_CACHE_DEADLINE_SECS: u64 = 30;
+
 use crate::proto::node::{
     OwnerControlApplyConfigRequest, OwnerControlDrainModelRequest, OwnerControlEnsureModelRequest,
-    OwnerControlGetConfigRequest, OwnerControlLoadModelRequest,
+    OwnerControlGetConfigRequest, OwnerControlKvCacheRequest, OwnerControlLoadModelRequest,
     OwnerControlRefreshInventoryRequest, OwnerControlRequest, OwnerControlUnloadModelRequest,
     OwnerControlWatchConfigRequest,
 };
@@ -93,6 +96,10 @@ pub(crate) enum OwnedNodeCommand {
         request_id: u64,
         request: OwnerControlDrainModelRequest,
     },
+    KvCache {
+        request_id: u64,
+        request: OwnerControlKvCacheRequest,
+    },
 }
 
 impl OwnedNodeCommand {
@@ -140,7 +147,13 @@ impl OwnedNodeCommand {
                 request,
             });
         }
-        request.drain_model.map(|request| Self::DrainModel {
+        if let Some(request) = request.drain_model {
+            return Some(Self::DrainModel {
+                request_id,
+                request,
+            });
+        }
+        request.kv_cache.map(|request| Self::KvCache {
             request_id,
             request,
         })
@@ -155,7 +168,8 @@ impl OwnedNodeCommand {
             | Self::LoadModel { request_id, .. }
             | Self::UnloadModel { request_id, .. }
             | Self::EnsureModel { request_id, .. }
-            | Self::DrainModel { request_id, .. } => *request_id,
+            | Self::DrainModel { request_id, .. }
+            | Self::KvCache { request_id, .. } => *request_id,
         }
     }
 
@@ -169,6 +183,7 @@ impl OwnedNodeCommand {
             Self::UnloadModel { request, .. } => &request.requester_node_id,
             Self::EnsureModel { request, .. } => &request.requester_node_id,
             Self::DrainModel { request, .. } => &request.requester_node_id,
+            Self::KvCache { request, .. } => &request.requester_node_id,
         }
     }
 
@@ -182,6 +197,7 @@ impl OwnedNodeCommand {
             Self::UnloadModel { request, .. } => &request.target_node_id,
             Self::EnsureModel { request, .. } => &request.target_node_id,
             Self::DrainModel { request, .. } => &request.target_node_id,
+            Self::KvCache { request, .. } => &request.target_node_id,
         }
     }
 
@@ -194,7 +210,8 @@ impl OwnedNodeCommand {
             | Self::LoadModel { .. }
             | Self::UnloadModel { .. }
             | Self::EnsureModel { .. }
-            | Self::DrainModel { .. } => OwnedNodeCommandExecutionShape::Unary,
+            | Self::DrainModel { .. }
+            | Self::KvCache { .. } => OwnedNodeCommandExecutionShape::Unary,
         }
     }
 
@@ -206,6 +223,9 @@ impl OwnedNodeCommand {
             | Self::UnloadModel { .. }
             | Self::EnsureModel { .. }
             | Self::DrainModel { .. } => OwnedNodeCommandDeadline::Unary(Duration::from_secs(5)),
+            Self::KvCache { .. } => OwnedNodeCommandDeadline::Unary(Duration::from_secs(
+                OWNER_CONTROL_KV_CACHE_DEADLINE_SECS,
+            )),
             Self::ScanRefresh { .. } => OwnedNodeCommandDeadline::Scan(Duration::from_secs(
                 OWNER_CONTROL_SCAN_DEADLINE_SECS,
             )),
@@ -245,6 +265,7 @@ mod tests {
             unload_model: None,
             ensure_model: None,
             drain_model: None,
+            kv_cache: None,
         })
         .expect("typed command");
 
@@ -259,6 +280,37 @@ mod tests {
             command.deadline(),
             OwnedNodeCommandDeadline::Scan(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn kv_cache_command_is_authenticated_unary_work() {
+        let command = OwnedNodeCommand::decode(OwnerControlRequest {
+            request_id: 42,
+            kv_cache: Some(crate::proto::node::OwnerControlKvCacheRequest {
+                requester_node_id: vec![1; 32],
+                target_node_id: vec![2; 32],
+                operation: crate::proto::node::OwnerControlKvCacheOperation::Status as i32,
+                target_bytes: None,
+                model_identity: None,
+            }),
+            ..Default::default()
+        })
+        .expect("typed command");
+
+        assert_eq!(command.request_id(), 42);
+        assert_eq!(command.requester_node_id(), [1; 32]);
+        assert_eq!(command.target_node_id(), [2; 32]);
+        assert_eq!(
+            command.execution_shape(),
+            OwnedNodeCommandExecutionShape::Unary
+        );
+        assert_eq!(
+            command.deadline(),
+            OwnedNodeCommandDeadline::Unary(Duration::from_secs(
+                OWNER_CONTROL_KV_CACHE_DEADLINE_SECS
+            ))
+        );
+        assert!(!command.is_model_lifecycle());
     }
 
     #[tokio::test(start_paused = true)]
@@ -329,6 +381,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -368,6 +421,7 @@ mod tests {
             unload_model: None,
             ensure_model: None,
             drain_model: None,
+            kv_cache: None,
         }
     }
 

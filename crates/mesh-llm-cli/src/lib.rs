@@ -18,7 +18,7 @@ pub use inventory::{
 
 pub use parser::{
     AuthCommand, BinaryFlavor, Cli, Command, ConfigCommand, DiscoveryScope, DoctorCommand,
-    GpuCommand, MeshDiscoveryMode, MeshGuardrailCliMode, NormalizedRuntimeArgs, PluginCommand,
-    RuntimeSurface, SkillAgentArg, SkillCommand, TrustCommand, TrustPolicy,
+    GpuCommand, KvCacheCommand, MeshDiscoveryMode, MeshGuardrailCliMode, NormalizedRuntimeArgs,
+    PluginCommand, RuntimeSurface, SkillAgentArg, SkillCommand, TrustCommand, TrustPolicy,
     legacy_runtime_surface_warning, normalize_runtime_surface_args, validate_discovery_mode_args,
 };

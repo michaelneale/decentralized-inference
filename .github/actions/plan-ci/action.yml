@@ -284,7 +284,7 @@ runs:
                 rust_tests: .matrices.rust_tests,
                 hosts: [.matrices.hosts[] | select(.platform == "linux")],
                 runtime_products: [.matrices.runtime_products[] | select(.platform == "linux")],
-                smoke: [.matrices.smoke[] | select(.id != "metal-model-load")],
+                smoke: [.matrices.smoke[] | select(.id != "metal-model-load" and .id != "product-integration-metal" and .id != "product-integration-windows-cpu")],
                 sdk: [.matrices.sdk[] | select(.platform == "linux")]
               }
             }
@@ -309,7 +309,7 @@ runs:
                 hosts: [.matrices.hosts[] | select(.platform == "macos")],
                 runtime_products: [.matrices.runtime_products[] | select(.platform == "macos")],
                 platform_checks: [.matrices.platform_checks[] | select(.platform == "macos")],
-                smoke: [.matrices.smoke[] | select(.id == "metal-model-load")],
+                smoke: [.matrices.smoke[] | select(.id == "metal-model-load" or .id == "product-integration-metal")],
                 sdk: [.matrices.sdk[] | select(.platform == "macos")]
               }
             }
@@ -326,7 +326,8 @@ runs:
               matrices: {
                 hosts: [.matrices.hosts[] | select(.platform == "windows")],
                 runtime_products: [.matrices.runtime_products[] | select(.platform == "windows")],
-                platform_checks: [.matrices.platform_checks[] | select(.platform == "windows")]
+                platform_checks: [.matrices.platform_checks[] | select(.platform == "windows")],
+                smoke: [.matrices.smoke[] | select(.id == "product-integration-windows-cpu")]
               }
             }
             | .required = ([.matrices[] | length] | add) > 0

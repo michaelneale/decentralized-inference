@@ -109,6 +109,26 @@ fn build_built_in_config_schema() -> ConfigSchema {
             "runtime.native_runtime.selection",
             ConfigValueSchema::String,
         ),
+        kv_disk_setting(
+            "runtime.kv_cache.disk.mode",
+            string_enum(["off", "auto", "fixed"]),
+            false,
+        ),
+        kv_disk_setting(
+            "runtime.kv_cache.disk.directory",
+            ConfigValueSchema::Path,
+            false,
+        ),
+        kv_disk_setting(
+            "runtime.kv_cache.disk.budget_mib",
+            ConfigValueSchema::Integer,
+            true,
+        ),
+        kv_disk_setting(
+            "runtime.kv_cache.disk.minimum_free_mib",
+            ConfigValueSchema::Integer,
+            true,
+        ),
         runtime_setting(
             "runtime.model_target_demand_upgrade_min_requests",
             ConfigValueSchema::Integer,

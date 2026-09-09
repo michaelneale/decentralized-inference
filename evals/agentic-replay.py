@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agentic Replay: compare inference engines on ordered real-agent trajectories.
+"""Agentic Replay: compare inference engines or certify disk-L3 lifecycle behavior.
 
 The runner creates detached worktrees, builds the release host and native
 runtime for every requested ref, replays a deterministic subset of the pinned
@@ -7,11 +7,17 @@ Thoughtworks agentic-coding-trajectories corpus, and writes raw evidence,
 tables, CSV, and dependency-free SVG charts.
 
 Mesh ref arms are deliberately launched without context-size, lane-count,
-KV-budget, or backend-tuning arguments. External llama.cpp, vLLM, and SGLang
-arms use an explicit engine configuration so their capacity and model choices
-are visible in the artifact. Their identity is the SHA-256 of the engine's
-reported version. Client concurrency is offered by this runner and is not a
-server startup setting.
+KV-budget, or backend-tuning arguments. The only serving argument is
+``--model``; ``--log-format json`` is observational. External llama.cpp, vLLM,
+and SGLang arms use an explicit engine configuration so their capacity and
+model choices are visible in the artifact. Their identity is the SHA-256 of
+the engine's reported version. Client concurrency is offered by this runner
+and is not a server startup setting.
+
+The ``l3-*`` commands run captured trajectories through disk-off, empty-root,
+same-process, post-restart, concurrent-fill, lifecycle-operation, and low-space
+phases. They preserve the cache root across restarts and derive acceptance from
+API counters plus generated-output hashes.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -74,6 +81,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:9337/v1"
 DEFAULT_ENDPOINT = urlsplit(DEFAULT_BASE_URL)
 DEFAULT_HOST = DEFAULT_ENDPOINT.hostname or "127.0.0.1"
 DEFAULT_PORT = DEFAULT_ENDPOINT.port or 80
+MANAGEMENT_HOST = "127.0.0.1"
+MANAGEMENT_PORT = 3131
 FORBIDDEN_STARTUP_OPTIONS = (
     "--ctx-size",
     "--generation-concurrency",
@@ -179,6 +188,16 @@ def parse_ref_specs(repo: Path, values: Sequence[str]) -> list[RefSpec]:
         commits.add(commit)
         specs.append(RefSpec(label=label, ref=ref, commit=commit))
     return specs
+
+
+def parse_single_ref_spec(repo: Path, value: str) -> RefSpec:
+    if "=" not in value:
+        raise ValueError(f"ref must use LABEL=GIT_REF syntax: {value}")
+    label, ref = value.split("=", 1)
+    label, ref = slug(label), ref.strip()
+    if not ref:
+        raise ValueError(f"empty git ref for label {label}")
+    return RefSpec(label=label, ref=ref, commit=git(repo, "rev-parse", f"{ref}^{{commit}}"))
 
 
 def external_config(args: argparse.Namespace) -> EngineConfig | None:
@@ -742,6 +761,7 @@ def stream_request(
     prompt_tokens = 0
     cached_tokens = 0
     content_events = 0
+    decode_event_times: list[float] = []
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_call_parts: dict[int, dict[str, Any]] = {}
@@ -815,8 +835,10 @@ def stream_request(
             reasoning_content = delta.get("reasoning_content")
             tool_calls = delta.get("tool_calls")
             if content or reasoning_content or tool_calls:
+                event_at = time.monotonic()
                 if first_token_at is None:
-                    first_token_at = time.monotonic()
+                    first_token_at = event_at
+                decode_event_times.append(event_at)
                 content_events += 1
                 if isinstance(content, str):
                     content_parts.append(content)
@@ -863,6 +885,10 @@ def stream_request(
         "ttft_seconds": first_token_at - started,
         "elapsed_seconds": completed - started,
         "generation_seconds": completed - first_token_at,
+        "decode_inter_token_seconds": [
+            later - earlier
+            for earlier, later in zip(decode_event_times, decode_event_times[1:])
+        ],
         "completion_tokens": completion_tokens,
         "prompt_tokens": prompt_tokens,
         "cached_tokens": cached_tokens,
@@ -1025,6 +1051,11 @@ def summarize_requests(
     generation_seconds = sum(
         request["generation_seconds"] for request in successful
     )
+    decode_inter_token = [
+        sample
+        for request in successful
+        for sample in request.get("decode_inter_token_seconds", [])
+    ]
     if successful:
         workload_window = max(request["completed"] for request in successful) - min(
             request["started"] for request in successful
@@ -1082,6 +1113,7 @@ def summarize_requests(
             if generation_seconds > 0
             else None
         ),
+        "decode_inter_token_p99_seconds": percentile(decode_inter_token, 0.99),
         "mean_in_flight": mean_in_flight,
         "concurrency_utilization_pct": (
             100 * mean_in_flight / offered_concurrency
@@ -1254,14 +1286,20 @@ def start_server(
     log_path: Path,
     hf_home: Optional[Path],
 ) -> tuple[subprocess.Popen[bytes], list[str]]:
-    if port_is_open():
+    external = build.get("engine", "mesh") != "mesh"
+    management_port_open = not external and port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT)
+    if port_is_open() or management_port_open:
         raise RuntimeError(
-            f"TCP {DEFAULT_PORT} is already in use; stop the existing inference server"
+            (
+                f"TCP {DEFAULT_PORT} or {MANAGEMENT_PORT} is already in use; "
+                "stop the existing Mesh instance"
+                if not external
+                else f"TCP {DEFAULT_PORT} is already in use; stop the existing inference server"
+            )
         )
     command = command_for_build(build, model)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("wb")
-    external = build.get("engine", "mesh") != "mesh"
     process = subprocess.Popen(
         command,
         cwd=Path(build["worktree"]),
@@ -1280,7 +1318,9 @@ def start_server(
     return process, command
 
 
-def stop_server(process: subprocess.Popen[bytes]) -> None:
+def stop_server(
+    process: subprocess.Popen[bytes], *, include_management_port: bool = True
+) -> None:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGINT)
         try:
@@ -1293,12 +1333,240 @@ def stop_server(process: subprocess.Popen[bytes]) -> None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=10)
     deadline = time.monotonic() + 10
-    while port_is_open() and time.monotonic() < deadline:
+    while (
+        port_is_open()
+        or (include_management_port and port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT))
+    ) and time.monotonic() < deadline:
         time.sleep(0.2)
-    if port_is_open():
-        raise RuntimeError(
-            f"inference server stopped but TCP {DEFAULT_PORT} is still occupied"
+    occupied = [
+        port
+        for host, port in (
+            (DEFAULT_HOST, DEFAULT_PORT),
+            (MANAGEMENT_HOST, MANAGEMENT_PORT),
         )
+        if (port != MANAGEMENT_PORT or include_management_port) and port_is_open(host, port)
+    ]
+    if occupied:
+        raise RuntimeError(f"Mesh stopped but TCP ports {occupied} are still occupied")
+    if process.poll() is None:
+        raise RuntimeError(f"Mesh PID {process.pid} remained alive after shutdown")
+
+
+def l3_server_command(
+    binary: Path,
+    model: str,
+    cache_root: Optional[Path],
+    budget: str,
+    minimum_free: str,
+) -> list[str]:
+    command = server_command(binary, model)
+    if cache_root is not None:
+        command.extend(
+            (
+                "--kv-cache-disk",
+                budget,
+                "--kv-cache-disk-dir",
+                str(cache_root),
+                "--kv-cache-min-free",
+                minimum_free,
+            )
+        )
+    return command
+
+
+def start_l3_server(
+    build: dict[str, Any],
+    model: str,
+    state_dir: Path,
+    log_path: Path,
+    hf_home: Optional[Path],
+    cache_root: Optional[Path],
+    budget: str,
+    minimum_free: str,
+) -> tuple[subprocess.Popen[bytes], list[str]]:
+    if port_is_open() or port_is_open(MANAGEMENT_HOST, MANAGEMENT_PORT):
+        raise RuntimeError(
+            f"TCP {DEFAULT_PORT} or {MANAGEMENT_PORT} is already in use; "
+            "stop the existing Mesh instance"
+        )
+    command = l3_server_command(
+        Path(build["binary"]), model, cache_root, budget, minimum_free
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("wb")
+    process = subprocess.Popen(
+        command,
+        cwd=Path(build["worktree"]),
+        env=isolated_server_env(Path(build["runtime_root"]), state_dir, hf_home),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log_handle.close()
+    return process, command
+
+
+def management_json(
+    method: str, path: str, body: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    connection = http.client.HTTPConnection(
+        MANAGEMENT_HOST, MANAGEMENT_PORT, timeout=30
+    )
+    encoded = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if encoded is not None else {}
+    try:
+        connection.request(method, path, body=encoded, headers=headers)
+        response = connection.getresponse()
+        payload = response.read()
+    finally:
+        connection.close()
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"management {method} {path} returned non-JSON HTTP {response.status}"
+        ) from error
+    if response.status < 200 or response.status >= 300:
+        raise RuntimeError(
+            f"management {method} {path} failed with HTTP {response.status}: {document}"
+        )
+    if not isinstance(document, dict):
+        raise RuntimeError(f"management {method} {path} returned non-object JSON")
+    return document
+
+
+def wait_for_l3_status(
+    process: subprocess.Popen[bytes], timeout: float
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_error = "not ready"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Mesh exited before L3 status readiness with status {process.returncode}"
+            )
+        try:
+            status = management_json("GET", "/api/runtime/kv-cache")
+            if status.get("version") == 1:
+                return status
+            last_error = f"unexpected status version: {status.get('version')!r}"
+        except (OSError, RuntimeError) as error:
+            last_error = str(error)
+        time.sleep(0.5)
+    raise TimeoutError(f"L3 status did not become ready after {timeout}s: {last_error}")
+
+
+def wait_for_committed_write(
+    process: subprocess.Popen[bytes], minimum_writes: int, timeout: float
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    previous: Optional[tuple[int, int, int]] = None
+    while time.monotonic() < deadline:
+        status = wait_for_l3_status(process, min(timeout, 5))
+        activity = status.get("activity") or {}
+        usage = status.get("usage") or {}
+        snapshot = (
+            int(activity.get("writes") or 0),
+            int(usage.get("reserved_inflight_bytes") or 0),
+            int(usage.get("used_bytes") or 0),
+        )
+        if (
+            snapshot[0] >= minimum_writes
+            and snapshot[1] == 0
+            and snapshot[2] > 0
+            and snapshot == previous
+        ):
+            return status
+        previous = snapshot
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"L3 write did not reach committed/stable state after {timeout}s"
+    )
+
+
+def clear_l3_until_empty(timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    stable_empty = 0
+    last: Optional[dict[str, Any]] = None
+    while time.monotonic() < deadline:
+        last = management_json("DELETE", "/api/runtime/kv-cache", {})
+        manifests = (
+            last.get("status", {}).get("usage", {}).get("manifests")
+        )
+        if manifests == 0:
+            stable_empty += 1
+            if stable_empty >= 4:
+                return last
+        else:
+            stable_empty = 0
+        time.sleep(0.5)
+    raise TimeoutError(f"L3 clear did not remain empty after {timeout}s: {last}")
+
+
+def activity_delta(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, int]:
+    before_activity = before.get("activity") or {}
+    after_activity = after.get("activity") or {}
+    fields = (
+        "fills",
+        "hits",
+        "misses",
+        "writes",
+        "bytes_read",
+        "bytes_written",
+        "evictions",
+        "corrupt_entries",
+    )
+    return {
+        field: int(after_activity.get(field) or 0)
+        - int(before_activity.get(field) or 0)
+        for field in fields
+    }
+
+
+def final_checkpoint_request(
+    trajectory: dict[str, Any],
+    model_id: str,
+    max_output_tokens: int,
+    timeout: float,
+    phase: str,
+) -> dict[str, Any]:
+    results = replay_trajectory(
+        trajectory,
+        model_id,
+        max_output_tokens,
+        timeout,
+        measured_assistant_turns={assistant_turn_count(trajectory) - 1},
+        checkpoint_stage=phase,
+    )
+    if len(results) != 1:
+        raise RuntimeError(
+            f"trajectory {trajectory['session_id']} produced {len(results)} final checkpoints"
+        )
+    return results[0]
+
+
+def concurrent_final_checkpoints(
+    trajectory: dict[str, Any],
+    model_id: str,
+    max_output_tokens: int,
+    timeout: float,
+    phase: str,
+    requests: int,
+) -> list[dict[str, Any]]:
+    barrier = threading.Barrier(requests)
+
+    def run(index: int) -> dict[str, Any]:
+        barrier.wait(timeout=timeout)
+        result = final_checkpoint_request(
+            trajectory, model_id, max_output_tokens, timeout, phase
+        )
+        result["request_id"] = f"{trajectory['session_id']}:{phase}:{index}"
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=requests) as pool:
+        return list(pool.map(run, range(requests)))
 
 
 def collect_runtime_logs(state_dir: Path, output_dir: Path) -> None:
@@ -1368,7 +1636,10 @@ def run_arm_pass(
     finally:
         try:
             if process is not None:
-                stop_server(process)
+                stop_server(
+                    process,
+                    include_management_port=build.get("engine", "mesh") == "mesh",
+                )
         finally:
             collect_runtime_logs(state_dir, pass_dir / "native-runtime")
             shutil.rmtree(state_dir, ignore_errors=True)
@@ -2312,6 +2583,689 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     return report
 
 
+def l3_lifecycle_plan(args: argparse.Namespace, spec: RefSpec) -> dict[str, Any]:
+    prompt_min, prompt_max = parse_token_range(args.prompt_token_range)
+    return {
+        "schema_version": 1,
+        "kind": "disk-l3-lifecycle",
+        "repo": str(args.repo),
+        "ref": spec.__dict__,
+        "build_commands": [
+            ["just", "release-host-build"],
+            ["just", "release-runtime-build", args.backend],
+        ],
+        "server_commands": {
+            "disk_off": [
+                "<release-binary>",
+                "serve",
+                "--model",
+                args.model,
+                "--log-format",
+                "json",
+            ],
+            "disk_on": [
+                "<release-binary>",
+                "serve",
+                "--model",
+                args.model,
+                "--log-format",
+                "json",
+                "--kv-cache-disk",
+                args.disk_budget,
+                "--kv-cache-disk-dir",
+                "<persistent-cache-root>",
+                "--kv-cache-min-free",
+                args.minimum_free,
+            ],
+        },
+        "input": {
+            "trajectory_manifest": str(args.trajectory_manifest),
+            "lifecycle_cohort": args.lifecycle_cohort,
+            "required_source_datasets": args.require_source_dataset,
+            "high_load_cohorts": [str(value) for value in args.concurrency],
+            "prompt_token_range": [prompt_min, prompt_max],
+            "low_space_disk_budget": args.low_space_disk_budget,
+            "low_space_minimum_free": args.low_space_minimum_free,
+        },
+        "phases": [
+            "disk-off cold restarts",
+            "disk-on empty-root cold write",
+            "multi-turn growth across captured sessions and sources",
+            "same-process L1 repeat",
+            "post-restart first-request L3 samples",
+            "identical-prefix physical-fill wave",
+            "empty-root identical-prefix record wave",
+            "prune and clear during traffic",
+            "forced low-space cold fallback",
+            *(
+                f"captured high-load c{value} disk-off and disk-on"
+                for value in args.concurrency
+            ),
+        ],
+        "gates": {
+            "all_requests_succeed": True,
+            "greedy_seeded_output_sha256_matches_disk_off": True,
+            "post_restart_l3_ttft_p50_ratio_max": args.max_l3_ttft_ratio,
+            "identical_prefix_repeats": args.identical_repeats,
+            "physical_fill_delta": 1,
+            "physical_write_delta": 1,
+            "payload_write_amplification_max": args.max_payload_write_amplification,
+            "forced_low_space_state": "read_only_low_space",
+            "high_load_decode_inter_token_p99_regression_max_pct": (
+                args.max_decode_p99_regression_pct
+            ),
+        },
+        "outputs": [
+            "raw request JSONL",
+            "phase status snapshots and counter deltas",
+            "server/build logs",
+            "versioned run JSON and Markdown report",
+            "SHA-256 inventory",
+        ],
+    }
+
+
+def select_l3_trajectories(
+    cohorts: dict[str, list[dict[str, Any]]], args: argparse.Namespace
+) -> list[dict[str, Any]]:
+    trajectories = cohorts[args.lifecycle_cohort]
+    if not args.require_source_dataset:
+        return [trajectories[0]]
+    selected: list[dict[str, Any]] = []
+    for source in args.require_source_dataset:
+        match = next(
+            (
+                trajectory
+                for trajectory in trajectories
+                if trajectory["source_dataset"] == source
+            ),
+            None,
+        )
+        if match is None:
+            raise ValueError(
+                f"lifecycle cohort {args.lifecycle_cohort!r} is missing required "
+                f"source_dataset {source!r}"
+            )
+        selected.append(match)
+    return selected
+
+
+def l3_request_gate(
+    checks: list[dict[str, Any]], name: str, passed: bool, detail: str
+) -> None:
+    checks.append({"name": name, "passed": passed, "detail": detail})
+
+
+def evaluate_l3_lifecycle_gates(
+    run: dict[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
+    phases = run["phases"]
+    checks: list[dict[str, Any]] = []
+    all_requests = [
+        request
+        for phase in phases.values()
+        for request in phase.get("requests", [])
+    ]
+    failures = [request.get("request_id", "unknown") for request in all_requests if "error" in request]
+    l3_request_gate(
+        checks,
+        "all_requests_succeed",
+        not failures,
+        "all requests succeeded" if not failures else f"failed requests: {failures}",
+    )
+
+    baseline = phases["disk_off_cold"]["requests"]
+    baseline_hashes = {
+        (request["session_id"], request["assistant_turn"]): request.get(
+            "content_sha256"
+        )
+        for request in baseline
+    }
+    mismatches = [
+        request.get("request_id", "unknown")
+        for request in all_requests
+        if "error" not in request
+        and (request.get("session_id"), request.get("assistant_turn"))
+        in baseline_hashes
+        and request.get("content_sha256")
+        != baseline_hashes[
+            (request["session_id"], request["assistant_turn"])
+        ]
+    ]
+    l3_request_gate(
+        checks,
+        "output_identity",
+        not mismatches,
+        "all generated identities match disk-off"
+        if not mismatches
+        else f"mismatched requests: {mismatches}",
+    )
+
+    prompt_min, prompt_max = parse_token_range(args.prompt_token_range)
+    qualifying = [
+        request
+        for request in baseline + phases["restart_l3"]["requests"]
+        if "error" not in request
+    ]
+    prompt_outliers = [
+        request["request_id"]
+        for request in qualifying
+        if not prompt_min <= request["prompt_tokens"] <= prompt_max
+    ]
+    l3_request_gate(
+        checks,
+        "prompt_token_range",
+        not prompt_outliers,
+        f"all cold/restart prompts are within {prompt_min}:{prompt_max}"
+        if not prompt_outliers
+        else f"out-of-range requests: {prompt_outliers}",
+    )
+
+    cold_p50 = statistics.median(
+        request["ttft_seconds"] for request in baseline if "error" not in request
+    )
+    restart_p50 = statistics.median(
+        request["ttft_seconds"]
+        for request in phases["restart_l3"]["requests"]
+        if "error" not in request
+    )
+    ratio = restart_p50 / cold_p50 if cold_p50 else math.inf
+    l3_request_gate(
+        checks,
+        "post_restart_l3_ttft",
+        ratio <= args.max_l3_ttft_ratio,
+        f"restart/cold p50 ratio {ratio:.4f} (max {args.max_l3_ttft_ratio:.4f})",
+    )
+    restart_deltas = phases["restart_l3"]["activity_deltas"]
+    l3_request_gate(
+        checks,
+        "every_restart_reads_l3",
+        bool(restart_deltas)
+        and all(delta["fills"] >= 1 and delta["bytes_read"] > 0 for delta in restart_deltas),
+        "each fresh process performed a physical L3 fill"
+        if restart_deltas
+        else "no restart samples recorded",
+    )
+
+    growth = phases["multi_turn_growth"]
+    growth_sources = {request["source_dataset"] for request in growth["requests"]}
+    l3_request_gate(
+        checks,
+        "multi_turn_growth",
+        growth["activity_delta"]["writes"] > 0
+        and set(args.require_source_dataset).issubset(growth_sources),
+        f"writes={growth['activity_delta']['writes']} sources={sorted(growth_sources)}",
+    )
+
+    l1_delta = phases["same_process_l1"]["activity_delta"]
+    l3_request_gate(
+        checks,
+        "same_process_l1_avoids_disk",
+        l1_delta["fills"] == 0 and l1_delta["bytes_read"] == 0,
+        f"fills={l1_delta['fills']} bytes_read={l1_delta['bytes_read']}",
+    )
+    fill_delta = phases["concurrent_fill"]["activity_delta"]
+    l3_request_gate(
+        checks,
+        "single_physical_fill",
+        fill_delta["fills"] == 1,
+        f"fills={fill_delta['fills']} across {args.identical_repeats} requests",
+    )
+    record_delta = phases["concurrent_record"]["activity_delta"]
+    initial_delta = phases["disk_on_empty"]["activity_delta"]
+    allowed_write_bytes = math.ceil(
+        initial_delta["bytes_written"] * args.max_payload_write_amplification
+    )
+    record_ok = (
+        record_delta["writes"] == 1
+        and record_delta["bytes_written"] <= allowed_write_bytes
+    )
+    l3_request_gate(
+        checks,
+        "single_physical_write",
+        record_ok,
+        f"writes={record_delta['writes']} bytes={record_delta['bytes_written']} "
+        f"allowed={allowed_write_bytes}",
+    )
+    low_space = phases["low_space"]
+    low_state = low_space["status_after"]["effective"]["state"]
+    low_success = all("error" not in request for request in low_space["requests"])
+    l3_request_gate(
+        checks,
+        "low_space_falls_back_cold",
+        low_state == "read_only_low_space"
+        and low_success
+        and low_space["activity_delta"]["writes"] == 0,
+        f"effective_state={low_state} request_success={low_success} "
+        f"writes={low_space['activity_delta']['writes']}",
+    )
+    lifecycle = phases["lifecycle_under_traffic"]
+    lifecycle_success = all("error" not in request for request in lifecycle["requests"])
+    final_manifests = (
+        lifecycle["final_clear"].get("status", {}).get("usage", {}).get("manifests")
+    )
+    l3_request_gate(
+        checks,
+        "lifecycle_under_traffic",
+        lifecycle_success
+        and "prune" in lifecycle
+        and "clear" in lifecycle
+        and final_manifests == 0,
+        f"traffic_success={lifecycle_success} final_manifests={final_manifests}",
+    )
+
+    for concurrency in args.concurrency:
+        off = phases[f"high_load_off_c{concurrency}"]["summary"]
+        on = phases[f"high_load_on_c{concurrency}"]["summary"]
+        off_p99 = off.get("decode_inter_token_p99_seconds")
+        on_p99 = on.get("decode_inter_token_p99_seconds")
+        comparable = off_p99 not in (None, 0) and on_p99 is not None
+        regression = 100 * (on_p99 / off_p99 - 1) if comparable else math.inf
+        off_hashes = off.get("content_sha256_by_request", {})
+        on_hashes = on.get("content_sha256_by_request", {})
+        passed = (
+            off["failed_requests"] == 0
+            and on["failed_requests"] == 0
+            and off_hashes == on_hashes
+            and regression <= args.max_decode_p99_regression_pct
+        )
+        l3_request_gate(
+            checks,
+            f"high_load_c{concurrency}",
+            passed,
+            f"decode-gap p99 regression={regression:.3f}% output_match={off_hashes == on_hashes}",
+        )
+    return {
+        "evaluated": True,
+        "passed": all(check["passed"] for check in checks),
+        "checks": checks,
+        "cold_ttft_p50_seconds": cold_p50,
+        "restart_l3_ttft_p50_seconds": restart_p50,
+        "restart_l3_ttft_ratio": ratio,
+    }
+
+
+def write_l3_lifecycle_report(output: Path, run: dict[str, Any]) -> Path:
+    lines = [
+        "# Disk L3 KV cache lifecycle certification",
+        "",
+        f"- Commit: `{run['build']['commit']}`",
+        f"- Model: `{run['config']['model']}`",
+        f"- Backend: `{run['config']['backend']}`",
+        f"- Result: **{'PASS' if run['gates']['passed'] else 'FAIL'}**",
+        f"- Cold TTFT p50: `{run['gates']['cold_ttft_p50_seconds']:.6f}s`",
+        f"- Restart L3 TTFT p50: `{run['gates']['restart_l3_ttft_p50_seconds']:.6f}s`",
+        f"- Restart/cold ratio: `{run['gates']['restart_l3_ttft_ratio']:.4f}`",
+        "",
+        "## Gates",
+        "",
+    ]
+    for check in run["gates"]["checks"]:
+        marker = "PASS" if check["passed"] else "FAIL"
+        lines.append(f"- **{marker}** `{check['name']}` — {check['detail']}")
+    report = output / "REPORT.md"
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    inventory = [
+        f"{sha256(path)}  {path.relative_to(output).as_posix()}"
+        for path in sorted(item for item in output.rglob("*") if item.is_file())
+        if path.name != "artifact-sha256.txt"
+    ]
+    (output / "artifact-sha256.txt").write_text(
+        "\n".join(inventory) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def run_l3_lifecycle(args: argparse.Namespace) -> Path:
+    args.repo = args.repo.resolve()
+    args.output = args.output.resolve()
+    args.trajectory_manifest = args.trajectory_manifest.resolve()
+    if args.hf_home is not None:
+        args.hf_home = args.hf_home.resolve()
+    spec = parse_single_ref_spec(args.repo, args.ref)
+    plan = l3_lifecycle_plan(args, spec)
+    args.output.mkdir(parents=True, exist_ok=False)
+    write_json(args.output / "plan.json", plan)
+    commands = CommandLog(args.output / "commands.jsonl")
+    expected_cohorts = [args.lifecycle_cohort, *(str(value) for value in args.concurrency)]
+    inputs = import_trajectory_manifest(
+        args.trajectory_manifest, args.output, expected_cohorts
+    )
+    cohorts = load_trajectory_cohorts(Path(inputs["manifest"]), expected_cohorts)
+    lifecycle_trajectories = select_l3_trajectories(cohorts, args)
+    for concurrency in args.concurrency:
+        if len(cohorts[str(concurrency)]) < concurrency:
+            raise ValueError(
+                f"cohort {concurrency} has {len(cohorts[str(concurrency)])} "
+                f"trajectories; at least {concurrency} required"
+            )
+    worktree_root = (
+        args.worktree_root or (args.repo.parent / ".agentic-replay-worktrees")
+    ).resolve()
+    worktree = prepare_worktree(args.repo, worktree_root, spec)
+    build = build_ref(
+        spec, worktree, args.backend, args.output, commands, args.skip_build
+    )
+    run: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "disk-l3-lifecycle",
+        "started_at": utc_now(),
+        "host": {"hostname": socket.gethostname(), "platform": sys.platform},
+        "config": {
+            "model": args.model,
+            "backend": args.backend,
+            "disk_budget": args.disk_budget,
+            "minimum_free": args.minimum_free,
+            "low_space_disk_budget": args.low_space_disk_budget,
+            "prompt_token_range": args.prompt_token_range,
+            "cold_samples": args.cold_samples,
+            "restart_samples": args.restart_samples,
+            "identical_repeats": args.identical_repeats,
+            "concurrency": args.concurrency,
+        },
+        "plan_sha256": stable_hash(plan),
+        "inputs": inputs,
+        "build": build,
+        "phases": {},
+    }
+    run_path = args.output / "run.json"
+    scratch_root = Path(tempfile.mkdtemp(prefix="agentic-replay-l3-"))
+    cache_root = scratch_root / "cache"
+    cache_root.mkdir()
+    process: Optional[subprocess.Popen[bytes]] = None
+    server_index = 0
+
+    def serve(
+        cache: Optional[Path],
+        minimum_free: str = args.minimum_free,
+        budget: str = args.disk_budget,
+    ) -> tuple[str, Path]:
+        nonlocal process, server_index
+        server_index += 1
+        state_dir = scratch_root / f"state-{server_index}"
+        state_dir.mkdir()
+        log_path = args.output / "logs" / f"server-{server_index}.log"
+        process, command = start_l3_server(
+            build,
+            args.model,
+            state_dir,
+            log_path,
+            args.hf_home,
+            cache,
+            budget,
+            minimum_free,
+        )
+        model_id = wait_for_model(DEFAULT_BASE_URL, args.startup_timeout, process)
+        run.setdefault("servers", []).append(
+            {
+                "index": server_index,
+                "pid": process.pid,
+                "command": command,
+                "log": str(log_path),
+            }
+        )
+        return model_id, state_dir
+
+    def stop(state_dir: Path) -> None:
+        nonlocal process
+        if process is not None:
+            stop_server(process)
+            collect_runtime_logs(
+                state_dir, args.output / "native-runtime" / f"server-{server_index}"
+            )
+            process = None
+
+    def primary_request(model_id: str, phase: str) -> dict[str, Any]:
+        return final_checkpoint_request(
+            lifecycle_trajectories[0],
+            model_id,
+            args.max_output_tokens,
+            args.request_timeout,
+            phase,
+        )
+
+    try:
+        off_requests: list[dict[str, Any]] = []
+        for sample in range(args.cold_samples):
+            model_id, state_dir = serve(None)
+            try:
+                for trajectory in lifecycle_trajectories:
+                    request = final_checkpoint_request(
+                        trajectory,
+                        model_id,
+                        args.max_output_tokens,
+                        args.request_timeout,
+                        f"disk_off_cold_{sample + 1}",
+                    )
+                    request["request_id"] = (
+                        f"{trajectory['session_id']}:disk-off:{sample + 1}"
+                    )
+                    off_requests.append(request)
+            finally:
+                stop(state_dir)
+        write_request_records(
+            args.output / "data/disk-off-cold.jsonl", off_requests, 1
+        )
+        run["phases"]["disk_off_cold"] = {"requests": off_requests}
+        write_json(run_path, run)
+
+        model_id, state_dir = serve(cache_root)
+        growth_before = wait_for_l3_status(process, args.startup_timeout)
+        growth_requests = [
+            request
+            for trajectory in lifecycle_trajectories
+            for request in replay_trajectory(
+                trajectory,
+                model_id,
+                args.max_output_tokens,
+                args.request_timeout,
+                checkpoint_stage="multi_turn_growth",
+            )
+        ]
+        growth_after = wait_for_committed_write(process, 1, args.request_timeout)
+        run["phases"]["multi_turn_growth"] = {
+            "requests": growth_requests,
+            "status_before": growth_before,
+            "status_after": growth_after,
+            "activity_delta": activity_delta(growth_before, growth_after),
+        }
+        clear_l3_until_empty(args.request_timeout)
+        stop(state_dir)
+
+        model_id, state_dir = serve(cache_root)
+        status_before = wait_for_l3_status(process, args.startup_timeout)
+        if (status_before.get("usage") or {}).get("manifests") != 0:
+            raise RuntimeError("disk-on empty-root phase started with cached manifests")
+        empty_request = primary_request(model_id, "disk_on_empty")
+        status_after = wait_for_committed_write(process, 1, args.request_timeout)
+        empty_phase = {
+            "requests": [empty_request],
+            "status_before": status_before,
+            "status_after": status_after,
+            "activity_delta": activity_delta(status_before, status_after),
+        }
+        run["phases"]["disk_on_empty"] = empty_phase
+        additional_requests = [
+            final_checkpoint_request(
+                trajectory,
+                model_id,
+                args.max_output_tokens,
+                args.request_timeout,
+                "disk_on_additional_source",
+            )
+            for trajectory in lifecycle_trajectories[1:]
+        ]
+        if additional_requests:
+            additional_after = wait_for_committed_write(
+                process, len(lifecycle_trajectories), args.request_timeout
+            )
+            run["phases"]["disk_on_additional_sources"] = {
+                "requests": additional_requests,
+                "status_before": status_after,
+                "status_after": additional_after,
+                "activity_delta": activity_delta(status_after, additional_after),
+            }
+            status_after = additional_after
+        l1_before = status_after
+        l1_requests = [
+            final_checkpoint_request(
+                trajectory,
+                model_id,
+                args.max_output_tokens,
+                args.request_timeout,
+                "same_process_l1",
+            )
+            for trajectory in lifecycle_trajectories
+        ]
+        l1_after = wait_for_l3_status(process, args.request_timeout)
+        run["phases"]["same_process_l1"] = {
+            "requests": l1_requests,
+            "status_before": l1_before,
+            "status_after": l1_after,
+            "activity_delta": activity_delta(l1_before, l1_after),
+        }
+        stop(state_dir)
+        write_json(run_path, run)
+
+        restart_requests: list[dict[str, Any]] = []
+        restart_deltas: list[dict[str, int]] = []
+        for sample in range(args.restart_samples):
+            model_id, state_dir = serve(cache_root)
+            before = wait_for_l3_status(process, args.startup_timeout)
+            try:
+                for trajectory in lifecycle_trajectories:
+                    request = final_checkpoint_request(
+                        trajectory,
+                        model_id,
+                        args.max_output_tokens,
+                        args.request_timeout,
+                        f"restart_l3_{sample + 1}",
+                    )
+                    request["request_id"] = (
+                        f"{trajectory['session_id']}:restart:{sample + 1}"
+                    )
+                    restart_requests.append(request)
+                after = wait_for_l3_status(process, args.request_timeout)
+                restart_deltas.append(activity_delta(before, after))
+            finally:
+                stop(state_dir)
+        run["phases"]["restart_l3"] = {
+            "requests": restart_requests,
+            "activity_deltas": restart_deltas,
+        }
+
+        model_id, state_dir = serve(cache_root)
+        before = wait_for_l3_status(process, args.startup_timeout)
+        fill_requests = concurrent_final_checkpoints(
+            lifecycle_trajectories[0],
+            model_id,
+            args.max_output_tokens,
+            args.request_timeout,
+            "concurrent_fill",
+            args.identical_repeats,
+        )
+        after = wait_for_l3_status(process, args.request_timeout)
+        run["phases"]["concurrent_fill"] = {
+            "requests": fill_requests,
+            "status_before": before,
+            "status_after": after,
+            "activity_delta": activity_delta(before, after),
+        }
+        stop(state_dir)
+
+        model_id, state_dir = serve(cache_root)
+        clear_l3_until_empty(args.request_timeout)
+        stop(state_dir)
+        model_id, state_dir = serve(cache_root)
+        before = wait_for_l3_status(process, args.startup_timeout)
+        record_requests = concurrent_final_checkpoints(
+            lifecycle_trajectories[0],
+            model_id,
+            args.max_output_tokens,
+            args.request_timeout,
+            "concurrent_record",
+            args.identical_repeats,
+        )
+        after = wait_for_committed_write(process, 1, args.request_timeout)
+        run["phases"]["concurrent_record"] = {
+            "requests": record_requests,
+            "status_before": before,
+            "status_after": after,
+            "activity_delta": activity_delta(before, after),
+        }
+        stop(state_dir)
+        write_json(run_path, run)
+
+        model_id, state_dir = serve(cache_root)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            traffic = pool.submit(primary_request, model_id, "lifecycle_under_traffic")
+            time.sleep(0.05)
+            prune = management_json(
+                "POST", "/api/runtime/kv-cache/prune", {"target_bytes": 0}
+            )
+            clear = management_json("DELETE", "/api/runtime/kv-cache", {})
+            traffic_request = traffic.result()
+        final_clear = clear_l3_until_empty(args.request_timeout)
+        run["phases"]["lifecycle_under_traffic"] = {
+            "requests": [traffic_request],
+            "prune": prune,
+            "clear": clear,
+            "final_clear": final_clear,
+        }
+        stop(state_dir)
+
+        model_id, state_dir = serve(
+            cache_root, args.low_space_minimum_free, args.low_space_disk_budget
+        )
+        low_before = wait_for_l3_status(process, args.startup_timeout)
+        low_request = primary_request(model_id, "low_space")
+        low_after = wait_for_l3_status(process, args.request_timeout)
+        run["phases"]["low_space"] = {
+            "requests": [low_request],
+            "status_before": low_before,
+            "status_after": low_after,
+            "activity_delta": activity_delta(low_before, low_after),
+        }
+        stop(state_dir)
+
+        for disk_enabled in (False, True):
+            model_id, state_dir = serve(cache_root if disk_enabled else None)
+            try:
+                for concurrency in args.concurrency:
+                    phase = f"high_load_{'on' if disk_enabled else 'off'}_c{concurrency}"
+                    raw_path = args.output / "data" / f"{phase}.jsonl"
+                    summary = run_trajectory_cell(
+                        trajectories=cohorts[str(concurrency)][:concurrency],
+                        model_id=model_id,
+                        concurrency=concurrency,
+                        max_output_tokens=args.max_output_tokens,
+                        timeout=args.request_timeout,
+                        raw_path=raw_path,
+                        replay_mode="final",
+                    )
+                    requests = [
+                        json.loads(line)
+                        for line in raw_path.read_text(encoding="utf-8").splitlines()
+                    ]
+                    run["phases"][phase] = {
+                        "requests": requests,
+                        "summary": summary,
+                    }
+            finally:
+                stop(state_dir)
+        run["completed_at"] = utc_now()
+        run["gates"] = evaluate_l3_lifecycle_gates(run, args)
+        write_json(run_path, run)
+        report = write_l3_lifecycle_report(args.output, run)
+        if not run["gates"]["passed"]:
+            raise RuntimeError(f"disk L3 lifecycle gates failed; see {report}")
+        return report
+    finally:
+        if process is not None:
+            stop_server(process)
+        shutil.rmtree(scratch_root, ignore_errors=True)
+
+
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", type=Path, default=REPO)
     parser.add_argument(
@@ -2403,6 +3357,96 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_l3_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", type=Path, default=REPO)
+    parser.add_argument(
+        "--ref",
+        required=True,
+        help="single LABEL=GIT_REF release candidate",
+    )
+    parser.add_argument("--model", required=True, help="model URI or local package path")
+    parser.add_argument("--backend", default="metal")
+    parser.add_argument("--trajectory-manifest", type=Path, required=True)
+    parser.add_argument("--lifecycle-cohort", default="l3")
+    parser.add_argument(
+        "--require-source-dataset",
+        action="append",
+        default=[],
+        help="repeat for required captured Buzz/OpenCode/Goose source names",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        action="append",
+        default=[],
+        help="captured high-load cohort; defaults to c64/c128/c256",
+    )
+    parser.add_argument("--prompt-token-range", default="18000:24000")
+    parser.add_argument("--cold-samples", type=int, default=3)
+    parser.add_argument("--restart-samples", type=int, default=3)
+    parser.add_argument("--identical-repeats", type=int, default=100)
+    parser.add_argument("--max-output-tokens", type=int, default=2048)
+    parser.add_argument("--disk-budget", default="auto")
+    parser.add_argument("--low-space-disk-budget", default="32GiB")
+    parser.add_argument("--minimum-free", default="1GiB")
+    parser.add_argument(
+        "--low-space-minimum-free",
+        default="1TiB",
+        help="minimum-free threshold used to force read-only cold fallback",
+    )
+    parser.add_argument("--max-l3-ttft-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--max-payload-write-amplification", type=float, default=1.2
+    )
+    parser.add_argument(
+        "--max-decode-p99-regression-pct", type=float, default=5.0
+    )
+
+
+def validate_l3_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if not args.concurrency:
+        args.concurrency = [64, 128, 256]
+    positive = (
+        args.cold_samples,
+        args.restart_samples,
+        args.identical_repeats,
+        args.max_output_tokens,
+    )
+    if any(value <= 0 for value in positive):
+        parser.error("L3 sample, repeat, and output sizes must be positive")
+    if len(set(args.concurrency)) != len(args.concurrency) or any(
+        value <= 0 for value in args.concurrency
+    ):
+        parser.error("--concurrency values must be unique and positive")
+    if len(set(args.require_source_dataset)) != len(args.require_source_dataset):
+        parser.error("--require-source-dataset values must be unique")
+    if args.command == "l3-run" and len(args.require_source_dataset) < 3:
+        parser.error(
+            "l3-run requires three --require-source-dataset values for the "
+            "captured Buzz, OpenCode, and Goose workloads"
+        )
+    try:
+        parse_token_range(args.prompt_token_range)
+    except ValueError as error:
+        parser.error(str(error))
+    iec = re.compile(r"[1-9][0-9]*(?:KiB|MiB|GiB|TiB)\Z")
+    if args.disk_budget != "auto" and iec.fullmatch(args.disk_budget) is None:
+        parser.error("--disk-budget must be auto or a positive IEC size")
+    for option in (
+        "minimum_free",
+        "low_space_minimum_free",
+        "low_space_disk_budget",
+    ):
+        if iec.fullmatch(getattr(args, option)) is None:
+            parser.error(f"--{option.replace('_', '-')} must be a positive IEC size")
+    if not 0 < args.max_l3_ttft_ratio <= 1:
+        parser.error("--max-l3-ttft-ratio must be greater than 0 and at most 1")
+    if args.max_payload_write_amplification < 1:
+        parser.error("--max-payload-write-amplification must be at least 1")
+    if args.max_decode_p99_regression_pct < 0:
+        parser.error("--max-decode-p99-regression-pct cannot be negative")
+
+
 def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "run" and (
         (args.dataset_file is None) == (args.trajectory_manifest is None)
@@ -2491,9 +3535,29 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     run.add_argument("--resume", action="store_true")
     report = subparsers.add_parser("report", help="rerender tables and charts from run.json")
     report.add_argument("--artifact", type=Path, required=True)
+    l3_plan = subparsers.add_parser(
+        "l3-plan", help="print the side-effect-free disk-L3 certification plan"
+    )
+    add_l3_arguments(l3_plan)
+    l3_run = subparsers.add_parser(
+        "l3-run", help="build and execute disk-L3 lifecycle certification"
+    )
+    add_l3_arguments(l3_run)
+    l3_run.add_argument("--output", type=Path, required=True)
+    l3_run.add_argument("--worktree-root", type=Path)
+    l3_run.add_argument("--hf-home", type=Path)
+    l3_run.add_argument("--startup-timeout", type=float, default=1800)
+    l3_run.add_argument("--request-timeout", type=float, default=900)
+    l3_run.add_argument("--skip-build", action="store_true")
+    l3_report = subparsers.add_parser(
+        "l3-report", help="rerender a disk-L3 lifecycle report from run.json"
+    )
+    l3_report.add_argument("--artifact", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command in {"plan", "run"}:
         validate_args(args, parser)
+    elif args.command in {"l3-plan", "l3-run"}:
+        validate_l3_args(args, parser)
     return args
 
 
@@ -2513,9 +3577,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "run":
         print(run_benchmark(args))
         return 0
+    if args.command == "l3-plan":
+        args.repo = args.repo.resolve()
+        args.trajectory_manifest = args.trajectory_manifest.resolve()
+        spec = parse_single_ref_spec(args.repo, args.ref)
+        print(json.dumps(l3_lifecycle_plan(args, spec), indent=2, sort_keys=True))
+        return 0
+    if args.command == "l3-run":
+        print(run_l3_lifecycle(args))
+        return 0
     artifact = args.artifact.resolve()
     document = json.loads((artifact / "run.json").read_text(encoding="utf-8"))
-    print(write_report(artifact, document))
+    if args.command == "l3-report":
+        print(write_l3_lifecycle_report(artifact, document))
+    else:
+        print(write_report(artifact, document))
     return 0
 
 

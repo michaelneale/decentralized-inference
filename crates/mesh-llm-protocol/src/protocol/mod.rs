@@ -71,6 +71,8 @@ pub enum ControlFrameError {
     MissingModelRef,
     InvalidModelRefCombination,
     InvalidInventoryOrder,
+    InvalidKvCacheOperation { got: i32 },
+    MissingKvCacheStatus,
     DecodeError(String),
     WrongStreamType { expected: u8, got: u8 },
     ForgedSender,
@@ -168,6 +170,12 @@ impl std::fmt::Display for ControlFrameError {
                     f,
                     "inventory entries must be strictly sorted by canonical model ref"
                 )
+            }
+            ControlFrameError::InvalidKvCacheOperation { got } => {
+                write!(f, "invalid owner-control kv-cache operation: {got}")
+            }
+            ControlFrameError::MissingKvCacheStatus => {
+                write!(f, "owner-control kv-cache response missing status payload")
             }
             ControlFrameError::DecodeError(msg) => write!(f, "protobuf decode error: {}", msg),
             ControlFrameError::WrongStreamType { expected, got } => write!(
@@ -363,6 +371,7 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlRequest {
             self.unload_model.is_some(),
             self.ensure_model.is_some(),
             self.drain_model.is_some(),
+            self.kv_cache.is_some(),
         ];
         if commands.into_iter().filter(|present| *present).count() != 1 {
             return Err(ControlFrameError::MissingControlCommand);
@@ -391,6 +400,9 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlRequest {
         if let Some(request) = &self.drain_model {
             request.validate_frame()?;
         }
+        if let Some(request) = &self.kv_cache {
+            request.validate_frame()?;
+        }
         Ok(())
     }
 }
@@ -409,6 +421,7 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlResponse {
             self.unload_model.is_some(),
             self.ensure_model.is_some(),
             self.drain_model.is_some(),
+            self.kv_cache.is_some(),
         ];
         if results.into_iter().filter(|present| *present).count() != 1 {
             return Err(ControlFrameError::MissingControlResult);
@@ -435,6 +448,9 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlResponse {
             response.validate_frame()?;
         }
         if let Some(response) = &self.drain_model {
+            response.validate_frame()?;
+        }
+        if let Some(response) = &self.kv_cache {
             response.validate_frame()?;
         }
         Ok(())
@@ -597,6 +613,23 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlDrainModelRequest 
     }
 }
 
+impl ValidateControlFrame for crate::proto::node::OwnerControlKvCacheRequest {
+    fn validate_frame(&self) -> Result<(), ControlFrameError> {
+        validate_endpoint_id_length(self.requester_node_id.len())?;
+        validate_endpoint_id_length(self.target_node_id.len())?;
+        match crate::proto::node::OwnerControlKvCacheOperation::try_from(self.operation) {
+            Ok(crate::proto::node::OwnerControlKvCacheOperation::Status)
+            | Ok(crate::proto::node::OwnerControlKvCacheOperation::Prune)
+            | Ok(crate::proto::node::OwnerControlKvCacheOperation::Clear) => Ok(()),
+            Ok(crate::proto::node::OwnerControlKvCacheOperation::Unspecified) | Err(_) => {
+                Err(ControlFrameError::InvalidKvCacheOperation {
+                    got: self.operation,
+                })
+            }
+        }
+    }
+}
+
 impl ValidateControlFrame for crate::proto::node::OwnerControlLoadModelResponse {
     fn validate_frame(&self) -> Result<(), ControlFrameError> {
         validate_owner_control_model_for_load_or_ensure(
@@ -634,6 +667,15 @@ impl ValidateControlFrame for crate::proto::node::OwnerControlDrainModelResponse
                 .as_ref()
                 .ok_or(ControlFrameError::MissingModelRef)?,
         )
+    }
+}
+
+impl ValidateControlFrame for crate::proto::node::OwnerControlKvCacheResponse {
+    fn validate_frame(&self) -> Result<(), ControlFrameError> {
+        if self.status_json.is_empty() {
+            return Err(ControlFrameError::MissingKvCacheStatus);
+        }
+        Ok(())
     }
 }
 
@@ -917,6 +959,7 @@ mod tests {
         OwnerControlConfigSnapshot, OwnerControlConfigUpdate, OwnerControlEnvelope,
         OwnerControlError, OwnerControlErrorCode, OwnerControlGetConfigRequest,
         OwnerControlGetConfigResponse, OwnerControlHandshake, OwnerControlInventoryEntry,
+        OwnerControlKvCacheOperation, OwnerControlKvCacheRequest, OwnerControlKvCacheResponse,
         OwnerControlRefreshInventory, OwnerControlRefreshInventoryDisposition,
         OwnerControlRefreshInventoryRequest, OwnerControlRefreshInventoryResponse,
         OwnerControlRequest, OwnerControlResponse, OwnerControlWatchAccepted,
@@ -1011,6 +1054,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             response: None,
             error: None,
@@ -1039,6 +1083,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -1063,6 +1108,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             response: None,
             error: None,
@@ -1091,6 +1137,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -1113,6 +1160,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             response: None,
             error: None,
@@ -1137,6 +1185,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -1159,6 +1208,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -1188,11 +1238,50 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
         decode_owner_control_envelope(&encode_owner_control_envelope(&update_response))
             .expect("watch update response must decode");
+
+        let cache_request = OwnerControlEnvelope {
+            r#gen: NODE_PROTOCOL_GENERATION,
+            handshake: None,
+            request: Some(OwnerControlRequest {
+                request_id: 16,
+                kv_cache: Some(OwnerControlKvCacheRequest {
+                    requester_node_id: vec![0x61; 32],
+                    target_node_id: vec![0x62; 32],
+                    operation: OwnerControlKvCacheOperation::Prune as i32,
+                    target_bytes: Some(1024),
+                    model_identity: Some("blake3:model".to_string()),
+                }),
+                ..Default::default()
+            }),
+            response: None,
+            error: None,
+        };
+        let decoded = decode_owner_control_envelope(&encode_owner_control_envelope(&cache_request))
+            .expect("kv-cache request must decode");
+        assert_eq!(decoded.request.unwrap().request_id, 16);
+
+        let cache_response = OwnerControlEnvelope {
+            r#gen: NODE_PROTOCOL_GENERATION,
+            handshake: None,
+            request: None,
+            response: Some(OwnerControlResponse {
+                request_id: 16,
+                kv_cache: Some(OwnerControlKvCacheResponse {
+                    status_json: br#"{"version":1}"#.to_vec(),
+                    freed_bytes: Some(512),
+                }),
+                ..Default::default()
+            }),
+            error: None,
+        };
+        decode_owner_control_envelope(&encode_owner_control_envelope(&cache_response))
+            .expect("kv-cache response must decode");
     }
 
     #[test]
@@ -1210,6 +1299,7 @@ mod tests {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             response: None,
             error: None,

@@ -84,6 +84,14 @@ pub struct ExactStateRestore {
     pub lookup_ms: f64,
     pub kv_import_ms: f64,
     pub recurrent_import_ms: f64,
+    /// Where the state came from: `"radix"` (RAM) or `"l3"` (disk).
+    pub source: &'static str,
+    /// Store-side cost of an L3 fill (read, digest verification, assembly),
+    /// kept apart from the runtime import above so restore thresholds come
+    /// from real numbers. Zero for a radix hit.
+    pub fill_ms: f64,
+    /// Whether an L3 fill's radix re-warm record was accepted by the worker.
+    pub rewarm_enqueued: bool,
 }
 
 #[derive(Debug, Clone)]

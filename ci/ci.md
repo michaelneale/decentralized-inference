@@ -328,8 +328,7 @@ runtime producers are not duplicated.
   that join only their matching immutable host and runtime artifacts.
 - `ci-platform-checks-slice.yml` — macOS portable/unit, Windows portable, and
   focused Windows log-store privacy ACL checks.
-- `ci-linux-product-smoke-slice.yml` and
-  `ci-macos-product-smoke-slice.yml` — platform-local callers of the typed
+- `ci-{linux,macos,windows}-product-smoke-slice.yml` — platform-local callers of the typed
   product-integration suite and the model-download consumer. The suite stages
   its registry-derived pair exactly once: dense SmolLM2-135M Q8 and recurrent
   IBM Granite 4.0 H 350M Q4. Its ordered phases cover dense standalone,
@@ -342,7 +341,13 @@ runtime producers are not duplicated.
   topology/run/model/package/manifest identity, the same exact two-stage
   contiguous cut on distinct nodes and bind addresses, two matching `ready`
   statuses, and the same sole served model. It atomically records
-  `split-evidence.json`. Readiness uses a capped five-minute wall-clock deadline
+  `split-evidence.json`. A separately reconciled `durable-l3` phase enables a
+  fixed, CLI-sourced disk tier for both model families, preserves each node's
+  root and identity across a full process restart, requires a post-restart L3
+  fill with cached tokens and exact output, exercises `kv-cache status` and
+  `clear`, and records digest-bound evidence. Windows CPU runs this phase alone
+  on a real Windows product executor; Linux CPU and macOS Metal include it in
+  the complete suite. Readiness uses a capped five-minute wall-clock deadline
   and parallel endpoint captures bounded to two seconds by default; timeout or
   process-exit diagnostics retain the final snapshots, failed reconciliation,
   and both server log tails. The status projection never persists invite
@@ -353,10 +358,9 @@ runtime producers are not duplicated.
   evidence. All JSON snapshots and reconciled evidence upload with the phase
   logs on success or failure. The existing Qwen3.5 recurrent job remains
   required until Granite passes that live contract. The typed runner supports
-  CPU, CUDA, Metal, Vulkan, and ROCm,
-  but only CPU is selected during the first qualification stage; the existing
-  CUDA inference and Metal model-load signals remain required until their typed
-  product rows pass live qualification in that order. CUDA and Metal request
+  CPU, CUDA, Metal, Vulkan, ROCm, and Windows CPU. CPU, Metal, and Windows CPU
+  are selected; the existing CUDA inference signal remains required until its
+  typed product row passes live qualification. CUDA and Metal request
   their explicit accelerator device and reject unsupported typed selections.
   CUDA inference uses the
   approved `gpu-nvidia` ephemeral self-hosted scale set, including for

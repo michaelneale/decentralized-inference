@@ -151,18 +151,7 @@ fn update_weight_identity(hasher: &mut blake3::Hasher, config: &StageConfig) {
         }
     }
     hasher.update(b"checkpoint-quantization:");
-    let quantization = config
-        .checkpoint_quantization
-        .as_deref()
-        .unwrap_or("preserve")
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_uppercase)
-        .collect::<String>();
-    hasher.update(match quantization.as_str() {
-        "DIRECT" | "NONE" | "PRESERVE" => b"PRESERVE" as &[u8],
-        _ => quantization.as_bytes(),
-    });
+    hasher.update(normalized_checkpoint_quantization(config).as_bytes());
     hasher.update(b"checkpoint-imatrix:");
     match config.checkpoint_imatrix_sha256.as_deref() {
         Some(digest) => hasher.update(digest.as_bytes()),
@@ -178,6 +167,21 @@ fn update_weight_identity(hasher: &mut blake3::Hasher, config: &StageConfig) {
         LoadMode::RuntimeSlice => b"load:runslice",
         LoadMode::ArtifactSlice => b"load:artslice",
     });
+}
+
+fn normalized_checkpoint_quantization(config: &StageConfig) -> String {
+    let quantization = config
+        .checkpoint_quantization
+        .as_deref()
+        .unwrap_or("preserve")
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    match quantization.as_str() {
+        "DIRECT" | "NONE" | "PRESERVE" => "PRESERVE".to_string(),
+        _ => quantization,
+    }
 }
 
 pub fn prefix_hash_with_namespace(
@@ -218,11 +222,10 @@ fn prefix_namespace_hasher(
     // process and would prevent otherwise compatible cache identities from
     // agreeing across runs.
     //
-    // Reuse depends on the *shape* of the stage: the model, owned layers, and
-    // pipeline position. Those are hashed below with the runtime layout fields
-    // in `update_layout_identity`.
-    hasher.update(config.stage_id.as_bytes());
-    hasher.update(&config.stage_index.to_le_bytes());
+    // Reuse depends on the numerical shape of the stage, not its placement.
+    // Replicas may have different stage ids/indexes while owning the same layer
+    // range; including those labels prevents both disk reuse and later remote
+    // handoff between otherwise compatible runtimes.
     hasher.update(&config.layer_start.to_le_bytes());
     hasher.update(&config.layer_end.to_le_bytes());
     hasher.update(NATIVE_KV_RUNTIME_ABI_VERSION.as_bytes());
@@ -237,6 +240,166 @@ fn prefix_namespace_hasher(
     }
     hasher.update(&token_start.to_le_bytes());
     hasher
+}
+
+/// Numerical identity for an exact-state payload produced by a stage.
+///
+/// This is the production counterpart to [`ExactStateIdentityParams`]. It
+/// deliberately reuses the same exhaustive weight/layout hashing as radix
+/// pages while excluding run, topology, stage id/index, addresses, and other
+/// placement labels.
+pub fn exact_state_identity_for_stage(config: &StageConfig, payload_kind: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"exact-state-stage-identity-v1");
+    update_weight_identity(&mut hasher, config);
+    hasher.update(&config.layer_start.to_le_bytes());
+    hasher.update(&config.layer_end.to_le_bytes());
+    hasher.update(NATIVE_KV_RUNTIME_ABI_VERSION.as_bytes());
+    hasher.update(&NATIVE_KV_LAYER_CONTIGUOUS_LAYOUT.to_le_bytes());
+    hasher.update(NATIVE_KV_DTYPE.as_bytes());
+    update_layout_identity(&mut hasher, config);
+    update_platform_identity(&mut hasher);
+    hasher.update(&config.ctx_size.to_le_bytes());
+    hasher.update(&config.lane_count.to_le_bytes());
+    hasher.update(b"payload:");
+    hasher.update(payload_kind.as_bytes());
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+/// Stable identity for model-scoped lifecycle operations.
+///
+/// Unlike an exact-state identity this deliberately excludes stage layout,
+/// payload format, placement, and device details: every split stage for the
+/// same numerical model must be selected by one model-scoped prune or clear.
+/// A source-model digest is authoritative when present. Older/direct inputs
+/// without one fall back to their materialized manifest/package identity.
+pub fn numerical_model_identity_for_stage(config: &StageConfig) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"numerical-model-identity-v1");
+    match config.source_model_sha256.as_deref() {
+        Some(digest) => {
+            hasher.update(b"source:");
+            hasher.update(digest.as_bytes());
+        }
+        None => {
+            hasher.update(b"source:<absent>");
+            hasher.update(b"manifest:");
+            hasher.update(
+                config
+                    .manifest_sha256
+                    .as_deref()
+                    .unwrap_or("<absent>")
+                    .as_bytes(),
+            );
+            hasher.update(b"package:");
+            hasher.update(
+                config
+                    .package_ref
+                    .as_deref()
+                    .unwrap_or("<absent>")
+                    .as_bytes(),
+            );
+            // The fallback must not collapse unrelated legacy configurations
+            // that have no content digest at all.
+            hasher.update(b"model:");
+            hasher.update(config.model_id.as_bytes());
+        }
+    }
+    hasher.update(b"checkpoint-quantization:");
+    hasher.update(normalized_checkpoint_quantization(config).as_bytes());
+    hasher.update(b"checkpoint-imatrix:");
+    hasher.update(
+        config
+            .checkpoint_imatrix_sha256
+            .as_deref()
+            .unwrap_or("<absent>")
+            .as_bytes(),
+    );
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+/// The *numerical* identity of an exact-state (full-state or KV+recurrent)
+/// payload for prefill/decode handoff.
+///
+/// This is the numerical half of the numerical-vs-placement identity split:
+/// it covers every input that changes the bytes or the interpretation of an
+/// exported state blob — weights, cache dtypes, flash-attention layout, the
+/// GPU layer split, backend, platform, layer range, and the context shape
+/// (`ctx_size`, `lane_count`, which decide the KV buffer geometry a
+/// full-state blob is laid out against).
+///
+/// It deliberately excludes placement: `stage_id`, `stage_index`,
+/// `topology_id`, `run_id`, and bind addresses. A prefill replica and a
+/// decode replica differ in exactly those fields, and state must flow
+/// between them whenever the numerical identity matches.
+pub struct ExactStateIdentityParams<'a> {
+    pub model_id: &'a str,
+    pub model_revision: Option<&'a str>,
+    pub model_file: Option<&'a str>,
+    /// Content digests of the served weights, when known. `model_id` is a
+    /// display name — two runs can present the same id while serving
+    /// different tensors (requantized artifact, republished package,
+    /// swapped GGUF), and state crossing that boundary is silent numerical
+    /// corruption. Absent digests are tagged distinctly so `None` cannot
+    /// alias a real value.
+    pub manifest_sha256: Option<&'a str>,
+    pub source_model_sha256: Option<&'a str>,
+    pub package_ref: Option<&'a str>,
+    pub cache_type_k: &'a str,
+    pub cache_type_v: &'a str,
+    pub flash_attn_type: FlashAttentionType,
+    pub n_gpu_layers: i32,
+    pub backend_device: Option<&'a str>,
+    pub layer_start: u32,
+    pub layer_end: u32,
+    pub ctx_size: u32,
+    pub lane_count: u32,
+    pub payload_kind: &'a str,
+}
+
+pub fn exact_state_identity(params: &ExactStateIdentityParams<'_>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"exact-state-identity-v1");
+    hasher.update(NATIVE_KV_RUNTIME_ABI_VERSION.as_bytes());
+    hasher.update(b"model:");
+    hasher.update(params.model_id.as_bytes());
+    for (tag, value) in [
+        (&b"revision:"[..], params.model_revision),
+        (&b"file:"[..], params.model_file),
+        (&b"manifest:"[..], params.manifest_sha256),
+        (&b"source:"[..], params.source_model_sha256),
+        (&b"package:"[..], params.package_ref),
+        (&b"device:"[..], params.backend_device),
+    ] {
+        hasher.update(tag);
+        match value {
+            Some(value) => {
+                hasher.update(b"=");
+                hasher.update(value.as_bytes());
+            }
+            None => {
+                hasher.update(b"<absent>");
+            }
+        }
+    }
+    hasher.update(b"kv:");
+    hasher.update(params.cache_type_k.as_bytes());
+    hasher.update(b"/");
+    hasher.update(params.cache_type_v.as_bytes());
+    hasher.update(match params.flash_attn_type {
+        FlashAttentionType::Auto => b"fa:auto",
+        FlashAttentionType::Disabled => b"fa:offf",
+        FlashAttentionType::Enabled => b"fa:onnn",
+    });
+    hasher.update(&params.n_gpu_layers.to_le_bytes());
+    hasher.update(&params.layer_start.to_le_bytes());
+    hasher.update(&params.layer_end.to_le_bytes());
+    hasher.update(&params.ctx_size.to_le_bytes());
+    hasher.update(&params.lane_count.to_le_bytes());
+    hasher.update(b"kind:");
+    hasher.update(params.payload_kind.as_bytes());
+    update_platform_identity(&mut hasher);
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 pub fn page_id(
@@ -258,6 +421,144 @@ pub fn page_id(
 
 pub fn activation_page_id(page_id: &str, activation_width: i32) -> String {
     format!("act:{}:w{}", page_id, activation_width.max(0))
+}
+
+#[cfg(test)]
+mod exact_state_identity_tests {
+    use super::*;
+
+    fn params() -> ExactStateIdentityParams<'static> {
+        ExactStateIdentityParams {
+            model_id: "org/model:Q4_K_M",
+            model_revision: Some("abc123"),
+            model_file: Some("model.gguf"),
+            manifest_sha256: Some("m".repeat(64).leak()),
+            source_model_sha256: Some("s".repeat(64).leak()),
+            package_ref: None,
+            cache_type_k: "f16",
+            cache_type_v: "f16",
+            flash_attn_type: FlashAttentionType::Auto,
+            n_gpu_layers: 99,
+            backend_device: Some("Metal"),
+            layer_start: 0,
+            layer_end: 28,
+            ctx_size: 8192,
+            lane_count: 2,
+            payload_kind: "full-state",
+        }
+    }
+
+    /// Placement is excluded *by construction*: the params carry no stage,
+    /// topology, or run fields, so two replicas that differ only in placement
+    /// produce the same identity.
+    #[test]
+    fn identical_numerics_produce_identical_identity() {
+        assert_eq!(
+            exact_state_identity(&params()),
+            exact_state_identity(&params())
+        );
+    }
+
+    #[test]
+    fn cache_dtype_changes_identity() {
+        let saver = ExactStateIdentityParams {
+            cache_type_k: "q4_0",
+            cache_type_v: "q4_0",
+            ..params()
+        };
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&saver)
+        );
+    }
+
+    #[test]
+    fn context_shape_changes_identity() {
+        let wider_ctx = ExactStateIdentityParams {
+            ctx_size: 16384,
+            ..params()
+        };
+        let more_lanes = ExactStateIdentityParams {
+            lane_count: 4,
+            ..params()
+        };
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&wider_ctx)
+        );
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&more_lanes)
+        );
+    }
+
+    #[test]
+    fn backend_and_weights_change_identity() {
+        let cuda = ExactStateIdentityParams {
+            backend_device: Some("CUDA0"),
+            ..params()
+        };
+        let other_revision = ExactStateIdentityParams {
+            model_revision: Some("def456"),
+            ..params()
+        };
+        let absent_revision = ExactStateIdentityParams {
+            model_revision: None,
+            ..params()
+        };
+        assert_ne!(exact_state_identity(&params()), exact_state_identity(&cuda));
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&other_revision)
+        );
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&absent_revision)
+        );
+    }
+
+    /// Weight content digests must separate state even when the display
+    /// model id matches — the same argument `update_weight_identity` makes
+    /// for KV pages.
+    #[test]
+    fn weight_digests_change_identity() {
+        let requantized = ExactStateIdentityParams {
+            source_model_sha256: Some("t".repeat(64).leak()),
+            ..params()
+        };
+        let repacked = ExactStateIdentityParams {
+            manifest_sha256: Some("n".repeat(64).leak()),
+            ..params()
+        };
+        let absent = ExactStateIdentityParams {
+            manifest_sha256: None,
+            ..params()
+        };
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&requantized)
+        );
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&repacked)
+        );
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&absent)
+        );
+    }
+
+    #[test]
+    fn payload_kind_changes_identity() {
+        let pages = ExactStateIdentityParams {
+            payload_kind: "kv-recurrent",
+            ..params()
+        };
+        assert_ne!(
+            exact_state_identity(&params()),
+            exact_state_identity(&pages)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -778,6 +1079,71 @@ mod identity_stability_tests {
         assert_eq!(
             prefix_identity(&run_one, 0, &tokens).page_id,
             prefix_identity(&run_two, 0, &tokens).page_id
+        );
+    }
+
+    #[test]
+    fn placement_labels_do_not_change_numerical_identity() {
+        let first = config_with_topology("topology-a");
+        let replica = StageConfig {
+            run_id: "other-run".to_string(),
+            topology_id: "topology-b".to_string(),
+            stage_id: "prefill-replica-7".to_string(),
+            stage_index: 9,
+            bind_addr: "127.0.0.1:9999".to_string(),
+            ..first.clone()
+        };
+        let tokens = (0..256).collect::<Vec<_>>();
+
+        assert_eq!(
+            prefix_namespace_hash(&first, 0, None),
+            prefix_namespace_hash(&replica, 0, None)
+        );
+        assert_eq!(
+            exact_state_identity_for_stage(&first, "full-state"),
+            exact_state_identity_for_stage(&replica, "full-state")
+        );
+        assert_eq!(
+            numerical_model_identity_for_stage(&first),
+            numerical_model_identity_for_stage(&replica)
+        );
+        assert_eq!(
+            prefix_identity(&first, 0, &tokens).prefix_hash,
+            prefix_identity(&replica, 0, &tokens).prefix_hash
+        );
+    }
+
+    #[test]
+    fn model_identity_groups_split_packages_from_one_source_model() {
+        let mut first = config_with_topology("topology-a");
+        first.source_model_sha256 = Some("source-digest".to_string());
+        first.manifest_sha256 = Some("stage-a-manifest".to_string());
+        first.package_ref = Some("stage-a-package".to_string());
+        let second = StageConfig {
+            stage_id: "stage-b".to_string(),
+            stage_index: 1,
+            layer_start: 24,
+            layer_end: 48,
+            manifest_sha256: Some("stage-b-manifest".to_string()),
+            package_ref: Some("stage-b-package".to_string()),
+            ..first.clone()
+        };
+
+        assert_eq!(
+            numerical_model_identity_for_stage(&first),
+            numerical_model_identity_for_stage(&second)
+        );
+        assert_ne!(
+            exact_state_identity_for_stage(&first, "full-state"),
+            exact_state_identity_for_stage(&second, "full-state")
+        );
+
+        let mut equivalent_spelling = first.clone();
+        equivalent_spelling.checkpoint_quantization = Some("none".to_string());
+        assert_eq!(
+            numerical_model_identity_for_stage(&first),
+            numerical_model_identity_for_stage(&equivalent_spelling),
+            "equivalent preserve-mode spellings must share lifecycle identity"
         );
     }
 

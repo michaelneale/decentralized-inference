@@ -626,6 +626,7 @@ impl Node {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         }
@@ -672,6 +673,7 @@ impl Node {
                     unload_model: None,
                     ensure_model: None,
                     drain_model: None,
+                    kv_cache: None,
                 }),
                 error: None,
             },
@@ -1068,6 +1070,13 @@ impl Node {
                     if let Some(leader) = lifecycle_leader.take() {
                         leader.publish(envelope.clone());
                     }
+                    self.send_owner_control_envelope(send, envelope).await?;
+                }
+                OwnedNodeCommand::KvCache {
+                    request_id,
+                    request,
+                } => {
+                    let envelope = commands::kv_cache::execute(request_id, request).await;
                     self.send_owner_control_envelope(send, envelope).await?;
                 }
             }

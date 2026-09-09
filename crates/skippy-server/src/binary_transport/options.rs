@@ -32,6 +32,8 @@ pub struct BinaryStageOptions {
     /// the stage-control load request.
     pub continuous_batching: bool,
     pub openai: Option<EmbeddedOpenAiStageOptions>,
+    /// Shared node owner for the durable disk tier.
+    pub l3_manager: Option<skippy_cache::L3CacheManager>,
 }
 
 #[derive(Clone)]
@@ -149,6 +151,7 @@ impl BinaryStageOptions {
             native_mtp_enabled,
             continuous_batching: true,
             openai,
+            l3_manager: None,
         })
     }
 

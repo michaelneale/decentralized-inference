@@ -7,7 +7,9 @@ version.workspace = true
 [dependencies]
 hex = "0.4"
 anyhow.workspace = true
+blake3.workspace = true
 clap.workspace = true
+skippy-cache = { path = "../skippy-cache" }
 skippy-protocol = { path = "../skippy-protocol" }
 skippy-runtime = { path = "../skippy-runtime" }
 model-artifact = { path = "../model-artifact" }

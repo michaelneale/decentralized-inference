@@ -685,6 +685,7 @@ impl ResolvedEmbeddedOpenAiArgs {
             generation_receipt: None,
             linear_proposal_ingress: None,
             openai_guardrails: None,
+            l3_manager: crate::runtime::kv_disk_config::node_kv_disk_manager(),
         }
     }
 }

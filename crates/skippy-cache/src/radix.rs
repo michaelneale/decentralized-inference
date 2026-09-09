@@ -1762,22 +1762,28 @@ mod tests {
                 );
                 assert_eq!(
                     stats.resident_logical_bytes,
-                    resident.values().map(|entry| entry.bytes).sum(),
+                    resident.values().map(|entry| entry.bytes).sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
                 assert_eq!(
                     stats.recurrent_logical_bytes,
-                    recurrent.values().map(|entry| entry.bytes).sum(),
+                    recurrent.values().map(|entry| entry.bytes).sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
                 assert_eq!(
                     stats.resident_active_refs,
-                    resident.values().map(|entry| u64::from(entry.refs)).sum(),
+                    resident
+                        .values()
+                        .map(|entry| u64::from(entry.refs))
+                        .sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
                 assert_eq!(
                     stats.recurrent_active_refs,
-                    recurrent.values().map(|entry| u64::from(entry.refs)).sum(),
+                    recurrent
+                        .values()
+                        .map(|entry| u64::from(entry.refs))
+                        .sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
                 assert_eq!(

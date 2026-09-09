@@ -6,11 +6,12 @@ use std::{
 use anyhow::Result;
 use mesh_llm_events::OutputEvent;
 use skippy_cache::{
-    CacheBlobStore, ResidentActivationCache, ResidentCacheConfig, SparseCheckpointPolicy,
-    UnifiedRadixCache,
+    CacheBlobStore, GeometryBlock, GeometryKind, L3CacheManager, L3Tier, PayloadGeometry,
+    ResidentActivationCache, ResidentCacheConfig, SparseCheckpointPolicy, StoreLimits,
+    UnifiedRadixCache, exact_state_identity_for_stage, numerical_model_identity_for_stage,
 };
 use skippy_protocol::{StageConfig, StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload};
-use skippy_runtime::ModelStateKind;
+use skippy_runtime::{ModelStateKind, RuntimeKvPageDesc};
 
 use super::{
     EXACT_STATE_RECORD_CAPACITY, ExactStateByteLimits, KvStageIntegration, PendingExactStateRecord,
@@ -49,6 +50,25 @@ impl KvStageIntegration {
         config: &StageConfig,
         model_state_kind: Option<ModelStateKind>,
     ) -> Result<Option<Self>> {
+        Self::from_loaded_model_with_l3(config, model_state_kind, || l3_manager_from_env(config))
+    }
+
+    /// Construct a stage with an explicitly injected node cache manager.
+    /// Embedders that own several stages can use this path without consulting
+    /// process environment or opening the root again.
+    pub fn from_loaded_model_with_l3_manager(
+        config: &StageConfig,
+        model_state_kind: Option<ModelStateKind>,
+        manager: Option<L3CacheManager>,
+    ) -> Result<Option<Self>> {
+        Self::from_loaded_model_with_l3(config, model_state_kind, || Ok(manager))
+    }
+
+    fn from_loaded_model_with_l3(
+        config: &StageConfig,
+        model_state_kind: Option<ModelStateKind>,
+        manager: impl FnOnce() -> Result<Option<L3CacheManager>>,
+    ) -> Result<Option<Self>> {
         let Some(mut cache_config) = effective_cache_config(config) else {
             return Ok(None);
         };
@@ -65,10 +85,11 @@ impl KvStageIntegration {
             emit_cache_disabled_warning(config, reason);
             return Ok(None);
         }
-        let payload = effective_cache_payload(cache_config.payload, &model_capability);
+        let mut payload = effective_cache_payload(cache_config.payload, &model_capability);
         if payload == StagePrefixCachePayload::Disabled {
             return Ok(None);
         }
+        let dense_without_recurrent = matches!(model_capability, ModelKvCapability::KnownDense);
         if matches!(model_capability, ModelKvCapability::KnownRecurrent)
             && matches!(payload, StagePrefixCachePayload::ResidentKv)
         {
@@ -87,6 +108,20 @@ impl KvStageIntegration {
             );
             return Ok(None);
         }
+        let l3_manager = manager()?;
+        if l3_manager.is_some()
+            && payload == StagePrefixCachePayload::ResidentKv
+            && dense_without_recurrent
+        {
+            // The durable tier needs exportable state and ResidentKv is
+            // borrow-only. Dense families record KV pages with an empty
+            // recurrent snapshot so they reach disk; the model is known
+            // dense, so the empty snapshot is expected rather than corrupt.
+            payload = StagePrefixCachePayload::KvRecurrent;
+        }
+        let l3 = l3_manager
+            .map(|manager| l3_tier_for_manager(config, payload, manager))
+            .transpose()?;
         // FullState is architecture-neutral: the native runtime serializes the
         // complete session state for both dense and recurrent model families.
         if matches!(model_capability, ModelKvCapability::KnownRecurrent) {
@@ -111,8 +146,19 @@ impl KvStageIntegration {
             std::sync::mpsc::sync_channel::<PendingExactStateRecord>(EXACT_STATE_RECORD_CAPACITY);
         let worker_radix = radix.clone();
         let worker_exact_blobs = exact_blobs.clone();
-        let inflight_records = Arc::new(Mutex::new(BTreeSet::new()));
+        let worker_l3 = l3.clone();
+        let inflight_records: Arc<Mutex<BTreeSet<String>>> = l3.as_ref().map_or_else(
+            || Arc::new(Mutex::new(BTreeSet::new())),
+            |tier| tier.manager().record_claims(tier.state_identity()),
+        );
         let worker_inflight_records = inflight_records.clone();
+        let inflight_fills: Arc<Mutex<BTreeSet<String>>> = l3.as_ref().map_or_else(
+            || Arc::new(Mutex::new(BTreeSet::new())),
+            |tier| tier.manager().fill_claims(),
+        );
+        let worker_inflight_fills = inflight_fills.clone();
+        let exact_state_record_queue_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let worker_exact_state_record_queue_bytes = exact_state_record_queue_bytes.clone();
         let exact_state_records_queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let exact_state_records_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let worker_exact_state_records_dropped = exact_state_records_dropped.clone();
@@ -126,10 +172,12 @@ impl KvStageIntegration {
             .name(format!("skippy-exact-cache-{}", config.stage_id))
             .spawn(move || {
                 while let Ok(pending) = exact_state_record_rx.recv() {
+                    let fill_claim = pending.l3_fill_claim.clone();
                     super::run_exact_state_record_job(
                         &worker_inflight_records,
                         &worker_exact_state_records_dropped,
                         &worker_exact_state_records_pending,
+                        &worker_exact_state_record_queue_bytes,
                         &worker_exact_state_record_worker_healthy,
                         &worker_exact_state_record_worker_panics,
                         pending,
@@ -139,10 +187,20 @@ impl KvStageIntegration {
                                 &worker_exact_blobs,
                                 exact_max_entries,
                                 exact_byte_limits,
+                                worker_l3.as_deref(),
                                 pending,
                             )
                         },
                     );
+                    if let Some(fill_claim) = fill_claim {
+                        // The filled entry is radix-resident now (or the
+                        // insert failed, and a re-fill is the right call
+                        // either way): release the claim.
+                        worker_inflight_fills
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&fill_claim);
+                    }
                 }
             })?;
         Ok(Some(Self {
@@ -171,6 +229,10 @@ impl KvStageIntegration {
             cache_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             output_tokens: Arc::new(Mutex::new(OutputTokenCache::new(exact_max_entries))),
             split_prefill_tokens: Arc::new(Mutex::new(BTreeMap::new())),
+            exact_state_record_queue_bytes,
+            l3,
+            inflight_fills,
+            dense_without_recurrent,
         }))
     }
 
@@ -183,6 +245,221 @@ impl KvStageIntegration {
     }
 }
 
+/// Open the durable L3 tier when `SKIPPY_L3_DIR` is set.
+///
+/// Experimental, environment-only plumbing: the public `[runtime.kv_cache.disk]`
+/// configuration replaces it and this reader becomes a one-release
+/// compatibility shim with a deprecation warning. The tier identity is the
+/// radix cache's own numerical namespace, so restarts reuse it and a change
+/// in weights, cache dtypes, layout or platform refuses stale state.
+const DEFAULT_L3_BUDGET_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const DEFAULT_L3_MINIMUM_FREE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const L3_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
+/// Cap on rows per segment.
+///
+/// Windows are the dedupe granularity: a turn leaves a partial window in every
+/// run, and those rows are rewritten next turn, so amplification is roughly
+/// `1 + (tokens_so_far mod window) / new_tokens`. Measured on an M4 mini with
+/// 2000-token base and 300-token turns: 512 rows gives 1.92x over the soak
+/// (worst turn 2.55x) and misses §13.4's 1.2x gate; 128 rows gives 1.18x with
+/// no margin; 64 rows gives 1.07x (worst turn 1.17x). The cost of the smaller
+/// window is segment count, which is why it is capped rather than shrunk
+/// further.
+const L3_MAX_WINDOW_ROWS: u64 = 64;
+
+fn l3_manager_from_env(config: &StageConfig) -> Result<Option<L3CacheManager>> {
+    let Ok(root) = std::env::var("SKIPPY_L3_DIR") else {
+        return Ok(None);
+    };
+    if root.trim().is_empty() {
+        return Ok(None);
+    }
+    let budget_bytes = match std::env::var("SKIPPY_L3_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        // There is no unbounded mode. Zero used to mean "no cap"; it is now
+        // rejected rather than silently reinterpreted.
+        Some(0) => {
+            let _ = mesh_llm_events::emit_event(OutputEvent::Warning {
+                message: "SKIPPY_L3_BUDGET_BYTES=0 is not unbounded; using the default budget"
+                    .to_string(),
+                context: Some(format!("budget_bytes={DEFAULT_L3_BUDGET_BYTES}")),
+            });
+            DEFAULT_L3_BUDGET_BYTES
+        }
+        Some(bytes) => bytes,
+        None => DEFAULT_L3_BUDGET_BYTES,
+    };
+    let manager = match L3CacheManager::acquire(
+        &root,
+        StoreLimits::new(budget_bytes, DEFAULT_L3_MINIMUM_FREE_BYTES),
+    ) {
+        Ok(manager) => manager,
+        Err(error) => {
+            // A tier that cannot open is a visible decline, not a crash:
+            // serving continues cache-off for this stage.
+            let _ = mesh_llm_events::emit_event(OutputEvent::Warning {
+                message: "Skippy L3 disk cache disabled for this model stage".to_string(),
+                context: Some(format!(
+                    "stage_id={} directory={root} reason={error:#}",
+                    config.stage_id
+                )),
+            });
+            return Ok(None);
+        }
+    };
+    Ok(Some(manager))
+}
+
+fn l3_tier_for_manager(
+    config: &StageConfig,
+    payload: StagePrefixCachePayload,
+    manager: L3CacheManager,
+) -> Result<Arc<L3Tier>> {
+    let identity = exact_state_identity_for_stage(config, l3_payload_kind(payload));
+    let model_identity = numerical_model_identity_for_stage(config);
+    let root = manager.root().display().to_string();
+    let tier = manager.tier_for_model(model_identity, identity, L3_SEGMENT_BYTES);
+    // Warm state must never be invisible: say what the tier can restore the
+    // moment the stage comes up.
+    match tier.status() {
+        Ok(status) => {
+            let _ = mesh_llm_events::emit_event(OutputEvent::Info {
+                message: "Skippy L3 disk cache open".to_string(),
+                context: Some(format!(
+                    "stage_id={} directory={root} restorable_manifests={} restorable_tokens={} used_bytes={} budget_bytes={}",
+                    config.stage_id,
+                    status.restorable_manifests,
+                    status.restorable_tokens,
+                    status.usage.used_bytes,
+                    status.usage.budget_bytes
+                )),
+            });
+        }
+        Err(error) => {
+            let _ = mesh_llm_events::emit_event(OutputEvent::Warning {
+                message: "Skippy L3 disk cache open; status unavailable".to_string(),
+                context: Some(format!("stage_id={} reason={error:#}", config.stage_id)),
+            });
+        }
+    }
+    Ok(Arc::new(tier))
+}
+
+fn l3_payload_kind(payload: StagePrefixCachePayload) -> &'static str {
+    match payload {
+        StagePrefixCachePayload::KvRecurrent => "kv-recurrent",
+        StagePrefixCachePayload::FullState => "full-state",
+        StagePrefixCachePayload::ResidentKv | StagePrefixCachePayload::Disabled => "unsupported",
+    }
+}
+
+/// Describe an exported KV page so the store can cut segments where a growing
+/// prefix keeps its bytes still.
+///
+/// The runtime writes every selected layer's K rows, then every layer's V rows,
+/// then the indexer rows, each run holding one row per token in token order
+/// (`llama_kv_cache::stage_export_kv_page`). Cutting that on fixed byte offsets
+/// re-writes the whole payload every turn, because adding tokens shifts every
+/// run after the first — measured at 8x on an M4 mini. Cutting per run into
+/// fixed token windows writes only the new rows.
+///
+/// Returns `None` when the layout is not one this mapping can state exactly;
+/// the store then falls back to fixed-size cutting, which is correct but not
+/// cheap.
+fn kv_page_geometry(desc: &RuntimeKvPageDesc, payload_bytes: u64) -> Option<PayloadGeometry> {
+    // A composite (ISWA) page is two independently-shaped components; its
+    // geometry is not this single-run description.
+    if desc.component_count != 0 || desc.token_count == 0 || desc.layer_count == 0 {
+        return None;
+    }
+    let rows = desc.token_count;
+    let layers = desc.layer_count;
+    let k_stride = u64::from(desc.k_row_bytes);
+    if k_stride == 0 {
+        return None;
+    }
+    let mut blocks = Vec::new();
+    for layer in 0..layers {
+        blocks.push(GeometryBlock {
+            stride: k_stride,
+            kind: GeometryKind::Key,
+            layer,
+            column: 0,
+        });
+    }
+    let transposed = desc.flags & skippy_runtime::KV_PAGE_FLAG_V_TRANSPOSED != 0;
+    if transposed {
+        // Transposed V is stored column-major, but each column is still one
+        // contiguous run of one element per token, so it windows the same way.
+        // The column count is not in the descriptor; derive it from the bytes
+        // the K and indexer runs do not claim.
+        let element_bytes = u64::from(desc.v_element_bytes);
+        let k_idx_stride = u64::from(desc.k_idx_row_bytes);
+        let claimed = u64::from(layers)
+            .checked_mul(rows)?
+            .checked_mul(k_stride.checked_add(k_idx_stride)?)?;
+        let v_bytes = payload_bytes.checked_sub(claimed)?;
+        let per_layer = v_bytes.checked_div(u64::from(layers))?;
+        let column_bytes = rows.checked_mul(element_bytes)?;
+        if element_bytes == 0 || column_bytes == 0 || per_layer % column_bytes != 0 {
+            return None;
+        }
+        let columns = u32::try_from(per_layer / column_bytes).ok()?;
+        for layer in 0..layers {
+            for column in 0..columns {
+                blocks.push(GeometryBlock {
+                    stride: element_bytes,
+                    kind: GeometryKind::Value,
+                    layer,
+                    column,
+                });
+            }
+        }
+    } else if desc.v_row_bytes > 0 {
+        for layer in 0..layers {
+            blocks.push(GeometryBlock {
+                stride: u64::from(desc.v_row_bytes),
+                kind: GeometryKind::Value,
+                layer,
+                column: 0,
+            });
+        }
+    }
+    if desc.k_idx_row_bytes > 0 {
+        for layer in 0..layers {
+            blocks.push(GeometryBlock {
+                stride: u64::from(desc.k_idx_row_bytes),
+                kind: GeometryKind::KeyIndex,
+                layer,
+                column: 0,
+            });
+        }
+    }
+    // The window must depend only on the model's shape, never on this entry's
+    // token count, or the boundaries move between turns and nothing dedupes.
+    let widest = blocks.iter().map(|block| block.stride).max()?;
+    let window_rows = (L3_SEGMENT_BYTES as u64 / widest.max(1))
+        .clamp(1, L3_MAX_WINDOW_ROWS)
+        .next_power_of_two()
+        .min(L3_MAX_WINDOW_ROWS);
+    let geometry = PayloadGeometry {
+        blocks,
+        rows,
+        window_rows,
+        // A recurrent snapshot rides after the KV page and has no row
+        // structure; it is whatever the payload has left.
+        tail_bytes: 0,
+    };
+    let described = geometry.total_bytes();
+    let tail = payload_bytes.checked_sub(described)?;
+    Some(PayloadGeometry {
+        tail_bytes: tail,
+        ..geometry
+    })
+}
+
 fn emit_cache_disabled_warning(config: &StageConfig, reason: &str) {
     let _ = mesh_llm_events::emit_event(OutputEvent::Warning {
         message: "Skippy KV cache disabled for this model stage".to_string(),
@@ -193,13 +470,59 @@ fn emit_cache_disabled_warning(config: &StageConfig, reason: &str) {
     });
 }
 
+fn emit_l3_state_transitions(l3: &L3Tier) {
+    for transition in l3.manager().take_state_transitions() {
+        let context = serde_json::to_string(&transition).ok();
+        let _ = mesh_llm_events::emit_event(OutputEvent::Info {
+            message: "Skippy L3 disk cache state changed".to_string(),
+            context,
+        });
+    }
+}
+
 fn store_exact_radix_record(
     radix: &Mutex<UnifiedRadixCache<super::RadixResidentEntry, RadixExactEntry>>,
     blobs: &Mutex<CacheBlobStore>,
     max_entries: usize,
     limits: ExactStateByteLimits,
+    l3: Option<&L3Tier>,
     pending: PendingExactStateRecord,
 ) -> Result<()> {
+    // Write through to the durable tier before the payload is deduplicated
+    // into blocks, while its bytes are still contiguous. Best-effort: a full
+    // or failing disk must not fail the in-memory record. The refusal reason
+    // lands in the tier's status; one warning per process keeps a full disk
+    // from flooding the log.
+    if let Some(l3) = l3 {
+        let kv_desc_json = pending
+            .extra
+            .kv_desc
+            .as_ref()
+            .and_then(|desc| serde_json::to_string(desc).ok());
+        let geometry = pending
+            .extra
+            .kv_desc
+            .as_ref()
+            .and_then(|desc| kv_page_geometry(desc, pending.payload.byte_len()));
+        let spill = l3.spill(
+            &pending.namespace,
+            &pending.token_ids,
+            &pending.payload,
+            kv_desc_json,
+            geometry.as_ref(),
+        );
+        emit_l3_state_transitions(l3);
+        if let Err(error) = spill {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                let _ = mesh_llm_events::emit_event(OutputEvent::Warning {
+                    message: "Skippy L3 disk cache write refused; see kv-cache status".to_string(),
+                    context: Some(format!("page_id={} reason={error:#}", pending.page_id)),
+                });
+            }
+        }
+    }
     let logical_bytes = pending.payload.byte_len();
     let (payload, _) = pending.payload.dedupe_into(
         &mut blobs
@@ -459,6 +782,7 @@ mod tests {
             extra: super::super::ExactStateExtra::default(),
             namespace: "model".to_string(),
             token_ids: tokens.to_vec(),
+            l3_fill_claim: None,
         }
     }
 
@@ -472,6 +796,7 @@ mod tests {
             &blobs,
             1,
             limits(0, 0),
+            None,
             pending("first", &[1, 2], b"aaaabbbb"),
         )
         .unwrap();
@@ -480,6 +805,7 @@ mod tests {
             &blobs,
             1,
             limits(0, 0),
+            None,
             pending("second", &[1, 3], b"aaaacccc"),
         )
         .unwrap();
@@ -509,6 +835,7 @@ mod tests {
             &blobs,
             1,
             limits(0, 0),
+            None,
             pending("empty", &[], b"aaaabbbb"),
         )
         .unwrap_err();
@@ -519,6 +846,166 @@ mod tests {
         );
         assert_eq!(blobs.lock().unwrap().physical_bytes(), 0);
         assert_eq!(radix.lock().unwrap().stats().recurrent_entries, 0);
+    }
+
+    #[test]
+    fn exact_records_write_through_to_l3_and_survive_radix_eviction() {
+        let radix = Mutex::new(UnifiedRadixCache::new());
+        let blobs = Mutex::new(CacheBlobStore::new(4));
+        let root = std::env::temp_dir()
+            .join("skippy-server-l3-tests")
+            .join(format!("write-through-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tier = L3Tier::open(&root, 0, "blake3:test-tier".to_string(), 4096).unwrap();
+
+        // Two records with max_entries = 1: the first is evicted from RAM.
+        store_exact_radix_record(
+            &radix,
+            &blobs,
+            1,
+            limits(0, 0),
+            Some(&tier),
+            pending("first", &[1, 2], b"first-exact-state"),
+        )
+        .unwrap();
+        store_exact_radix_record(
+            &radix,
+            &blobs,
+            1,
+            limits(0, 0),
+            Some(&tier),
+            pending("second", &[1, 3], b"second-exact-state"),
+        )
+        .unwrap();
+        assert!(
+            radix
+                .lock()
+                .unwrap()
+                .lookup_recurrent("model", &[1, 2])
+                .is_none(),
+            "first record must be evicted from RAM"
+        );
+
+        // The evicted prefix still fills from the durable tier, including
+        // for a longer query that extends the recorded path.
+        let fill = tier
+            .fill_longest("model", &[1, 2, 7, 8], 64)
+            .unwrap()
+            .expect("evicted record must remain in L3");
+        assert_eq!(fill.token_count, 2);
+        assert_eq!(
+            fill.payload
+                .full_state_bytes_timed()
+                .unwrap()
+                .0
+                .into_owned(),
+            b"first-exact-state".to_vec()
+        );
+        let status = tier.status().unwrap();
+        assert_eq!(status.activity.writes, 2);
+        assert_eq!(status.activity.fills, 1);
+    }
+
+    fn kv_desc(layers: u32, tokens: u64, k_row: u32, v_row: u32) -> RuntimeKvPageDesc {
+        let mut desc = RuntimeKvPageDesc {
+            version: 1,
+            layer_start: 0,
+            layer_end: layers as i32,
+            token_start: 0,
+            token_count: tokens,
+            layer_count: layers,
+            k_type: 1,
+            v_type: 1,
+            k_row_bytes: k_row,
+            v_row_bytes: v_row,
+            v_element_bytes: 2,
+            k_idx_row_bytes: 0,
+            payload_bytes: 0,
+            flags: 0,
+            codec: 0,
+            component_count: 0,
+            components: Default::default(),
+        };
+        desc.payload_bytes = u64::from(layers) * tokens * (u64::from(k_row) + u64::from(v_row));
+        desc
+    }
+
+    #[test]
+    fn kv_page_geometry_describes_the_runtime_export_layout() {
+        // Every layer's K rows, then every layer's V rows: the order
+        // `stage_export_kv_page` writes them in.
+        let desc = kv_desc(4, 2048, 1024, 1024);
+        let geometry =
+            kv_page_geometry(&desc, desc.payload_bytes).expect("dense page must be describable");
+
+        assert_eq!(geometry.blocks.len(), 8);
+        assert_eq!(geometry.rows, 2048);
+        assert!(
+            geometry.blocks[..4]
+                .iter()
+                .all(|block| block.kind == GeometryKind::Key)
+        );
+        assert!(
+            geometry.blocks[4..]
+                .iter()
+                .all(|block| block.kind == GeometryKind::Value)
+        );
+        assert_eq!(geometry.total_bytes(), desc.payload_bytes);
+        assert!(geometry.matches(desc.payload_bytes));
+    }
+
+    #[test]
+    fn kv_page_geometry_windows_are_stable_as_the_prefix_grows() {
+        // The property the whole fix rests on: the same model must produce the
+        // same window size at every length, or turn N+1's cuts land elsewhere
+        // and nothing is reused.
+        let short = kv_desc(4, 2048, 1024, 1024);
+        let long = kv_desc(4, 4096, 1024, 1024);
+        let short_geometry = kv_page_geometry(&short, short.payload_bytes).expect("short");
+        let long_geometry = kv_page_geometry(&long, long.payload_bytes).expect("long");
+        assert_eq!(short_geometry.window_rows, long_geometry.window_rows);
+        assert_eq!(short_geometry.blocks, long_geometry.blocks);
+    }
+
+    #[test]
+    fn kv_page_geometry_accounts_for_a_recurrent_tail() {
+        let desc = kv_desc(2, 512, 512, 512);
+        let tail = 4096;
+        let geometry = kv_page_geometry(&desc, desc.payload_bytes + tail).expect("hybrid page");
+        assert_eq!(geometry.tail_bytes, tail);
+        assert!(geometry.matches(desc.payload_bytes + tail));
+    }
+
+    #[test]
+    fn kv_page_geometry_declines_what_it_cannot_state_exactly() {
+        // A composite ISWA page is two differently-shaped components.
+        let mut composite = kv_desc(4, 512, 1024, 1024);
+        composite.component_count = 2;
+        assert!(kv_page_geometry(&composite, composite.payload_bytes).is_none());
+
+        // Bytes that the described runs cannot account for.
+        let desc = kv_desc(4, 512, 1024, 1024);
+        assert!(kv_page_geometry(&desc, desc.payload_bytes - 1).is_none());
+    }
+
+    #[test]
+    fn kv_page_geometry_windows_transposed_value_columns() {
+        // Transposed V is column-major, but each column is one contiguous run
+        // of one element per token, so it windows like any other run.
+        let mut desc = kv_desc(2, 256, 1024, 0);
+        desc.flags = skippy_runtime::KV_PAGE_FLAG_V_TRANSPOSED;
+        desc.v_element_bytes = 2;
+        let columns = 512u64;
+        let payload = desc.payload_bytes + u64::from(desc.layer_count) * columns * 256 * 2;
+        let geometry = kv_page_geometry(&desc, payload).expect("transposed page");
+
+        let value_blocks = geometry
+            .blocks
+            .iter()
+            .filter(|block| block.kind == GeometryKind::Value)
+            .count();
+        assert_eq!(value_blocks as u64, u64::from(desc.layer_count) * columns);
+        assert!(geometry.matches(payload));
     }
 
     #[test]
@@ -538,6 +1025,7 @@ mod tests {
                 &blobs,
                 8,
                 limits(4, 1024),
+                None,
                 pending(page_id, &tokens, bytes),
             )
             .unwrap();
@@ -568,6 +1056,7 @@ mod tests {
                 &blobs,
                 2,
                 limits(4, 1_024),
+                None,
                 pending(page_id, &tokens, bytes),
             )
             .unwrap();
@@ -595,6 +1084,7 @@ mod tests {
                 &blobs,
                 8,
                 limits(4, 8),
+                None,
                 pending(page_id, &tokens, bytes),
             )
             .unwrap();
@@ -620,6 +1110,7 @@ mod tests {
             &blobs,
             8,
             limits(2, 4),
+            None,
             pending("checkpoint", &[1, 2], b"aaaabbbb"),
         )
         .unwrap();
@@ -769,6 +1260,79 @@ mod tests {
 
         assert_eq!(kv.payload, StagePrefixCachePayload::KvRecurrent);
         assert_eq!(kv.exact_max_entries, RECURRENT_CACHE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn injected_manager_is_shared_across_placement_equivalent_stages() {
+        let root = std::env::temp_dir()
+            .join("skippy-server-l3-manager-tests")
+            .join(format!("shared-stages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let manager = L3CacheManager::acquire(&root, StoreLimits::new(1_000_000, 0)).unwrap();
+        let mut first = enabled_auto_config("future/model");
+        first.kv_cache.as_mut().unwrap().payload = StageKvCachePayload::FullState;
+        let second = StageConfig {
+            stage_id: "replica-stage".to_string(),
+            stage_index: 7,
+            topology_id: "other-topology".to_string(),
+            run_id: "other-run".to_string(),
+            ..first.clone()
+        };
+
+        let first = KvStageIntegration::from_loaded_model_with_l3_manager(
+            &first,
+            Some(ModelStateKind::Dense),
+            Some(manager.clone()),
+        )
+        .unwrap()
+        .unwrap();
+        let second = KvStageIntegration::from_loaded_model_with_l3_manager(
+            &second,
+            Some(ModelStateKind::Dense),
+            Some(manager),
+        )
+        .unwrap()
+        .unwrap();
+        let first_l3 = first.l3.as_ref().unwrap();
+        let second_l3 = second.l3.as_ref().unwrap();
+
+        assert!(first_l3.manager().shares_root_with(second_l3.manager()));
+        assert_eq!(first_l3.state_identity(), second_l3.state_identity());
+        assert_eq!(first_l3.model_identity(), second_l3.model_identity());
+        assert!(Arc::ptr_eq(&first.inflight_fills, &second.inflight_fills));
+        assert!(Arc::ptr_eq(
+            &first.inflight_records,
+            &second.inflight_records
+        ));
+        assert!(first.try_begin_record("shared-page"));
+        assert!(
+            !second.try_begin_record("shared-page"),
+            "placement replicas performed duplicate record work"
+        );
+        first.finish_record("shared-page");
+        assert!(second.try_begin_record("shared-page"));
+        second.finish_record("shared-page");
+    }
+
+    #[test]
+    fn dense_auto_cache_becomes_exportable_when_disk_is_injected() {
+        let root = std::env::temp_dir()
+            .join("skippy-server-l3-manager-tests")
+            .join(format!("dense-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let manager = L3CacheManager::acquire(&root, StoreLimits::new(1_000_000, 0)).unwrap();
+        let config = enabled_auto_config("future/model");
+
+        let kv = KvStageIntegration::from_loaded_model_with_l3_manager(
+            &config,
+            Some(ModelStateKind::Dense),
+            Some(manager),
+        )
+        .unwrap()
+        .expect("dense disk cache should remain enabled");
+
+        assert_eq!(kv.payload, StagePrefixCachePayload::KvRecurrent);
+        assert!(kv.l3.is_some());
     }
 
     #[test]

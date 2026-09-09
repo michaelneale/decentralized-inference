@@ -1,5 +1,7 @@
 #[path = "descriptors/auth.rs"]
 mod auth;
+#[path = "descriptors/kv_cache.rs"]
+mod kv_cache;
 #[path = "descriptors/models.rs"]
 mod models;
 #[path = "descriptors/plugins_benchmark.rs"]
@@ -68,5 +70,6 @@ pub(super) const DESCRIPTOR_GROUPS: &[&[Descriptor]] = &[
     models::DESCRIPTORS,
     plugins_benchmark::BENCHMARK_DESCRIPTORS,
     runtime::DESCRIPTORS,
+    kv_cache::DESCRIPTORS,
     auth::DESCRIPTORS,
 ];

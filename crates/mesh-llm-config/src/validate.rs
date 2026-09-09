@@ -264,6 +264,81 @@ fn validate_runtime_config(config: &RuntimeConfig) -> Vec<ConfigDiagnostic> {
             "runtime.drain_timeout_secs must not exceed runtime.drain_timeout_max_secs",
         ));
     }
+    diagnostics.extend(validate_kv_disk_config(&config.kv_cache.disk));
+    diagnostics
+}
+
+fn validate_kv_disk_config(config: &KvDiskTierConfig) -> Vec<ConfigDiagnostic> {
+    let mut diagnostics = Vec::new();
+    match config.mode {
+        Some(KvDiskTierMode::Fixed) if config.budget_mib.is_none() => {
+            diagnostics.push(validation_diagnostic(
+                "runtime.kv_cache.disk.budget_mib",
+                "runtime.kv_cache.disk.budget_mib is required when mode = \"fixed\"",
+            ));
+        }
+        Some(KvDiskTierMode::Off | KvDiskTierMode::Auto) | None if config.budget_mib.is_some() => {
+            diagnostics.push(validation_diagnostic(
+                "runtime.kv_cache.disk.budget_mib",
+                "runtime.kv_cache.disk.budget_mib is only valid when mode = \"fixed\"",
+            ));
+        }
+        _ => {}
+    }
+    if config.budget_mib == Some(0) {
+        diagnostics.push(validation_diagnostic(
+            "runtime.kv_cache.disk.budget_mib",
+            "runtime.kv_cache.disk.budget_mib must be greater than zero",
+        ));
+    }
+    if config
+        .minimum_free_mib
+        .is_some_and(|minimum| minimum < MIN_KV_DISK_MINIMUM_FREE_MIB)
+    {
+        diagnostics.push(validation_diagnostic(
+            "runtime.kv_cache.disk.minimum_free_mib",
+            format!(
+                "runtime.kv_cache.disk.minimum_free_mib must be at least {MIN_KV_DISK_MINIMUM_FREE_MIB}"
+            ),
+        ));
+    }
+    for (path, value) in [
+        ("runtime.kv_cache.disk.budget_mib", config.budget_mib),
+        (
+            "runtime.kv_cache.disk.minimum_free_mib",
+            config.minimum_free_mib,
+        ),
+    ] {
+        if value.is_some_and(|mib| mib.checked_mul(1024 * 1024).is_none()) {
+            diagnostics.push(validation_diagnostic(
+                path,
+                format!("{path} is too large to represent as bytes"),
+            ));
+        }
+    }
+    if let Some(directory) = config.directory.as_deref() {
+        let rendered = directory.to_string_lossy();
+        // A drive letter is absolute only where the host understands one. On
+        // Unix `C:\cache` is a relative path, and accepting it would put a
+        // durable cache under the process working directory.
+        let windows_absolute = cfg!(windows)
+            && rendered.as_bytes().get(1) == Some(&b':')
+            && rendered
+                .as_bytes()
+                .get(2)
+                .is_some_and(|byte| matches!(byte, b'/' | b'\\'));
+        if rendered.trim().is_empty() {
+            diagnostics.push(validation_diagnostic(
+                "runtime.kv_cache.disk.directory",
+                "runtime.kv_cache.disk.directory must not be empty",
+            ));
+        } else if !directory.is_absolute() && !windows_absolute {
+            diagnostics.push(validation_diagnostic(
+                "runtime.kv_cache.disk.directory",
+                "runtime.kv_cache.disk.directory must be an absolute path",
+            ));
+        }
+    }
     diagnostics
 }
 

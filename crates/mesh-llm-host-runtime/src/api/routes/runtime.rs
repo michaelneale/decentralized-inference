@@ -13,6 +13,7 @@ use crate::crypto::{
     OwnerKeychainLoadError, keystore_metadata, load_keystore, load_owner_keypair_from_keychain,
 };
 use crate::plugin::validate_config_diagnostics_with_installed_plugin_schemas;
+use futures_util::{FutureExt, StreamExt, stream};
 use mesh_client::{
     ClientBuilder, ControlPlaneBootstrapOptions, ControlPlaneClientError, ControlPlaneConnection,
     InviteToken, OwnerControlRemoteError, client::control_plane::OwnerControlScanRefreshResult,
@@ -32,6 +33,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use zeroize::Zeroizing;
 
+const CONTROL_KV_CACHE_MAX_ENDPOINTS: usize = 256;
+const CONTROL_KV_CACHE_CONCURRENCY: usize = 8;
+const CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS: u64 = 45;
+
 pub(super) async fn handle(
     stream: &mut TcpStream,
     state: &MeshApi,
@@ -43,7 +48,7 @@ pub(super) async fn handle(
         "GET" => handle_get(stream, state, path_only).await,
         "POST" => handle_post(stream, state, path_only, body).await,
         "PUT" => handle_put(stream, state, path_only, body).await,
-        "DELETE" => handle_delete(stream, state, path_only).await,
+        "DELETE" => handle_delete(stream, state, path_only, body).await,
         _ => Ok(()),
     }
 }
@@ -66,6 +71,7 @@ async fn handle_get(
         "/api/runtime/config-control-state" => {
             handle_runtime_config_control_state(stream, state).await
         }
+        "/api/runtime/kv-cache" => super::kv_cache::handle_status(stream).await,
         "/api/runtime/control-bootstrap" => handle_control_bootstrap(stream, state).await,
         "/api/runtime/intents" => handle_get_intents(stream, state).await,
         "/api/runtime/activity" => super::runtime_activity::handle_get(stream, state).await,
@@ -91,6 +97,7 @@ async fn handle_post(
         "/api/runtime/control/apply-config" => {
             handle_control_apply_config(stream, state, body).await
         }
+        "/api/runtime/control/kv-cache" => handle_control_kv_cache(stream, state, body).await,
         "/api/runtime/control/load-model" => handle_control_load_model(stream, state, body).await,
         "/api/runtime/control/unload-model" => {
             handle_control_unload_model(stream, state, body).await
@@ -102,6 +109,7 @@ async fn handle_post(
         "/api/runtime/config/validate" => handle_runtime_config_validate(stream, body).await,
         "/api/runtime/mesh-guardrails" => handle_set_mesh_guardrails(stream, state, body).await,
         "/api/runtime/models" => handle_load_model(stream, state, body).await,
+        "/api/runtime/kv-cache/prune" => super::kv_cache::handle_prune(stream, body).await,
         _ => Ok(()),
     }
 }
@@ -124,11 +132,13 @@ async fn handle_delete(
     stream: &mut TcpStream,
     state: &MeshApi,
     path_only: &str,
+    body: &str,
 ) -> anyhow::Result<()> {
     match path_only {
         "/api/runtime/activity/override" => {
             super::runtime_activity::handle_delete(stream, state).await
         }
+        "/api/runtime/kv-cache" => super::kv_cache::handle_clear(stream, body).await,
         p if p.starts_with("/api/runtime/instances/") => {
             handle_unload_instance(stream, state, p).await
         }
@@ -189,6 +199,14 @@ struct RawApplyConfigRequest {
     endpoint: Option<String>,
     expected_revision: u64,
     config: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlKvCacheRequest {
+    endpoints: Vec<String>,
+    operation: String,
+    target_bytes: Option<u64>,
+    model_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,6 +329,25 @@ struct LocalControlErrorPayload {
     legacy_retry_allowed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_revision: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalControlKvCachePayload {
+    results: Vec<LocalControlKvCacheResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalControlKvCacheResult {
+    endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_node_id: Option<String>,
+    operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    freed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<LocalControlErrorPayload>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -530,6 +567,150 @@ async fn handle_control_apply_config(
         }
         Err(error) => respond_control_error(stream, error).await,
     }
+}
+
+async fn handle_control_kv_cache(
+    stream: &mut TcpStream,
+    state: &MeshApi,
+    body: &str,
+) -> anyhow::Result<()> {
+    if !ensure_loopback_control_caller(stream).await? {
+        return Ok(());
+    }
+    let request: ControlKvCacheRequest = match serde_json::from_str(body) {
+        Ok(request) => request,
+        Err(_) => return respond_error(stream, 400, "Invalid JSON body").await,
+    };
+    if request.endpoints.is_empty() {
+        return respond_error(
+            stream,
+            400,
+            "at least one owner-control endpoint is required",
+        )
+        .await;
+    }
+    if request.endpoints.len() > CONTROL_KV_CACHE_MAX_ENDPOINTS {
+        return respond_error(
+            stream,
+            400,
+            "at most 256 owner-control endpoints are allowed",
+        )
+        .await;
+    }
+    let operation = match request.operation.as_str() {
+        "status" => mesh_client::proto::node::OwnerControlKvCacheOperation::Status,
+        "prune" => mesh_client::proto::node::OwnerControlKvCacheOperation::Prune,
+        "clear" => mesh_client::proto::node::OwnerControlKvCacheOperation::Clear,
+        _ => return respond_error(stream, 400, "unknown kv-cache operation").await,
+    };
+    let endpoints = request.endpoints;
+    let timeout_endpoints = endpoints.clone();
+    let operation_label = request.operation.clone();
+    let mut operations = stream::iter(endpoints.into_iter().enumerate())
+        .map(|(index, endpoint)| {
+            execute_control_kv_cache_target(
+                state,
+                endpoint,
+                request.operation.clone(),
+                operation,
+                request.target_bytes,
+                request.model_identity.clone(),
+            )
+            .map(move |result| (index, result))
+        })
+        .buffer_unordered(CONTROL_KV_CACHE_CONCURRENCY);
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS);
+    let mut indexed_results = Vec::with_capacity(timeout_endpoints.len());
+    loop {
+        match tokio::time::timeout_at(deadline, operations.next()).await {
+            Ok(Some(result)) => indexed_results.push(result),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    drop(operations);
+    if indexed_results.len() < timeout_endpoints.len() {
+        let completed = indexed_results
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<std::collections::HashSet<_>>();
+        indexed_results.extend(
+            timeout_endpoints
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !completed.contains(index))
+                .map(|(index, endpoint)| {
+                    (
+                        index,
+                        LocalControlKvCacheResult {
+                            endpoint,
+                            target_node_id: None,
+                            operation: operation_label.clone(),
+                            freed_bytes: None,
+                            status: None,
+                            error: Some(LocalControlErrorPayload {
+                                code: "control_timeout".to_string(),
+                                message: format!(
+                                    "kv-cache batch exceeded its {CONTROL_KV_CACHE_BATCH_TIMEOUT_SECS}-second deadline before a receipt was returned"
+                                ),
+                                legacy_retry_allowed: false,
+                                current_revision: None,
+                            }),
+                        },
+                    )
+                }),
+        );
+    }
+    indexed_results.sort_by_key(|(index, _)| *index);
+    let results = indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect();
+    respond_json(stream, 200, &LocalControlKvCachePayload { results }).await
+}
+
+async fn execute_control_kv_cache_target(
+    state: &MeshApi,
+    endpoint: String,
+    operation_label: String,
+    operation: mesh_client::proto::node::OwnerControlKvCacheOperation,
+    target_bytes: Option<u64>,
+    model_identity: Option<String>,
+) -> LocalControlKvCacheResult {
+    let mut result = LocalControlKvCacheResult {
+        endpoint: endpoint.clone(),
+        target_node_id: None,
+        operation: operation_label,
+        freed_bytes: None,
+        status: None,
+        error: None,
+    };
+    match connect_owner_control_client(state, &endpoint).await {
+        Ok(client) => {
+            result.target_node_id = Some(hex::encode(client.target_node_id()));
+            let response = client
+                .kv_cache(operation, target_bytes, model_identity)
+                .await;
+            client.close().await;
+            match response {
+                Ok(response) => {
+                    result.freed_bytes = response.freed_bytes;
+                    match serde_json::from_slice(&response.status_json) {
+                        Ok(status) => result.status = Some(status),
+                        Err(error) => {
+                            result.error = Some(control_error_from_anyhow(anyhow::anyhow!(
+                                "invalid kv-cache status from target: {error}"
+                            )));
+                        }
+                    }
+                }
+                Err(error) => result.error = Some(control_error_from_client(error)),
+            }
+        }
+        Err(error) => result.error = Some(error),
+    }
+    result
 }
 
 async fn handle_control_load_model(
@@ -769,7 +950,7 @@ fn required_control_endpoint(endpoint: Option<String>) -> Result<String, LocalCo
     }
 }
 
-async fn ensure_loopback_control_caller(stream: &mut TcpStream) -> anyhow::Result<bool> {
+pub(super) async fn ensure_loopback_control_caller(stream: &mut TcpStream) -> anyhow::Result<bool> {
     ensure_loopback_control_caller_for_peer_addr(stream, stream.peer_addr()).await
 }
 

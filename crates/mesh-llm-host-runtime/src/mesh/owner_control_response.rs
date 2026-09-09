@@ -21,6 +21,7 @@ pub(super) fn apply_response_envelope(
             unload_model: None,
             ensure_model: None,
             drain_model: None,
+            kv_cache: None,
         }),
         error: None,
     }
