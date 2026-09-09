@@ -1,12 +1,16 @@
-name: Agentic Replay Nightly (micstudio)
+name: Agentic Replay (micstudio)
 
+# Coding-agent replay benchmark on the pinned micstudio runner.
+#
+# Scheduled runs and manual dispatches from main execute trusted main and
+# publish results to the HF dataset repo. Manual dispatches from any other
+# branch run that branch, gate against history, and print the numbers to the
+# run summary without writing to the dataset.
 on:
   schedule:
-    - cron: "23 14 * * *" # after the Linux competitive run settles
+    - cron: "23 14 * * *"
   workflow_dispatch:
 
-# Scheduled runs execute the default-branch definition only; manual dispatch is
-# accepted only from main so caller-selected content never reaches micstudio.
 permissions:
   contents: read
 
@@ -14,96 +18,52 @@ concurrency:
   group: agentic-replay-nightly
   cancel-in-progress: false
 
+env:
+  MATRIX_FILE: ci/agentic-replay-nightly/matrix.json
+  DATASET_REPO: meshllm/agentic-replay-nightly
+
 jobs:
   replay:
-    if: >-
-      github.repository == 'Mesh-LLM/mesh-llm' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'schedule' && vars.MESH_AGENTIC_REPLAY_NIGHTLY_ENABLED == '1'))
+    if: github.repository == 'Mesh-LLM/mesh-llm'
     runs-on: [self-hosted, X64, macOS, family-certify, agentic-replay]
     timeout-minutes: 720
-    env:
-      EXPECTED_REPLAY_RUNNER_NAME: micstudio
-      MATRIX_FILE: ci/agentic-replay-nightly/matrix.json
-      DATASET_REPO: ${{ vars.MESH_AGENTIC_REPLAY_DATASET || 'meshllm/agentic-replay-nightly' }}
-      # Same model-access config as the llama canary: micstudio ships a
-      # pre-warmed read-only HF cache exported as HF_CACHE; the workflow
-      # normalizes it into HF_HOME/HF_HUB_CACHE so `hf download` is only a
-      # cache-miss backfill. Dataset writes go through the runner-local hf CLI.
-      HF_HUB_OFFLINE: "1"
-      GATE_ENABLED: ${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}
     steps:
-      - name: Verify pinned replay runner
+      - name: Resolve run context
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RUNNER_NAME" != "$EXPECTED_REPLAY_RUNNER_NAME" ]]; then
-            echo "agentic replay nightly requires runner '$EXPECTED_REPLAY_RUNNER_NAME'; got '$RUNNER_NAME'" >&2
+          if [[ "$RUNNER_NAME" != "micstudio" ]]; then
+            echo "agentic replay requires the micstudio runner; got '$RUNNER_NAME'" >&2
             exit 1
           fi
+          # Label for this run's cells; branch names may contain '/'.
+          label=$(printf '%s' "$GITHUB_REF_NAME" | tr -C 'a-zA-Z0-9._-' '-')
+          {
+            echo "is_main=$([[ "$GITHUB_REF_NAME" == main ]] && echo true || echo false)"
+            echo "replay_ref=$GITHUB_REF_NAME"
+            echo "label=$label"
+            # micstudio exports its pre-warmed HF cache as HF_CACHE; the hf
+            # CLI needs the standard HF_HOME/HF_HUB_CACHE names.
+            echo "HF_HOME=${HF_CACHE:?HF_CACHE is not exported on this runner}"
+            echo "HF_HUB_CACHE=${HF_CACHE}/hub"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: main
+          ref: ${{ steps.meta.outputs.replay_ref }}
           persist-credentials: false
 
-      - name: Verify runner toolchain
+      - name: Download and verify pinned inputs
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          missing=0
-          for cmd in cargo just jq python3 uv git-lfs hf opencode; do
-            if ! command -v "$cmd" >/dev/null 2>&1; then
-              echo "missing on micstudio image: $cmd" >&2
-              missing=1
-            fi
-          done
-          if [[ -z "${HF_CACHE:-}" ]]; then
-            echo "HF_CACHE is not exported on this runner" >&2
-            missing=1
-          fi
-          if [[ "$missing" == "1" ]]; then exit 1; fi
-          export HF_HOME="$HF_CACHE"
-          export HF_HUB_CACHE="$HF_CACHE/hub"
-          export HISTORY_LOCAL="$RUNNER_TEMP/agentic-replay-history"
-          export OUTPUT_DIR="$RUNNER_TEMP/agentic-replay-artifacts"
-          {
-            echo "HF_HOME=$HF_HOME"
-            echo "HF_HUB_CACHE=$HF_HUB_CACHE"
-            echo "HISTORY_LOCAL=$HISTORY_LOCAL"
-            echo "OUTPUT_DIR=$OUTPUT_DIR"
-          } >> "$GITHUB_ENV"
-
-      - name: Record hardware fingerprint
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUTPUT_DIR/summary"
-          python3 - <<'PY' > "$OUTPUT_DIR/hardware.json"
-          import json, subprocess
-          sysctl = lambda k: subprocess.check_output(["sysctl", "-n", k]).decode().strip()
-          print(json.dumps({
-              "machine_model": sysctl("hw.model"),
-              "chip": sysctl("machdep.cpu.brand_string"),
-              "gpu_cores": 80,
-              "unified_memory_bytes": int(sysctl("hw.memsize")),
-              "os_version": subprocess.check_output(["sw_vers", "-productVersion"]).decode().strip(),
-          }))
-          PY
-
-      - name: Verify pinned replay inputs
-        run: |
-          set -euo pipefail
-          python3 - "$MATRIX_FILE" <<'PY' > "$RUNNER_TEMP/agentic-replay-models.tsv"
-          import json, pathlib, re, sys
-          matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
-          for model in matrix["models"]:
-              revision = model.get("revision", "")
-              digest = model.get("sha256", "")
-              if not re.fullmatch(r"[0-9a-f]{40}", revision):
-                  raise SystemExit(f"{model.get('family')}: revision must be an immutable 40-hex commit")
-              if not re.fullmatch(r"[0-9a-f]{64}", digest):
-                  raise SystemExit(f"{model.get('family')}: sha256 must be a 64-hex digest")
-              print("\t".join((model["family"], model["repo"], revision, model["file"], digest)))
+          mkdir -p "$RUNNER_TEMP/agentic-replay-artifacts/summary"
+          python3 - "$MATRIX_FILE" > "$RUNNER_TEMP/agentic-replay-models.tsv" <<'PY'
+          import json, pathlib, sys
+          for model in json.loads(pathlib.Path(sys.argv[1]).read_text())["models"]:
+              print("\t".join((model["family"], model["repo"], model["revision"], model["file"], model["sha256"])))
           PY
           while IFS=$'\t' read -r family repo revision file expected_sha; do
             model_path=$(hf download "$repo" "$file" --revision "$revision")
@@ -120,27 +80,13 @@ jobs:
           print(f"verified {family}: {actual}")
           PY
           done < "$RUNNER_TEMP/agentic-replay-models.tsv"
-
-          python3 - "$MATRIX_FILE" evals/skippy-competitive-benchmark.json <<'PY' > "$RUNNER_TEMP/agentic-replay-dataset.tsv"
-          import json, pathlib, re, sys
-          matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())["replay"]
-          canonical = json.loads(pathlib.Path(sys.argv[2]).read_text())["thoughtworks"]["dataset"]
-          dataset = {
-              "repo": matrix.get("dataset"),
-              "revision": matrix.get("dataset_revision"),
-              "filename": matrix.get("dataset_file"),
-              "sha256": matrix.get("dataset_sha256"),
-          }
-          if dataset != canonical:
-              raise SystemExit("nightly dataset pin must match the agentic-replay harness pin")
-          if not re.fullmatch(r"[0-9a-f]{40}", dataset["revision"] or ""):
-              raise SystemExit("dataset revision must be an immutable 40-hex commit")
-          if not re.fullmatch(r"[0-9a-f]{64}", dataset["sha256"] or ""):
-              raise SystemExit("dataset sha256 must be a 64-hex digest")
-          print("\t".join((dataset["repo"], dataset["revision"], dataset["filename"], dataset["sha256"])))
+          python3 - "$MATRIX_FILE" > "$RUNNER_TEMP/agentic-replay-dataset.pin" <<'PY'
+          import json, pathlib, sys
+          d = json.loads(pathlib.Path(sys.argv[1]).read_text())["replay"]
+          print(d["dataset"], d["dataset_revision"], d["dataset_file"], d["dataset_sha256"])
           PY
-          IFS=$'\t' read -r dataset_repo dataset_revision dataset_file dataset_sha < "$RUNNER_TEMP/agentic-replay-dataset.tsv"
-          dataset_path=$(HF_HUB_OFFLINE=0 hf download "$dataset_repo" "$dataset_file" \
+          read -r dataset_repo dataset_revision dataset_file dataset_sha < "$RUNNER_TEMP/agentic-replay-dataset.pin"
+          dataset_path=$(hf download "$dataset_repo" "$dataset_file" \
             --repo-type dataset --revision "$dataset_revision")
           python3 - "$dataset_path" "$dataset_sha" <<'PY'
           import hashlib, pathlib, sys
@@ -156,136 +102,123 @@ jobs:
           PY
           echo "DATASET_FILE=$dataset_path" >> "$GITHUB_ENV"
 
+      - name: Record hardware fingerprint
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/agentic-replay-artifacts/hardware.json"
+          import json, subprocess
+          sysctl = lambda k: subprocess.check_output(["sysctl", "-n", k]).decode().strip()
+          print(json.dumps({
+              "machine_model": sysctl("hw.model"),
+              "chip": sysctl("machdep.cpu.brand_string"),
+              "gpu_cores": 80,
+              "unified_memory_bytes": int(sysctl("hw.memsize")),
+              "os_version": subprocess.check_output(["sw_vers", "-productVersion"]).decode().strip(),
+          }))
+          PY
+
       - name: Replay each pinned model
         run: |
           set -euo pipefail
-          LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
-          LEVEL_ARGS=()
-          for level in $LEVELS; do LEVEL_ARGS+=(--concurrency "$level"); done
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
             if ! python3 evals/agentic-replay.py run \
-                --ref main=HEAD \
+                --ref "${{ steps.meta.outputs.label }}=HEAD" \
                 --model "$model_uri" \
                 --backend metal \
                 --trajectories-per-framework 8 \
-                "${LEVEL_ARGS[@]}" \
+                --concurrency 1 --concurrency 2 --concurrency 4 --concurrency 8 \
                 --passes 2 \
                 --warmup-turns 4 \
                 --dataset-file "$DATASET_FILE" \
-                --output "$OUTPUT_DIR/$family"; then
+                --output "$RUNNER_TEMP/agentic-replay-artifacts/$family"; then
               FAILED=1
             fi
           done
           exit $FAILED # failures continue to the gate step via `if: !cancelled()`
 
-      - name: Download cohort-matched history
+      - name: Summarize, gate, and publish (main only)
+        id: history
         if: ${{ !cancelled() }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LABEL: ${{ steps.meta.outputs.label }}
+          IS_MAIN: ${{ steps.meta.outputs.is_main }}
         run: |
           set -euo pipefail
+          OUTPUT_DIR="$RUNNER_TEMP/agentic-replay-artifacts"
+          HISTORY_LOCAL="$RUNNER_TEMP/agentic-replay-history"
+          # Replay parameters via a plain file: process substitution breaks on
+          # this runner's bash/Python combination (/dev/fd is not passable).
+          python3 -c "import json;print(json.dumps(json.load(open('$MATRIX_FILE'))['replay']))" \
+            > "$RUNNER_TEMP/agentic-replay-params.json"
+          # Baseline history: best-effort download; a missing dataset is a
+          # bootstrap run, anything else fails loudly.
           rm -rf "$HISTORY_LOCAL"
-          if HF_HUB_OFFLINE=0 hf download "$DATASET_REPO" \
-            --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" 2> "$RUNNER_TEMP/hf-download.err"; then
-            exit 0
-          fi
-          # Only a genuinely missing dataset is a bootstrap run; auth,
-          # permission, and network failures must fail loudly.
-          if HF_HUB_OFFLINE=0 python3 - "$DATASET_REPO" <<'PY' > "$RUNNER_TEMP/repo-exists.out" 2>&1; then
-          import os, sys
-          import huggingface_hub
-          repo = sys.argv[1]
-          try:
-              huggingface_hub.repo_info(repo, repo_type="dataset", token=os.environ.get("HF_TOKEN"))
-          except Exception as exc:
-              message = str(exc)
-              if "404" in message or "Entry Not Found" in message or "Repository Not Found" in message:
-                  sys.exit(3)
-              sys.exit(1)
-          PY
-            rc=0
-          else
-            rc=$?
-          fi
-          if [[ "$rc" == "0" ]]; then
-            echo "history dataset exists but download failed:" >&2
-            cat "$RUNNER_TEMP/hf-download.err" >&2; cat "$RUNNER_TEMP/repo-exists.out" >&2
-            exit 1
-          elif [[ "$rc" == "3" ]]; then
+          if ! hf download "$DATASET_REPO" \
+            --repo-type dataset --local-dir "$HISTORY_LOCAL" --exclude "*.md" \
+            > "$RUNNER_TEMP/hf-download.log" 2>&1; then
+            if hf download "$DATASET_REPO" card.md --repo-type dataset \
+              > "$RUNNER_TEMP/hf-probe.log" 2>&1; then
+              echo "history dataset exists but download failed:" >&2
+              cat "$RUNNER_TEMP/hf-download.log" "$RUNNER_TEMP/hf-probe.log" >&2
+              exit 1
+            fi
             echo "no history yet (bootstrap run)"
-          else
-            echo "history dataset lookup failed:" >&2
-            cat "$RUNNER_TEMP/hf-download.err" >&2; cat "$RUNNER_TEMP/repo-exists.out" >&2
-            exit 1
           fi
-
-      - name: Normalize history and gate on regression
-        id: history
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
           BACKEND_SHA=$(python3 - "$OUTPUT_DIR" <<'PY'
           import json, sys, pathlib
-          output = pathlib.Path(sys.argv[1])
           digests = set()
-          for run_doc in output.glob("*/run.json"):
+          for run_doc in pathlib.Path(sys.argv[1]).glob("*/run.json"):
               for build in json.loads(run_doc.read_text()).get("builds", []):
                   if build.get("binary_sha256"):
                       digests.add(build["binary_sha256"])
           if len(digests) > 1:
-              print(f"multiple backend binaries: {sorted(digests)}", file=sys.stderr)
-              sys.exit(1)
+              sys.exit(f"multiple backend binaries: {sorted(digests)}")
           print(digests.pop() if digests else "")
           PY
           )
           args=(
             --matrix "$MATRIX_FILE"
             --replay-dir "$OUTPUT_DIR"
-            --label main
+            --label "$LABEL"
             --hardware "$OUTPUT_DIR/hardware.json"
             --source-sha "$(git rev-parse HEAD)"
-            --replay <(python3 -c "import json;print(json.dumps(json.load(open('$MATRIX_FILE'))['replay']))")
+            --replay "$RUNNER_TEMP/agentic-replay-params.json"
             --output "$OUTPUT_DIR/summary/history.jsonl"
+            --gate
           )
-          if [[ -n "$BACKEND_SHA" ]]; then
-            args+=(--backend-binary-sha256 "$BACKEND_SHA")
-          fi
-          if [[ -d "$HISTORY_LOCAL/data/runs" ]]; then
-            args+=(--baseline "$HISTORY_LOCAL/data/runs")
-          fi
-          if [[ "$GATE_ENABLED" == "1" ]]; then
-            args+=(--gate)
-          fi
+          [[ -n "$BACKEND_SHA" ]] && args+=(--backend-binary-sha256 "$BACKEND_SHA")
+          [[ -d "$HISTORY_LOCAL/data/runs" ]] && args+=(--baseline "$HISTORY_LOCAL/data/runs")
           python3 scripts/agentic-replay-history.py "${args[@]}"
-
-      - name: Publish immutable run shard and card
-        if: ${{ !cancelled() && steps.history.outcome == 'success' }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          set -euo pipefail
-          RUN_DATE=$(date -u +%F)
-          HF_HUB_OFFLINE=0 hf upload "$DATASET_REPO" \
-            "$OUTPUT_DIR/summary/history.jsonl" "data/runs/$RUN_DATE/${{ github.run_id }}.jsonl" \
-            --repo-type dataset --commit-message "run $RUN_DATE ${{ github.run_id }} @ ${{ github.sha }}"
           python3 scripts/agentic-replay-card.py \
             --history "$HISTORY_LOCAL/data/runs" \
             --latest "$OUTPUT_DIR/summary/history.jsonl" \
             --output "$OUTPUT_DIR/card.md"
-          HF_HUB_OFFLINE=0 hf upload "$DATASET_REPO" \
+          cat "$OUTPUT_DIR/card.md" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$IS_MAIN" != "true" ]]; then
+            echo "branch run — latest numbers vs history are in the step summary above; dataset not written"
+            exit 0
+          fi
+          RUN_DATE=$(date -u +%F)
+          hf upload "$DATASET_REPO" \
+            "$OUTPUT_DIR/summary/history.jsonl" "data/runs/$RUN_DATE/${{ github.run_id }}.jsonl" \
+            --repo-type dataset --commit-message "run $RUN_DATE ${{ github.run_id }} @ ${{ github.sha }}"
+          hf upload "$DATASET_REPO" \
             "$OUTPUT_DIR/card.md" "card.md" --repo-type dataset \
             --commit-message "card refresh $RUN_DATE"
 
       - name: Open repair PR on regression (opencode loop)
-        if: failure()
+        if: failure() && steps.meta.outputs.is_main == 'true'
         env:
-          # Same token as the llama canary repair loop, per James 2026-09-08.
           GH_TOKEN: ${{ secrets.CANARY_REPAIR_TOKEN }}
+          # Same location the summarize step downloaded the baseline to.
+          HISTORY_LOCAL: ${{ runner.temp }}/agentic-replay-history
+          DATASET_REPO: meshllm/agentic-replay-nightly
         run: |
           set -euo pipefail
-          scripts/agentic-replay-repair.sh "$OUTPUT_DIR" || {
+          scripts/agentic-replay-repair.sh "$RUNNER_TEMP/agentic-replay-artifacts" || {
             echo "repair did not clear the regression — PR opened flagged needs-attention" >&2
           }
 
