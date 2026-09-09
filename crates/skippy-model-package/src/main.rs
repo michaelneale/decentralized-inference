@@ -13,6 +13,7 @@ mod plan;
 mod preflight;
 mod progress;
 mod source_inventory;
+mod tensor_payload;
 #[cfg(test)]
 mod test_gguf;
 #[cfg(test)]

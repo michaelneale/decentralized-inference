@@ -465,30 +465,49 @@ impl Node {
                 .context("fetch package manifest from peer")?;
         }
 
-        let artifacts =
-            if crate::models::artifact_transfer::package_manifest_schema_version(&package_dir)?
-                == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION)
-            {
-                crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
-                    &package_dir,
-                    &load.package_ref,
-                    &load.manifest_sha256,
-                    &load.admission,
-                )?
-            } else {
-                crate::models::artifact_transfer::required_stage_package_artifacts(
-                    &package_dir,
-                    &load.package_ref,
-                    &load.manifest_sha256,
-                    crate::models::artifact_transfer::StageArtifactSelection {
-                        layer_start: load.layer_start,
-                        layer_end: load.layer_end,
-                        include_embeddings: load.layer_start == 0,
-                        include_output: load.downstream.is_none(),
-                        include_projectors: load.layer_start == 0,
-                    },
-                )?
-            };
+        let package_v2 =
+            crate::models::artifact_transfer::package_manifest_schema_version(&package_dir)?
+                == u64::from(skippy_package_format::PACKAGE_SCHEMA_VERSION);
+        if package_v2 {
+            let carrier = crate::models::artifact_transfer::package_v2_metadata_carrier_request(
+                &package_dir,
+                &load.package_ref,
+                &load.manifest_sha256,
+            )?;
+            if !crate::models::artifact_transfer::local_artifact_satisfies(
+                &package_dir,
+                &carrier,
+                true,
+            )? {
+                let destination =
+                    crate::models::artifact_transfer::local_artifact_path(&package_dir, &carrier);
+                self.fetch_artifact_from_peer(peer_id, load, &carrier, &destination)
+                    .await
+                    .context("fetch package metadata carrier from peer")?;
+            }
+        }
+
+        let artifacts = if package_v2 {
+            crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
+                &package_dir,
+                &load.package_ref,
+                &load.manifest_sha256,
+                &load.admission,
+            )?
+        } else {
+            crate::models::artifact_transfer::required_stage_package_artifacts(
+                &package_dir,
+                &load.package_ref,
+                &load.manifest_sha256,
+                crate::models::artifact_transfer::StageArtifactSelection {
+                    layer_start: load.layer_start,
+                    layer_end: load.layer_end,
+                    include_embeddings: load.layer_start == 0,
+                    include_output: load.downstream.is_none(),
+                    include_projectors: load.layer_start == 0,
+                },
+            )?
+        };
         for artifact in artifacts {
             if crate::models::artifact_transfer::local_artifact_satisfies(
                 &package_dir,
