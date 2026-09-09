@@ -37,6 +37,7 @@ async fn build_test_mesh_api_with_api_port(api_port: u16) -> MeshApi {
         .await
         .unwrap();
     let resolved_plugins = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![],
         inactive: vec![],
     };
@@ -254,6 +255,7 @@ async fn build_test_mesh_api_with_plugin_manager(
 
 async fn build_inference_endpoint_plugin_manager(models: &[&str]) -> plugin::PluginManager {
     let resolved_plugins = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![],
         inactive: vec![],
     };
@@ -269,6 +271,7 @@ async fn build_inference_endpoint_plugin_manager(models: &[&str]) -> plugin::Plu
     .unwrap();
     plugin_manager
         .set_test_inference_endpoints(vec![plugin::InferenceEndpointRoute {
+            strip_caller_credentials: false,
             plugin_name: "endpoint-plugin".into(),
             endpoint_id: "endpoint-plugin".into(),
             address: "http://127.0.0.1:8000/v1".into(),

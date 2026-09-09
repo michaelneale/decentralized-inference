@@ -36,7 +36,6 @@ members = [
     "crates/mesh-llm-ffi",
     "crates/mesh-llm-nodejs",
     "crates/mesh-llm-test-harness",
-    "crates/endpoint-discovery",
     "crates/model-ref",
     "crates/model-artifact",
     "crates/model-hf",

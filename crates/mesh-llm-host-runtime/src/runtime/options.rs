@@ -12,6 +12,7 @@ use crate::plugin::SpeculativeConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSurface {
+    Share,
     Serve,
     Client,
 }
@@ -47,6 +48,18 @@ pub struct RuntimeOptions {
     pub native_serving_plugin_state: Option<PathBuf>,
     pub native_serving_plugin_deadline_ms: Option<u64>,
     pub client: bool,
+    /// Serve one already-running external OpenAI-compatible HTTP endpoint and
+    /// nothing else.
+    ///
+    /// `Some` is the whole of sharing mode: there is no separate flag and no
+    /// state where sharing is enabled without an upstream. The node stays a
+    /// full mesh participant — it gossips, claims the host role, and accepts
+    /// inbound requests — but never loads a native inference runtime or a
+    /// local model. It is deliberately NOT `client`: a client node never
+    /// claims the host role, so it could not serve the upstream to peers.
+    ///
+    /// Set per invocation only; never read from or written to config.
+    pub shared_endpoint: Option<String>,
     pub console: u16,
     pub headless: bool,
     pub swarm_capture: Option<PathBuf>,
@@ -126,6 +139,7 @@ impl Default for RuntimeOptions {
             native_serving_plugin_state: None,
             native_serving_plugin_deadline_ms: None,
             client: false,
+            shared_endpoint: None,
             console: 3131,
             headless: false,
             swarm_capture: None,
@@ -184,6 +198,77 @@ impl Default for RuntimeOptions {
 }
 
 impl RuntimeOptions {
+    /// Whether this invocation may load models on local hardware.
+    ///
+    /// Two distinct startups answer `false` for different reasons: a client
+    /// never serves at all, and a sharing node serves exclusively by
+    /// forwarding to an already-running external server. Callers that gate
+    /// native initialization, local model scanning, GPU survey, or local load
+    /// intents should ask this rather than testing `client` alone.
+    #[must_use]
+    pub const fn allows_local_inference(&self) -> bool {
+        !self.client && self.shared_endpoint.is_none()
+    }
+
+    /// Validate the upstream URL and reject flags that ask a sharing node to
+    /// do local work.
+    ///
+    /// Sharing forwards to an external server and nothing else. Silently
+    /// ignoring a `--model` or `--split` would leave the user with a node that
+    /// looks configured for local serving and never does it.
+    pub fn validate_shared_endpoint_args(&self) -> anyhow::Result<()> {
+        if self.shared_endpoint.is_none() {
+            return Ok(());
+        }
+        // Fail on a malformed or unsupported URL before anything starts.
+        crate::plugin::shared_endpoint::normalize_shared_endpoint_url(
+            self.shared_endpoint.as_deref().unwrap_or_default(),
+        )?;
+        anyhow::ensure!(
+            !self.client,
+            "sharing an endpoint cannot be combined with client mode: a client node never \
+             claims the host role, so it cannot serve a shared endpoint to peers"
+        );
+        anyhow::ensure!(
+            self.model.is_empty() && self.gguf.is_empty(),
+            "sharing an endpoint cannot be combined with --model or --gguf: this node forwards \
+             to an already-running server and never loads a model itself"
+        );
+        anyhow::ensure!(
+            self.mmproj.is_none(),
+            "--mmproj is not valid when sharing an endpoint: it applies to a locally loaded model"
+        );
+        anyhow::ensure!(
+            !self.split,
+            "--split is not valid when sharing an endpoint: there is no local model to split"
+        );
+        anyhow::ensure!(
+            self.split_topology_lock.is_none(),
+            "--split-topology-lock is not valid when sharing an endpoint: there is no local \
+             model to split"
+        );
+        anyhow::ensure!(
+            !self.local_model_only,
+            "--local-model-only is not valid when sharing an endpoint: it selects a local \
+             serving topology with no mesh participation"
+        );
+        anyhow::ensure!(
+            self.plugin.is_none()
+                && self.native_serving_plugin.is_none()
+                && self.native_serving_plugin_config.is_none()
+                && self.native_serving_plugin_state.is_none()
+                && self.native_serving_plugin_deadline_ms.is_none(),
+            "--plugin runs this process as a plugin host and is not valid when sharing an \
+             endpoint"
+        );
+        anyhow::ensure!(
+            self.checkpoint_quantization.is_none() && self.checkpoint_imatrix.is_none(),
+            "--checkpoint-quantization and --checkpoint-imatrix require a local model and are \
+             not valid when sharing an endpoint"
+        );
+        Ok(())
+    }
+
     pub fn validate_discovery_mode_args(&self) -> anyhow::Result<()> {
         if self.mesh_discovery_mode != MeshDiscoveryMode::Mdns {
             return Ok(());
@@ -200,5 +285,139 @@ impl RuntimeOptions {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_endpoint_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn sharing() -> RuntimeOptions {
+        RuntimeOptions {
+            shared_endpoint: Some("http://localhost:11434".to_string()),
+            ..RuntimeOptions::default()
+        }
+    }
+
+    #[test]
+    fn default_serve_allows_local_inference() {
+        assert!(RuntimeOptions::default().allows_local_inference());
+    }
+
+    #[test]
+    fn client_does_not_allow_local_inference() {
+        let options = RuntimeOptions {
+            client: true,
+            ..RuntimeOptions::default()
+        };
+        assert!(!options.allows_local_inference());
+    }
+
+    #[test]
+    fn sharing_does_not_allow_local_inference() {
+        assert!(!sharing().allows_local_inference());
+    }
+
+    #[test]
+    fn a_bare_sharing_invocation_is_valid_and_is_not_client_mode() {
+        let options = sharing();
+        options.validate_shared_endpoint_args().unwrap();
+        assert!(
+            !options.client,
+            "sharing must stay a full mesh participant so it can claim the host role"
+        );
+    }
+
+    #[test]
+    fn sharing_rejects_an_unsupported_upstream_url() {
+        let options = RuntimeOptions {
+            shared_endpoint: Some("https://api.example.com/v1".to_string()),
+            ..RuntimeOptions::default()
+        };
+        let error = options
+            .validate_shared_endpoint_args()
+            .expect_err("HTTPS upstreams are not supported yet");
+        assert!(error.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn sharing_rejects_explicit_local_model() {
+        let mut options = sharing();
+        options.model.push(PathBuf::from("Qwen3-8B-Q4_K_M"));
+        let error = options
+            .validate_shared_endpoint_args()
+            .expect_err("an explicit local model must be rejected");
+        assert!(error.to_string().contains("--model"));
+    }
+
+    #[test]
+    fn sharing_rejects_explicit_gguf() {
+        let mut options = sharing();
+        options.gguf.push(PathBuf::from("/models/model.gguf"));
+        assert!(options.validate_shared_endpoint_args().is_err());
+    }
+
+    #[test]
+    fn sharing_rejects_split() {
+        let options = RuntimeOptions {
+            split: true,
+            ..sharing()
+        };
+        assert!(options.validate_shared_endpoint_args().is_err());
+    }
+
+    #[test]
+    fn sharing_rejects_plugin_process_mode() {
+        let options = RuntimeOptions {
+            plugin: Some("openai-endpoint".to_string()),
+            ..sharing()
+        };
+        assert!(options.validate_shared_endpoint_args().is_err());
+    }
+
+    #[test]
+    fn sharing_rejects_client_combination() {
+        let options = RuntimeOptions {
+            client: true,
+            ..sharing()
+        };
+        let error = options
+            .validate_shared_endpoint_args()
+            .expect_err("client and sharing are contradictory");
+        assert!(error.to_string().contains("host role"));
+    }
+
+    #[test]
+    fn sharing_rejects_local_model_only_topology() {
+        let options = RuntimeOptions {
+            local_model_only: true,
+            ..sharing()
+        };
+        assert!(options.validate_shared_endpoint_args().is_err());
+    }
+
+    #[test]
+    fn sharing_rejects_checkpoint_quantization() {
+        let options = RuntimeOptions {
+            checkpoint_quantization: Some("Q4_K_M".to_string()),
+            ..sharing()
+        };
+        assert!(options.validate_shared_endpoint_args().is_err());
+    }
+
+    /// Normal serve and client startups must be completely unaffected.
+    #[test]
+    fn non_sharing_startups_skip_the_guard_entirely() {
+        let mut serve = RuntimeOptions::default();
+        serve.model.push(PathBuf::from("Qwen3-8B-Q4_K_M"));
+        serve.split = true;
+        assert!(serve.validate_shared_endpoint_args().is_ok());
+
+        let client = RuntimeOptions {
+            client: true,
+            ..RuntimeOptions::default()
+        };
+        assert!(client.validate_shared_endpoint_args().is_ok());
     }
 }

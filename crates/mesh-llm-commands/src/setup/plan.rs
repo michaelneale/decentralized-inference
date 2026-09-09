@@ -1,7 +1,6 @@
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupPlan {
     pub runtime: SetupRuntimePlan,
-    pub endpoints: SetupEndpointPlan,
     pub service: SetupServicePlan,
     pub github_star: SetupGitHubStarPlan,
     pub core_steps: Vec<SetupStep>,
@@ -10,14 +9,12 @@ pub struct SetupPlan {
 impl SetupPlan {
     pub fn new(
         runtime: SetupRuntimePlan,
-        endpoints: SetupEndpointPlan,
         service: SetupServicePlan,
         github_star: SetupGitHubStarPlan,
     ) -> Self {
-        let core_steps = build_core_steps(runtime, endpoints, service);
+        let core_steps = build_core_steps(runtime, service);
         Self {
             runtime,
-            endpoints,
             service,
             github_star,
             core_steps,
@@ -28,14 +25,6 @@ impl SetupPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupRuntimePlan {
     InstallAndPrune,
-    Skip,
-}
-
-/// Whether setup probes loopback for OpenAI-compatible servers already running
-/// on this machine. Probing only reports; it never writes config.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SetupEndpointPlan {
-    Probe,
     Skip,
 }
 
@@ -62,23 +51,15 @@ pub enum SetupGitHubStarSkipReason {
 pub enum SetupStep {
     InstallRuntime,
     PruneInactiveRuntimes,
-    DiscoverLocalEndpoints,
     InstallService,
     PrintServiceGuidance,
 }
 
-fn build_core_steps(
-    runtime: SetupRuntimePlan,
-    endpoints: SetupEndpointPlan,
-    service: SetupServicePlan,
-) -> Vec<SetupStep> {
+fn build_core_steps(runtime: SetupRuntimePlan, service: SetupServicePlan) -> Vec<SetupStep> {
     let mut steps = Vec::new();
     if matches!(runtime, SetupRuntimePlan::InstallAndPrune) {
         steps.push(SetupStep::InstallRuntime);
         steps.push(SetupStep::PruneInactiveRuntimes);
-    }
-    if matches!(endpoints, SetupEndpointPlan::Probe) {
-        steps.push(SetupStep::DiscoverLocalEndpoints);
     }
     match service {
         SetupServicePlan::Install => steps.push(SetupStep::InstallService),

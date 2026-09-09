@@ -303,6 +303,7 @@ async fn start_inference_endpoint_plugin_manager(
     let plugin_manager = plugin::PluginManager::for_test_bridge(&[], Arc::new(NoopTestBridge));
     plugin_manager
         .set_test_inference_endpoints(vec![plugin::InferenceEndpointRoute {
+            strip_caller_credentials: false,
             plugin_name: "endpoint-plugin".into(),
             endpoint_id: "endpoint-plugin".into(),
             address,

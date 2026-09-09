@@ -191,6 +191,7 @@ pub async fn shutdown_logging_for_one_shot_cli() -> bool {
 }
 
 pub async fn initialize_host_runtime_for_options(options: &RuntimeOptions) -> Result<()> {
+    options.validate_shared_endpoint_args()?;
     configure_hf_tls_provider();
     if options.plugin.is_some() {
         return Ok(());
@@ -198,63 +199,28 @@ pub async fn initialize_host_runtime_for_options(options: &RuntimeOptions) -> Re
     if !runtime_options_require_native_runtime(options) {
         return initialize_logging_for_cli(options.config.as_deref()).await;
     }
-    initialize_host_runtime_with_config_for_local_serving(
-        options.config.as_deref(),
-        runtime_options_request_local_serving(options),
-    )
-    .await
+    initialize_host_runtime_with_config(options.config.as_deref()).await
 }
 
+/// Whether this startup must resolve a native inference runtime.
+///
+/// A client never serves, and a sharing node serves only by forwarding to an
+/// already-running external server, so neither needs the native runtime
+/// resolved or loaded. For sharing this is a requirement rather than a
+/// tolerated failure: skipping initialization entirely is what distinguishes
+/// "deliberately sharing an external endpoint" from "the runtime install is
+/// broken", which a downgraded warning cannot express.
 fn runtime_options_require_native_runtime(options: &RuntimeOptions) -> bool {
-    !options.client && options.plugin.is_none()
-}
-
-/// `true` when this startup explicitly names a model this node must load
-/// itself. Such a model needs the native runtime, so a missing runtime stays
-/// fatal even if an external inference plugin is also configured.
-fn runtime_options_request_local_serving(options: &RuntimeOptions) -> bool {
-    !options.model.is_empty() || !options.gguf.is_empty()
+    options.allows_local_inference() && options.plugin.is_none()
 }
 
 pub async fn initialize_host_runtime_with_config(config_path: Option<&Path>) -> Result<()> {
-    initialize_host_runtime_with_config_for_local_serving(config_path, true).await
-}
-
-/// A warning produced during startup, before the output surface exists.
-static DEFERRED_STARTUP_WARNING: LazyLock<std::sync::Mutex<Option<String>>> =
-    LazyLock::new(|| std::sync::Mutex::new(None));
-
-fn set_deferred_startup_warning(warning: String) {
-    *DEFERRED_STARTUP_WARNING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(warning);
-}
-
-/// Take the startup warning, if one was recorded, for emission by the runtime
-/// once its output surface is installed.
-pub(crate) fn take_deferred_startup_warning() -> Option<String> {
-    DEFERRED_STARTUP_WARNING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-}
-
-async fn initialize_host_runtime_with_config_for_local_serving(
-    config_path: Option<&Path>,
-    local_serving_requested: bool,
-) -> Result<()> {
     let config = plugin::load_config(config_path)?;
 
     // Logging config is validated as part of config loading and must be resolved
     // before native runtime setup. Foundation failures remain fail-open so they
     // cannot prevent serving from starting.
     initialize_logging_foundation(&config.logging).await;
-
-    let requirement_input = system::native_runtime_requirement::NativeRuntimeRequirementInput {
-        local_serving_requested: local_serving_requested || !config.models.is_empty(),
-        external_inference_configured:
-            system::native_runtime_requirement::config_declares_external_inference(&config),
-    };
 
     #[cfg(feature = "dynamic-native-runtime")]
     {
@@ -272,34 +238,19 @@ async fn initialize_host_runtime_with_config_for_local_serving(
             }
             None => system::native_runtime::NativeRuntimeStartupSelection::current(),
         };
-        let requirement =
-            system::native_runtime_requirement::native_runtime_requirement(requirement_input);
-        match system::native_runtime::try_load_installed_native_runtime(startup_selection).await {
-            Ok(Some(runtime)) => tracing::info!(
+        if let Some(runtime) =
+            system::native_runtime::try_load_installed_native_runtime(startup_selection).await?
+        {
+            tracing::info!(
                 native_runtime_id = %runtime.native_runtime_id,
                 libraries = ?runtime.libraries,
                 "Loaded MeshLLM native runtime"
-            ),
-            Ok(None) => {}
-            Err(error)
-                if requirement
-                    == system::native_runtime_requirement::NativeRuntimeRequirement::OptionalExternalInference =>
-            {
-                let warning =
-                    system::native_runtime_requirement::external_inference_only_startup_warning(
-                        &format!("{error:#}"),
-                    );
-                tracing::warn!(target: "mesh_llm", "{warning}");
-                // Startup runs before the output surface is installed, so the
-                // runtime replays this once the CLI surface exists.
-                set_deferred_startup_warning(warning);
-            }
-            Err(error) => return Err(error),
+            );
         }
     }
     #[cfg(not(feature = "dynamic-native-runtime"))]
     {
-        let _ = (config, requirement_input);
+        let _ = config;
     }
 
     Ok(())
@@ -402,6 +353,39 @@ pub(crate) async fn initialize_logging_foundation_with_store_clock_for_test(
 
 fn logging_foundation_from_config(config: &mesh_llm_config::LoggingConfig) -> LoggingFoundation {
     LoggingFoundation::init(config.enabled, config.application_state_root.as_ref())
+}
+
+#[cfg(test)]
+mod native_runtime_gate_tests {
+    use super::*;
+
+    fn sharing() -> RuntimeOptions {
+        RuntimeOptions {
+            shared_endpoint: Some("http://localhost:11434".to_string()),
+            ..RuntimeOptions::default()
+        }
+    }
+
+    #[test]
+    fn sharing_startup_skips_native_runtime_resolution() {
+        assert!(!runtime_options_require_native_runtime(&sharing()));
+    }
+
+    #[test]
+    fn plain_serve_still_requires_a_native_runtime() {
+        assert!(runtime_options_require_native_runtime(
+            &RuntimeOptions::default()
+        ));
+    }
+
+    #[test]
+    fn client_startup_still_skips_native_runtime_resolution() {
+        let options = RuntimeOptions {
+            client: true,
+            ..RuntimeOptions::default()
+        };
+        assert!(!runtime_options_require_native_runtime(&options));
+    }
 }
 
 #[cfg(test)]

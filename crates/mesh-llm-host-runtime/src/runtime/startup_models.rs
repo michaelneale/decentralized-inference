@@ -405,6 +405,7 @@ pub(super) fn validate_runtime_cli_model_options(options: &RuntimeOptions) -> Re
     if options.client && (!options.model.is_empty() || !options.gguf.is_empty()) {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
+    options.validate_shared_endpoint_args()?;
     if let Some(mmproj) = &options.mmproj {
         anyhow::ensure!(!options.client, "--mmproj cannot be used with --client");
         anyhow::ensure!(
@@ -789,7 +790,10 @@ pub(super) fn build_startup_model_specs(
     options: &RuntimeOptions,
     config: &plugin::MeshConfig,
 ) -> Result<Vec<StartupModelSpec>> {
-    if options.client {
+    // Neither a client nor a sharing node loads a model itself, so neither
+    // builds startup specs — including specs declared in config, which would
+    // otherwise pull a local model into a sharing-only invocation.
+    if !options.allows_local_inference() {
         return Ok(Vec::new());
     }
 
@@ -1520,4 +1524,63 @@ pub(super) async fn find_remote_catalog_model_exact_blocking(
         .await
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod shared_endpoint_startup_tests {
+    use super::*;
+
+    fn sharing() -> RuntimeOptions {
+        RuntimeOptions {
+            shared_endpoint: Some("http://localhost:11434".to_string()),
+            ..RuntimeOptions::default()
+        }
+    }
+
+    #[test]
+    fn sharing_builds_no_startup_specs_from_config_models() {
+        let mut config = plugin::MeshConfig::default();
+        config.models.push(plugin::ModelConfigEntry {
+            model: "Qwen3-8B-Q4_K_M".to_string(),
+            ..Default::default()
+        });
+
+        let specs = build_startup_model_specs(&sharing(), &config)
+            .expect("sharing startup must not fail on configured models");
+
+        assert!(
+            specs.is_empty(),
+            "a sharing-only node must not adopt config startup models"
+        );
+    }
+
+    #[test]
+    fn serve_still_builds_startup_specs_from_config_models() {
+        let mut config = plugin::MeshConfig::default();
+        config.models.push(plugin::ModelConfigEntry {
+            model: "Qwen3-8B-Q4_K_M".to_string(),
+            ..Default::default()
+        });
+
+        let specs = build_startup_model_specs(&RuntimeOptions::default(), &config)
+            .expect("serve must still build config startup specs");
+
+        assert_eq!(
+            specs.len(),
+            1,
+            "normal serve behavior must be unchanged by the sharing guard"
+        );
+    }
+
+    #[test]
+    fn sharing_cli_validation_rejects_a_local_model() {
+        let mut options = sharing();
+        options.model.push(std::path::PathBuf::from("Qwen3-8B"));
+        assert!(validate_runtime_cli_model_options(&options).is_err());
+    }
+
+    #[test]
+    fn sharing_cli_validation_accepts_a_bare_sharing_invocation() {
+        validate_runtime_cli_model_options(&sharing()).expect("a bare sharing invocation is valid");
+    }
 }

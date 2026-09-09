@@ -94,6 +94,7 @@ fn optional_missing_installed_plugin_becomes_inactive_summary() {
 #[tokio::test]
 async fn required_plugin_load_failure_stops_manager_startup() {
     let specs = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![ExternalPluginSpec {
             name: "broken".into(),
             command: "mesh-llm-definitely-missing-plugin-binary".into(),
@@ -161,6 +162,7 @@ async fn required_plugin_failure_rolls_back_plugins_loaded_earlier() {
         assert_eq!(read, 0, "rollback must disconnect the loaded plugin");
     });
     let specs = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![
             ExternalPluginSpec {
                 name: "first".into(),
@@ -203,6 +205,7 @@ async fn required_plugin_failure_rolls_back_plugins_loaded_earlier() {
 #[tokio::test]
 async fn optional_plugin_load_failure_becomes_inactive_summary() {
     let specs = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![ExternalPluginSpec {
             name: "optional-broken".into(),
             command: "mesh-llm-definitely-missing-plugin-binary".into(),
@@ -260,6 +263,7 @@ async fn remote_connect_failures_honor_required_and_optional_policy() {
 
     let (required_tx, _required_rx) = mpsc::channel(1);
     let required = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![remote_spec("required-remote", false)],
         inactive: Vec::new(),
     };
@@ -275,6 +279,7 @@ async fn remote_connect_failures_honor_required_and_optional_policy() {
 
     let (optional_tx, _optional_rx) = mpsc::channel(1);
     let optional = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![remote_spec("optional-remote", true)],
         inactive: Vec::new(),
     };
@@ -290,6 +295,7 @@ async fn remote_connect_failures_honor_required_and_optional_policy() {
 #[tokio::test]
 async fn lazy_start_plugin_does_not_block_manager_startup() {
     let specs = ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![ExternalPluginSpec {
             name: "lazy".into(),
             command: "mesh-llm-definitely-missing-plugin-binary".into(),

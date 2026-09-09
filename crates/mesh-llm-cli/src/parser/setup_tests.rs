@@ -19,7 +19,6 @@ fn setup_command_parses_without_plugin_fallback() {
             service,
             no_service,
             skip_runtime,
-            no_discover_endpoints,
             verbose,
         } => {
             assert!(yes);
@@ -27,7 +26,6 @@ fn setup_command_parses_without_plugin_fallback() {
             assert!(!service);
             assert!(!no_service);
             assert!(skip_runtime);
-            assert!(!no_discover_endpoints);
             assert!(verbose);
         }
         other => panic!("unexpected command: {other:?}"),

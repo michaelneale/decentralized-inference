@@ -6,6 +6,7 @@ pub(crate) mod mcp;
 pub mod openai_exchange;
 mod runtime;
 mod schema_validation;
+pub(crate) mod shared_endpoint;
 pub(crate) mod stapler;
 mod startup;
 #[cfg(test)]
@@ -114,6 +115,10 @@ pub struct PluginManager {
 pub(in crate::plugin) struct PluginManagerInner {
     pub(in crate::plugin) plugins: BTreeMap<String, ExternalPlugin>,
     pub(in crate::plugin) inactive: BTreeMap<String, PluginSummary>,
+    /// One already-running upstream this node serves without a plugin process.
+    /// Fixed for the manager's lifetime; its health and models live in
+    /// `endpoint_health` alongside plugin endpoints.
+    pub(in crate::plugin) shared_endpoint: Option<String>,
     pub(in crate::plugin) endpoint_health: Arc<Mutex<BTreeMap<String, EndpointHealthState>>>,
     pub(in crate::plugin) runtime_data: RuntimeDataCollector,
     pub(in crate::plugin) rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
@@ -154,6 +159,7 @@ impl PluginManager {
             inner: Arc::new(PluginManagerInner {
                 plugins,
                 inactive: Self::inactive_plugins(specs, failed_plugins),
+                shared_endpoint: specs.shared_endpoint.clone(),
                 endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
                 runtime_data,
                 rpc_bridge,
@@ -368,6 +374,7 @@ impl PluginManager {
             inner: Arc::new(PluginManagerInner {
                 plugins: BTreeMap::new(),
                 inactive: BTreeMap::new(),
+                shared_endpoint: None,
                 endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
                 runtime_data: RuntimeDataCollector::new(),
                 rpc_bridge: Arc::new(Mutex::new(Some(bridge))),
@@ -376,6 +383,27 @@ impl PluginManager {
                     .iter()
                     .map(|name| (*name).to_string())
                     .collect(),
+                test_endpoints: Arc::new(Mutex::new(Vec::new())),
+                test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
+                test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
+                test_stream_handlers: Arc::new(Mutex::new(BTreeMap::new())),
+            }),
+        }
+    }
+
+    /// A manager whose only inference source is one shared upstream.
+    #[cfg(test)]
+    pub(crate) fn for_test_shared_endpoint(address: &str) -> Self {
+        Self {
+            inner: Arc::new(PluginManagerInner {
+                plugins: BTreeMap::new(),
+                inactive: BTreeMap::new(),
+                shared_endpoint: Some(address.to_string()),
+                endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
+                runtime_data: RuntimeDataCollector::new(),
+                rpc_bridge: Arc::new(Mutex::new(None)),
+                shutting_down: AtomicBool::new(false),
+                bridged_plugins: BTreeSet::new(),
                 test_endpoints: Arc::new(Mutex::new(Vec::new())),
                 test_inference_endpoints: Arc::new(Mutex::new(Vec::new())),
                 test_manifests: Arc::new(Mutex::new(BTreeMap::new())),
@@ -393,6 +421,7 @@ impl PluginManager {
                     .into_iter()
                     .map(|summary| (summary.name.clone(), summary))
                     .collect(),
+                shared_endpoint: None,
                 endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
                 runtime_data: RuntimeDataCollector::new(),
                 rpc_bridge: Arc::new(Mutex::new(None)),
@@ -1304,6 +1333,7 @@ impl PluginManager {
                 if manager.inner.shutting_down.load(Ordering::SeqCst) {
                     break;
                 }
+                manager.refresh_shared_endpoint().await;
                 let plugin_names = manager.inner.plugins.keys().cloned().collect::<Vec<_>>();
                 for plugin_name in plugin_names {
                     let Some(plugin) = manager.inner.plugins.get(&plugin_name) else {
@@ -1800,6 +1830,7 @@ mod tests {
     #[tokio::test]
     async fn plugin_load_failure_keeps_declared_web_ui_metadata() {
         let specs = ResolvedPlugins {
+            shared_endpoint: None,
             externals: vec![ExternalPluginSpec {
                 name: "demo".into(),
                 command: "mesh-llm-definitely-missing-plugin-binary".into(),

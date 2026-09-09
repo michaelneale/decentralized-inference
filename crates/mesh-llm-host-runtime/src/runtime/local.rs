@@ -623,16 +623,6 @@ pub(super) async fn start_local_openai_model(
     LocalRuntimeModelHandle,
     tokio::sync::oneshot::Receiver<()>,
 )> {
-    // A node started with only an external inference plugin has no native
-    // runtime loaded. Refuse the local load with an actionable message
-    // instead of calling into unresolved Skippy FFI symbols.
-    anyhow::ensure!(
-        skippy_runtime::native_runtime_loaded(),
-        "cannot load {} locally: no MeshLLM native runtime is loaded. This node is serving \
-         models through an external inference plugin only; run `mesh-llm runtime install` to \
-         serve models locally.",
-        runtime_model_name
-    );
     let model_name = runtime_model_name.to_string();
     let package_ref = spec.model_path.to_string_lossy().to_string();
     let package = if skippy::is_layer_package_ref(&package_ref) {

@@ -376,7 +376,6 @@ publish_crates=(
     skippy-topology
     skippy-metrics
     skippy-cache
-    endpoint-discovery
     model-ref
     model-artifact
     model-resolver

@@ -5,7 +5,6 @@ pub struct SetupOptions {
     pub service: bool,
     pub no_service: bool,
     pub skip_runtime: bool,
-    pub no_discover_endpoints: bool,
     pub verbose: bool,
 }
 

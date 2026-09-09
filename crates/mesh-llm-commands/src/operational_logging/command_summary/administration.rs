@@ -92,10 +92,6 @@ pub(super) fn format_plugin(command: &mesh_llm_cli::PluginCommand, assembly: &mu
             assembly.redact("query", query.is_some());
         }
         PluginCommand::List => assembly.command.push_str(" plugins list"),
-        PluginCommand::Discover { apply } => {
-            assembly.command.push_str(" plugins discover");
-            assembly.flag("apply", *apply);
-        }
     }
 }
 

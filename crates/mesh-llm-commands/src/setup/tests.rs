@@ -46,7 +46,6 @@ fn interactive_unix_enter_accepts_default_yes_service_prompt() {
         vec![
             SetupStep::InstallRuntime,
             SetupStep::PruneInactiveRuntimes,
-            SetupStep::DiscoverLocalEndpoints,
             SetupStep::InstallService,
         ]
     );
@@ -67,11 +66,7 @@ fn interactive_unix_explicit_no_skips_service_prompt() {
     assert_eq!(plan.service, SetupServicePlan::Skip);
     assert_eq!(
         plan.core_steps,
-        vec![
-            SetupStep::InstallRuntime,
-            SetupStep::PruneInactiveRuntimes,
-            SetupStep::DiscoverLocalEndpoints,
-        ]
+        vec![SetupStep::InstallRuntime, SetupStep::PruneInactiveRuntimes]
     );
     assert_eq!(prompter.prompts.len(), 1);
 }
@@ -100,7 +95,6 @@ fn non_interactive_unix_never_prompts_and_prints_service_guidance() {
         vec![
             SetupStep::InstallRuntime,
             SetupStep::PruneInactiveRuntimes,
-            SetupStep::DiscoverLocalEndpoints,
             SetupStep::PrintServiceGuidance,
         ]
     );
@@ -183,10 +177,7 @@ fn skip_runtime_omits_install_and_prune_steps() {
     let plan = plan_setup(options, environment, &mut prompter).expect("plan should succeed");
 
     assert_eq!(plan.runtime, SetupRuntimePlan::Skip);
-    assert_eq!(
-        plan.core_steps,
-        vec![SetupStep::DiscoverLocalEndpoints, SetupStep::InstallService]
-    );
+    assert_eq!(plan.core_steps, vec![SetupStep::InstallService]);
 }
 
 #[test]
@@ -233,106 +224,7 @@ fn yes_and_no_service_keeps_explicit_service_skip_without_prompt() {
     );
     assert_eq!(
         plan.core_steps,
-        vec![
-            SetupStep::InstallRuntime,
-            SetupStep::PruneInactiveRuntimes,
-            SetupStep::DiscoverLocalEndpoints,
-        ]
+        vec![SetupStep::InstallRuntime, SetupStep::PruneInactiveRuntimes]
     );
     assert!(prompter.prompts.is_empty());
-}
-
-#[test]
-fn setup_probes_local_endpoints_by_default() {
-    let options = SetupOptions {
-        yes: true,
-        ..SetupOptions::default()
-    };
-    let environment = SetupEnvironment {
-        platform: SetupPlatform::Linux,
-        interactive: false,
-    };
-    let mut prompter = FakePrompter::default();
-
-    let plan = plan_setup(options, environment, &mut prompter).expect("plan should succeed");
-
-    assert_eq!(plan.endpoints, super::SetupEndpointPlan::Probe);
-    assert!(
-        plan.core_steps.contains(&SetupStep::DiscoverLocalEndpoints),
-        "default setup should look for LLM servers already running here"
-    );
-}
-
-#[test]
-fn no_discover_endpoints_removes_the_probe_step() {
-    let options = SetupOptions {
-        yes: true,
-        no_discover_endpoints: true,
-        ..SetupOptions::default()
-    };
-    let environment = SetupEnvironment {
-        platform: SetupPlatform::Linux,
-        interactive: false,
-    };
-    let mut prompter = FakePrompter::default();
-
-    let plan = plan_setup(options, environment, &mut prompter).expect("plan should succeed");
-
-    assert_eq!(plan.endpoints, super::SetupEndpointPlan::Skip);
-    assert!(!plan.core_steps.contains(&SetupStep::DiscoverLocalEndpoints));
-}
-
-#[test]
-fn endpoint_probe_runs_before_service_install() {
-    let options = SetupOptions {
-        yes: true,
-        service: true,
-        ..SetupOptions::default()
-    };
-    let environment = SetupEnvironment {
-        platform: SetupPlatform::Linux,
-        interactive: false,
-    };
-    let mut prompter = FakePrompter::default();
-
-    let plan = plan_setup(options, environment, &mut prompter).expect("plan should succeed");
-
-    let probe = plan
-        .core_steps
-        .iter()
-        .position(|step| *step == SetupStep::DiscoverLocalEndpoints)
-        .expect("probe step");
-    let service = plan
-        .core_steps
-        .iter()
-        .position(|step| *step == SetupStep::InstallService)
-        .expect("service step");
-    assert!(
-        probe < service,
-        "operators should see what was found before the node is installed as a service"
-    );
-}
-
-/// `mesh-llm setup --config <path>` must report endpoint discovery against that
-/// file. Reading the default location instead produced a false "publish this"
-/// hint when the selected file already configured or disabled the plugin.
-#[test]
-fn setup_command_args_carry_the_selected_config_path() {
-    let path = std::path::Path::new("/tmp/example-mesh-config.toml");
-
-    let args = super::SetupCommandArgs {
-        options: SetupOptions::default(),
-        environment: SetupEnvironment {
-            platform: SetupPlatform::Linux,
-            interactive: false,
-        },
-        configured: crate::runtime_native::NativeRuntimeConfigSelection::default(),
-        config_path: Some(path),
-    };
-
-    assert_eq!(
-        args.config_path,
-        Some(path),
-        "discovery must consult the same config file as the rest of setup"
-    );
 }

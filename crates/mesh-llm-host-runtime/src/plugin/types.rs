@@ -185,6 +185,7 @@ impl PluginCapabilityProvider {
 
 #[derive(Clone, Debug)]
 pub struct InferenceEndpointRoute {
+    pub strip_caller_credentials: bool,
     pub plugin_name: String,
     pub endpoint_id: String,
     pub address: String,

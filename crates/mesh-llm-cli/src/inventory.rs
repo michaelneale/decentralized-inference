@@ -208,8 +208,14 @@ pub fn build_cli_inventory() -> CliInventory {
         &root_path,
     ));
 
+    children.push(build_runtime_surface_node(
+        &command,
+        RuntimeSurface::Share,
+        &root_path,
+    ));
+
     for subcommand in command.get_subcommands() {
-        if subcommand.get_name() == "serve" || subcommand.get_name() == "client" {
+        if matches!(subcommand.get_name(), "serve" | "client" | "share") {
             continue;
         }
         children.push(build_command_node(subcommand, &root_path, &root_global_ids));
@@ -351,6 +357,7 @@ fn build_runtime_surface_node(
     let name = match surface {
         RuntimeSurface::Serve => "serve",
         RuntimeSurface::Client => "client",
+        RuntimeSurface::Share => "share",
     };
     let path = join_path(parent_path, name);
     let help = runtime_surface_help(surface);
@@ -360,6 +367,12 @@ fn build_runtime_surface_node(
     );
 
     let mut children = Vec::new();
+    if surface == RuntimeSurface::Share {
+        let endpoint = Arg::new("endpoint")
+            .required(true)
+            .help("HTTP OpenAI-compatible upstream URL");
+        children.push(build_leaf_node(root, &path, &endpoint));
+    }
     children.extend(build_leaf_nodes(root, &path, |arg| {
         runtime_surface_allows_arg(surface, arg)
     }));
@@ -459,7 +472,7 @@ fn runtime_surface_allows_arg(surface: RuntimeSurface, arg: &Arg) -> bool {
     !runtime_surface_excluded_arg(surface, id)
 }
 
-const RUNTIME_SURFACE_ALWAYS_EXCLUDED_ARGS: &[&str] = &["client", "plugin"];
+const RUNTIME_SURFACE_ALWAYS_EXCLUDED_ARGS: &[&str] = &["client", "plugin", "shared_endpoint"];
 
 fn runtime_surface_excluded_arg(surface: RuntimeSurface, id: &str) -> bool {
     if RUNTIME_SURFACE_ALWAYS_EXCLUDED_ARGS.contains(&id) {
@@ -469,7 +482,7 @@ fn runtime_surface_excluded_arg(surface: RuntimeSurface, id: &str) -> bool {
     // Client mode has no local model or serving pipeline.  Keep shared
     // networking, logging, ownership, and management flags by reflecting
     // the root command, while omitting serving-only controls.
-    matches!(surface, RuntimeSurface::Client) && client_excluded_arg(id)
+    matches!(surface, RuntimeSurface::Client | RuntimeSurface::Share) && client_excluded_arg(id)
 }
 
 fn client_excluded_arg(id: &str) -> bool {
@@ -731,6 +744,12 @@ mod tests {
         let inventory = build_cli_inventory();
         let serve = find_child(&inventory.root, "serve");
         let client = find_child(&inventory.root, "client");
+        let share = find_child(&inventory.root, "share");
+        assert_eq!(share.synthetic, Some(true));
+        assert!(share.children.iter().all(|child| child.name != "--model"));
+        assert!(share.children.iter().any(
+            |child| child.kind == InventoryNodeKind::Positional && child.required == Some(true)
+        ));
 
         assert_eq!(serve.synthetic, Some(true));
         assert_eq!(client.synthetic, Some(true));
@@ -773,6 +792,7 @@ mod tests {
             if node.path == inventory.root.path
                 || node.path.starts_with("mesh-llm serve")
                 || node.path.starts_with("mesh-llm client")
+                || node.path.starts_with("mesh-llm share")
             {
                 continue;
             }

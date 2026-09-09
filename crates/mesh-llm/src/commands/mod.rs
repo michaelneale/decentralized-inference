@@ -23,7 +23,10 @@ pub async fn dispatch(cli: &Cli) -> Result<bool> {
     let Some(cmd) = cli.command.as_ref() else {
         return Ok(false);
     };
-    if matches!(cmd, Command::Serve | Command::Client) {
+    if matches!(
+        cmd,
+        Command::Serve | Command::Client | Command::Share { .. }
+    ) {
         return Ok(false);
     }
     let family = match cmd {
@@ -50,7 +53,7 @@ async fn dispatch_command(cli: &Cli, cmd: &Command) -> Result<()> {
 
 async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
     match cmd {
-        Command::Serve | Command::Client => Ok(()),
+        Command::Serve | Command::Client | Command::Share { .. } => Ok(()),
         Command::Models { command } => {
             dispatch_models_command(command).await?;
             Ok(())
@@ -197,29 +200,16 @@ async fn run_plugin_command(command: &mesh_llm_cli::PluginCommand, cli: &Cli) ->
     match command {
         mesh_llm_cli::PluginCommand::List => {
             let rows = resolved_plugin_list_rows(cli)?;
-            mesh_llm_commands::plugin::run_plugin_command(
-                command,
-                Some(&rows),
-                cli.config.as_deref(),
-            )
-            .await?;
+            mesh_llm_commands::plugin::run_plugin_command(command, Some(&rows)).await?;
         }
         mesh_llm_cli::PluginCommand::Info { .. } => {
-            if !mesh_llm_commands::plugin::run_plugin_command(command, None, cli.config.as_deref())
-                .await?
-            {
+            if !mesh_llm_commands::plugin::run_plugin_command(command, None).await? {
                 let rows = resolved_plugin_list_rows(cli)?;
-                mesh_llm_commands::plugin::run_plugin_command(
-                    command,
-                    Some(&rows),
-                    cli.config.as_deref(),
-                )
-                .await?;
+                mesh_llm_commands::plugin::run_plugin_command(command, Some(&rows)).await?;
             }
         }
         _ => {
-            mesh_llm_commands::plugin::run_plugin_command(command, None, cli.config.as_deref())
-                .await?;
+            mesh_llm_commands::plugin::run_plugin_command(command, None).await?;
         }
     }
     Ok(())

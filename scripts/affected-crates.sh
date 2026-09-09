@@ -45,7 +45,6 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-ffi"
   "mesh-llm-nodejs"
   "mesh-llm-test-harness"
-  "endpoint-discovery"
   "model-ref"
   "model-artifact"
   "model-hf"

@@ -62,6 +62,7 @@ mesh-llm serve --model Qwen2.5-32B
 mesh-llm serve --join <token>
 mesh-llm serve --discover "my-mesh"
 mesh-llm serve --model MiniMax-M2.5-Q4_K_M --mesh-guardrails metrics
+mesh-llm share http://localhost:11434
 mesh-llm client --auto
 mesh-llm gpus
 mesh-llm discover
@@ -1055,6 +1056,50 @@ For strategy diagrams, CLI overrides, and the VerifyWindow telemetry used to
 evaluate a configuration, see
 [Pipelined VerifyWindow Decode](skippy/PIPELINED_VERIFY_WINDOW.md).
 
+## Share an LLM server you already run
+
+If Ollama, LM Studio, LiteLLM, vLLM, or any other OpenAI-compatible server is
+already running, publish its models to your mesh with one command:
+
+```bash
+mesh-llm share http://localhost:11434
+```
+
+The upstream server keeps running the models. Mesh forwards requests to it and
+advertises its models under their own names. This node does not install a
+plugin, does not load a native inference runtime, does not load a model of its
+own, and does not rewrite your config file.
+
+Like `serve`, this starts a **private** mesh. Make the choice explicit to go
+further:
+
+```bash
+mesh-llm share http://localhost:11434 --join <token>
+mesh-llm share http://localhost:11434 --publish
+```
+
+Check what is being served:
+
+```bash
+curl -s http://localhost:9337/v1/models | jq '.data[].id'
+```
+
+No native inference runtime is required, so this works on a machine with no
+supported GPU.
+
+Current limits:
+
+- One HTTP OpenAI-compatible upstream per node, fixed for the run. To change
+  it, stop the command and start it again with the new URL.
+- `https://` upstreams are rejected, so authenticated cloud providers are not
+  supported yet.
+- Ctrl-C stops sharing. It does not stop the upstream server, which keeps
+  running and serving its own clients.
+
+For a provider you want recorded durably in `config.toml` and restored on every
+start, use the `openai-endpoint` plugin instead — see
+[plugins/README.md](plugins/README.md).
+
 ## Lemonade integration
 
 Use the `openai-endpoint` plugin to route requests to a local [Lemonade Server](https://lemonade-server.ai) through the same `http://localhost:9337/v1` API that mesh-llm exposes.
@@ -1116,18 +1161,6 @@ mesh-llm serve
 No `[[models]]` entry or placeholder local model is required. `on_demand`
 prevents any configured local models from loading eagerly while preserving the
 ability to load one later.
-
-A native runtime is also not required. When an enabled plugin entry supplies a
-URL and no local model is requested, `mesh-llm serve` starts even if no
-compatible native runtime is installed for this machine — for example a box
-that only runs Ollama and has no supported GPU. It prints a warning naming the
-limitation and continues serving the plugin's models. A later attempt to load a
-local GGUF or layer package on that node fails with an actionable error rather
-than starting.
-
-A native runtime remains required when the startup explicitly names a local
-model (`--model`, `--gguf`, or a configured `[[models]]` entry). In that case a
-missing runtime still fails startup as before.
 
 After startup, mesh-llm should include Lemonade-hosted models in its own model list:
 

@@ -23,7 +23,6 @@ async fn run_setup_no_interactive_uses_guidance_step_and_hidden_star_without_pro
         vec![
             SetupStep::InstallRuntime,
             SetupStep::PruneInactiveRuntimes,
-            SetupStep::DiscoverLocalEndpoints,
             SetupStep::PrintServiceGuidance,
         ]
     );
@@ -38,7 +37,6 @@ async fn run_setup_skip_runtime_and_no_service_runs_no_hidden_core_side_effects(
         skip_runtime: true,
         no_service: true,
         yes: true,
-        no_discover_endpoints: true,
         ..SetupOptions::default()
     };
     let environment = SetupEnvironment {
@@ -81,9 +79,6 @@ async fn run_setup_service_failure_is_core_fatal_and_skips_github() {
             .to_string()
             .contains("simulated step failure for InstallService")
     );
-    assert_eq!(
-        actions.steps,
-        vec![SetupStep::DiscoverLocalEndpoints, SetupStep::InstallService]
-    );
+    assert_eq!(actions.steps, vec![SetupStep::InstallService]);
     assert!(actions.github.is_empty());
 }

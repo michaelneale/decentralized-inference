@@ -45,11 +45,6 @@ pub(crate) fn print_setup_summary(plan: &SetupPlan, actions: &CliSetupActions<'_
         eprintln!("- Runtime: {}", runtime_summary(plan, actions));
         eprintln!("- Service: {}", service_summary(plan, actions));
         eprintln!(
-            "- Local servers: {}",
-            endpoints_summary(plan, actions)
-                .unwrap_or_else(|| "not probed (--no-discover-endpoints)".to_string())
-        );
-        eprintln!(
             "- GitHub star: {}",
             super::github::github_summary(plan, &actions.github_outcome)
         );
@@ -59,38 +54,9 @@ pub(crate) fn print_setup_summary(plan: &SetupPlan, actions: &CliSetupActions<'_
     eprintln!("{} Mesh setup complete", style_ok("✓"));
     eprintln!("  Runtime  {}", runtime_brief(plan, actions));
     eprintln!("  Service  {}", service_brief(plan, actions));
-    if let Some(endpoints) = endpoints_brief(plan, actions) {
-        eprintln!("  Local servers  {endpoints}");
-    }
     if let Some(github) = github_brief(actions) {
         eprintln!("  GitHub star  {github}");
     }
-}
-
-/// Plain (unstyled) description of what endpoint discovery found.
-fn endpoints_summary(plan: &SetupPlan, actions: &CliSetupActions<'_>) -> Option<String> {
-    match plan.endpoints {
-        super::SetupEndpointPlan::Skip => None,
-        super::SetupEndpointPlan::Probe => Some(if actions.endpoints_found.is_empty() {
-            "none detected".to_string()
-        } else {
-            actions
-                .endpoints_found
-                .iter()
-                .map(crate::endpoint_discovery::DiscoveredEndpoint::describe)
-                .collect::<Vec<_>>()
-                .join(", ")
-        }),
-    }
-}
-
-fn endpoints_brief(plan: &SetupPlan, actions: &CliSetupActions<'_>) -> Option<String> {
-    let summary = endpoints_summary(plan, actions)?;
-    Some(if actions.endpoints_found.is_empty() {
-        style_muted(&summary)
-    } else {
-        style_ok(&summary)
-    })
 }
 
 fn runtime_summary(plan: &SetupPlan, actions: &CliSetupActions<'_>) -> String {
@@ -251,7 +217,6 @@ mod tests {
                 interactive: false,
             },
             NativeRuntimeConfigSelection::default(),
-            None,
             false,
         );
         actions.github_outcome = github_outcome;

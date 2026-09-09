@@ -25,6 +25,7 @@ mod release_attestation;
 mod run_auto;
 mod runtime_registry;
 mod serving_surface;
+mod shared_endpoint;
 mod split_participant_settle;
 mod split_planning;
 mod split_topology_lock;

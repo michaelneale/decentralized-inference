@@ -37,7 +37,6 @@ pub struct InactivePluginRow {
 pub async fn run_plugin_command(
     command: &PluginCommand,
     runtime_rows: Option<&PluginListRows>,
-    config_path: Option<&std::path::Path>,
 ) -> Result<bool> {
     match command {
         PluginCommand::Install {
@@ -60,9 +59,6 @@ pub async fn run_plugin_command(
         PluginCommand::Delete { name } => delete(name)?,
         PluginCommand::Info { name } => return info(name, runtime_rows),
         PluginCommand::Search { query } => search(query.as_deref()).await?,
-        PluginCommand::Discover { apply } => {
-            crate::endpoint_discovery::run_discover_endpoints(config_path, *apply).await?;
-        }
         PluginCommand::List => {
             let Some(runtime_rows) = runtime_rows else {
                 return Ok(false);

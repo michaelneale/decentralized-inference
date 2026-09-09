@@ -59,6 +59,7 @@ async fn run_plugin_cli_request(
     let command = request.command.clone();
     let input_json = serde_json::to_string(&request).context("Serialize plugin CLI request")?;
     let resolved = plugin::ResolvedPlugins {
+        shared_endpoint: None,
         externals: vec![spec],
         inactive: Vec::new(),
     };

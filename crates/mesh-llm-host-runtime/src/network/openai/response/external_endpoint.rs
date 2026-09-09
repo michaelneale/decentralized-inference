@@ -23,6 +23,7 @@ pub(in crate::network::openai) async fn route_http_endpoint_attempt(
     base_url: &str,
     prefetched: &[u8],
     request_path: &str,
+    strip_caller_credentials: bool,
     logging: RouteAttemptLoggingContext<'_>,
 ) -> RouteAttemptResult {
     let RouteAttemptLoggingContext {
@@ -31,7 +32,12 @@ pub(in crate::network::openai) async fn route_http_endpoint_attempt(
         response_adapter,
         route_observer,
     } = logging;
-    let target = match build_external_endpoint_target(base_url, request_path, prefetched) {
+    let target = match build_external_endpoint_target(
+        base_url,
+        request_path,
+        prefetched,
+        strip_caller_credentials,
+    ) {
         Ok(target) => target,
         Err(()) => return RouteAttemptResult::RetryableUnavailable,
     };
@@ -139,12 +145,19 @@ fn build_external_endpoint_target(
     base_url: &str,
     request_path: &str,
     prefetched: &[u8],
+    strip_caller_credentials: bool,
 ) -> std::result::Result<ExternalEndpointTarget, ()> {
     let (url, host) = parse_external_endpoint_url(base_url)?;
     let port = url.port_or_known_default().unwrap_or(80);
     let forward_path = endpoint_forward_path(&url, request_path);
-    let forwarded =
-        rewrite_external_endpoint_request(base_url, prefetched, &forward_path, &host, port)?;
+    let forwarded = rewrite_external_endpoint_request(
+        base_url,
+        prefetched,
+        &forward_path,
+        &host,
+        port,
+        strip_caller_credentials,
+    )?;
     Ok(ExternalEndpointTarget {
         host,
         port,
@@ -189,8 +202,15 @@ fn rewrite_external_endpoint_request(
     forward_path: &str,
     host: &str,
     port: u16,
+    strip_caller_credentials: bool,
 ) -> std::result::Result<Vec<u8>, ()> {
-    match rewrite_http_request_target(prefetched, forward_path, host, port) {
+    match rewrite_http_request_target(
+        prefetched,
+        forward_path,
+        host,
+        port,
+        strip_caller_credentials,
+    ) {
         Ok(forwarded) => Ok(forwarded),
         Err(err) => {
             tracing::warn!(
@@ -233,47 +253,59 @@ fn rewrite_http_request_target(
     new_path: &str,
     host: &str,
     port: u16,
+    strip_caller_credentials: bool,
 ) -> Result<Vec<u8>> {
-    let header_end = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|idx| idx + 4)
-        .context("missing HTTP header terminator")?;
-    let header_text =
-        std::str::from_utf8(&raw[..header_end - 4]).context("invalid HTTP headers")?;
-    let mut lines = header_text.split("\r\n");
-    let request_line = lines.next().context("missing HTTP request line")?;
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts.next().context("missing HTTP method")?;
-    let _old_path = request_parts.next().context("missing HTTP path")?;
-    let version = request_parts.next().unwrap_or("HTTP/1.1");
-
-    let mut rebuilt = format!("{method} {new_path} {version}\r\n");
-    let mut saw_host = false;
-    for line in lines {
-        if let Some((name, _value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("host")
-        {
-            rebuilt.push_str(&format!("Host: {host}:{port}\r\n"));
-            saw_host = true;
-            continue;
-        }
-        rebuilt.push_str(line);
-        rebuilt.push_str("\r\n");
-    }
-    if !saw_host {
-        rebuilt.push_str(&format!("Host: {host}:{port}\r\n"));
-    }
-    rebuilt.push_str("\r\n");
-
-    let mut bytes = rebuilt.into_bytes();
-    bytes.extend_from_slice(&raw[header_end..]);
-    Ok(bytes)
+    use crate::network::openai::forwarded_request::finalize_forwarded_request;
+    let omitted = if strip_caller_credentials {
+        &[
+            "host",
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+        ][..]
+    } else {
+        &["host"][..]
+    };
+    let mut forwarded = finalize_forwarded_request(raw, false, Some(new_path), None, omitted)?;
+    let line_end = forwarded
+        .windows(2)
+        .position(|bytes| bytes == b"\r\n")
+        .context("missing HTTP request line")?
+        + 2;
+    let host_header = format!("Host: {host}:{port}\r\n");
+    forwarded.splice(line_end..line_end, host_header.bytes());
+    Ok(forwarded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_endpoint_keeps_its_existing_authentication_headers() {
+        let raw = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nX-Api-Key: key\r\nContent-Length: 2\r\n\r\n{}";
+        let forwarded =
+            rewrite_http_request_target(raw, "/api/v1/chat/completions", "localhost", 8000, false)
+                .unwrap();
+        let headers = String::from_utf8(forwarded).unwrap();
+        assert!(headers.contains("Authorization: Bearer token\r\n"));
+        assert!(headers.contains("X-Api-Key: key\r\n"));
+    }
+
+    #[test]
+    fn shared_endpoint_strips_credentials_and_preserves_header_bytes() {
+        let raw = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret\r\nX-Api-Key: secret\r\nProxy-Authorization: secret\r\nApi-Key: secret\r\nX-Trace: \xff\r\nContent-Length: 2\r\n\r\n{}";
+        let rewritten =
+            rewrite_http_request_target(raw, "/v1/chat/completions", "[::1]", 11434, true).unwrap();
+        assert!(!rewritten.windows(6).any(|bytes| bytes == b"secret"));
+        assert!(
+            rewritten
+                .windows(12)
+                .any(|bytes| bytes == b"X-Trace: \xff\r\n")
+        );
+        assert!(rewritten.ends_with(b"\r\n\r\n{}"));
+    }
 
     #[test]
     fn test_endpoint_forward_path_maps_v1_requests_onto_api_v1_base() {
@@ -286,7 +318,7 @@ mod tests {
     fn test_rewrite_http_request_target_updates_request_line_and_host() {
         let raw = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:9337\r\nx-request-id: 4c3ca94d-bc1f-4759-912d-f4f6d77d5515\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
         let rewritten =
-            rewrite_http_request_target(raw, "/api/v1/chat/completions", "localhost", 8000)
+            rewrite_http_request_target(raw, "/api/v1/chat/completions", "localhost", 8000, false)
                 .unwrap();
         let rewritten = String::from_utf8(rewritten).unwrap();
         assert!(rewritten.starts_with("POST /api/v1/chat/completions HTTP/1.1\r\n"));

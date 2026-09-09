@@ -10,18 +10,13 @@ pub(crate) async fn dispatch_setup_command(
     config_path: Option<&Path>,
 ) -> Result<()> {
     let selector = native_runtime_config_selector(config_path)?;
-    let args = setup_command_args(
-        cmd,
-        native_runtime_command_selection(selector.as_ref()),
-        config_path,
-    )?;
+    let args = setup_command_args(cmd, native_runtime_command_selection(selector.as_ref()))?;
     mesh_llm_commands::setup::run_setup_command(args).await
 }
 
 fn setup_command_args<'a>(
     cmd: &Command,
     configured: mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection<'a>,
-    config_path: Option<&'a Path>,
 ) -> Result<SetupCommandArgs<'a>> {
     let Command::Setup {
         yes,
@@ -29,7 +24,6 @@ fn setup_command_args<'a>(
         service,
         no_service,
         skip_runtime,
-        no_discover_endpoints,
         verbose,
     } = cmd
     else {
@@ -43,7 +37,6 @@ fn setup_command_args<'a>(
             service: *service,
             no_service: *no_service,
             skip_runtime: *skip_runtime,
-            no_discover_endpoints: *no_discover_endpoints,
             verbose: *verbose,
         },
         environment: SetupEnvironment {
@@ -51,7 +44,6 @@ fn setup_command_args<'a>(
             interactive: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
         },
         configured,
-        config_path,
     })
 }
 
@@ -81,11 +73,9 @@ mod tests {
                 service: true,
                 no_service: false,
                 skip_runtime: true,
-                no_discover_endpoints: true,
                 verbose: true,
             },
             mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection::default(),
-            None,
         )
         .expect("setup args should build");
 
@@ -97,7 +87,6 @@ mod tests {
                 service: true,
                 no_service: false,
                 skip_runtime: true,
-                no_discover_endpoints: true,
                 verbose: true,
             }
         );
@@ -111,7 +100,6 @@ mod tests {
                 command: None,
             },
             mesh_llm_commands::runtime_native::NativeRuntimeConfigSelection::default(),
-            None,
         )
         .expect_err("doctor command must not route through setup dispatch");
 

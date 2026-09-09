@@ -212,7 +212,9 @@ pub(super) fn initial_console_session_mode_for_surface(
     current_mode: ConsoleSessionMode,
 ) -> ConsoleSessionMode {
     match explicit_surface {
-        Some(RuntimeSurface::Serve | RuntimeSurface::Client) => current_mode,
+        Some(RuntimeSurface::Share | RuntimeSurface::Serve | RuntimeSurface::Client) => {
+            current_mode
+        }
         _ => ConsoleSessionMode::None,
     }
 }

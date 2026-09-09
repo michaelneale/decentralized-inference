@@ -262,6 +262,12 @@ release_signer_keys = ["not-an-ed25519-key"]
 pub struct ResolvedPlugins {
     pub externals: Vec<ExternalPluginSpec>,
     pub inactive: Vec<PluginSummary>,
+    /// A single already-running OpenAI-compatible upstream to serve without a
+    /// plugin process, normalized to an API base URL.
+    ///
+    /// Set per invocation by `mesh-llm share <url>`; never read from or
+    /// written to configuration.
+    pub shared_endpoint: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -328,6 +334,7 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
     Ok(ResolvedPlugins {
         externals,
         inactive,
+        shared_endpoint: None,
     })
 }
 
