@@ -70,12 +70,16 @@ struct AutoRouteDecision {
     required_tokens: Option<u32>,
 }
 
+/// Convert a [`proxy::RouteDispatchOutcome`] to the [`crate::logging::TerminalOutcome`]
+/// variant used by structured terminal-event logging at request boundaries.
 fn terminal_outcome_for_dispatch(
     outcome: proxy::RouteDispatchOutcome,
 ) -> crate::logging::TerminalOutcome {
     outcome.terminal_outcome()
 }
 
+/// Return `true` when the dispatch outcome carries a 2xx status code,
+/// indicating the model inference request was served successfully.
 fn model_access_succeeded(outcome: proxy::RouteDispatchOutcome) -> bool {
     matches!(
         outcome,
@@ -87,6 +91,10 @@ fn model_access_succeeded(outcome: proxy::RouteDispatchOutcome) -> bool {
     )
 }
 
+/// Lift a raw I/O result from a response-send helper into a typed
+/// [`proxy::RouteDispatchOutcome`]: `Ok(())` becomes `Responded(status_code)`;
+/// any write error becomes `Dropped` (the connection closed before the client
+/// could read the response).
 fn response_outcome(status_code: u16, result: std::io::Result<()>) -> proxy::RouteDispatchOutcome {
     match result {
         Ok(()) => proxy::RouteDispatchOutcome::Responded(status_code),
@@ -703,16 +711,47 @@ async fn route_self_targeted_model(
     route_observer: OpenAiRouteObserver<'_>,
 ) -> proxy::RouteDispatchOutcome {
     let self_id = ctx.node.id();
-    if !excluded.contains(&self_id)
-        && let Some(plugin_manager) = ctx.plugin_manager
-        && plugin_manager
+    if let Some(plugin_manager) = ctx.plugin_manager {
+        match plugin_manager
             .inference_endpoint_for_model(model_name)
             .await
-            .ok()
-            .flatten()
-            .is_some()
-    {
-        return try_route_plugin_model(ctx, tcp_stream, request, model_name, route_observer).await;
+        {
+            Err(error) => {
+                // Transient resolution failure — degrade gracefully with 503,
+                // not 409. A 409 would mis-state the reason: the peer did not
+                // refuse to serve the model; we failed to ask it. The caller
+                // (client) should retry; the peer is not at fault.
+                tracing::warn!(
+                    %error,
+                    "route_self_targeted_model: failed to resolve plugin endpoint for '{model_name}'"
+                );
+                return response_outcome(
+                    503,
+                    proxy::send_503_observed(
+                        tcp_stream,
+                        &format!(
+                            "plugin endpoint for model '{model_name}' unavailable (resolution error)"
+                        ),
+                        route_observer,
+                    )
+                    .await,
+                );
+            }
+            Ok(Some(_endpoint)) => {
+                // Self is the target and serves the model via plugin.
+                if !excluded.contains(&self_id) {
+                    return try_route_plugin_model(
+                        ctx,
+                        tcp_stream,
+                        request,
+                        model_name,
+                        route_observer,
+                    )
+                    .await;
+                }
+            }
+            Ok(None) => {}
+        }
     }
     response_outcome(
         409,
@@ -754,6 +793,13 @@ enum RemoteMeshRoute {
     NoRemoteHost,
 }
 
+/// Build the [`RemoteMeshRoute`] for `model_name` given the optional
+/// `x-mesh-target` and the `x-mesh-exclude` set. Queries `hosts_for_model`
+/// from the node to get the live remote candidate list, applies the exclude
+/// filter, and either forces a single-peer target pool (when `target` is
+/// `Some`) or returns the full filtered pool. Returns
+/// [`RemoteMeshRoute::TargetUnavailable`] when an explicit `target` is not
+/// in the candidate set -- the caller must fail closed, never substitute.
 async fn resolve_remote_mesh_route(
     ctx: &IngressRouteContext<'_>,
     model_name: &str,
@@ -797,6 +843,10 @@ async fn resolve_remote_mesh_route(
     RemoteMeshRoute::Targets(mesh_targets)
 }
 
+/// Decode a hex-encoded 32-byte `EndpointId` from a header value string.
+/// Leading/trailing whitespace is trimmed before decoding. Returns `None` on
+/// any decode or length error — the caller is responsible for turning `None`
+/// into an appropriate rejection (400 or 409).
 fn parse_endpoint_id_hex(value: &str) -> Option<iroh::EndpointId> {
     let bytes = hex::decode(value.trim()).ok()?;
     let bytes: [u8; 32] = bytes.as_slice().try_into().ok()?;
@@ -860,6 +910,12 @@ fn mesh_headers_force_remote(
     excluded.contains(&self_id) || target.is_some_and(|id| id != self_id)
 }
 
+/// Dispatch an inference request to an out-of-process plugin endpoint that
+/// serves `model_name` (path 2 / `RawProxy` dispatch). Checks activity policy
+/// admission first; resolves the plugin endpoint via `plugin_manager`; emits
+/// an effective and a terminal OpenAI exchange event to the plugin bus so any
+/// observing plugin can track the full lifecycle of each exchange, including
+/// cases where the backend returns an error or the connection is dropped.
 async fn try_route_plugin_model(
     ctx: &IngressRouteContext<'_>,
     mut tcp_stream: ClientStream,
@@ -1081,6 +1137,11 @@ async fn route_request(
     }
 }
 
+/// Ensure the request body is parsed as JSON when an effective model is known,
+/// so cache routing and provider-confirmed local receipts use a stable prefix
+/// key even when only one eligible target exists. No-op for tokenize requests
+/// (which use a different body shape). The body is already bounded and
+/// buffered at ingress; parsing here does not change the forwarded bytes.
 fn prepare_cache_routing_body(
     request: &mut proxy::BufferedHttpRequest,
     effective_model: Option<&str>,
@@ -1094,6 +1155,11 @@ fn prepare_cache_routing_body(
     }
 }
 
+/// Run model-name resolution for a `model: "auto"` request, returning an
+/// [`AutoRouteDecision`] on success or `Err(())` when no served model can
+/// satisfy the media inputs in the request body. Side-effects: enables auto
+/// route hooks on the buffered request if a model is selected, and records
+/// the model hit on the node for activity tracking.
 async fn prepare_auto_route_decision(
     request: &mut proxy::BufferedHttpRequest,
     ctx: &IngressRouteContext<'_>,
@@ -1129,6 +1195,10 @@ async fn prepare_auto_route_decision(
     }
 }
 
+/// Respond with 422 when the auto-route resolver determines no served model
+/// can satisfy the media inputs (e.g., audio/image) in the request. The
+/// response body names the constraint so the client knows to re-send without
+/// the unsupported media.
 async fn send_media_unsupported(
     tcp_stream: ClientStream,
     route_observer: OpenAiRouteObserver<'_>,
@@ -1145,6 +1215,9 @@ async fn send_media_unsupported(
     )
 }
 
+/// Build the sorted list of model names visible to the `/v1/models` endpoint:
+/// the remote-mesh callable set from `targets` merged with `local_models`
+/// (plugin-served and locally-launched models) with duplicates removed.
 fn callable_models_with_local_served(
     targets: &election::ModelTargets,
     local_models: Vec<String>,
