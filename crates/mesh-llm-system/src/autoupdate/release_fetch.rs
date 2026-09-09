@@ -422,6 +422,8 @@ async fn install_native_runtime_after_update(
 ) {
 }
 
+// Only the non-Windows `install_native_runtime_after_update` calls this.
+#[cfg(not(windows))]
 async fn download_optional_url(url: &str, path: &Path, expected_sha256: &str) -> Result<bool> {
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
