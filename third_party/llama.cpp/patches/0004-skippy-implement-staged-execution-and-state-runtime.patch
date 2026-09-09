@@ -1,7 +1,7 @@
-From 9918b1222c2d877b19b72e9a944241ec88040a22 Mon Sep 17 00:00:00 2001
+From 6a6dc61cac16847157aacea68a9def470c21df1d Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:03 +1000
-Subject: [PATCH] skippy: implement staged execution and state runtime
+Subject: [PATCH 04/23] skippy: implement staged execution and state runtime
 
 ---
  src/llama-graph.cpp                 |   44 +-
@@ -39,7 +39,7 @@ Subject: [PATCH] skippy: implement staged execution and state runtime
  create mode 100644 src/skippy/tokenization.cpp
 
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 0749c9243..0b6d17053 100644
+index 5c3c1a703..cf82e3925 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -46,10 +46,10 @@ bool skippy_graph_build_inputs::topology_equal(const skippy_graph_build_inputs &
@@ -81,7 +81,7 @@ index 0749c9243..0b6d17053 100644
      return values &&
             values->ne[0] == n_embd &&
             values->ne[1] == n_hc &&
-@@ -1775,6 +1775,32 @@ void llm_graph_context::request_inputs(llm_graph_input_rs * input) const {
+@@ -1776,6 +1776,32 @@ void llm_graph_context::request_inputs(llm_graph_input_rs * input) const {
      request_input(input->s_copy, "recurrent.copy_indices");
  }
  
@@ -114,7 +114,7 @@ index 0749c9243..0b6d17053 100644
  
  
  ggml_tensor * llm_graph_context::build_cvec(
-@@ -3741,6 +3767,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
+@@ -3792,6 +3818,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
      inp->inp_hca.k_rot = mctx_cur->get_hca()->build_input_k_rot(ctx0);
      inp->inp_lid.k_rot = mctx_cur->get_lid()->build_input_k_rot(ctx0);
  
@@ -124,10 +124,10 @@ index 0749c9243..0b6d17053 100644
  }
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 368c4798c..97fb5ac86 100644
+index 7cd9248d5..0ed603825 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
-@@ -76,7 +76,7 @@ struct skippy_activation_gemma3n_altup {
+@@ -77,7 +77,7 @@ struct skippy_activation_gemma3n_altup {
      uint32_t n_altup = 0;
  };
  
@@ -136,7 +136,7 @@ index 368c4798c..97fb5ac86 100644
      const float * values = nullptr;
      uint32_t token_count = 0;
      uint32_t n_embd = 0;
-@@ -103,7 +103,7 @@ struct skippy_graph_build_inputs {
+@@ -104,7 +104,7 @@ struct skippy_graph_build_inputs {
      skippy_activation_tokens activation_tokens;
      skippy_activation_rwkv7_v_first rwkv7_v_first;
      skippy_activation_gemma3n_altup gemma3n_altup;
@@ -145,7 +145,7 @@ index 368c4798c..97fb5ac86 100644
      skippy_activation_glm_dsa_top_k glm_dsa_top_k;
      skippy_activation_mtp_embeddings mtp_embeddings;
  
-@@ -242,10 +242,10 @@ private:
+@@ -243,10 +243,10 @@ private:
      skippy_activation_mtp_embeddings mtp_embeddings;
  };
  
@@ -159,7 +159,7 @@ index 368c4798c..97fb5ac86 100644
  
      void set_input(const llama_ubatch * ubatch) override;
  
-@@ -259,7 +259,7 @@ public:
+@@ -260,7 +260,7 @@ public:
      const int64_t n_hc;
  
  private:
@@ -168,7 +168,7 @@ index 368c4798c..97fb5ac86 100644
  };
  
  class llm_graph_input_stage_tokens : public llm_graph_input_i {
-@@ -1271,6 +1271,7 @@ struct llm_graph_context {
+@@ -1272,6 +1272,7 @@ struct llm_graph_context {
      void request_inputs(llm_graph_input_attn_kv * input) const;
      void request_inputs(llm_graph_input_attn_k * input) const;
      void request_inputs(llm_graph_input_rs * input) const;
@@ -6629,3 +6629,6 @@ index 000000000..54753a161
 +
 +
 +} // extern "C"
+-- 
+2.55.0
+

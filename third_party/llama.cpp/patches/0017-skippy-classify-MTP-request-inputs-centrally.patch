@@ -1,18 +1,18 @@
-From 7b4ffb2204935fca7522a04eb20d4bbcda4506b4 Mon Sep 17 00:00:00 2001
+From 6251b55c28e9823eeb68be0d113deb9dfbe0921a Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 8 Sep 2026 00:57:55 +1000
-Subject: [PATCH] skippy: classify MTP request inputs centrally
+Subject: [PATCH 17/23] skippy: classify MTP request inputs centrally
 
 ---
- src/llama-graph.cpp                     | 23 +++++++++++++++++++++++
+ src/llama-graph.cpp                     | 24 ++++++++++++++++++++++++
  src/skippy/tests/graph_build_inputs.cpp | 24 ++++++++++++++++++++++++
- 2 files changed, 47 insertions(+)
+ 2 files changed, 48 insertions(+)
 
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 1d1987309..499832ec1 100644
+index 05145d9f7..5d0d99f4f 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -15,6 +15,7 @@
+@@ -16,6 +16,7 @@
  #include "llama-memory-hybrid-iswa.h"
  #include "llama-memory-recurrent.h"
  
@@ -20,7 +20,7 @@ index 1d1987309..499832ec1 100644
  #include <cassert>
  #include <cmath>
  #include <cstring>
-@@ -1657,6 +1657,29 @@ bool llm_graph_result::can_reuse(const llm_graph_params & params) {
+@@ -1658,6 +1659,29 @@ bool llm_graph_result::can_reuse(const llm_graph_params & params) {
  }
  
  llm_graph_input_i * llm_graph_result::add_input(llm_graph_input_ptr input) {
@@ -93,4 +93,5 @@ index b6007e395..9da60aba5 100644
      int rc = check_sched_reserve_and_memory_update(argv[1]);
      if (rc == 0) {
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
+

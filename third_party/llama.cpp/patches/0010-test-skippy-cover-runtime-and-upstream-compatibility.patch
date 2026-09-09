@@ -1,20 +1,20 @@
-From a0ac2dda6cca8b1583a50082257edaf2f430c23e Mon Sep 17 00:00:00 2001
+From 78415123b89c9402f3f28c6c7a4c7e9344d6b8bf Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:23:40 +1000
-Subject: [PATCH] test(skippy): cover runtime and upstream compatibility
+Subject: [PATCH 10/23] test(skippy): cover runtime and upstream compatibility
 
 ---
  tests/CMakeLists.txt                          |  22 ++
  tests/test-chat-auto-parser.cpp               |  47 +++
- tests/test-chat.cpp                           | 285 ++++++++++++++++-
+ tests/test-chat.cpp                           | 285 +++++++++++++++-
  tests/test-llama-archs.cpp                    | 122 ++++++-
  tests/test-skippy-activation-layout.cpp       |  64 ++++
  tests/test-skippy-kv-cells-contiguous.cpp     |  20 ++
  tests/test-skippy-kv-page-export.cpp          | 261 +++++++++++++++
- tests/test-skippy-model-loader-accounting.cpp | 301 ++++++++++++++++++
+ tests/test-skippy-model-loader-accounting.cpp | 306 ++++++++++++++++++
  .../test-skippy-recurrent-state-roundtrip.cpp | 159 +++++++++
  ...st-skippy-verify-checkpoint-retirement.cpp |  26 ++
- 10 files changed, 1293 insertions(+), 14 deletions(-)
+ 10 files changed, 1298 insertions(+), 14 deletions(-)
  create mode 100644 tests/test-skippy-activation-layout.cpp
  create mode 100644 tests/test-skippy-kv-cells-contiguous.cpp
  create mode 100644 tests/test-skippy-kv-page-export.cpp
@@ -23,7 +23,7 @@ Subject: [PATCH] test(skippy): cover runtime and upstream compatibility
  create mode 100644 tests/test-skippy-verify-checkpoint-retirement.cpp
 
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index fe3d14ffc..ed156f339 100644
+index 5531c4ce3..5a45037bb 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -152,6 +152,12 @@ llama_build(test-recurrent-state-rollback.cpp)
@@ -144,7 +144,7 @@ index 5aa948251..78df176dd 100644
  
  static void test_cohere_reasoning_detection(testing & t) {
 diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
-index 7918f0ffc..635e0d662 100644
+index f27c91e4d..c608477f3 100644
 --- a/tests/test-chat.cpp
 +++ b/tests/test-chat.cpp
 @@ -436,6 +436,21 @@ static common_chat_tool special_function_tool{
@@ -407,7 +407,7 @@ index 7918f0ffc..635e0d662 100644
          // Tool call with reasoning (forced-open mode)
          tst.test(
                 "I'm\nthinking</think>"
-@@ -4442,7 +4637,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+@@ -4536,7 +4731,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
                  "Thinking.\n"
                  "</think>"
                  "<tool_call>get_weather"
@@ -416,7 +416,7 @@ index 7918f0ffc..635e0d662 100644
                  "</tool_call>\n";
  
              bool got_runtime_error = false;
-@@ -6815,6 +7010,65 @@ static void test_template_generation_prompt() {
+@@ -6909,6 +7104,65 @@ static void test_template_generation_prompt() {
          check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
          check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
      }
@@ -482,7 +482,7 @@ index 7918f0ffc..635e0d662 100644
  }
  
  // Test the developer role to system workaround with a simple mock template
-@@ -7157,6 +7411,7 @@ static void test_msg_diffs_compute() {
+@@ -7251,6 +7505,7 @@ static void test_msg_diffs_compute() {
  int main(int argc, char ** argv) {
      bool detailed_debug    = false;
      bool only_run_filtered = false;
@@ -490,7 +490,7 @@ index 7918f0ffc..635e0d662 100644
  
      // Check for --template and --detailed flags
      for (int i = 1; i < argc; i++) {
-@@ -7174,9 +7429,19 @@ int main(int argc, char ** argv) {
+@@ -7268,9 +7523,19 @@ int main(int argc, char ** argv) {
              g_force_reconstruction_test = true;
              only_run_filtered          = true;
          }
@@ -511,7 +511,7 @@ index 7918f0ffc..635e0d662 100644
          std::cout << "\n[chat] All template tests passed!" << '\n';
          return 0;
 diff --git a/tests/test-llama-archs.cpp b/tests/test-llama-archs.cpp
-index 35a3286e4..b8a8400da 100644
+index dbed9846f..53eafea50 100644
 --- a/tests/test-llama-archs.cpp
 +++ b/tests/test-llama-archs.cpp
 @@ -14,6 +14,7 @@
@@ -549,7 +549,7 @@ index 35a3286e4..b8a8400da 100644
  
      uint32_t n_vocab = 128;
      uint32_t n_embd  = 256;
-@@ -262,9 +277,19 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+@@ -288,9 +303,19 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
      ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
                arch == LLM_ARCH_QWEN4EXP ? n_embd_head : uint32_t(128));
  
@@ -569,8 +569,8 @@ index 35a3286e4..b8a8400da 100644
 +    }
      ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
  
-     if (arch == LLM_ARCH_DEEPSEEK4) {
-@@ -345,9 +370,57 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
+     if (arch == LLM_ARCH_HY_V4) {
+@@ -387,9 +412,57 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
      return true;
  }
  
@@ -629,7 +629,7 @@ index 35a3286e4..b8a8400da 100644
      GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
      llama_model_params model_params = llama_model_default_params();
      model_params.progress_callback = silent_model_load_progress;
-@@ -363,6 +436,9 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+@@ -405,6 +478,9 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
      if (!encode) {
          ctx_params.n_ubatch = 64;
      }
@@ -639,7 +639,7 @@ index 35a3286e4..b8a8400da 100644
  
      size_t tmp = seed;
      llama_model_ptr model(gguf_ctx != nullptr ?
-@@ -378,6 +454,20 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+@@ -420,6 +496,20 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
      return std::make_pair(std::move(model), std::move(lctx));
  }
  
@@ -660,7 +660,7 @@ index 35a3286e4..b8a8400da 100644
  static std::vector<float> get_logits(
          llama_model * model, llama_context * lctx, const std::vector<llama_token> & tokens, bool encode = false) {
      const uint32_t n_vocab  = llama_vocab_n_tokens(llama_model_get_vocab(model));
-@@ -517,6 +607,10 @@ static bool arch_supported(const llm_arch arch) {
+@@ -560,6 +650,10 @@ static bool arch_supported(const llm_arch arch) {
      if (arch == LLM_ARCH_DEEPSEEK2OCR) {
          return false;
      }
@@ -671,7 +671,7 @@ index 35a3286e4..b8a8400da 100644
      // FIXME: these hit scheduler/view-backed-output issues with WebGPU on CI.
  #ifdef GGML_USE_WEBGPU
      if (arch == LLM_ARCH_DEEPSEEK32 || arch == LLM_ARCH_GLM_DSA || arch == LLM_ARCH_DOTS3NOTE || arch == LLM_ARCH_QWEN4EXP) {
-@@ -535,6 +629,20 @@ static bool arch_supported(const llm_arch arch) {
+@@ -578,6 +672,20 @@ static bool arch_supported(const llm_arch arch) {
      return true;
  }
  
@@ -689,12 +689,12 @@ index 35a3286e4..b8a8400da 100644
 +    return true;
 +}
 +
- static int save_models(const llm_arch target_arch, const size_t seed, const ggml_log_level log_level, const std::string & dir) {
+ static int save_models(const llm_arch target_arch, const size_t seed, const int verbosity, const std::string & dir) {
      struct user_data_t {
          struct {
-@@ -700,6 +808,12 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
-                 std::string status_roundtrip = "\033[1;33mSKIP\033[0m";
+@@ -754,6 +862,12 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
                  char nmse_str[12] = {0};
+ 
                  bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
 +                if (arch == LLM_ARCH_GLM_DSA && !glm_dsa_backend_config_supported(dc.devs)) {
 +                    skip = true;
@@ -1070,7 +1070,7 @@ index 000000000..96937c8dc
 +}
 diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
 new file mode 100644
-index 000000000..7e87226dc
+index 000000000..56412f5f9
 --- /dev/null
 +++ b/tests/test-skippy-model-loader-accounting.cpp
 @@ -0,0 +1,306 @@
@@ -1240,7 +1240,7 @@ index 000000000..7e87226dc
 +    ggml_context * accounting_ctx_raw = accounting_ctx.get();
 +    ggml_context * synthetic_ctx_raw = synthetic_ctx.get();
 +    const auto cpu_buft = ggml_backend_cpu_buffer_type();
-+    loader.ctx_map.emplace(cpu_buft, std::move(accounting_ctx));
++    loader.ctx_map.emplace(llama_model_loader::ctx_key{cpu_buft, /*lazy=*/false}, std::move(accounting_ctx));
 +    loader.init_mappings(false);
 +
 +    const size_t weight_size = ggml_nbytes(weight);
@@ -1577,3 +1577,6 @@ index 000000000..d09acccb4
 +    if (skippy_retire_verify_checkpoint_exact(checkpoints, 10, 3)) return 6;
 +    return 0;
 +}
+-- 
+2.55.0
+

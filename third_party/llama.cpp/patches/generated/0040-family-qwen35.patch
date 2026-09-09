@@ -9,10 +9,10 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index 4d9bf937a4bb2115fb1d87df8de31d6d087f2ba1..807f91150adffd66dc068e6dbcda59f8acc1978c 100644
+index 583fcea714fb4f687e0c4cce4a3bc83944d81466..360fe8877fbb39e9e72824614f3a49cba7deb207 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -146,17 +146,32 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+@@ -142,17 +142,32 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
      ggml_tensor * cur;
      ggml_tensor * inpL;
  
@@ -49,7 +49,7 @@ index 4d9bf937a4bb2115fb1d87df8de31d6d087f2ba1..807f91150adffd66dc068e6dbcda59f8
          res->t_layer_inp[il] = inpL;
  
          ggml_tensor * inpSA = inpL;
-@@ -175,7 +190,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+@@ -171,7 +186,7 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
              cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
          }
  
@@ -58,7 +58,7 @@ index 4d9bf937a4bb2115fb1d87df8de31d6d087f2ba1..807f91150adffd66dc068e6dbcda59f8
              cur   = ggml_get_rows(ctx0, cur,   inp_out_ids);
              inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
          }
-@@ -204,7 +219,15 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+@@ -200,7 +215,15 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
  
          // Input for next layer
          inpL = cur;
@@ -75,10 +75,10 @@ index 4d9bf937a4bb2115fb1d87df8de31d6d087f2ba1..807f91150adffd66dc068e6dbcda59f8
  
      cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index 9855f9284958a69e50bb00cd2e5b208c6da7c63b..d674e838e14ae887e33395bee73887f4a321c0b4 100644
+index 7b637b455afb251d2218179b0d1132671f233f70..bb002fb8b53dd7049d58efbb3b9427799c445e9a 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
-@@ -169,17 +169,32 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
+@@ -165,17 +165,32 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
      ggml_tensor * cur;
      ggml_tensor * inpL;
  
@@ -115,7 +115,7 @@ index 9855f9284958a69e50bb00cd2e5b208c6da7c63b..d674e838e14ae887e33395bee73887f4
          res->t_layer_inp[il] = inpL;
  
          ggml_tensor * inpSA = inpL;
-@@ -198,7 +213,7 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
+@@ -194,7 +209,7 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
              cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
          }
  
@@ -124,7 +124,7 @@ index 9855f9284958a69e50bb00cd2e5b208c6da7c63b..d674e838e14ae887e33395bee73887f4
              cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
              inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
          }
-@@ -227,7 +242,15 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
+@@ -223,7 +238,15 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
  
          // Input for next layer
          inpL = cur;

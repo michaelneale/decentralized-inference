@@ -1,7 +1,7 @@
-From db705a1fa9e18eaa80bcef47b0deae9494a00092 Mon Sep 17 00:00:00 2001
+From 129b6a563fbc6a228c3baf0159fd2e1ee1525f54 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Mon, 7 Sep 2026 06:22:57 +1000
-Subject: [PATCH] skippy: implement model lifecycle and package loading
+Subject: [PATCH 03/23] skippy: implement model lifecycle and package loading
 
 ---
  src/skippy/abi.cpp                      |  52 ++
@@ -9,15 +9,15 @@ Subject: [PATCH] skippy: implement model lifecycle and package loading
  src/skippy/model_lifecycle.cpp          | 146 ++++
  src/skippy/model_load_config.cpp        | 159 ++++
  src/skippy/model_load_config_internal.h |  25 +
- src/skippy/model_loading.cpp            | 923 ++++++++++++++++++++++++
+ src/skippy/model_loading.cpp            | 950 ++++++++++++++++++++++++
  src/skippy/model_loading_internal.h     |  38 +
- src/skippy/model_package.cpp            | 738 +++++++++++++++++++
+ src/skippy/model_package.cpp            | 738 ++++++++++++++++++
  src/skippy/model_source.cpp             | 470 ++++++++++++
  src/skippy/package_tensor_binding.cpp   | 104 +++
  src/skippy/package_tensor_binding.h     |  27 +
  src/skippy/runtime_support.h            |  37 +
  src/skippy/runtime_types.h              | 159 ++++
- 13 files changed, 2984 insertions(+)
+ 13 files changed, 3011 insertions(+)
  create mode 100644 src/skippy/abi.cpp
  create mode 100644 src/skippy/devices.cpp
  create mode 100644 src/skippy/model_lifecycle.cpp
@@ -552,7 +552,7 @@ index 000000000..0f7c83139
 +        llama_context_params & params);
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
 new file mode 100644
-index 000000000..0e23cfef2
+index 000000000..7eb4d5e8c
 --- /dev/null
 +++ b/src/skippy/model_loading.cpp
 @@ -0,0 +1,950 @@
@@ -2296,7 +2296,7 @@ index 000000000..ffd84c132
 +}
 diff --git a/src/skippy/model_source.cpp b/src/skippy/model_source.cpp
 new file mode 100644
-index 000000000..2592ab088
+index 000000000..c23fb60e3
 --- /dev/null
 +++ b/src/skippy/model_source.cpp
 @@ -0,0 +1,470 @@
@@ -3121,3 +3121,6 @@ index 000000000..a82b64408
 +    bool reset_required = false;
 +    std::vector<skippy_verify_checkpoint> verify_checkpoints;
 +};
+-- 
+2.55.0
+

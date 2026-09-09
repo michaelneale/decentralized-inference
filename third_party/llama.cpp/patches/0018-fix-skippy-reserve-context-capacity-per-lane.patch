@@ -1,8 +1,8 @@
-From fbaef5c3b18658287a31000cfe7a2ee291c51bfb Mon Sep 17 00:00:00 2001
+From a66db462be5dc9b883ba21845dbe850a9fd754a9 Mon Sep 17 00:00:00 2001
 From: scama
  <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Tue, 8 Sep 2026 02:40:22 +1000
-Subject: [PATCH] fix(skippy): reserve context capacity per lane
+Subject: [PATCH 18/23] fix(skippy): reserve context capacity per lane
 
 ---
  src/skippy/model_loading.cpp                  | 59 ++++++++++++++++---
@@ -10,10 +10,10 @@ Subject: [PATCH] fix(skippy): reserve context capacity per lane
  2 files changed, 93 insertions(+), 8 deletions(-)
 
 diff --git a/src/skippy/model_loading.cpp b/src/skippy/model_loading.cpp
-index 0e23cfef2..628fa6008 100644
+index 7eb4d5e8c..13dc3d8ee 100644
 --- a/src/skippy/model_loading.cpp
 +++ b/src/skippy/model_loading.cpp
-@@ -477,6 +477,22 @@ static bool skippy_resolve_tristate(int32_t tristate, bool derived_default) {
+@@ -490,6 +490,22 @@ static bool skippy_resolve_tristate(int32_t tristate, bool derived_default) {
      return derived_default;
  }
  
@@ -36,7 +36,7 @@ index 0e23cfef2..628fa6008 100644
  extern "C" {
  
  struct skippy_runtime_config skippy_runtime_config_default(void) {
-@@ -535,19 +551,34 @@ enum skippy_status skippy_finish_model_open(
+@@ -548,19 +564,34 @@ enum skippy_status skippy_finish_model_open(
          }
      }
  
@@ -76,7 +76,7 @@ index 0e23cfef2..628fa6008 100644
      params.n_ubatch = config != nullptr && config->n_ubatch > 0 ? static_cast<uint32_t>(config->n_ubatch) : 0u;
      params.n_threads = config != nullptr && config->n_threads > 0 ? config->n_threads : skippy_default_thread_count();
      params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : params.n_threads;
-@@ -861,6 +892,20 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+@@ -888,6 +919,20 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
          return SKIPPY_STATUS_INVALID_ARGUMENT;
      }
  
@@ -97,7 +97,7 @@ index 0e23cfef2..628fa6008 100644
      llama_model_params model_params = llama_model_default_params();
      // The guard above already established an external MTP source, so this model
      // backs an LLAMA_CONTEXT_TYPE_MTP draft context and must retain MTP tensors.
-@@ -890,8 +935,8 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
+@@ -917,8 +962,8 @@ enum skippy_status skippy_model_attach_mtp_draft_model(
      llama_context_params ctx_params = llama_context_default_params();
      ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
      ctx_params.ctx_other = target_model->ctx;
@@ -109,7 +109,7 @@ index 0e23cfef2..628fa6008 100644
      ctx_params.n_threads = config != nullptr && config->n_threads > 0 ? config->n_threads : skippy_default_thread_count();
      ctx_params.n_threads_batch = config != nullptr && config->n_threads_batch > 0 ? config->n_threads_batch : ctx_params.n_threads;
 diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
-index 7e87226dc..417ac4347 100644
+index 56412f5f9..1e6c8602c 100644
 --- a/tests/test-skippy-model-loader-accounting.cpp
 +++ b/tests/test-skippy-model-loader-accounting.cpp
 @@ -1,5 +1,6 @@
@@ -175,5 +175,5 @@ index 7e87226dc..417ac4347 100644
          return EXIT_FAILURE;
      }
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 

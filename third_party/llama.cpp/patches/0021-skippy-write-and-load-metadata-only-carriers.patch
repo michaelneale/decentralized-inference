@@ -1,12 +1,19 @@
-From e9610c5ce96ead1b18114b52ed4e74322331f66c Mon Sep 17 00:00:00 2001
-From: scama <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+From eafffdd8a1d8d95aef540b0fe86b19f888945915 Mon Sep 17 00:00:00 2001
+From: scama
+ <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
 Date: Wed, 9 Sep 2026 09:18:53 +1000
-Subject: [PATCH] skippy: write and load metadata-only carriers
+Subject: [PATCH 21/23] skippy: write and load metadata-only carriers
 
 Assisted-by: scama
 ---
+ src/llama-model-loader.cpp                    |   8 +-
+ src/llama-model-loader.h                      |  10 +-
+ src/skippy/model_package.cpp                  |  98 ++++++++++++++++
+ .../tests/renamed_multishard_planning.cpp     | 108 ++++++++++++++++--
+ 4 files changed, 209 insertions(+), 15 deletions(-)
+
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6fe522303..5e4fe26eb 100644
+index e645c2db4..203b869f8 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -611,7 +611,7 @@ llama_model_loader::llama_model_loader(
@@ -46,10 +53,10 @@ index 6fe522303..5e4fe26eb 100644
      } else {
          get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index 68b47e1b0..23f6e2849 100644
+index 6bab2de0a..c8b72dce2 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
-@@ -52,14 +52,20 @@ struct llama_model_loader {
+@@ -53,14 +53,20 @@ struct llama_model_loader {
  
          ggml_tensor * tensor;
  
@@ -331,4 +338,5 @@ index 8f4e7dd44..3391f6342 100644
              "renamed multishard metadata planning: tensors=%zu dependencies=%zu payload_reads=%zu payload_bytes=%zu recurrent=%d\n",
              bindings.size(),
 -- 
-2.50.1
+2.55.0
+

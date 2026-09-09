@@ -9,10 +9,10 @@ separately and remain outside the primary decoder stage interval.
 
 ---
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 755bf48610f983688546ffab8609afeee2cb4ce5..041db21370a93694ed146f23b9f3b66386d19357 100644
+index 051b1e6d375eca78ca533ec7d0bb4c2ac7c1aa26..3e8ec9f55f2c2f4fe99b40ceb0225bc942a21b7e 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -307,9 +307,18 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -355,9 +355,18 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
      int sections[4];
      std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
  
@@ -34,7 +34,7 @@ index 755bf48610f983688546ffab8609afeee2cb4ce5..041db21370a93694ed146f23b9f3b663
  
      auto * inp = build_inp_mem_hybrid();
  
-@@ -323,23 +332,51 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -371,23 +380,51 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
                  "the indexer cache must track the attention cache cell for cell");
      }
  
@@ -91,7 +91,7 @@ index 755bf48610f983688546ffab8609afeee2cb4ce5..041db21370a93694ed146f23b9f3b663
          res->t_layer_inp[il] = res_hc;
  
          if (hparams.is_ple(il)) {
-@@ -362,7 +399,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -410,7 +447,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
              cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
          }
  
@@ -100,7 +100,7 @@ index 755bf48610f983688546ffab8609afeee2cb4ce5..041db21370a93694ed146f23b9f3b663
              // everything below is per token, so drop the rows that produce no output
              cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
              inject = ggml_get_rows(ctx0, inject, inp_out_ids);
-@@ -388,8 +425,17 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -436,8 +473,17 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
  
          // "l_last" is the layer output name that build_cvec and imatrix look for
          cb(res_hc, "l_last", il);

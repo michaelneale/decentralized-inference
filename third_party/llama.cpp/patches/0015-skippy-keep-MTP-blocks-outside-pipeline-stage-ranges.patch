@@ -1,7 +1,7 @@
-From 1d31a5e6cc788196cb824393955510b10e753bb4 Mon Sep 17 00:00:00 2001
+From 34d751d72489811fe2d0c2db7e7718aed98491d9 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 8 Sep 2026 00:28:03 +1000
-Subject: [PATCH] skippy: keep MTP blocks outside pipeline stage ranges
+Subject: [PATCH 15/23] skippy: keep MTP blocks outside pipeline stage ranges
 
 ---
  src/skippy/session.cpp                |  8 ++++----
@@ -78,5 +78,5 @@ index 11ee232fc..30627b1c5 100644
      return result;
  }
 -- 
-2.54.0 (Apple Git-157)
+2.55.0
 
