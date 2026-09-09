@@ -196,91 +196,19 @@ mod tests {
     }
 
     fn write_local_package_v2_fixture(root: &Path) -> (String, String) {
-        use skippy_package_format::{
-            Artifact, ArtifactCatalog, PackageManifest, SourceFile, SourceModel, Tensor,
-            TensorCatalog, TensorIntegrity, TensorStorage,
-        };
-        let primary = b"primary";
-        let resident = b"resident";
-        let unused = b"unused";
-        fs::create_dir_all(root.join("artifacts")).unwrap();
-        fs::write(root.join("artifacts/primary.gguf"), primary).unwrap();
-        fs::write(root.join("artifacts/resident.gguf"), resident).unwrap();
-        fs::write(root.join("artifacts/unused.gguf"), unused).unwrap();
-        let mut manifest = PackageManifest {
-            schema_version: skippy_package_format::PACKAGE_SCHEMA_VERSION,
-            package_id: String::new(),
-            model_id: "model-a".to_string(),
-            source_model: SourceModel {
-                sha256: sha256_hex(primary),
-                metadata_artifact_id: "primary".to_string(),
-                repo: None,
-                revision: None,
-                primary_file: Some("model.gguf".to_string()),
-                canonical_ref: None,
-                distribution_id: None,
-                files: vec![SourceFile {
-                    path: "model.gguf".to_string(),
-                    byte_size: primary.len() as u64,
-                    sha256: sha256_hex(primary),
-                }],
-            },
-            format: "gguf".to_string(),
-            layer_count: 1,
-            model_metadata: std::collections::BTreeMap::from([(
-                "general.architecture".to_string(),
-                serde_json::Value::String("llama".to_string()),
-            )]),
-            artifact_catalog: ArtifactCatalog {
-                entries: vec![
-                    Artifact {
-                        id: "primary".to_string(),
-                        path: "artifacts/primary.gguf".to_string(),
-                        byte_size: primary.len() as u64,
-                        sha256: sha256_hex(primary),
-                    },
-                    Artifact {
-                        id: "resident".to_string(),
-                        path: "artifacts/resident.gguf".to_string(),
-                        byte_size: resident.len() as u64,
-                        sha256: sha256_hex(resident),
-                    },
-                    Artifact {
-                        id: "unused".to_string(),
-                        path: "artifacts/unused.gguf".to_string(),
-                        byte_size: unused.len() as u64,
-                        sha256: sha256_hex(unused),
-                    },
-                ],
-            },
-            tensor_catalog: TensorCatalog {
-                entries: vec![Tensor {
-                    id: "resident-tensor".to_string(),
-                    name: "blk.0.weight".to_string(),
-                    ggml_type: 0,
-                    dimensions: vec![1],
-                    layer_ordinal: Some(0),
-                    storage: TensorStorage::Owned {
-                        artifact_id: "resident".to_string(),
-                        data_offset: 0,
-                        stored_length: resident.len() as u64,
-                        alignment: 1,
-                        integrity: TensorIntegrity::ArtifactSha256,
-                    },
-                }],
-            },
-            sidecars: Vec::new(),
-            generation: None,
-            native_abi_version: "test".to_string(),
-            generator_version: "test".to_string(),
-            created_at_unix_secs: 1,
-        };
-        manifest.package_id = manifest.computed_package_id().unwrap();
-        manifest.validate().unwrap();
+        let manifest = crate::inference::skippy::write_test_package_v2_fixture(
+            root,
+            "model-a",
+            &[
+                ("primary", "artifacts/primary.gguf", "input.weight"),
+                ("resident", "artifacts/resident.gguf", "resident-tensor"),
+                ("unused", "artifacts/unused.gguf", "unused-tensor"),
+            ],
+        )
+        .unwrap();
         let package_id = manifest.package_id.clone();
-        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let bytes = fs::read(root.join("model-package.json")).unwrap();
         let manifest_sha = sha256_hex(&bytes);
-        fs::write(root.join("model-package.json"), bytes).unwrap();
         (manifest_sha, package_id)
     }
 
@@ -427,7 +355,7 @@ mod tests {
         assert_eq!(
             resolved.model_part_paths,
             vec![
-                dir.path().join("artifacts/primary.gguf"),
+                dir.path().join("shared/metadata.gguf"),
                 dir.path().join("artifacts/resident.gguf")
             ]
         );

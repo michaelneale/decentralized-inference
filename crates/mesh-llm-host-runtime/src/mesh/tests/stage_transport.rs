@@ -300,7 +300,7 @@ async fn package_v2_artifact_transfer_populates_empty_peer_cache_with_only_admit
     let cache = tempfile::tempdir().unwrap();
     let _cache_guard = EnvVarGuard::set("HF_HUB_CACHE", cache.path());
     let _transfer_guard = EnvVarGuard::set_str("MESH_LLM_ARTIFACT_TRANSFER", "1");
-    let (_package_dir, package_ref, manifest_sha256, package_id) =
+    let (package_dir, package_ref, manifest_sha256, package_id) =
         write_hf_package_v2_artifact_stream_package(cache.path());
     let server = make_test_node(super::NodeRole::Host { http_port: 9337 }).await?;
     let client = make_test_node(super::NodeRole::Worker).await?;
@@ -385,6 +385,16 @@ async fn package_v2_artifact_transfer_populates_empty_peer_cache_with_only_admit
     client
         .fetch_artifact_from_peer(server_id, &load, &manifest, &manifest_destination)
         .await?;
+    let carrier = crate::models::artifact_transfer::package_v2_metadata_carrier_request(
+        &peer_package,
+        &package_ref,
+        &manifest_sha256,
+    )?;
+    let carrier_destination =
+        crate::models::artifact_transfer::local_artifact_path(&peer_package, &carrier);
+    client
+        .fetch_artifact_from_peer(server_id, &load, &carrier, &carrier_destination)
+        .await?;
     let admitted = crate::models::artifact_transfer::required_admitted_stage_package_artifacts(
         &peer_package,
         &package_ref,
@@ -398,14 +408,16 @@ async fn package_v2_artifact_transfer_populates_empty_peer_cache_with_only_admit
             .fetch_artifact_from_peer(server_id, &load, artifact, &destination)
             .await?;
     }
-    assert_eq!(std::fs::read(peer_package.join("artifacts/primary.gguf"))?, b"primary");
     assert_eq!(
         std::fs::read(peer_package.join("artifacts/resident.gguf"))?,
-        b"resident"
+        std::fs::read(package_dir.join("artifacts/resident.gguf"))?
     );
+    assert!(peer_package.join("shared/metadata.gguf").is_file());
+    assert!(!peer_package.join("artifacts/primary.gguf").exists());
     assert!(!peer_package.join("artifacts/unowned.gguf").exists());
 
-    let unowned = request_for("artifacts/unowned.gguf", b"unowned");
+    let unowned_bytes = std::fs::read(package_dir.join("artifacts/unowned.gguf"))?;
+    let unowned = request_for("artifacts/unowned.gguf", &unowned_bytes);
     let (mut send, mut recv) = client
         .open_skippy_stage_mesh_stream(server_id, skippy_protocol::STAGE_STREAM_ARTIFACT_TRANSFER)
         .await?;

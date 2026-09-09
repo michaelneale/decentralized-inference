@@ -48,7 +48,15 @@ pub struct GgufTensor {
 }
 
 pub fn read_gguf_catalog(path: impl AsRef<Path>) -> Result<GgufCatalog> {
-    let path = path.as_ref();
+    read_gguf_catalog_with_mode(path.as_ref(), true)
+}
+
+/// Read a descriptor-only GGUF whose tensor payloads intentionally start at EOF.
+pub fn read_gguf_metadata_catalog(path: impl AsRef<Path>) -> Result<GgufCatalog> {
+    read_gguf_catalog_with_mode(path.as_ref(), false)
+}
+
+fn read_gguf_catalog_with_mode(path: &Path, require_tensor_payloads: bool) -> Result<GgufCatalog> {
     let file = File::open(path).with_context(|| format!("open GGUF catalog {}", path.display()))?;
     let artifact_bytes = file
         .metadata()
@@ -130,11 +138,13 @@ pub fn read_gguf_catalog(path: impl AsRef<Path>) -> Result<GgufCatalog> {
         tensor.data_offset = data_start
             .checked_add(tensor.data_offset)
             .with_context(|| format!("GGUF tensor {:?} data offset overflow", tensor.name))?;
-        ensure!(
-            tensor.data_offset < artifact_bytes,
-            "GGUF tensor {:?} starts beyond the artifact",
-            tensor.name
-        );
+        if require_tensor_payloads {
+            ensure!(
+                tensor.data_offset < artifact_bytes,
+                "GGUF tensor {:?} starts beyond the artifact",
+                tensor.name
+            );
+        }
     }
 
     Ok(GgufCatalog {

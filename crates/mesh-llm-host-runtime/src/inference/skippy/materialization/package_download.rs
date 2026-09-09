@@ -968,7 +968,7 @@ fn download_hf_package_to_local_sync(
         let manifest_v2: PackageManifestV2 =
             serde_json::from_slice(&manifest_contents).context("parse package-v2 manifest")?;
         manifest_v2
-            .validate()
+            .validate_root()
             .context("validate package-v2 manifest")?;
         let metadata_artifact = manifest_v2
             .artifact_catalog
@@ -1084,7 +1084,7 @@ fn verify_package_v2_metadata(package_dir: &Path, manifest_bytes: &[u8]) -> Resu
     let manifest: PackageManifestV2 =
         serde_json::from_slice(manifest_bytes).context("parse package-v2 manifest")?;
     manifest
-        .validate()
+        .validate_root()
         .context("validate package-v2 manifest")?;
     let computed = manifest
         .computed_package_id()
@@ -1099,7 +1099,10 @@ fn verify_package_v2_metadata(package_dir: &Path, manifest_bytes: &[u8]) -> Resu
         .iter()
         .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
         .context("package-v2 metadata artifact is absent")?;
-    verify_package_v2_artifact(package_dir, artifact)
+    verify_package_v2_artifact(package_dir, artifact)?;
+    skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, package_dir)
+        .context("resolve package-v2 metadata carrier")?;
+    Ok(())
 }
 
 fn verify_package_v2_artifact(package_dir: &Path, artifact: &PackageV2Artifact) -> Result<()> {
@@ -1150,6 +1153,9 @@ pub fn resolve_package_v2_stage_to_local(
         .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?;
     let manifest: PackageManifestV2 =
         serde_json::from_slice(&manifest_bytes).context("parse package-v2 manifest")?;
+    let manifest =
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, &package_dir)
+            .context("resolve package-v2 metadata carrier")?;
     let resolved = manifest
         .resolve_stage_admission(admission)
         .context("resolve exact package-v2 stage admission")?;
@@ -1242,6 +1248,11 @@ pub fn resolve_package_v2_full_model_to_local(
             .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
     )
     .context("parse package-v2 manifest")?;
+    let manifest = skippy_model::package_carrier::resolve_package_carrier_from_dir(
+        manifest,
+        Path::new(&local_ref),
+    )
+    .context("resolve package-v2 metadata carrier")?;
     let mut sidecars = manifest.sidecars.clone();
     sidecars.sort();
     let admission = PackageV2StageAdmissionDescriptor {

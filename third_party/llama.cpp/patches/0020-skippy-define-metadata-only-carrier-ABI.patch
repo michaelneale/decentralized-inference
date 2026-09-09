@@ -1,0 +1,40 @@
+From e9610c5ce96ead1b18114b52ed4e74322331f66c Mon Sep 17 00:00:00 2001
+From: scama <a1860575018c4680d5669dd7bc3bd356b478bccb8d42e194df46304a5e25f49a@meshllm.communities.buzz.xyz>
+Date: Wed, 9 Sep 2026 09:18:53 +1000
+Subject: [PATCH] skippy: define metadata-only carrier ABI
+
+Assisted-by: scama
+---
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index b156cb5eb..65cfa2ce8 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -46,7 +46,7 @@ extern "C" {
+ 
+ #define SKIPPY_ABI_VERSION_MAJOR 0
+ #define SKIPPY_ABI_VERSION_MINOR 1
+-#define SKIPPY_ABI_VERSION_PATCH 52
++#define SKIPPY_ABI_VERSION_PATCH 53
+ 
+ #if defined(_MSC_VER)
+ #define SKIPPY_DEPRECATED(message) __declspec(deprecated(message))
+diff --git a/include/skippy/model_package.h b/include/skippy/model_package.h
+index 22639b8f5..6ea9b395f 100644
+--- a/include/skippy/model_package.h
++++ b/include/skippy/model_package.h
+@@ -89,6 +89,13 @@ LLAMA_API enum skippy_status skippy_write_slice_gguf(
+         const char * output_path,
+         struct skippy_error ** out_error);
+ 
++/** @brief Writes complete GGUF model metadata and tensor descriptors without payload bytes. */
++LLAMA_API enum skippy_status skippy_write_gguf_metadata_from_parts(
++        const char * const * input_paths,
++        size_t input_count,
++        const char * output_path,
++        struct skippy_error ** out_error);
++
+ /** @brief Composes ordered GGUF parts into one output GGUF file. */
+ LLAMA_API enum skippy_status skippy_write_gguf_from_parts(
+         const char * const * input_paths,
+-- 
+2.50.1

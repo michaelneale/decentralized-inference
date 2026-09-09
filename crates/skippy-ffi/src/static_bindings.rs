@@ -622,6 +622,13 @@ unsafe extern "C" {
         out_error: *mut *mut Error,
     ) -> Status;
 
+    pub fn skippy_write_gguf_metadata_from_parts(
+        input_paths: *const *const c_char,
+        input_count: usize,
+        output_path: *const c_char,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
     pub fn skippy_write_gguf_from_parts(
         input_paths: *const *const c_char,
         input_count: usize,

@@ -29,7 +29,9 @@ pub use config::{
 };
 pub use devices::{BackendDevice, BackendDeviceType, backend_devices};
 pub(crate) use error::ensure_ok;
-pub use gguf_writer::{ModelInfo, SlicePlan, write_gguf_from_parts};
+pub use gguf_writer::{
+    ModelInfo, SlicePlan, write_gguf_from_parts, write_gguf_metadata_from_parts,
+};
 pub use logging::{
     LLAMA_LOG_LEVEL_DEBUG, NativeLogEvent, disable_verbose_native_logs, enable_verbose_native_logs,
     redirect_native_logs_to_file, register_filtered_native_logs, restore_native_logs,

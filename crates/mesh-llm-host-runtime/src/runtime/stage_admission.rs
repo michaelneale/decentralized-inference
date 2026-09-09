@@ -366,10 +366,9 @@ pub fn realize_native_stage_chain(
             .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
     )
     .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
-    manifest
-        .validate()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("validate package-v2 manifest")?;
+    let manifest =
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, package_dir)
+            .context("resolve package-v2 metadata carrier")?;
     let computed_package_id = manifest
         .computed_package_id()
         .context("compute package-v2 identity")?;
@@ -608,6 +607,43 @@ struct PlannerInputs {
     backend_id: CString,
 }
 
+fn planner_profiles(
+    profiles: &[StagePlannerProfile],
+) -> anyhow::Result<(Vec<CString>, Vec<skippy_ffi::StagePlannerProfileV1>)> {
+    let mut previous_profile = None;
+    let profile_ids = profiles
+        .iter()
+        .map(|profile| {
+            if previous_profile
+                .is_some_and(|previous: &str| previous >= profile.profile_id.as_str())
+            {
+                anyhow::bail!("stage planner profile IDs are not strictly sorted");
+            }
+            previous_profile = Some(profile.profile_id.as_str());
+            cstring(&profile.profile_id, "profile ID")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !profile_ids.is_empty(),
+        "stage planner profile set is empty"
+    );
+    let native_profiles = profiles
+        .iter()
+        .zip(&profile_ids)
+        .map(|(profile, id)| skippy_ffi::StagePlannerProfileV1 {
+            abi_version: skippy_ffi::STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
+            struct_size: u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerProfileV1>())
+                .expect("stage planner profile descriptor size fits u32"),
+            profile_id: id.as_ptr(),
+            n_tokens: profile.n_tokens,
+            n_sequences: profile.n_sequences,
+            n_outputs: profile.n_outputs,
+            n_recurrent_rollback_sequences: profile.n_recurrent_rollback_sequences,
+        })
+        .collect();
+    Ok((profile_ids, native_profiles))
+}
+
 impl PlannerInputs {
     fn new(
         package_dir: Option<&Path>,
@@ -623,46 +659,80 @@ impl PlannerInputs {
             .iter()
             .map(|artifact| (artifact.id.as_str(), artifact))
             .collect::<BTreeMap<_, _>>();
-        let mut source_artifacts = artifact_by_id
-            .iter()
-            .filter_map(|(id, artifact)| source_artifact_index(id).map(|index| (index, *artifact)))
-            .collect::<Vec<_>>();
-        source_artifacts.sort_by_key(|(index, _)| *index);
-        anyhow::ensure!(
-            !source_artifacts.is_empty()
-                && source_artifacts
-                    .iter()
-                    .enumerate()
-                    .all(|(expected, (actual, _))| expected == *actual),
-            "package-v2 source artifacts are not a contiguous source-00000 shard set"
-        );
-        let mut shard_paths = Vec::with_capacity(source_artifacts.len());
         let mut shard_index_by_artifact = BTreeMap::new();
-        for (index, artifact) in &source_artifacts {
-            let path = match (package_dir, explicit_shard_paths) {
-                (Some(package_dir), None) => contained_package_path(package_dir, &artifact.path)?,
-                (None, Some(paths)) => paths
-                    .get(*index)
-                    .cloned()
-                    .with_context(|| format!("direct GGUF source shard {index} is missing"))?,
-                _ => anyhow::bail!(
-                    "stage planner requires exactly one package directory or explicit shard set"
-                ),
-            };
-            anyhow::ensure!(
-                path.is_file(),
-                "stage-planning source artifact is missing: {}",
-                path.display()
-            );
-            shard_paths.push(path_cstring(&path, "stage-planning shard path")?);
-            shard_index_by_artifact.insert(artifact.id.as_str(), *index);
-        }
-        if let Some(paths) = explicit_shard_paths {
-            anyhow::ensure!(
-                paths.len() == source_artifacts.len(),
-                "direct GGUF source shard count differs from planning manifest"
-            );
-        }
+        let mut carrier_tensors = None;
+        let shard_paths = match (package_dir, explicit_shard_paths) {
+            (Some(package_dir), None) => {
+                let artifact = artifact_by_id
+                    .get(manifest.source_model.metadata_artifact_id.as_str())
+                    .with_context(|| {
+                        format!(
+                            "package-v2 metadata artifact {:?} is absent",
+                            manifest.source_model.metadata_artifact_id
+                        )
+                    })?;
+                let path = contained_package_path(package_dir, &artifact.path)?;
+                anyhow::ensure!(
+                    path.is_file(),
+                    "stage-planning metadata carrier is missing: {}",
+                    path.display()
+                );
+                let catalog = skippy_model::gguf_catalog::read_gguf_metadata_catalog(&path)
+                    .with_context(|| {
+                        format!("read stage-planning metadata carrier {}", path.display())
+                    })?;
+                let tensors = catalog
+                    .tensors
+                    .into_iter()
+                    .map(|tensor| (tensor.name.clone(), tensor))
+                    .collect::<BTreeMap<_, _>>();
+                anyhow::ensure!(
+                    tensors.len() == manifest.tensor_catalog.entries.len(),
+                    "metadata carrier and package tensor inventory sizes differ"
+                );
+                carrier_tensors = Some(tensors);
+                vec![path_cstring(&path, "stage-planning metadata carrier path")?]
+            }
+            (None, Some(paths)) => {
+                let mut source_artifacts = artifact_by_id
+                    .iter()
+                    .filter_map(|(id, artifact)| {
+                        source_artifact_index(id).map(|index| (index, *artifact))
+                    })
+                    .collect::<Vec<_>>();
+                source_artifacts.sort_by_key(|(index, _)| *index);
+                anyhow::ensure!(
+                    !source_artifacts.is_empty()
+                        && source_artifacts
+                            .iter()
+                            .enumerate()
+                            .all(|(expected, (actual, _))| expected == *actual),
+                    "direct GGUF source artifacts are not a contiguous source-00000 shard set"
+                );
+                anyhow::ensure!(
+                    paths.len() == source_artifacts.len(),
+                    "direct GGUF source shard count differs from planning manifest"
+                );
+                let mut shard_paths = Vec::with_capacity(source_artifacts.len());
+                for (index, artifact) in &source_artifacts {
+                    let path = paths
+                        .get(*index)
+                        .cloned()
+                        .with_context(|| format!("direct GGUF source shard {index} is missing"))?;
+                    anyhow::ensure!(
+                        path.is_file(),
+                        "stage-planning source artifact is missing: {}",
+                        path.display()
+                    );
+                    shard_paths.push(path_cstring(&path, "stage-planning shard path")?);
+                    shard_index_by_artifact.insert(artifact.id.as_str(), *index);
+                }
+                shard_paths
+            }
+            _ => anyhow::bail!(
+                "stage planner requires exactly one package directory or explicit shard set"
+            ),
+        };
 
         let tensor_by_id = manifest
             .tensor_catalog
@@ -687,13 +757,30 @@ impl PlannerInputs {
         for (index, tensor) in ordered_tensors.iter().enumerate() {
             let (artifact_id, data_offset, stored_length) =
                 tensor_storage(manifest, &tensor_by_id, &tensor.id)?;
-            let split_no = *shard_index_by_artifact.get(artifact_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "tensor {:?} resolves to non-source artifact {:?}",
-                    tensor.id,
-                    artifact_id
-                )
-            })?;
+            let (split_no, data_offset) = if let Some(carrier_tensors) = &carrier_tensors {
+                let carrier = carrier_tensors.get(&tensor.name).with_context(|| {
+                    format!(
+                        "tensor {:?} is absent from the metadata carrier",
+                        tensor.name
+                    )
+                })?;
+                anyhow::ensure!(
+                    carrier.ggml_type == tensor.ggml_type
+                        && carrier.dimensions == tensor.dimensions,
+                    "tensor {:?} metadata differs from the metadata carrier",
+                    tensor.name
+                );
+                (0, carrier.data_offset)
+            } else {
+                let split_no = *shard_index_by_artifact.get(artifact_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "tensor {:?} resolves to non-source artifact {:?}",
+                        tensor.id,
+                        artifact_id
+                    )
+                })?;
+                (split_no, data_offset)
+            };
             let mut dimensions = [0_i64; skippy_ffi::STAGE_PLAN_MAX_DIMS];
             anyhow::ensure!(
                 !tensor.dimensions.is_empty()
@@ -729,38 +816,7 @@ impl PlannerInputs {
             });
         }
 
-        let mut previous_profile = None;
-        let profile_ids = profiles
-            .iter()
-            .map(|profile| {
-                if previous_profile
-                    .is_some_and(|previous: &str| previous >= profile.profile_id.as_str())
-                {
-                    anyhow::bail!("stage planner profile IDs are not strictly sorted");
-                }
-                previous_profile = Some(profile.profile_id.as_str());
-                cstring(&profile.profile_id, "profile ID")
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        anyhow::ensure!(
-            !profile_ids.is_empty(),
-            "stage planner profile set is empty"
-        );
-        let profiles = profiles
-            .iter()
-            .zip(&profile_ids)
-            .map(|(profile, id)| skippy_ffi::StagePlannerProfileV1 {
-                abi_version: skippy_ffi::STAGE_PLANNER_PROFILE_V1_ABI_VERSION,
-                struct_size:
-                    u32::try_from(std::mem::size_of::<skippy_ffi::StagePlannerProfileV1>())
-                        .expect("stage planner profile descriptor size fits u32"),
-                profile_id: id.as_ptr(),
-                n_tokens: profile.n_tokens,
-                n_sequences: profile.n_sequences,
-                n_outputs: profile.n_outputs,
-                n_recurrent_rollback_sequences: profile.n_recurrent_rollback_sequences,
-            })
-            .collect();
+        let (profile_ids, profiles) = planner_profiles(profiles)?;
         Ok(Self {
             package_id: cstring(&manifest.package_id, "package ID")?,
             shard_paths,
@@ -1521,418 +1577,4 @@ fn admit_profiles(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use skippy_package_format::{
-        Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, SidecarKind, SourceFile, SourceModel,
-        Tensor, TensorCatalog, TensorIntegrity, TensorStorage,
-    };
-    use std::collections::BTreeMap;
-
-    const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    /// A minimal, self-consistent v2 manifest whose tensor catalog contains
-    /// exactly `package.tensor.a` and `package.tensor.b`.
-    fn manifest() -> PackageManifest {
-        let mut m = PackageManifest {
-            schema_version: PACKAGE_SCHEMA_VERSION,
-            package_id: String::new(),
-            model_id: "fixture/model".to_string(),
-            source_model: SourceModel {
-                sha256: DIGEST.to_string(),
-                metadata_artifact_id: "weights-a".to_string(),
-                repo: None,
-                revision: None,
-                primary_file: Some("model.gguf".to_string()),
-                canonical_ref: None,
-                distribution_id: None,
-                files: vec![SourceFile {
-                    path: "model.gguf".to_string(),
-                    byte_size: 256,
-                    sha256: DIGEST.to_string(),
-                }],
-            },
-            format: "gguf".to_string(),
-            layer_count: 16,
-            model_metadata: BTreeMap::from([(
-                "general.architecture".to_string(),
-                serde_json::Value::String("llama".to_string()),
-            )]),
-            artifact_catalog: ArtifactCatalog {
-                entries: vec![
-                    artifact("weights-a", "artifacts/source-00000.gguf", 256),
-                    artifact("weights-b", "artifacts/source-00001.gguf", 128),
-                ],
-            },
-            tensor_catalog: TensorCatalog {
-                entries: vec![
-                    tensor("package.tensor.a", "native.layer.0", "weights-a", Some(0)),
-                    tensor("package.tensor.b", "shared", "weights-b", None),
-                ],
-            },
-            sidecars: Vec::new(),
-            generation: None,
-            native_abi_version: "0.1.52".to_string(),
-            generator_version: "test".to_string(),
-            created_at_unix_secs: 1,
-        };
-        m.package_id = m.computed_package_id().unwrap();
-        m.validate().unwrap();
-        m
-    }
-
-    fn artifact(id: &str, path: &str, byte_size: u64) -> Artifact {
-        Artifact {
-            id: id.to_string(),
-            path: path.to_string(),
-            byte_size,
-            sha256: DIGEST.to_string(),
-        }
-    }
-
-    fn tensor(id: &str, name: &str, artifact_id: &str, layer_ordinal: Option<u32>) -> Tensor {
-        Tensor {
-            id: id.to_string(),
-            name: name.to_string(),
-            ggml_type: 1,
-            dimensions: vec![4, 4],
-            layer_ordinal,
-            storage: TensorStorage::Owned {
-                artifact_id: artifact_id.to_string(),
-                data_offset: 0,
-                stored_length: 32,
-                alignment: 32,
-                integrity: TensorIntegrity::ArtifactSha256,
-            },
-        }
-    }
-
-    fn planned_profile(profile_id: &str) -> PlannedStageProfile {
-        PlannedStageProfile {
-            profile_id: profile_id.to_string(),
-            graph_identity: "graph-1".to_string(),
-            profile_identity: "profile-identity-1".to_string(),
-            slice_identity: "slice-1".to_string(),
-            source_snapshot_identity: "snapshot-1".to_string(),
-            graph_configuration_id: "graph-config-1".to_string(),
-            backend_id: "backend-1".to_string(),
-        }
-    }
-
-    fn realized_profile(profile_id: &str) -> RealizedStageProfile {
-        let planned = planned_profile(profile_id);
-        RealizedStageProfile {
-            profile_id: planned.profile_id,
-            graph_identity: planned.graph_identity,
-            profile_identity: planned.profile_identity,
-            slice_identity: planned.slice_identity,
-            source_snapshot_identity: planned.source_snapshot_identity,
-            graph_configuration_id: planned.graph_configuration_id,
-            backend_id: planned.backend_id,
-            activation_imports: Vec::new(),
-            activation_exports: Vec::new(),
-            request_inputs: Vec::new(),
-            state_effects: Vec::new(),
-        }
-    }
-
-    fn planned(m: &PackageManifest, tensors: &[&str], profiles: &[&str]) -> PlannedStageAdmission {
-        PlannedStageAdmission {
-            package_id: m.package_id.clone(),
-            plan_id: "skippy-plan:v1:t0".to_string(),
-            layer_start: 0,
-            layer_end: 16,
-            resident_tensor_ids: tensors.iter().map(|t| t.to_string()).collect(),
-            sidecars: Vec::new(),
-            profiles: profiles.iter().map(|p| planned_profile(p)).collect(),
-        }
-    }
-
-    fn realized(m: &PackageManifest, tensors: &[&str], profiles: &[&str]) -> RealizedStagePlan {
-        RealizedStagePlan {
-            package_id: m.package_id.clone(),
-            plan_id: "skippy-plan:v1:t0".to_string(),
-            layer_start: 0,
-            layer_end: 16,
-            resident_tensor_ids: tensors.iter().map(|t| t.to_string()).collect(),
-            sidecars: Vec::new(),
-            profiles: profiles.iter().map(|p| realized_profile(p)).collect(),
-        }
-    }
-
-    #[test]
-    fn planned_admission_uses_manifest_topology_and_sidecar_inputs() {
-        let mut m = manifest();
-        let sidecar = Sidecar {
-            kind: skippy_package_format::SidecarKind::Mmproj,
-            artifact_id: "weights-b".to_string(),
-            name: Some("vision".to_string()),
-        };
-        m.sidecars = vec![sidecar.clone()];
-        let mut discovered = realized(&m, &["package.tensor.a"], &["decode"]);
-        discovered.package_id = "wrong-package".to_string();
-        discovered.layer_start = 99;
-        discovered.layer_end = 100;
-        discovered.sidecars.clear();
-
-        let planned = planned_admission_from_discovery(
-            &m,
-            (2, 7),
-            std::slice::from_ref(&sidecar),
-            &discovered,
-        );
-
-        assert_eq!(planned.package_id, m.package_id);
-        assert_eq!((planned.layer_start, planned.layer_end), (2, 7));
-        assert_eq!(planned.sidecars, vec![sidecar]);
-        assert_eq!(planned.plan_id, discovered.plan_id);
-        assert_eq!(planned.resident_tensor_ids, discovered.resident_tensor_ids);
-    }
-
-    #[test]
-    fn matching_plan_and_realization_is_admitted() {
-        let m = manifest();
-        let admitted = admit_stage_plan(
-            &planned(
-                &m,
-                &["package.tensor.a", "package.tensor.b"],
-                &["batched", "decode"],
-            ),
-            &realized(
-                &m,
-                &["package.tensor.a", "package.tensor.b"],
-                &["batched", "decode"],
-            ),
-            &m,
-        )
-        .expect("matching plan must admit");
-        assert_eq!(admitted.package_id, m.package_id);
-        assert_eq!(admitted.resident_tensor_ids.len(), 2);
-    }
-
-    #[test]
-    fn package_id_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.package_id = format!("sha256:{}", "1".repeat(64));
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::PackageIdMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn manifest_package_id_mismatch_fails_closed() {
-        let m = manifest();
-        // Both sides agree on a package id the manifest does not carry.
-        let mut p = planned(&m, &["package.tensor.a"], &["batched"]);
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        p.package_id = format!("sha256:{}", "2".repeat(64));
-        r.package_id = p.package_id.clone();
-        assert!(matches!(
-            admit_stage_plan(&p, &r, &m),
-            Err(StagePlanAdmissionError::ManifestResolution(
-                skippy_package_format::stage_admission::StageAdmissionError::PackageIdMismatch { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn unknown_resident_tensor_fails_closed() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.unknown"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(
-                &planned(&m, &["package.tensor.unknown"], &["batched"]),
-                &r,
-                &m
-            ),
-            Err(StagePlanAdmissionError::ManifestResolution(_))
-        ));
-    }
-
-    #[test]
-    fn plan_id_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.plan_id = "skippy-plan:v1:other".to_string();
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::PlanIdMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn layer_range_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.layer_end = 18;
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::LayerRangeMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn tensor_closure_mismatch_rejects() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.a", "package.tensor.b"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(
-                &planned(&m, &["package.tensor.a"], &["batched"]),
-                &r,
-                &m
-            ),
-            Err(StagePlanAdmissionError::TensorClosureMismatch { planned_only, realized_only })
-                if planned_only.is_empty()
-                    && realized_only == vec!["package.tensor.b".to_string()]
-        ));
-    }
-
-    #[test]
-    fn unsorted_realized_tensor_ids_reject_before_identity() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.b", "package.tensor.a"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(
-                // planned side is sorted; only the realized side is not
-                &planned(&m, &["package.tensor.a", "package.tensor.b"], &["batched"]),
-                &r,
-                &m
-            ),
-            Err(StagePlanAdmissionError::RealizedTensorIdsNotStrictlySorted { .. })
-        ));
-    }
-
-    #[test]
-    fn unsorted_planned_tensor_ids_reject_first() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.a", "package.tensor.b"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(
-                &planned(&m, &["package.tensor.b", "package.tensor.a"], &["batched"]),
-                &r,
-                &m
-            ),
-            Err(StagePlanAdmissionError::PlannedTensorIdsNotStrictlySorted { .. })
-        ));
-    }
-
-    #[test]
-    fn duplicate_realized_tensor_ids_reject() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.a", "package.tensor.a"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::RealizedTensorIdsNotStrictlySorted { .. })
-        ));
-    }
-
-    #[test]
-    fn sidecar_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.sidecars = vec![Sidecar {
-            kind: SidecarKind::Mmproj,
-            artifact_id: "weights-b".to_string(),
-            name: None,
-        }];
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::SidecarMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn profile_identity_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.profiles[0].graph_identity = "graph-2".to_string();
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::ProfileIdentityMismatch {
-                field: "graph_identity",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn profile_set_mismatch_rejects() {
-        let m = manifest();
-        let r = realized(&m, &["package.tensor.a"], &["batched"]);
-        assert!(matches!(
-            admit_stage_plan(
-                &planned(&m, &["package.tensor.a"], &["batched", "decode"]),
-                &r,
-                &m
-            ),
-            Err(StagePlanAdmissionError::ProfileSetMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn backend_identity_mismatch_rejects() {
-        let m = manifest();
-        let mut r = realized(&m, &["package.tensor.a"], &["batched"]);
-        r.profiles[0].backend_id = "backend-2".to_string();
-        assert!(matches!(
-            admit_stage_plan(&planned(&m, &["package.tensor.a"], &["batched"]), &r, &m),
-            Err(StagePlanAdmissionError::ProfileIdentityMismatch {
-                field: "backend_id",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    #[ignore = "requires SKIPPY_PACKAGE_V2_TEST_DIR and the prepared native runtime"]
-    fn realizes_and_admits_a_real_package_v2_chain() {
-        let package_dir = std::env::var_os("SKIPPY_PACKAGE_V2_TEST_DIR")
-            .map(PathBuf::from)
-            .expect("SKIPPY_PACKAGE_V2_TEST_DIR is required");
-        let admissions = realize_stage_admissions(
-            &package_dir,
-            &[(0, 16), (16, 32)],
-            &[
-                StagePlannerProfile {
-                    profile_id: "batched".to_string(),
-                    n_tokens: 8,
-                    n_sequences: 2,
-                    n_outputs: 8,
-                    n_recurrent_rollback_sequences: 0,
-                },
-                StagePlannerProfile {
-                    profile_id: "decode".to_string(),
-                    n_tokens: 1,
-                    n_sequences: 1,
-                    n_outputs: 1,
-                    n_recurrent_rollback_sequences: 0,
-                },
-                StagePlannerProfile {
-                    profile_id: "prefill".to_string(),
-                    n_tokens: 8,
-                    n_sequences: 1,
-                    n_outputs: 8,
-                    n_recurrent_rollback_sequences: 0,
-                },
-            ],
-            "skippy-graph-configuration:v1:real-package-test",
-            "skippy-backend:cpu:v1",
-        )
-        .expect("real package-v2 chain must admit");
-        assert_eq!(admissions.len(), 2);
-        assert_eq!(admissions[0].package_id, admissions[1].package_id);
-        assert_ne!(admissions[0].plan_id, admissions[1].plan_id);
-        assert!(
-            admissions
-                .iter()
-                .all(|admission| !admission.resident_tensor_ids.is_empty())
-        );
-        assert!(
-            admissions
-                .iter()
-                .all(|admission| admission.profiles.len() == 3)
-        );
-    }
-}
+mod tests;
