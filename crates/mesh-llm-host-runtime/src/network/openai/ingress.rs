@@ -940,8 +940,11 @@ async fn try_handle_moa_intercept(
         tcp_stream,
         request,
         decision.effective_model.as_deref(),
-        Some(ctx.route.targets),
-        decision.required_tokens,
+        super::moa_gateway::MoaRoutingContext {
+            targets: Some(ctx.route.targets),
+            required_tokens: decision.required_tokens,
+            affinity: ctx.route.affinity,
+        },
         route_observer,
     )
     .await;

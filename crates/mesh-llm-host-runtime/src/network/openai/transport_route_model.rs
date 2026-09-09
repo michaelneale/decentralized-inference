@@ -1,4 +1,6 @@
 use super::*;
+use crate::network::openai::routing_rank::{RankedCandidates, rank_targets_by_context};
+use crate::network::reservations::RoutingReservation;
 
 pub(crate) struct RouteModelRequestContext<'a> {
     pub(crate) required_tokens: Option<u32>,
@@ -93,9 +95,9 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     } = args;
     let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
-    let ordered_candidates =
-        order_targets_by_context(&node, model, required_tokens, &targets.candidates(model)).await;
-    let ordered_candidates = affinity.route_eligible_candidates(model, &ordered_candidates);
+    let ranked =
+        rank_targets_by_context(&node, model, required_tokens, &targets.candidates(model)).await;
+    let ordered_candidates = affinity.route_eligible_candidates(model, &ranked.ordered);
     if ordered_candidates.is_empty() {
         record_route_model_unavailable(&node, model, 0);
         let reason = no_context_eligible_target_reason(model, required_tokens);
@@ -109,19 +111,21 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     let prefix_hash = crate::network::affinity::cache_prefix_hash(request.body_json.as_ref());
     let cache_target =
         cache_target_for_request(&node, affinity, model, prefix_hash, &ordered_candidates).await;
-    let selection = crate::network::affinity::select_model_target_from_candidates(
+    let Some(ReservedModelRoute {
+        selection,
+        ordered,
+        mut reservation,
+    }) = select_and_reserve_model_route(
         targets,
-        &ordered_candidates,
+        &ranked,
         model,
         request.body_json.as_ref(),
         affinity,
         cache_target,
-    );
-    if matches!(selection.target, election::InferenceTarget::None) {
+    )
+    else {
         return send_route_model_none_target(&node, tcp_stream, model, route_observer).await;
-    }
-    let mut ordered = ordered_candidates;
-    move_target_first(&mut ordered, &selection.target);
+    };
     let total_targets = ordered.len();
     let mut state = RouteModelState {
         route_started,
@@ -134,6 +138,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
     // the identical nonce instead of letting each target's frontend mint its own.
     let forwarding_raw = request.raw.as_slice();
     for (idx, target) in ordered.into_iter().enumerate() {
+        reservation.transfer_to(&target);
         state.attempts += 1;
         let attempt_started = Instant::now();
         let retry_policy = ResponseRetryPolicy::next_target_available(idx + 1 < total_targets);
@@ -209,6 +214,58 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
         route_observer,
     )
     .await
+}
+
+struct ReservedModelRoute {
+    selection: TargetSelection,
+    ordered: Vec<election::InferenceTarget>,
+    reservation: RoutingReservation,
+}
+
+fn select_and_reserve_model_route(
+    targets: &election::ModelTargets,
+    ranked: &RankedCandidates<election::InferenceTarget>,
+    model: &str,
+    parsed_body: Option<&serde_json::Value>,
+    affinity: &AffinityRouter,
+    cache_target: Option<election::InferenceTarget>,
+) -> Option<ReservedModelRoute> {
+    // Cache lookup can await while another request cools a target. Refresh
+    // health once here, then use exactly this snapshot for selection,
+    // reservation spreading, and retries. A second filter inside selection
+    // would let the reservation undo a health decision it never saw.
+    let mut ordered = affinity.route_eligible_candidates(model, &ranked.ordered);
+    let mut selection = crate::network::affinity::select_model_target_from_eligible_candidates(
+        targets,
+        &ordered,
+        parsed_body,
+        affinity,
+        cache_target,
+    );
+    if matches!(selection.target, election::InferenceTarget::None) {
+        return None;
+    }
+    // Health policy can remove or reorder candidates, so the original
+    // equivalent run can shrink or disappear. Never let its old length admit
+    // a lower-ranked fallback.
+    let spread_limit = ordered
+        .iter()
+        .take_while(|candidate| ranked.ordered[..ranked.equivalent_prefix].contains(candidate))
+        .count();
+    let (target, reservation) = affinity.reserve_route(
+        model,
+        &ordered,
+        spread_limit,
+        &selection.target,
+        selection.affinity_applied,
+    )?;
+    selection.target = target;
+    move_target_first(&mut ordered, &selection.target);
+    Some(ReservedModelRoute {
+        selection,
+        ordered,
+        reservation,
+    })
 }
 
 fn record_route_model_unavailable(node: &mesh::Node, model: &str, attempts: usize) {
@@ -499,7 +556,154 @@ fn record_route_model_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::target_health::TargetHealthOutcome;
     use iroh::SecretKey;
+
+    #[test]
+    fn reservation_does_not_reintroduce_target_cooled_during_cache_lookup() {
+        let affinity = AffinityRouter::with_config(true, true);
+        let first = election::InferenceTarget::Local(9001);
+        let second = election::InferenceTarget::Local(9002);
+        let ranked = RankedCandidates {
+            ordered: vec![first.clone(), second.clone()],
+            equivalent_prefix: 2,
+        };
+        let (_, pressure) = affinity
+            .reserve_route("qwen", &ranked.ordered, 2, &second, true)
+            .unwrap();
+        // This is the snapshot passed to the asynchronous cache lookup.
+        let before_lookup = affinity.route_eligible_candidates("qwen", &ranked.ordered);
+        assert_eq!(before_lookup, ranked.ordered);
+        // Another request times out while that lookup is suspended.
+        affinity.record_target_outcome(Some("qwen"), &first, TargetHealthOutcome::Timeout);
+        for cache_target in [None, Some(first.clone())] {
+            let route = select_and_reserve_model_route(
+                &election::ModelTargets::default(),
+                &ranked,
+                "qwen",
+                None,
+                &affinity,
+                cache_target,
+            )
+            .unwrap();
+            assert_eq!(route.selection.target, second);
+            assert_eq!(route.ordered, vec![second.clone()]);
+            assert!(!route.selection.affinity_applied);
+            assert_eq!(affinity.stats_snapshot().reservation_active, 2);
+        }
+        drop(pressure);
+        assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+    }
+
+    #[test]
+    fn refreshed_spread_window_does_not_admit_lower_ranked_fallback() {
+        let first = election::InferenceTarget::Local(9001);
+        let second = election::InferenceTarget::Local(9002);
+        let fallback = election::InferenceTarget::Local(9003);
+        // Cover both a shortened equivalent run and one removed entirely.
+        for equivalent_prefix in [2, 1] {
+            let affinity = AffinityRouter::new();
+            let ranked = RankedCandidates {
+                ordered: vec![first.clone(), second.clone(), fallback.clone()],
+                equivalent_prefix,
+            };
+            let (_, _pressure) = affinity
+                .reserve_route("qwen", &ranked.ordered, 3, &second, true)
+                .unwrap();
+            affinity.record_target_outcome(Some("qwen"), &first, TargetHealthOutcome::Timeout);
+            let route = select_and_reserve_model_route(
+                &election::ModelTargets::default(),
+                &ranked,
+                "qwen",
+                None,
+                &affinity,
+                None,
+            )
+            .unwrap();
+            assert_eq!(route.selection.target, second);
+            assert_eq!(route.ordered, vec![second.clone(), fallback.clone()]);
+        }
+    }
+
+    #[test]
+    fn refreshed_route_preserves_healthy_cache_and_session_affinity_under_pressure() {
+        let affinity = AffinityRouter::with_config(true, true);
+        let ranked = RankedCandidates {
+            ordered: vec![
+                election::InferenceTarget::Local(9001),
+                election::InferenceTarget::Local(9002),
+            ],
+            equivalent_prefix: 2,
+        };
+        let body = serde_json::json!({"user": "same-session"});
+        for (parsed_body, cache_target) in
+            [(None, Some(ranked.ordered[0].clone())), (Some(&body), None)]
+        {
+            let select = || {
+                select_and_reserve_model_route(
+                    &election::ModelTargets::default(),
+                    &ranked,
+                    "qwen",
+                    parsed_body,
+                    &affinity,
+                    cache_target.clone(),
+                )
+                .unwrap()
+            };
+            let held = select();
+            let next = select();
+            assert!(held.selection.affinity_applied);
+            assert!(next.selection.affinity_applied);
+            assert_eq!(next.selection.target, held.selection.target);
+        }
+        assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+    }
+
+    #[test]
+    fn refreshed_route_keeps_all_cooling_availability_fallback() {
+        let affinity = AffinityRouter::new();
+        let ranked = RankedCandidates {
+            ordered: vec![
+                election::InferenceTarget::Local(9001),
+                election::InferenceTarget::Local(9002),
+            ],
+            equivalent_prefix: 2,
+        };
+        for target in &ranked.ordered {
+            affinity.record_target_outcome(Some("qwen"), target, TargetHealthOutcome::Timeout);
+        }
+        let route = select_and_reserve_model_route(
+            &election::ModelTargets::default(),
+            &ranked,
+            "qwen",
+            None,
+            &affinity,
+            None,
+        )
+        .unwrap();
+        assert!(ranked.ordered.contains(&route.selection.target));
+        assert_eq!(route.ordered.len(), 2);
+    }
+
+    #[test]
+    fn empty_refreshed_route_does_not_reserve() {
+        let affinity = AffinityRouter::new();
+        assert!(
+            select_and_reserve_model_route(
+                &election::ModelTargets::default(),
+                &RankedCandidates {
+                    ordered: vec![],
+                    equivalent_prefix: 0,
+                },
+                "qwen",
+                None,
+                &affinity,
+                Some(election::InferenceTarget::Local(9001)),
+            )
+            .is_none()
+        );
+        assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+    }
 
     async fn cache_context(
         prefix_hash: u64,
@@ -519,6 +723,7 @@ mod tests {
             target: target.clone(),
             prefix_hash: Some(prefix_hash),
             cache_target: Some(target.clone()),
+            affinity_applied: true,
         };
         let state = RouteModelState {
             route_started: Instant::now(),

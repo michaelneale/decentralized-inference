@@ -5,7 +5,7 @@ arbitrate responses with deterministic logic, manage tool call lifecycles,
 and return one coherent OpenAI-compatible response.
 
 **Crate:** `crates/mesh-mixture-of-agents/`
-**Virtual model:** `model: "mesh"` (not advertised in `/v1/models`)
+**Automatic directive:** `model: "mesh"` (`auto` is a deprecated alias; advertised when a model is available)
 **Status:** Integrated into mesh proxy, live-tested with mesh peers
 
 ---
@@ -171,6 +171,15 @@ for standalone/test use. The host runtime implements mesh-native backends:
 | `RemoteModelBackend` | HTTP-over-QUIC tunnel via `node.open_http_tunnel()` | Remote mesh peer |
 | `HttpBackend` | Plain HTTP to any URL | Standalone testing |
 
+Same-model self-fill keeps two distinct physical endpoints per committee.
+Concurrent turns at one gateway reserve the least-loaded clones within each
+leading context/throughput-equivalent tier; a slower or unknown-context clone
+does not displace an available higher-ranked clone merely because it is idle.
+Reservations last while the turn's backend references survive, including
+worker/reducer calls, and release on completion or cancellation. Self-fill
+slots do not fail over onto sibling clones. This is process-local accounting,
+not global admission, and does not change heterogeneous-model replica selection.
+
 All worker requests set `mesh_hooks: false` to prevent recursive virtual
 LLM consultations (MoA → model → hook → consult another model → ...).
 
@@ -320,7 +329,7 @@ through unchanged.
 
 | System | What it does | Relationship to MoA |
 |--------|-------------|---------------------|
-| `auto` | Routes to best single model | MoA fans out to ALL models |
+| `auto` / `mesh` | Same automatic directive | Committee-capable chat uses MoA; streaming, media, non-chat, or unavailable workers use ordinary routing |
 | Hooks (`virtual_llm.rs`) | Reactive during inference (entropy/drift/image) | MoA is proactive before inference |
 | Consult (`consult.rs`) | Single peer consultation over QUIC | MoA does parallel multi-peer |
 | Pipeline (`pipeline.rs`) | 2-model plan→execute for code tasks | Complementary, used at ingress line 279 |

@@ -1,6 +1,7 @@
 //! Prefix affinity and sticky routing helpers for inference target selection.
 
 use crate::inference::election;
+use crate::network::reservations::{RoutingReservation, RoutingReservations};
 use crate::network::target_health::{TargetHealth, TargetHealthOutcome, TargetReputationStats};
 use iroh::EndpointId;
 use mesh_llm_routing::affinity as shared_affinity;
@@ -38,10 +39,13 @@ pub struct AffinityStatsSnapshot {
     /// Legacy status compatibility paired with `learned`; permanently zero.
     pub evicted: u64,
     pub target_reputation: TargetReputationStats,
+    /// Requests currently holding an in-flight route reservation.
+    pub reservation_active: usize,
 }
 
 mesh_llm_routing::impl_affinity_stats_snapshot!(AffinityStatsSnapshot {
     target_reputation: TargetReputationStats::default(),
+    reservation_active: 0,
 });
 
 #[derive(Clone, Debug)]
@@ -76,6 +80,7 @@ pub struct AffinityRouter {
     inner: Arc<Mutex<AffinityState>>,
     prefix: Arc<shared_affinity::AffinityRouter>,
     target_health: TargetHealth,
+    reservations: RoutingReservations,
 }
 
 impl AffinityRouter {
@@ -84,6 +89,7 @@ impl AffinityRouter {
             inner: Arc::new(Mutex::new(AffinityState::default())),
             prefix: Arc::new(shared_affinity::AffinityRouter::new()),
             target_health: TargetHealth::default(),
+            reservations: RoutingReservations::default(),
         }
     }
 
@@ -96,6 +102,7 @@ impl AffinityRouter {
                 sticky_enabled,
             )),
             target_health: TargetHealth::default(),
+            reservations: RoutingReservations::default(),
         }
     }
 
@@ -106,6 +113,7 @@ impl AffinityRouter {
             self.prefix.sticky_enabled(),
         );
         stats.target_reputation = self.target_health.reputation_stats();
+        stats.reservation_active = self.reservations.active_total();
         stats
     }
 
@@ -137,6 +145,18 @@ impl AffinityRouter {
         outcome: TargetHealthOutcome,
     ) {
         self.target_health.record_outcome(model, target, outcome);
+    }
+
+    pub(crate) fn reserve_route(
+        &self,
+        model: &str,
+        candidates: &[election::InferenceTarget],
+        spread_limit: usize,
+        preferred: &election::InferenceTarget,
+        affinity_applied: bool,
+    ) -> Option<(election::InferenceTarget, RoutingReservation)> {
+        self.reservations
+            .reserve(model, candidates, spread_limit, preferred, affinity_applied)
     }
 
     /// Look up a previously-classified model name for an auto-routed session.
@@ -530,23 +550,19 @@ impl crate::mesh::Node {
     }
 }
 
-/// Select an inference target for a model request from a caller-supplied candidate
-/// list instead of pulling it from `targets`. This avoids cloning the entire
-/// `ModelTargets` when the caller has already reordered the candidates (e.g. by
-/// context capacity).
-pub fn select_model_target_from_candidates(
+/// Select from an already health-filtered snapshot. Callers that also reserve
+/// or retry targets must use this same snapshot for those decisions.
+pub(crate) fn select_model_target_from_eligible_candidates(
     targets: &election::ModelTargets,
     candidates: &[election::InferenceTarget],
-    model: &str,
     parsed_body: Option<&Value>,
     affinity: &AffinityRouter,
     cache_target: Option<election::InferenceTarget>,
 ) -> TargetSelection {
-    let eligible_candidates = affinity.route_eligible_candidates(model, candidates);
     let routing = routing_keys(parsed_body);
     shared_affinity::select_model_target_from_keys(
         targets,
-        &eligible_candidates,
+        candidates,
         &routing,
         &affinity.prefix,
         cache_target,
@@ -600,11 +616,13 @@ mod tests {
             target: target.clone(),
             prefix_hash: None,
             cache_target: None,
+            affinity_applied: false,
         };
         let prepared: PreparedTargets = PreparedTargets {
             ordered: vec![target],
             prefix_hash: selection.prefix_hash,
             cache_target: selection.cache_target,
+            affinity_applied: selection.affinity_applied,
         };
         assert_eq!(prepared.ordered.len(), 1);
     }
@@ -787,10 +805,9 @@ mod tests {
         );
         let candidates = targets.candidates("qwen");
         let cached = election::InferenceTarget::Remote(id_b);
-        let selection = select_model_target_from_candidates(
+        let selection = select_model_target_from_eligible_candidates(
             &targets,
             &candidates,
-            "qwen",
             Some(&req_a),
             &affinity,
             Some(cached.clone()),

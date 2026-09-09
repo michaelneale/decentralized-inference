@@ -3,6 +3,29 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type PromptShapeObservation = (Option<String>, Option<u64>, Option<u64>);
 
+fn mesh_request_plan(
+    model: &str,
+    target_hosts: Vec<iroh::EndpointId>,
+    affinity_applied: bool,
+) -> MeshRequestPlan {
+    mesh_request_plan_with_equivalents(model, target_hosts.len(), target_hosts, affinity_applied)
+}
+
+fn mesh_request_plan_with_equivalents(
+    model: &str,
+    equivalent_hosts: usize,
+    target_hosts: Vec<iroh::EndpointId>,
+    affinity_applied: bool,
+) -> MeshRequestPlan {
+    MeshRequestPlan {
+        effective_model: Some(model.to_string()),
+        auto_session_key: None,
+        equivalent_hosts,
+        target_hosts,
+        affinity_applied,
+    }
+}
+
 #[derive(Default)]
 struct PromptShapeSink {
     observations: std::sync::Mutex<Vec<PromptShapeObservation>>,
@@ -214,6 +237,61 @@ fn test_remote_retry_policy_only_retries_uncommitted_failures() {
     ));
 }
 
+#[test]
+fn passive_mesh_plan_spreads_overlap_and_releases_both_reservations() {
+    let first = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let second = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let plan = mesh_request_plan("test", vec![first, second], false);
+    let affinity = AffinityRouter::new();
+
+    let (first_order, first_reservation) = reserve_mesh_request_target(&plan, &affinity);
+    let (second_order, second_reservation) = reserve_mesh_request_target(&plan, &affinity);
+
+    assert_eq!(first_order, vec![first, second]);
+    assert_eq!(second_order, vec![second, first]);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 2);
+    drop(first_reservation);
+    drop(second_reservation);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+}
+
+#[test]
+fn mesh_plan_pressure_never_promotes_a_lower_throughput_ranked_host() {
+    // The fast host forms its own throughput tier (equivalent_hosts = 1).
+    // Concurrent unaffined requests must all keep the fast host first even
+    // though the slower host has zero in-flight reservations.
+    let fast = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let slow = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let plan = mesh_request_plan_with_equivalents("test", 1, vec![fast, slow], false);
+    let affinity = AffinityRouter::new();
+
+    let (first_order, first_reservation) = reserve_mesh_request_target(&plan, &affinity);
+    let (second_order, second_reservation) = reserve_mesh_request_target(&plan, &affinity);
+
+    assert_eq!(first_order, vec![fast, slow]);
+    assert_eq!(second_order, vec![fast, slow]);
+    drop(first_reservation);
+    drop(second_reservation);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+}
+
+#[test]
+fn passive_mesh_plan_keeps_affinity_authoritative_under_pressure() {
+    let first = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let second = iroh::EndpointId::from(iroh::SecretKey::generate().public());
+    let unaffined = mesh_request_plan("test", vec![first, second], false);
+    let affined = mesh_request_plan("test", vec![first, second], true);
+    let affinity = AffinityRouter::new();
+
+    let (_, pressure) = reserve_mesh_request_target(&unaffined, &affinity);
+    let (affined_order, affined_reservation) = reserve_mesh_request_target(&affined, &affinity);
+
+    assert_eq!(affined_order, vec![first, second]);
+    drop(pressure);
+    drop(affined_reservation);
+    assert_eq!(affinity.stats_snapshot().reservation_active, 0);
+}
+
 #[tokio::test]
 async fn remote_tokenizer_plan_routes_identity_model_without_context_rejection() -> Result<()> {
     let model = "acme/code-model:Q4_K_M";
@@ -329,7 +407,8 @@ async fn prefix_kill_switch_prevents_cache_evidence_reordering() -> Result<()> {
     });
     node.insert_test_peer(peer).await;
 
-    let ordered = order_mesh_target_hosts(&node, Some(model), None, &mut prepared, &affinity).await;
+    let (ordered, _) =
+        order_mesh_target_hosts(&node, Some(model), None, &mut prepared, &affinity).await;
 
     assert_eq!(ordered, vec![peer_id]);
     assert!(prepared.cache_target.is_none());

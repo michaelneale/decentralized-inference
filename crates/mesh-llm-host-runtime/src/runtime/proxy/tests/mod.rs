@@ -17,21 +17,33 @@ use tokio::sync::{oneshot, watch};
 async fn spawn_api_proxy_test_harness(
     targets: election::ModelTargets,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let (addr, handle, _) = spawn_api_proxy_test_harness_with_affinity(targets).await;
+    (addr, handle)
+}
+
+async fn spawn_api_proxy_test_harness_with_affinity(
+    targets: election::ModelTargets,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    affinity::AffinityRouter,
+) {
     let node = mesh::Node::new_for_tests(mesh::NodeRole::Worker)
         .await
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (_target_tx, target_rx) = watch::channel(targets);
+    let affinity = affinity::AffinityRouter::default();
     let handle = tokio::spawn(api_proxy(
         node,
         addr.port(),
         target_rx,
         Some(listener),
         false,
-        affinity::AffinityRouter::default(),
+        affinity.clone(),
     ));
-    (addr, handle)
+    (addr, handle, affinity)
 }
 
 async fn spawn_api_proxy_test_harness_with_contexts(
@@ -341,6 +353,43 @@ async fn spawn_status_upstream(
         let _ = stream.shutdown().await;
     });
     (port, request_rx, handle)
+}
+
+async fn spawn_held_upstream(
+    response_body: &str,
+) -> (
+    u16,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<tokio::sync::Semaphore>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let response = response_body.to_string();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let task_accepted = Arc::clone(&accepted);
+    let task_release = Arc::clone(&release);
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let response = response.clone();
+            let accepted = Arc::clone(&task_accepted);
+            let release = Arc::clone(&task_release);
+            tokio::spawn(async move {
+                let _raw = read_raw_http_request(&mut stream).await;
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _permit = release.acquire().await.expect("release semaphore");
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                stream.write_all(reply.as_bytes()).await.unwrap();
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (port, accepted, release, handle)
 }
 
 async fn spawn_streaming_upstream(

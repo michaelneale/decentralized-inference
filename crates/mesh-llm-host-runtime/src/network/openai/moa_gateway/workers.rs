@@ -117,9 +117,11 @@ pub(super) async fn build_moa_candidate_config(
     node: &mesh::Node,
     targets: Option<&election::ModelTargets>,
     required_tokens: Option<u32>,
+    affinity: &crate::network::affinity::AffinityRouter,
 ) -> moa::GatewayConfig {
     let http = reqwest::Client::new();
-    let (backends, models) = assemble_worker_pool(node, targets, required_tokens, &http).await;
+    let (backends, models) =
+        assemble_worker_pool(node, targets, required_tokens, &http, Some(affinity)).await;
 
     // Actor priority for the asymmetric tool path: best tool-caller first.
     // The actor is the one model that actually emits the tool call, so it must
@@ -239,6 +241,30 @@ fn patience_profile(public_mesh: bool) -> PatienceProfile {
             first_answer_grace: std::time::Duration::from_secs(10),
             strong_patience: std::time::Duration::from_secs(20),
         }
+    }
+}
+
+/// Keeps a physical clone reserved while any turn/backend reference survives.
+/// Self-fill slots are pinned: failure must not retry onto another slot's clone.
+pub(super) struct ReservedModelBackend {
+    pub(super) inner: std::sync::Arc<dyn moa::ModelBackend>,
+    pub(super) _reservation: crate::network::reservations::RoutingReservation,
+}
+
+#[async_trait::async_trait]
+impl moa::ModelBackend for ReservedModelBackend {
+    async fn chat_completion(
+        &self,
+        model: &str,
+        messages: &[serde_json::Value],
+        tools: Option<&serde_json::Value>,
+        max_tokens: u32,
+        timeout: std::time::Duration,
+        sampling: moa::SamplingParams,
+    ) -> Result<serde_json::Value, String> {
+        self.inner
+            .chat_completion(model, messages, tools, max_tokens, timeout, sampling)
+            .await
     }
 }
 

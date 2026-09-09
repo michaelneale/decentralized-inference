@@ -154,11 +154,13 @@ mod tests {
             target: target.clone(),
             prefix_hash: None,
             cache_target: None,
+            affinity_applied: false,
         };
         let prepared: PreparedTargets = PreparedTargets {
             ordered: vec![target],
             prefix_hash: selection.prefix_hash,
             cache_target: selection.cache_target,
+            affinity_applied: selection.affinity_applied,
         };
         assert_eq!(prepared.ordered.len(), 1);
     }

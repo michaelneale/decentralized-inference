@@ -39,7 +39,8 @@ async fn node_with_n_peers(models: &[FleetModel], count: u32) -> mesh::Node {
 async fn assemble(node: &mesh::Node) -> Vec<String> {
     let targets = election::ModelTargets::default();
     let http = reqwest::Client::new();
-    let (_backends, models) = assemble_worker_pool(node, Some(&targets), Some(13_000), &http).await;
+    let (_backends, models) =
+        assemble_worker_pool(node, Some(&targets), Some(13_000), &http, None).await;
     models.into_iter().map(|m| m.name).collect()
 }
 
@@ -92,7 +93,8 @@ async fn actor_ranking_is_bounded_at_thousand_scale() {
     let node = node_with_n_peers(&models, 3_000).await;
     let targets = election::ModelTargets::default();
     let http = reqwest::Client::new();
-    let (_backends, pool) = assemble_worker_pool(&node, Some(&targets), Some(13_000), &http).await;
+    let (_backends, pool) =
+        assemble_worker_pool(&node, Some(&targets), Some(13_000), &http, None).await;
 
     let started = Instant::now();
     let actors = compute_actor_candidates(&node, &pool).await;
@@ -211,7 +213,8 @@ async fn few_big_many_small_at_thousand_scale() {
 
         let targets = election::ModelTargets::default();
         let http = reqwest::Client::new();
-        let (_b, pool) = assemble_worker_pool(&node, Some(&targets), Some(13_000), &http).await;
+        let (_b, pool) =
+            assemble_worker_pool(&node, Some(&targets), Some(13_000), &http, None).await;
         let actors = compute_actor_candidates(&node, &pool).await;
         let first = actors
             .first()

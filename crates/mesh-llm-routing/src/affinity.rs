@@ -157,6 +157,8 @@ pub struct TargetSelection {
     pub prefix_hash: Option<u64>,
     /// Cache-evidence target used for this request, when one was available.
     pub cache_target: Option<InferenceTarget>,
+    /// Whether cache, session, or explicit prefix affinity chose the target.
+    pub affinity_applied: bool,
 }
 
 /// Remote-target ordering and cache-evidence metadata.
@@ -167,6 +169,8 @@ pub struct PreparedTargets {
     pub prefix_hash: Option<u64>,
     /// Cache-evidence target moved first, when one was available.
     pub cache_target: Option<InferenceTarget>,
+    /// Whether cache, session, or explicit prefix affinity ordered the targets.
+    pub affinity_applied: bool,
 }
 
 /// Whether prefix-only routing has been requested by the process.
@@ -294,6 +298,7 @@ pub fn select_model_target_from_keys(
             target: target.clone(),
             prefix_hash: routing.prefix_hash,
             cache_target: Some(target),
+            affinity_applied: true,
         };
     }
     if routing.prefix_hash.is_some() {
@@ -305,6 +310,7 @@ pub fn select_model_target_from_keys(
             target: ModelTargets::pick_sticky_from(candidates, session_hash),
             prefix_hash: routing.prefix_hash,
             cache_target: None,
+            affinity_applied: true,
         };
     }
 
@@ -314,6 +320,7 @@ pub fn select_model_target_from_keys(
                 target: ModelTargets::pick_sticky_from(candidates, prefix_hash),
                 prefix_hash: Some(prefix_hash),
                 cache_target: None,
+                affinity_applied: true,
             };
         }
 
@@ -323,6 +330,7 @@ pub fn select_model_target_from_keys(
                 target: ModelTargets::pick_sticky_from(candidates, sticky_hash),
                 prefix_hash: Some(prefix_hash),
                 cache_target: None,
+                affinity_applied: true,
             };
         }
 
@@ -330,6 +338,7 @@ pub fn select_model_target_from_keys(
             target: targets.pick_from(candidates),
             prefix_hash: Some(prefix_hash),
             cache_target: None,
+            affinity_applied: false,
         };
     }
 
@@ -339,6 +348,7 @@ pub fn select_model_target_from_keys(
             target: ModelTargets::pick_sticky_from(candidates, sticky_hash),
             prefix_hash: None,
             cache_target: None,
+            affinity_applied: true,
         };
     }
 
@@ -346,6 +356,7 @@ pub fn select_model_target_from_keys(
         target: targets.pick_from(candidates),
         prefix_hash: None,
         cache_target: None,
+        affinity_applied: false,
     }
 }
 
@@ -359,6 +370,7 @@ pub fn prepare_remote_targets_from_keys(
     let mut ordered: Vec<InferenceTarget> =
         hosts.iter().copied().map(InferenceTarget::Remote).collect();
     let mut cache_target = cache_target.filter(|target| ordered.contains(target));
+    let mut affinity_applied = false;
 
     if affinity.prefix_enabled()
         && let Some(target) = cache_target.as_ref()
@@ -369,6 +381,7 @@ pub fn prepare_remote_targets_from_keys(
             ordered,
             prefix_hash: routing.prefix_hash,
             cache_target,
+            affinity_applied: true,
         };
     }
     if let Some(session_hash) = routing.session_hash.filter(|_| affinity.sticky_enabled()) {
@@ -378,26 +391,31 @@ pub fn prepare_remote_targets_from_keys(
             ordered,
             prefix_hash: routing.prefix_hash,
             cache_target: None,
+            affinity_applied: true,
         };
     }
 
     if let Some(prefix_hash) = routing.prefix_hash {
         if prefix_only_enabled() {
             rotate_targets_by_hash(&mut ordered, prefix_hash);
+            affinity_applied = true;
         } else if let Some(sticky_hash) = routing.sticky_hash.filter(|_| affinity.sticky_enabled())
         {
             affinity.record_sticky_route();
             rotate_targets_by_hash(&mut ordered, sticky_hash);
+            affinity_applied = true;
         }
     } else if let Some(sticky_hash) = routing.sticky_hash.filter(|_| affinity.sticky_enabled()) {
         affinity.record_sticky_route();
         rotate_targets_by_hash(&mut ordered, sticky_hash);
+        affinity_applied = true;
     }
 
     PreparedTargets {
         ordered,
         prefix_hash: routing.prefix_hash,
         cache_target: cache_target.take(),
+        affinity_applied,
     }
 }
 

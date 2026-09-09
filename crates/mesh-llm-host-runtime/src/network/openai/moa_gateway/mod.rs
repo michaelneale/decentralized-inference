@@ -147,6 +147,13 @@ fn committee_admission(
     CommitteeAdmission::Admitted
 }
 
+/// Per-request routing inputs shared with ordinary single-model routing.
+pub struct MoaRoutingContext<'a> {
+    pub targets: Option<&'a election::ModelTargets>,
+    pub required_tokens: Option<u32>,
+    pub affinity: &'a crate::network::affinity::AffinityRouter,
+}
+
 /// Detect `model: "mesh"`, build a mesh-wide MoA config, run the turn,
 /// and write the HTTP response (JSON or SSE) directly to the stream.
 ///
@@ -166,8 +173,7 @@ pub async fn try_handle_moa(
     tcp_stream: ClientStream,
     request: &mut proxy::BufferedHttpRequest,
     effective_model: Option<&str>,
-    targets: Option<&election::ModelTargets>,
-    required_tokens: Option<u32>,
+    routing: MoaRoutingContext<'_>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> MoaDispatchResult {
     if !effective_model.is_some_and(automatic::is_directive) {
@@ -214,13 +220,20 @@ pub async fn try_handle_moa(
 
     let enable_thinking = effective_enable_thinking_for_moa(&body_json);
 
-    let Some(mut config) = admitted_gateway_config(node, targets, required_tokens).await else {
+    let Some(mut config) = admitted_gateway_config(
+        node,
+        routing.targets,
+        routing.required_tokens,
+        routing.affinity,
+    )
+    .await
+    else {
         // Zero admitted workers cannot produce a turn, so degrade through the
         // ordinary selector (which returns 503 if no model exists).
         return degrade_to_single_model(
             node,
-            targets,
-            required_tokens,
+            routing.targets,
+            routing.required_tokens,
             tcp_stream,
             request,
             route_observer,
@@ -242,6 +255,7 @@ pub async fn try_handle_moa(
 pub(in crate::network::openai) mod context_selection;
 mod pool;
 mod progress;
+mod self_fill;
 mod streaming;
 mod workers;
 
@@ -249,8 +263,9 @@ async fn admitted_gateway_config(
     node: &mesh::Node,
     targets: Option<&election::ModelTargets>,
     required_tokens: Option<u32>,
+    affinity: &crate::network::affinity::AffinityRouter,
 ) -> Option<moa::GatewayConfig> {
-    let config = build_moa_candidate_config(node, targets, required_tokens).await;
+    let config = build_moa_candidate_config(node, targets, required_tokens, affinity).await;
     let worker_count = config.models.len();
     if gateway_required(worker_count) {
         return Some(config);
