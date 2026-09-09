@@ -652,24 +652,24 @@ mod tests {
         );
     }
 
-    // --- #1668 review round: RemoteMesh / RawProxy publish pairs ---
+    // --- #1668 review round: RemoteMesh / RawProxy envelope shapes ---
     //
-    // Neither `route_missing_local_model`'s remote-mesh branch nor
-    // `try_route_plugin_model` (see `network::openai::ingress`) is economical
-    // to invoke directly in a unit test -- both need a live TCP stream and a
-    // real `mesh::Node`/`PluginManager` (see `ingress_tests`'s own comment
-    // on `plugin_route_status`). These test the pure envelope pair each call
-    // site publishes instead.
+    // Shape tests only — these call envelope constructors directly and assert
+    // on the fields they set. They do NOT invoke `route_missing_local_model`
+    // or `try_route_plugin_model`, so they would still pass if the publish
+    // calls inside those routing functions were deleted. Real end-to-end
+    // publish coverage (including both envelopes being emitted and their
+    // nonce_source values) lives in `ingress_tests::tests`.
 
-    /// `route_missing_local_model`'s remote-mesh branch publishes the same
-    /// effective/terminal pair `try_route_plugin_model` does for its own
-    /// dispatch, with `RemoteMesh` in place of `RawProxy` -- and, unlike that
-    /// path, carrying the nonce forwarded to the peer unchanged on BOTH
-    /// envelopes, not just the terminal one, so a plugin observing only the
-    /// effective event already knows what a later client ack must sign over.
-    /// `capsule_id` stays absent on both: this node mints nothing here.
+    /// Verifies the envelope constructor shape for the RemoteMesh effective +
+    /// terminal pair: both envelopes carry `RemoteMesh` dispatch path, the
+    /// nonce and nonce_source are threaded onto both, and `capsule_id` is
+    /// absent on both (this node mints nothing on the remote-mesh path).
+    ///
+    /// // Shape test only — does not invoke the routing function.
+    /// // Real publish coverage is in ingress_tests::tests.
     #[tokio::test]
-    async fn remote_mesh_branch_publishes_effective_and_terminal_with_the_forwarded_nonce() {
+    async fn envelope_shape_remote_mesh_effective_and_terminal_carry_nonce_fields() {
         let channel = RecordingChannel::default();
         let nonce = Some("6d7d8d2e-3f4a-4b5c-8d9e-0a1b2c3d4e5f".to_string());
         let nonce_source = Some(ClientNonceSource::ClientSupplied);
@@ -716,14 +716,16 @@ mod tests {
         assert!(events[1].capsule_id.is_none());
     }
 
-    /// The sibling of the test above for `try_route_plugin_model`'s own
-    /// effective/terminal pair (`RawProxy`) -- the pattern the remote-mesh
-    /// branch mirrors, previously uncovered at this level for the same
-    /// "not economical to invoke directly" reason. No marker exists on this
-    /// path (it never runs through `openai-frontend`'s `OpenAiHookPolicy`),
-    /// so nonce/nonce_source/capsule_id all stay absent on both envelopes.
+    /// Verifies the envelope constructor shape for the RawProxy effective +
+    /// terminal pair: both envelopes carry `RawProxy` dispatch path, and
+    /// nonce/nonce_source/capsule_id are all absent (the raw-proxy path never
+    /// runs through `openai-frontend`'s `OpenAiHookPolicy`, so no marker is
+    /// minted).
+    ///
+    /// // Shape test only — does not invoke the routing function.
+    /// // Real publish coverage is in ingress_tests::tests.
     #[tokio::test]
-    async fn raw_proxy_plugin_route_publishes_effective_and_terminal_without_a_marker() {
+    async fn envelope_shape_raw_proxy_effective_and_terminal_have_no_marker() {
         let channel = RecordingChannel::default();
 
         channel
