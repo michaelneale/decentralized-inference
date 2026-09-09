@@ -51,6 +51,12 @@ class AgenticReplayTest(unittest.TestCase):
             ],
         )
 
+    def test_single_ref_supports_absolute_measurement(self) -> None:
+        with mock.patch.object(BENCH, "git", return_value="a" * 40):
+            specs = BENCH.parse_ref_specs(REPO, ["main=HEAD"])
+
+        self.assertEqual(specs, [BENCH.RefSpec("main", "HEAD", "a" * 40)])
+
     def test_trajectory_replay_uses_recorded_history_in_strict_turn_order(self) -> None:
         trajectory = {
             "session_id": "session-1",
@@ -722,6 +728,7 @@ class AgenticReplayTest(unittest.TestCase):
                 "prompt_tokens": 100,
                 "cached_tokens": 50,
                 "requested_output_tokens": 10,
+                "finish_reason": "length",
                 "request_id": "request-1",
                 "content_sha256": "a" * 64,
             },
@@ -736,6 +743,7 @@ class AgenticReplayTest(unittest.TestCase):
                 "prompt_tokens": 100,
                 "cached_tokens": 100,
                 "requested_output_tokens": 10,
+                "finish_reason": "stop",
                 "request_id": "request-2",
                 "content_sha256": "b" * 64,
             },
@@ -746,6 +754,7 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(summary["successful_requests"], 2)
         self.assertEqual(summary["failed_request_ids"], [])
         self.assertEqual(summary["budget_exhausted_requests"], 2)
+        self.assertEqual(summary["finish_reason_length_requests"], 1)
         self.assertEqual(summary["agent_steps_per_second"], 0.5)
         self.assertEqual(summary["workload_output_tokens_per_second"], 5)
         self.assertEqual(summary["decode_tokens_per_second"], 5)

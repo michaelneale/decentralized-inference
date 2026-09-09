@@ -89,6 +89,9 @@ def build_rows(
             1000.0 * s for c in group for s in c.get("ttft_samples", [])
         )
         cache_pcts = [c["cache_pct"] for c in group if c.get("cache_pct") is not None]
+        finish_reason_length = sum(
+            int(c.get("finish_reason_length_requests", 0)) for c in group
+        )
         newest = max(c["_mtime"] for c in group)
 
         def mean_or_none(values: list[float]) -> float | None:
@@ -144,9 +147,17 @@ def build_rows(
                     ttft_ms[int(0.9 * (len(ttft_ms) - 1))] if ttft_ms else 0.0
                 ),
                 "cache_hit_pct": mean_or_none(cache_pcts),
-                "finish_reason_length_pct": None,
-                "complete": failed == 0 and requests > 0,
-                "artifact_result": "ok" if failed == 0 else "incomplete",
+                "finish_reason_length_pct": (
+                    100.0 * finish_reason_length / successful if successful else None
+                ),
+                "complete": (
+                    requests > 0 and failed == 0 and successful + failed == requests
+                ),
+                "artifact_result": (
+                    "ok"
+                    if requests > 0 and failed == 0 and successful + failed == requests
+                    else "incomplete"
+                ),
             }
         )
     return rows
@@ -171,7 +182,8 @@ def compare(row: dict[str, Any], prior: list[dict[str, Any]]) -> list[str]:
     if not row["complete"]:
         problems.append(
             f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
-            f"incomplete run ({row['failed_requests']} failed)"
+            f"incomplete run ({row['successful_requests']} successful, "
+            f"{row['failed_requests']} failed, {row['prompt_count']} expected)"
         )
         return problems
     prior = [
@@ -188,10 +200,20 @@ def compare(row: dict[str, Any], prior: list[dict[str, Any]]) -> list[str]:
         ("end_to_end_tokens_per_second", 1.0),
         ("ttft_ms_mean", -1.0),
         ("ttft_ms_p90", -1.0),
+        ("finish_reason_length_pct", -1.0),
     )
     for metric, direction in metrics:
-        base = statistics.median(r[metric] for r in prior[-BASELINE_MIN_RUNS:])
+        values = [
+            r.get(metric)
+            for r in prior[-BASELINE_MIN_RUNS:]
+            if isinstance(r.get(metric), (int, float))
+        ]
+        if len(values) < BASELINE_MIN_RUNS:
+            continue
+        base = statistics.median(values)
         candidate = row[metric]
+        if not isinstance(candidate, (int, float)):
+            continue
         if base == 0:
             # Zero baseline median (e.g. no TTFT samples): only the absolute
             # tolerance can fire; the percentage is undefined.
@@ -231,7 +253,12 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict[str, Any]] = []
     for model in matrix["models"]:
-        cells = load_cells(args.replay_dir, model["family"], args.label)
+        validate_model_pin(model)
+        try:
+            cells = load_cells(args.replay_dir, model["family"], args.label)
+        except FileNotFoundError as error:
+            print(f"warning: {error}", file=sys.stderr)
+            continue
         rows.extend(
             build_rows(
                 cells,
@@ -249,24 +276,28 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
 
     problems: list[str] = []
+    if not rows:
+        problems.append("no replay history rows were produced")
+    baseline: dict[str, list[dict[str, Any]]] = {}
     if args.baseline and args.baseline.is_dir():
         baseline = load_baseline(args.baseline)
-        for row in rows:
-            prior = [
-                r for r in baseline.get(baseline_key(row), [])
-                # Keep the benchmark shape stable here. compare() separately
-                # requires the same model digest while allowing source SHA to
-                # change between the baseline and candidate.
-                if r.get("replay", {}).get("trajectories_per_framework")
-                == row["replay"].get("trajectories_per_framework")
-                and r.get("replay", {}).get("passes") == row["replay"].get("passes")
-            ]
-            problems.extend(compare(row, prior))
+    for row in rows:
+        prior = [
+            r for r in baseline.get(baseline_key(row), [])
+            # Keep the benchmark shape stable here. compare() separately
+            # requires the same model digest while allowing source SHA to
+            # change between the baseline and candidate.
+            if r.get("replay", {}).get("trajectories_per_framework")
+            == row["replay"].get("trajectories_per_framework")
+            and r.get("replay", {}).get("passes") == row["replay"].get("passes")
+        ]
+        problems.extend(compare(row, prior))
     if problems:
         print("regressions detected:", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
-        if args.gate:
+        integrity_failed = not rows or any(not row["complete"] for row in rows)
+        if integrity_failed or args.gate:
             return 1
     print(f"wrote {len(rows)} history rows to {args.output}")
     return 0

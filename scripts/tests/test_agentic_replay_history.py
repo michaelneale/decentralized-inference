@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -57,6 +58,88 @@ def make_row(
 
 
 class GateTests(unittest.TestCase):
+    def test_build_rows_marks_dropped_request_and_reports_length_finishes(self):
+        cell = {
+            "_mtime": history.dt.datetime(2026, 9, 9),
+            "concurrency": 1,
+            "requests": 2,
+            "successful_requests": 1,
+            "failed_requests": 0,
+            "completion_tokens": 10,
+            "generation_seconds": 1.0,
+            "workload_window_seconds": 2.0,
+            "ttft_samples": [0.1],
+            "cache_pct": 50.0,
+            "finish_reason_length_requests": 1,
+        }
+
+        row = history.build_rows(
+            [cell],
+            model=make_row("2026-09-09")["model"],
+            replay={"passes": 2},
+            hardware={"machine_model": "runner"},
+            source_sha="a" * 40,
+            backend_binary_sha256=None,
+        )[0]
+
+        self.assertFalse(row["complete"])
+        self.assertEqual(row["artifact_result"], "incomplete")
+        self.assertEqual(row["finish_reason_length_pct"], 100.0)
+
+    def test_incomplete_bootstrap_run_fails_without_regression_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix = root / "matrix.json"
+            replay = root / "replay.json"
+            hardware = root / "hardware.json"
+            output = root / "history.jsonl"
+            cell = root / "artifacts/qwen25-coder-14b/data/pass-1/pr/c-1.json"
+            cell.parent.mkdir(parents=True)
+            matrix.write_text(
+                json.dumps({"models": [make_row("2026-09-09")["model"]]}),
+                encoding="utf-8",
+            )
+            replay.write_text(json.dumps({"passes": 1}), encoding="utf-8")
+            hardware.write_text(
+                json.dumps({"machine_model": "runner"}), encoding="utf-8"
+            )
+            cell.write_text(
+                json.dumps(
+                    {
+                        "concurrency": 1,
+                        "requests": 2,
+                        "successful_requests": 1,
+                        "failed_requests": 0,
+                        "completion_tokens": 1,
+                        "generation_seconds": 1.0,
+                        "workload_window_seconds": 1.0,
+                        "ttft_samples": [0.1],
+                        "cache_pct": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = history.main(
+                [
+                    "--matrix",
+                    str(matrix),
+                    "--replay-dir",
+                    str(root / "artifacts"),
+                    "--hardware",
+                    str(hardware),
+                    "--source-sha",
+                    "a" * 40,
+                    "--replay",
+                    str(replay),
+                    "--output",
+                    str(output),
+                ]
+            )
+
+            self.assertEqual(result, 1)
+            self.assertTrue(output.is_file())
+
     def test_history_rejects_unpinned_model(self):
         model = make_row("2026-09-09")["model"]
         model["sha256"] = None
@@ -89,6 +172,17 @@ class GateTests(unittest.TestCase):
     def test_incomplete_run_always_flags(self):
         problems = history.compare(make_row("2026-09-09", complete=False), [])
         self.assertTrue(problems)
+
+    def test_finish_reason_length_regression_is_gateable(self):
+        baseline = [make_row(f"2026-09-0{d}") for d in (1, 2, 3)]
+        for row in baseline:
+            row["finish_reason_length_pct"] = 0.0
+        candidate = make_row("2026-09-09")
+        candidate["finish_reason_length_pct"] = 5.0
+
+        problems = history.compare(candidate, baseline)
+
+        self.assertTrue(any("finish_reason_length_pct" in p for p in problems), problems)
 
     def test_baseline_with_other_model_sha_does_not_count_toward_bootstrap(self):
         other = make_row("2026-09-01")

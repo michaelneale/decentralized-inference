@@ -9,7 +9,6 @@ on:
 # accepted only from main so caller-selected content never reaches micstudio.
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: agentic-replay-nightly
@@ -124,23 +123,39 @@ jobs:
           LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
           LEVEL_ARGS=()
           for level in $LEVELS; do LEVEL_ARGS+=(--concurrency "$level"); done
-          DATASET_FILE="${MESH_AGENTIC_REPLAY_DATASET_FILE:-}"
-          if [[ -z "$DATASET_FILE" ]]; then
-            DATASET_FILE=$(find -L \
-              "$HF_HUB_CACHE/datasets--thoughtworks--agentic-coding-trajectories/snapshots" \
-              -mindepth 2 -maxdepth 2 -type f -name sessions.parquet -print -quit \
-              2>/dev/null || true)
-          fi
-          if [[ -z "$DATASET_FILE" ]]; then
-            echo "sessions.parquet not found in the HF cache" >&2
-            exit 1
-          fi
+          IFS=$'\t' read -r DATASET_ID DATASET_REVISION DATASET_RELATIVE_PATH DATASET_SHA256 < <(
+            python3 - "$MATRIX_FILE" <<'PY'
+          import json, pathlib, re, sys
+          replay = json.loads(pathlib.Path(sys.argv[1]).read_text())["replay"]
+          revision = replay.get("dataset_revision", "")
+          digest = replay.get("dataset_sha256", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", revision):
+              raise SystemExit("dataset_revision must be an immutable 40-hex commit")
+          if not re.fullmatch(r"[0-9a-f]{64}", digest):
+              raise SystemExit("dataset_sha256 must be a 64-hex digest")
+          print("\t".join((replay["dataset"], revision, replay["dataset_file"], digest)))
+          PY
+          )
+          DATASET_FILE=$(HF_HUB_OFFLINE=0 hf download "$DATASET_ID" "$DATASET_RELATIVE_PATH" \
+            --repo-type dataset --revision "$DATASET_REVISION")
+          python3 - "$DATASET_FILE" "$DATASET_SHA256" <<'PY'
+          import hashlib, pathlib, sys
+          path, expected = pathlib.Path(sys.argv[1]), sys.argv[2]
+          digest = hashlib.sha256()
+          with path.open("rb") as dataset_file:
+              for chunk in iter(lambda: dataset_file.read(8 * 1024 * 1024), b""):
+                  digest.update(chunk)
+          actual = digest.hexdigest()
+          if actual != expected:
+              raise SystemExit(f"dataset SHA-256 mismatch: expected={expected} actual={actual}")
+          print(f"verified replay dataset: {actual}")
+          PY
+          echo "DATASET_FILE=$DATASET_FILE" >> "$GITHUB_ENV"
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
             if ! python3 evals/agentic-replay.py run \
-                --ref main=origin/main \
-                --ref pr=HEAD \
+                --ref main=HEAD \
                 --model "$model_uri" \
                 --backend metal \
                 --trajectories-per-framework 8 \
@@ -167,7 +182,7 @@ jobs:
           fi
           # Only a genuinely missing dataset is a bootstrap run; auth,
           # permission, and network failures must fail loudly.
-          python3 - "$DATASET_REPO" <<'PY' > "$RUNNER_TEMP/repo-exists.out" 2>&1
+          if HF_HUB_OFFLINE=0 python3 - "$DATASET_REPO" <<'PY' > "$RUNNER_TEMP/repo-exists.out" 2>&1; then
           import os, sys
           import huggingface_hub
           repo = sys.argv[1]
@@ -179,7 +194,10 @@ jobs:
                   sys.exit(3)
               sys.exit(1)
           PY
-          rc=$?
+            rc=0
+          else
+            rc=$?
+          fi
           if [[ "$rc" == "0" ]]; then
             echo "history dataset exists but download failed:" >&2
             cat "$RUNNER_TEMP/hf-download.err" >&2; cat "$RUNNER_TEMP/repo-exists.out" >&2
@@ -232,7 +250,7 @@ jobs:
           python3 scripts/agentic-replay-history.py "${args[@]}"
 
       - name: Publish immutable run shard and card
-        if: ${{ !cancelled() && steps.history.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.history.outcome == 'success' }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |

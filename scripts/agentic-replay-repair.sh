@@ -14,12 +14,22 @@ git config user.name "mesh-replay-bot"
 git config user.email "replay-bot@meshllm.invalid"
 git checkout -b "$BRANCH"
 
+# Repair evidence and downloaded history are inputs, never source changes.
+REPO_ROOT=$(git rev-parse --show-toplevel)
+EXCLUDE_FILE=$(git rev-parse --git-path info/exclude)
+for artifact_root in "$OUTPUT_DIR" "${HISTORY_LOCAL:-$REPO_ROOT/.replay-history-cache}"; do
+  if [[ "$artifact_root" == "$REPO_ROOT/"* ]]; then
+    relative_root=${artifact_root#"$REPO_ROOT/"}
+    printf '/%s/\n' "${relative_root%/}" >> "$EXCLUDE_FILE"
+  fi
+done
+
 # 1. opencode analyzes the regression evidence and attempts a fix. It must not
 # see GitHub credentials.
 env -u GH_TOKEN -u GITHUB_TOKEN opencode run --mode agent \
   "The nightly agentic replay benchmark on micstudio regressed. Evidence: $OUTPUT_DIR/summary/history.jsonl and per-model artifacts in $OUTPUT_DIR. Analyze the regression, identify the offending change (git log origin/main is available), and attempt a minimal fix. Do not touch ci/agentic-replay-nightly baselines or thresholds." || true
 
-if git diff --quiet; then
+if [[ -z "$(git status --porcelain --untracked-files=all)" ]]; then
   echo "opencode produced no changes — needs-attention" >&2
   git commit --allow-empty -m "chore: agentic replay nightly regression needs attention (run ${GITHUB_RUN_ID:-local})
 
@@ -33,13 +43,20 @@ Attempted automated repair by opencode from nightly run evidence.
 
 Co-authored-by: opencode <opencode@meshllm.invalid>"
 
-  # 2. Re-run the benchmark on the repaired tree, then re-normalize + gate
-  # from the repaired summaries (single pass, gate armed).
+  # 2. Re-run the benchmark on the repaired tree with the nightly benchmark
+  # shape, then re-normalize and gate the repaired summaries.
   LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('ci/agentic-replay-nightly/matrix.json'))['replay']['concurrency'])))")
-  LEVEL_ARGS=""
-  for level in $LEVELS; do LEVEL_ARGS="$LEVEL_ARGS --concurrency $level"; done
+  LEVEL_ARGS=()
+  for level in $LEVELS; do LEVEL_ARGS+=(--concurrency "$level"); done
+  PASSES=$(python3 -c "import json;print(json.load(open('ci/agentic-replay-nightly/matrix.json'))['replay']['passes'])")
+  REPLAY_DATASET_FILE="${DATASET_FILE:-${MESH_AGENTIC_REPLAY_DATASET_FILE:-}}"
   RERUN_FAILED=0
+  if [[ -z "$REPLAY_DATASET_FILE" ]]; then
+    echo "replay dataset file is unavailable — needs-attention" >&2
+    RERUN_FAILED=1
+  fi
   for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models']))"); do
+    if [[ "$RERUN_FAILED" == "1" && -z "$REPLAY_DATASET_FILE" ]]; then break; fi
     model_uri=$(python3 -c "import json;m=[m for m in json.load(open('ci/agentic-replay-nightly/matrix.json'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
     python3 evals/agentic-replay.py run \
       --ref fixed=HEAD \
@@ -47,22 +64,27 @@ Co-authored-by: opencode <opencode@meshllm.invalid>"
       --model "$model_uri" \
       --backend metal \
       --trajectories-per-framework 8 \
-      $LEVEL_ARGS \
-      --passes 1 \
+      "${LEVEL_ARGS[@]}" \
+      --passes "$PASSES" \
       --warmup-turns 4 \
-      --dataset-file "${MESH_AGENTIC_REPLAY_DATASET_FILE:-}" \
+      --dataset-file "$REPLAY_DATASET_FILE" \
       --output "$OUTPUT_DIR/repair/$family" || RERUN_FAILED=1
   done
-  if [[ "$RERUN_FAILED" == "0" ]] && python3 scripts/agentic-replay-history.py \
-      --matrix ci/agentic-replay-nightly/matrix.json \
-      --replay-dir "$OUTPUT_DIR/repair" \
-      --label fixed \
-      --hardware "$OUTPUT_DIR/hardware.json" \
-      --source-sha "$(git rev-parse HEAD)" \
-      --replay ci/agentic-replay-nightly/matrix.json \
-      --output "$OUTPUT_DIR/summary/history-repair.jsonl" \
-      $( [[ -d .replay-history-cache/data/runs ]] && echo --baseline .replay-history-cache/data/runs ) \
-      --gate; then
+  HISTORY_ARGS=(
+    --matrix ci/agentic-replay-nightly/matrix.json
+    --replay-dir "$OUTPUT_DIR/repair"
+    --label fixed
+    --hardware "$OUTPUT_DIR/hardware.json"
+    --source-sha "$(git rev-parse HEAD)"
+    --replay <(python3 -c "import json;print(json.dumps(json.load(open('ci/agentic-replay-nightly/matrix.json'))['replay']))")
+    --output "$OUTPUT_DIR/summary/history-repair.jsonl"
+    --gate
+  )
+  HISTORY_RUNS="${HISTORY_LOCAL:-$REPO_ROOT/.replay-history-cache}/data/runs"
+  if [[ -d "$HISTORY_RUNS" ]]; then
+    HISTORY_ARGS+=(--baseline "$HISTORY_RUNS")
+  fi
+  if [[ "$RERUN_FAILED" == "0" ]] && python3 scripts/agentic-replay-history.py "${HISTORY_ARGS[@]}"; then
     RESOLVED=1
   fi
 fi

@@ -10,6 +10,9 @@
   "replay": {
     "mode": "checkpoint",
     "dataset": "thoughtworks/agentic-coding-trajectories",
+    "dataset_revision": "cef72d1f4d0caabf85937adf8337a14b7522c782",
+    "dataset_file": "sessions.parquet",
+    "dataset_sha256": "3dd8ec3546cf771ce4ab2ac6c51ccefdd621197fa997a2cefb430b50df808fb6",
     "trajectories_per_framework": 8,
     "passes": 2,
     "warmup_turns": 4,
