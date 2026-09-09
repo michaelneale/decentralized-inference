@@ -195,9 +195,7 @@ pub(in crate::network::openai::response) async fn relay_success_response<R: Asyn
                     MESH_SERVED_BY_HEADER,
                     served_by,
                 );
-                outgoing_end = outgoing_end
-                    .checked_add_signed(delta)
-                    .expect("served-by splice delta must keep outgoing_end in bounds");
+                outgoing_end = outgoing_end.saturating_add_signed(delta);
             }
             // Reads may include bytes beyond the declared HTTP body. Only the
             // declared response is client-visible and capturable.

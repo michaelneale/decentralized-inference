@@ -69,8 +69,10 @@ pub(in crate::network::openai::response) fn append_mesh_served_by_header(
 /// canonicalize to one value instead of appending a second.
 fn remove_existing_header(buf: &mut Vec<u8>, header_end: usize, name: &str) -> usize {
     let mut offset = 0usize;
-    while offset < header_end {
-        let Some(rel) = buf[offset..header_end]
+    let mut total_removed = 0usize;
+    while offset < header_end.saturating_sub(total_removed) {
+        let remaining_end = header_end - total_removed;
+        let Some(rel) = buf[offset..remaining_end]
             .windows(2)
             .position(|w| w == b"\r\n")
         else {
@@ -84,11 +86,13 @@ fn remove_existing_header(buf: &mut Vec<u8>, header_end: usize, name: &str) -> u
         if is_match {
             let removed = line_end - offset;
             buf.drain(offset..line_end);
-            return removed;
+            total_removed += removed;
+            // don't advance offset — the next line now starts at the same offset
+        } else {
+            offset = line_end;
         }
-        offset = line_end;
     }
-    0
+    total_removed
 }
 
 /// Splice a `name: value` header line into an already-buffered raw HTTP

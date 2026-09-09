@@ -26,8 +26,9 @@ pub use super::request_parse::{
 };
 pub(crate) use super::response::{
     PipelineCapsuleNonce, PipelineProxyResult, append_safe_header, pipeline_proxy_local,
-    send_400_observed, send_503_observed, send_error_observed, send_json_ok_with_headers,
-    send_json_with_status_and_headers_observed, send_models_list_with_descriptors,
+    send_400_observed, send_409_observed, send_503_observed, send_error_observed,
+    send_json_ok_with_headers, send_json_with_status_and_headers_observed,
+    send_models_list_with_descriptors,
 };
 pub(crate) use super::routing_rank::{
     capabilities_for_model, descriptor_metadata_for_model, request_budget_tokens_from_parts,

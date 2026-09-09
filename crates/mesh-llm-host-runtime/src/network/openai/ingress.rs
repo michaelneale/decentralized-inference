@@ -1257,11 +1257,24 @@ async fn enforce_mesh_routing_headers_before_dispatch(
         return Ok(tcp_stream);
     }
     match mesh_routing_unsupported_dispatch_kind(request, decision, routing_model) {
-        Some(kind) => Err(response_outcome(
-            400,
-            proxy::send_400_observed(
+        Some("multi-agent orchestration") => Err(response_outcome(
+            409,
+            proxy::send_409_observed(
                 tcp_stream,
-                &format!("routing headers not supported for this dispatch ({kind})"),
+                "x-mesh-target/x-mesh-exclude are not honored when the requested model is \
+                 \"mesh\" (multi-agent orchestration); if the fleet degraded to a specific \
+                 model, retry with that model name and the routing header",
+                route_observer,
+            )
+            .await,
+        )),
+        Some(kind) => Err(response_outcome(
+            409,
+            proxy::send_409_observed(
+                tcp_stream,
+                &format!(
+                    "routing headers present but this dispatch does not support them ({kind})"
+                ),
                 route_observer,
             )
             .await,
@@ -1270,25 +1283,15 @@ async fn enforce_mesh_routing_headers_before_dispatch(
     }
 }
 
-/// The pre-dispatch gates every ingress path shares: reject legacy/
-/// control-plane requests before ordinary routing ever sees them, then apply
-/// activity-policy admission to whatever remains. Consolidated into one
-/// stage returning a single `Result` so the caller matches on it once
-/// instead of twice.
+/// Apply activity-policy admission to an inference request that has already
+/// passed the control-plane gate. Returns the stream to continue dispatch, or
+/// an outcome (already written to the stream) when admission is denied.
 async fn admit_buffered_api_request(
     tcp_stream: ClientStream,
-    request: &proxy::BufferedHttpRequest,
     ctx: &ProxyConnectionContext<'_>,
     ingress_type: crate::runtime::IngressType,
     lifecycle: &OpenAiLifecycleAttachment,
 ) -> Result<ClientStream, proxy::RouteDispatchOutcome> {
-    let tcp_stream =
-        match maybe_handle_control_request(tcp_stream, request, ctx, lifecycle.route_observer())
-            .await
-        {
-            Ok(outcome) => return Err(outcome),
-            Err(tcp_stream) => tcp_stream,
-        };
     check_activity_admission(
         tcp_stream,
         &ctx.route.node.activity_policy_guard,
@@ -1409,6 +1412,7 @@ async fn try_handle_moa_intercept(
 /// dispatch. Each stage either hands the stream to the next one or writes a
 /// terminal response and returns -- this function owns the single terminal
 /// lifecycle event for the request no matter which stage ends it.
+#[allow(clippy::cognitive_complexity)]
 async fn handle_buffered_api_request(
     tcp_stream: ClientStream,
     mut request: proxy::BufferedHttpRequest,
@@ -1444,26 +1448,31 @@ async fn handle_buffered_api_request(
         }
     }
 
+    let tcp_stream =
+        match maybe_handle_control_request(tcp_stream, &request, &ctx, lifecycle.route_observer())
+            .await
+        {
+            Ok(outcome) => {
+                lifecycle.terminal(terminal_outcome_for_dispatch(outcome));
+                return;
+            }
+            Err(tcp_stream) => tcp_stream,
+        };
+
     let local_models = ctx.route.node.models_being_served().await;
     let callable = callable_models_with_local_served(ctx.route.targets, local_models);
     let descriptors = ctx.route.node.all_served_model_descriptors().await;
     proxy::rewrite_public_model_alias(&mut request, &callable, &descriptors);
 
-    let tcp_stream = match admit_buffered_api_request(
-        tcp_stream,
-        &request,
-        &ctx,
-        ingress_type,
-        &lifecycle,
-    )
-    .await
-    {
-        Ok(stream) => stream,
-        Err(outcome) => {
-            lifecycle.terminal(terminal_outcome_for_dispatch(outcome));
-            return;
-        }
-    };
+    // Admission applies to inference work after control-path rejection.
+    let tcp_stream =
+        match admit_buffered_api_request(tcp_stream, &ctx, ingress_type, &lifecycle).await {
+            Ok(stream) => stream,
+            Err(outcome) => {
+                lifecycle.terminal(terminal_outcome_for_dispatch(outcome));
+                return;
+            }
+        };
 
     let decision = match prepare_auto_route_decision(&mut request, &ctx.route, &descriptors).await {
         Ok(decision) => decision,

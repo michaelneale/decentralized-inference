@@ -719,12 +719,18 @@ mod tests {
         let events = channel.events.lock().unwrap();
         assert_eq!(events.len(), 2, "one effective-request, one terminal");
 
-        assert_eq!(events[0].dispatch_path, OpenAiExchangeDispatchPath::RawProxy);
+        assert_eq!(
+            events[0].dispatch_path,
+            OpenAiExchangeDispatchPath::RawProxy
+        );
         assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
         assert!(events[0].nonce.is_none());
         assert!(events[0].capsule_id.is_none());
 
-        assert_eq!(events[1].dispatch_path, OpenAiExchangeDispatchPath::RawProxy);
+        assert_eq!(
+            events[1].dispatch_path,
+            OpenAiExchangeDispatchPath::RawProxy
+        );
         assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
         assert_eq!(events[1].exchange_id, events[0].exchange_id);
         assert_eq!(events[1].status, Some(200));
