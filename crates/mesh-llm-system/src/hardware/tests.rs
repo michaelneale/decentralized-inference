@@ -378,6 +378,81 @@ fn test_hydrate_gpu_facts_uses_uuid_and_cuda_for_tegra_soc() {
     assert!(survey.gpus[0].unified_memory);
 }
 
+// Snapshot: when no collector set gpu_name, the placeholder "GPU {index}"
+// join that backfills it is unchanged by this PR; gpu_name_source labels it
+// Unknown so nothing downstream mistakes a placeholder for real hardware.
+#[test]
+fn test_hydrate_gpu_facts_backfill_tags_unknown_gpu_name_source() {
+    let mut survey = HardwareSurvey {
+        gpu_count: 2,
+        gpu_vram: vec![8_000_000_000, 8_000_000_000],
+        ..Default::default()
+    };
+
+    hydrate_gpu_facts(&mut survey, &[Metric::GpuFacts, Metric::GpuName]);
+
+    assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0, GPU 1"));
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::Unknown));
+}
+
+// Mirrors the cfg on `tegra_gpu_name_from_model_path`: the Tegra collector only
+// compiles for Linux non-skippy / dynamic-native-runtime builds. The tests now
+// drive the model path directly, so they no longer depend on host filesystem
+// state (the deterministic fix), only on the collector being present at all.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        not(feature = "skippy-devices"),
+        feature = "dynamic-native-runtime",
+        test
+    )
+))]
+#[test]
+fn test_tegra_collector_gpu_name_absent_leaves_source_none() {
+    // Drive the model read with a path guaranteed not to exist, so the result
+    // is independent of host filesystem state (a real Tegra host has the sysfs
+    // model file present, which made the old `TegraCollector.collect` form flip
+    // on such a host). With the model file absent, both the name and its source
+    // must stay absent — never a guessed source for a name that was never read.
+    let missing = std::path::Path::new("/nonexistent/mesh-llm/tegra/devicetree/base/model");
+    assert!(!missing.exists());
+
+    let mut survey = HardwareSurvey::default();
+    tegra_gpu_name_from_model_path(&mut survey, missing);
+
+    assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
+}
+
+// Sysfs-PRESENT case: the helper reads a real temp file containing a Tegra
+// model string, parses it, and tags both the name and source. Exercisable on
+// any platform because the helper is path-injectable.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        not(feature = "skippy-devices"),
+        feature = "dynamic-native-runtime",
+        test
+    )
+))]
+#[test]
+fn test_tegra_collector_gpu_name_present_tags_sysfs_source() {
+    use std::io::Write as _;
+
+    let path = std::env::temp_dir().join("mesh_llm_test_tegra_model_present");
+    let mut f = std::fs::File::create(&path).expect("create temp model file");
+    write!(f, "NVIDIA Jetson AGX Orin Developer Kit\0").expect("write model file");
+    drop(f);
+
+    let mut survey = HardwareSurvey::default();
+    tegra_gpu_name_from_model_path(&mut survey, &path);
+
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(survey.gpu_name.as_deref(), Some("Jetson AGX Orin"));
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::Sysfs));
+}
+
 #[test]
 fn test_summarize_gpu_name_single() {
     assert_eq!(
@@ -660,6 +735,7 @@ fn test_hardware_survey_default() {
     let s = HardwareSurvey::default();
     assert_eq!(s.vram_bytes, 0);
     assert_eq!(s.gpu_name, None);
+    assert_eq!(s.gpu_name_source, None);
     assert_eq!(s.gpu_count, 0);
     assert_eq!(s.hostname, None);
     assert!(s.gpu_vram.is_empty());
@@ -842,6 +918,54 @@ fn test_healthy_gpu_probe_without_vram_metric_does_not_probe_system_ram() {
     assert_eq!(survey.vram_bytes, 0);
 }
 
+// Snapshot: this probe's gpu_name value must stay exactly what it was before
+// gpu_name_source existed (the display_name join over the probed GPUs).
+// gpu_name_source is new; gpu_name is not.
+#[test]
+fn test_skippy_probe_gpu_name_unchanged_and_source_tagged() {
+    // synthetic_gpu uses "CUDA0" as backend_device — NativeRuntimeDevice on
+    // every platform, regardless of target OS.
+    let mut survey = HardwareSurvey::default();
+    let handled = apply_gpu_probe_outcome_to_survey(
+        &mut survey,
+        &[Metric::GpuName],
+        Ok::<Vec<GpuFacts>, ()>(vec![synthetic_gpu(0, None)]),
+        || 0,
+    );
+    assert!(handled);
+    assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0"));
+    assert_eq!(
+        survey.gpu_name_source,
+        Some(GpuNameSource::NativeRuntimeDevice)
+    );
+}
+
+#[test]
+fn test_skippy_probe_metal_backend_device_tagged_metal_default_device() {
+    // A device whose backend_device name starts with "MTL" (as the skippy
+    // Metal backend uses) must be labelled MetalDefaultDevice regardless of
+    // the host OS, so a macOS host running MoltenVK (Vulkan backend) is not
+    // mislabelled.
+    let mut survey = HardwareSurvey::default();
+    let metal_gpu = GpuFacts {
+        backend_device: Some("MTL0".to_string()),
+        display_name: "Apple M4 Max".to_string(),
+        ..synthetic_gpu(0, None)
+    };
+    let handled = apply_gpu_probe_outcome_to_survey(
+        &mut survey,
+        &[Metric::GpuName],
+        Ok::<Vec<GpuFacts>, ()>(vec![metal_gpu]),
+        || 0,
+    );
+    assert!(handled);
+    assert_eq!(survey.gpu_name.as_deref(), Some("Apple M4 Max"));
+    assert_eq!(
+        survey.gpu_name_source,
+        Some(GpuNameSource::MetalDefaultDevice)
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn test_probe_fallback_leaves_vram_untouched_on_macos() {
@@ -882,6 +1006,7 @@ fn test_skippy_backend_error_uses_cpu_only_budget_without_legacy_fallback() {
 
     assert!(handled);
     assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
     assert_eq!(survey.gpu_count, 0);
     assert!(survey.gpu_vram.is_empty());
     assert!(survey.gpus.is_empty());
@@ -909,6 +1034,7 @@ fn test_skippy_backend_empty_result_uses_cpu_only_budget_without_legacy_fallback
 
     assert!(handled);
     assert_eq!(survey.gpu_name, None);
+    assert_eq!(survey.gpu_name_source, None);
     assert_eq!(survey.gpu_count, 0);
     assert!(survey.gpu_vram.is_empty());
     assert!(survey.gpus.is_empty());
