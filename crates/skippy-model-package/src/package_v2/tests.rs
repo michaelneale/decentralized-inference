@@ -6,6 +6,28 @@ use std::collections::BTreeMap;
 
 use crate::test_gguf::{FixtureTensor, explicit, fixture, tensor};
 
+fn tensor_info(name: &str) -> TensorInfo {
+    TensorInfo {
+        name: name.to_string(),
+        layer_index: None,
+        role: skippy_ffi::TensorRole::Unknown,
+        ggml_type: 0,
+        byte_size: 4,
+        element_count: 1,
+    }
+}
+
+#[test]
+fn metadata_descriptor_match_rejects_duplicate_names_with_an_omission() {
+    let expected = BTreeMap::from([
+        ("first".to_string(), (0, 1)),
+        ("second".to_string(), (0, 1)),
+    ]);
+    let repeated = vec![tensor_info("first"), tensor_info("first")];
+
+    assert!(!metadata_descriptors_match(&repeated, &expected));
+}
+
 fn write(source: &Path, out: &Path, resume: bool) -> Result<()> {
     write_package(
         source.display().to_string(),

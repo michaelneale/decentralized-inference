@@ -1,7 +1,7 @@
 //! Source-complete v2 creation. Shards are physical containers, not stage owners.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +10,7 @@ use skippy_package_format::{
     Artifact, ArtifactCatalog, PACKAGE_SCHEMA_VERSION, PackageManifest, Sidecar, SidecarKind,
     SourceModel, Tensor, TensorCatalog,
 };
-use skippy_runtime::{ModelInfo, write_gguf_metadata_from_parts};
+use skippy_runtime::{ModelInfo, TensorInfo, write_gguf_metadata_from_parts};
 
 use crate::hash::file_sha256;
 use crate::package::{
@@ -19,16 +19,12 @@ use crate::package::{
 use crate::plan::StagePlan;
 use crate::progress::{PackageProgress, format_bytes};
 use crate::source_inventory::{SourceInventory, inspect};
+use crate::tensor_payload::{TensorLocation, compare_tensor_payload};
 use crate::write::{ModelSource, create_parent_dir, write_json_file, write_stage_artifact};
 
 mod layout;
 
 use layout::{PlannedArtifact, PlannedArtifactKind, plan_artifacts};
-
-struct SourceTensor {
-    path: PathBuf,
-    tensor: Tensor,
-}
 
 pub(crate) fn write_package(
     model: String,
@@ -238,7 +234,7 @@ fn ensure_native_inventory_matches(
     Ok(())
 }
 
-fn source_tensors_by_name(inventory: &SourceInventory) -> Result<BTreeMap<String, SourceTensor>> {
+fn source_tensors_by_name(inventory: &SourceInventory) -> Result<BTreeMap<String, TensorLocation>> {
     let mut tensors = BTreeMap::new();
     for shard in &inventory.shards {
         for tensor in &shard.tensors.entries {
@@ -246,7 +242,7 @@ fn source_tensors_by_name(inventory: &SourceInventory) -> Result<BTreeMap<String
                 tensors
                     .insert(
                         tensor.name.clone(),
-                        SourceTensor {
+                        TensorLocation {
                             path: shard.path.clone(),
                             tensor: tensor.clone(),
                         },
@@ -288,21 +284,17 @@ fn emit_metadata_artifact(
         .shards
         .iter()
         .flat_map(|shard| shard.tensors.entries.iter())
-        .map(|tensor| (&tensor.name, tensor))
-        .collect::<BTreeMap<_, _>>();
-    let descriptors_match = tensors.iter().all(|tensor| {
-        expected.get(&tensor.name).is_some_and(|source| {
-            source
+        .map(|tensor| {
+            let element_count = tensor
                 .dimensions
                 .iter()
                 .try_fold(1_u64, |count, dimension| count.checked_mul(*dimension))
-                .is_some_and(|element_count| {
-                    tensor.ggml_type == source.ggml_type && tensor.element_count == element_count
-                })
+                .context("source tensor element count overflow")?;
+            Ok((tensor.name.clone(), (tensor.ggml_type, element_count)))
         })
-    });
+        .collect::<Result<BTreeMap<_, _>>>()?;
     ensure!(
-        tensors.len() == expected.len() && descriptors_match,
+        metadata_descriptors_match(&tensors, &expected),
         "metadata carrier descriptor table differs from independent source inventory"
     );
     let artifact = artifact_record("metadata", relative, &path)?;
@@ -311,10 +303,27 @@ fn emit_metadata_artifact(
     Ok(artifact)
 }
 
+fn metadata_descriptors_match(
+    tensors: &[TensorInfo],
+    expected: &BTreeMap<String, (u32, u64)>,
+) -> bool {
+    let actual = tensors
+        .iter()
+        .map(|tensor| (tensor.name.as_str(), tensor))
+        .collect::<BTreeMap<_, _>>();
+    actual.len() == tensors.len()
+        && actual.len() == expected.len()
+        && actual.iter().all(|(name, tensor)| {
+            expected.get(*name).is_some_and(|(ggml_type, elements)| {
+                tensor.ggml_type == *ggml_type && tensor.element_count == *elements
+            })
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_payload_artifact(
     source: &ModelSource,
-    source_tensors: &BTreeMap<String, SourceTensor>,
+    source_tensors: &BTreeMap<String, TensorLocation>,
     planned: &PlannedArtifact,
     common_names: &BTreeSet<String>,
     layer_count: u32,
@@ -340,6 +349,18 @@ fn emit_payload_artifact(
         .entries
         .into_iter()
         .map(|tensor| (tensor.name.clone(), tensor))
+        .collect::<BTreeMap<_, _>>();
+    let emitted_locations = emitted_by_name
+        .iter()
+        .map(|(name, tensor)| {
+            (
+                name.clone(),
+                TensorLocation {
+                    path: path.clone(),
+                    tensor: tensor.clone(),
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let expected_physical = planned
         .tensor_names
@@ -377,7 +398,7 @@ fn emit_payload_artifact(
                 && tensor.dimensions == expected.tensor.dimensions,
             "written tensor {name:?} metadata differs from independent source inventory"
         );
-        compare_tensor_payload(name, expected, &path, &tensor)?;
+        compare_tensor_payload(name, source_tensors, &emitted_locations)?;
         tensor.layer_ordinal = layer_ordinal;
         bound.push(tensor);
     }
@@ -416,51 +437,6 @@ fn artifact_record(id: &str, relative: &str, path: &Path) -> Result<Artifact> {
         byte_size: fs::metadata(path)?.len(),
         sha256: file_sha256(path)?,
     })
-}
-
-fn compare_tensor_payload(
-    name: &str,
-    source: &SourceTensor,
-    emitted_path: &Path,
-    emitted: &Tensor,
-) -> Result<()> {
-    let (
-        skippy_package_format::TensorStorage::Owned {
-            data_offset: source_offset,
-            stored_length: source_length,
-            ..
-        },
-        skippy_package_format::TensorStorage::Owned {
-            data_offset: emitted_offset,
-            stored_length: emitted_length,
-            ..
-        },
-    ) = (&source.tensor.storage, &emitted.storage)
-    else {
-        anyhow::bail!("tensor {name:?} has unsupported alias storage")
-    };
-    ensure!(
-        source_length == emitted_length,
-        "written tensor {name:?} stored length differs from independent source"
-    );
-    let mut source_file = File::open(&source.path)?;
-    let mut emitted_file = File::open(emitted_path)?;
-    source_file.seek(SeekFrom::Start(*source_offset))?;
-    emitted_file.seek(SeekFrom::Start(*emitted_offset))?;
-    let mut source_buffer = [0_u8; 64 * 1024];
-    let mut emitted_buffer = [0_u8; 64 * 1024];
-    let mut remaining = *source_length;
-    while remaining > 0 {
-        let length = usize::try_from(remaining.min(source_buffer.len() as u64))?;
-        source_file.read_exact(&mut source_buffer[..length])?;
-        emitted_file.read_exact(&mut emitted_buffer[..length])?;
-        ensure!(
-            source_buffer[..length] == emitted_buffer[..length],
-            "written tensor {name:?} payload differs from independent source"
-        );
-        remaining -= length as u64;
-    }
-    Ok(())
 }
 
 fn ensure_not_source_file(source: &ModelSource, path: &Path) -> Result<()> {

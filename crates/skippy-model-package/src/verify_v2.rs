@@ -1,8 +1,7 @@
 //! Read-only verification against independently supplied source evidence.
 //! This unit verifies repacked model artifacts tensor by tensor, not graph readiness.
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -12,6 +11,7 @@ use skippy_package_format::{Artifact, PackageManifest, SourceFile, Tensor, Tenso
 
 use crate::hash::file_sha256;
 use crate::source_inventory::{SourceInventory, SourceShard, inspect};
+use crate::tensor_payload::{TensorLocation, compare_tensor_payload};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct VerificationReport {
@@ -234,12 +234,6 @@ fn layer_ordinal_from_artifact_path(path: &str) -> Option<u32> {
         .and_then(|value| value.parse().ok())
 }
 
-#[derive(Clone)]
-struct TensorLocation {
-    path: PathBuf,
-    tensor: Tensor,
-}
-
 fn source_tensor_locations(
     inventory: &SourceInventory,
 ) -> Result<BTreeMap<String, TensorLocation>> {
@@ -294,67 +288,6 @@ fn ensure_tensor_metadata_matches(actual: &Tensor, expected: &Tensor) -> Result<
         "tensor {:?} metadata differs from independent source inventory",
         actual.id
     );
-    Ok(())
-}
-
-fn owned_extent<'a>(
-    id: &str,
-    tensors: &'a BTreeMap<String, TensorLocation>,
-) -> Result<(&'a Path, u64, u64)> {
-    let location = tensors
-        .get(id)
-        .with_context(|| format!("tensor {id:?} is absent from storage inventory"))?;
-    match &location.tensor.storage {
-        TensorStorage::Owned {
-            data_offset,
-            stored_length,
-            ..
-        } => Ok((&location.path, *data_offset, *stored_length)),
-        TensorStorage::Alias { target_tensor_id } => {
-            let target = tensors.get(target_tensor_id).with_context(|| {
-                format!("tensor {id:?} aliases missing target {target_tensor_id:?}")
-            })?;
-            let TensorStorage::Owned {
-                data_offset,
-                stored_length,
-                ..
-            } = &target.tensor.storage
-            else {
-                anyhow::bail!("tensor {id:?} has an alias chain")
-            };
-            Ok((&target.path, *data_offset, *stored_length))
-        }
-    }
-}
-
-fn compare_tensor_payload(
-    id: &str,
-    source: &BTreeMap<String, TensorLocation>,
-    emitted: &BTreeMap<String, TensorLocation>,
-) -> Result<()> {
-    let (source_path, source_offset, source_length) = owned_extent(id, source)?;
-    let (emitted_path, emitted_offset, emitted_length) = owned_extent(id, emitted)?;
-    ensure!(
-        source_length == emitted_length,
-        "tensor {id:?} stored length differs from independent source"
-    );
-    let mut source_file = File::open(source_path)?;
-    let mut emitted_file = File::open(emitted_path)?;
-    source_file.seek(SeekFrom::Start(source_offset))?;
-    emitted_file.seek(SeekFrom::Start(emitted_offset))?;
-    let mut source_buffer = [0_u8; 64 * 1024];
-    let mut emitted_buffer = [0_u8; 64 * 1024];
-    let mut remaining = source_length;
-    while remaining > 0 {
-        let length = usize::try_from(remaining.min(source_buffer.len() as u64))?;
-        source_file.read_exact(&mut source_buffer[..length])?;
-        emitted_file.read_exact(&mut emitted_buffer[..length])?;
-        ensure!(
-            source_buffer[..length] == emitted_buffer[..length],
-            "tensor {id:?} payload differs from independent source"
-        );
-        remaining -= length as u64;
-    }
     Ok(())
 }
 

@@ -109,7 +109,12 @@ fn verifies_repacked_tensor_artifacts_against_source_payloads() {
     artifact.sha256 = file_sha256(&layer_path).unwrap();
     case.save(manifest);
 
-    assert!(case.verify().is_err());
+    assert!(
+        case.verify()
+            .unwrap_err()
+            .to_string()
+            .contains("payload differs")
+    );
 }
 
 #[test]
