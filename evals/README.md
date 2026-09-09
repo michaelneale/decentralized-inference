@@ -125,6 +125,50 @@ across refs and passes. `--max-ttft-regression-pct` bounds candidate median TTFT
 relative to the first ref. Any configured failure is written into `run.json` and
 the Markdown report before the command exits non-zero.
 
+### Disk L3 lifecycle certification
+
+Use `l3-plan` and `l3-run` for the persistent disk-cache release gate. Unlike
+the comparative `run` command, this mode evaluates one release candidate while
+preserving the same cache root across verified process restarts. It requires
+named captured Buzz, OpenCode, and Goose sources plus c64/c128/c256 cohorts.
+
+```bash
+python3 evals/agentic-replay.py l3-plan \
+  --ref candidate=<candidate-commit> \
+  --model '<model-uri>' \
+  --trajectory-manifest /path/to/captured-l3-trajectories.json \
+  --require-source-dataset buzz \
+  --require-source-dataset opencode \
+  --require-source-dataset goose
+
+python3 evals/agentic-replay.py l3-run \
+  --ref candidate=<candidate-commit> \
+  --model '<model-uri>' \
+  --trajectory-manifest /path/to/captured-l3-trajectories.json \
+  --require-source-dataset buzz \
+  --require-source-dataset opencode \
+  --require-source-dataset goose \
+  --output /path/to/l3-artifact
+```
+
+The manifest must contain an `l3` cohort with each required source and `64`,
+`128`, and `256` high-load cohorts with at least that many trajectories. The
+runner performs disk-off cold restarts, an empty-root write, multi-turn growth,
+same-process L1 reuse, first-request-after-restart L3 samples, 100-request
+identical-prefix fill and record waves, prune and clear while traffic is in
+flight, forced minimum-free fallback, and disk-off/disk-on high-load pairs.
+
+The command fails closed unless generated-output hashes match disk-off, every
+qualifying prompt is in the configured token range, post-restart L3 p50 TTFT is
+at most half of cold p50, fill and record waves each perform one physical
+operation, payload writes stay within 1.2x, low space remains inference-safe,
+and p99 decode-event latency at c64/c128/c256 regresses by no more than 5%.
+Server/API status snapshots, raw requests, process commands and PIDs, logs,
+binary/runtime hashes, a Markdown report, and an artifact hash inventory are
+retained. Run the same artifact recipe on every supported backend/model family
+and on each stage of the real two-machine split; the harness never treats a
+single-node pass as full-chain evidence.
+
 ### Compare Mesh with llama.cpp, vLLM, and SGLang
 
 Pass `--engine-config` to append external OpenAI-compatible server arms to the

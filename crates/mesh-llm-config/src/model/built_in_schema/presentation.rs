@@ -47,6 +47,12 @@ const RUNTIME_POLICY_CATEGORY: CategoryPresentation = CategoryPresentation {
     summary: "Runtime reconciliation behavior applied by the local process",
     order: 10,
 };
+const PROMPT_CACHE_CATEGORY: CategoryPresentation = CategoryPresentation {
+    id: "prompt-cache",
+    label: "Prompt Cache",
+    summary: "Node-local durable prefix cache storage and capacity",
+    order: 15,
+};
 const MEMORY_CATEGORY: CategoryPresentation = CategoryPresentation {
     id: "memory",
     label: "Memory",
@@ -106,11 +112,62 @@ struct SettingPresentation {
 
 fn setting_presentation_for_path(rendered: &str) -> Option<SettingPresentation> {
     logging_presentation(rendered)
+        .or_else(|| kv_disk_presentation(rendered))
         .or_else(|| process_setting_presentation(rendered))
         .or_else(|| runtime_defaults_presentation(rendered))
         .or_else(|| generation_defaults_presentation(rendered))
         .or_else(|| skippy_multimodal_presentation(rendered))
         .or_else(|| model_and_plugin_presentation(rendered))
+}
+
+fn kv_disk_presentation(rendered: &str) -> Option<SettingPresentation> {
+    match rendered {
+        "runtime.kv_cache.disk.mode" => Some(
+            sp(
+                "Disk prompt cache",
+                "Keep compatible prompt state on local disk across model reloads and process restarts.",
+                PROMPT_CACHE_CATEGORY,
+                10,
+            )
+            .hint("segmented")
+            .choices(&[
+                ("off", "Off", "Do not read or write the disk cache."),
+                ("auto", "Automatic", "Derive a bounded budget from available local storage."),
+                ("fixed", "Fixed", "Use the configured hard budget."),
+            ]),
+        ),
+        "runtime.kv_cache.disk.directory" => Some(
+            sp(
+                "Cache directory",
+                "Absolute node-local directory used for durable prompt-cache data.",
+                PROMPT_CACHE_CATEGORY,
+                20,
+            )
+            .placeholder("/fast-disk/mesh-kv-cache")
+            .hint("text"),
+        ),
+        "runtime.kv_cache.disk.budget_mib" => Some(
+            sp(
+                "Fixed cache budget",
+                "Hard whole-node disk-cache budget used only in fixed mode.",
+                PROMPT_CACHE_CATEGORY,
+                30,
+            )
+            .unit("MiB")
+            .hint("number"),
+        ),
+        "runtime.kv_cache.disk.minimum_free_mib" => Some(
+            sp(
+                "Minimum free space",
+                "Free local storage Mesh preserves before accepting cache writes.",
+                PROMPT_CACHE_CATEGORY,
+                40,
+            )
+            .unit("MiB")
+            .hint("number"),
+        ),
+        _ => None,
+    }
 }
 
 fn process_setting_presentation(rendered: &str) -> Option<SettingPresentation> {

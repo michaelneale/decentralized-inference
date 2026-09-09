@@ -599,7 +599,7 @@ fn run_binary_state_handoff(args: BinaryStateHandoffConfig) -> Result<BinaryStat
         stage_models,
     })
 }
-fn state_handoff_tokens(
+pub(in crate::runner) fn state_handoff_tokens(
     tokenizer: &StageModel,
     prompt: &str,
     prefix_token_count: Option<usize>,

@@ -1,7 +1,8 @@
 use super::shared::{
-    absent_condition, equals_bool_condition, present_condition, push_allowed_pattern_constraint,
-    push_dependency_disable, push_non_empty_constraint, push_range_constraint,
-    push_requires_constraint, set_numeric, set_static_options, set_text_format,
+    absent_condition, equals_bool_condition, equals_string_condition, present_condition,
+    push_allowed_pattern_constraint, push_dependency_disable, push_non_empty_constraint,
+    push_range_constraint, push_requires_constraint, set_numeric, set_static_options,
+    set_text_format,
 };
 use super::*;
 
@@ -102,6 +103,23 @@ pub(super) fn apply_runtime_controls_behavior(setting: &mut ConfigSettingSchema,
         }
         "runtime.activity.response" | "runtime.activity.advertisement" => {
             set_static_options(setting)
+        }
+        "runtime.kv_cache.disk.mode" => set_static_options(setting),
+        "runtime.kv_cache.disk.directory" => {
+            set_text_format(setting, ConfigTextFormat::Path);
+            push_non_empty_constraint(setting);
+        }
+        "runtime.kv_cache.disk.budget_mib" => {
+            set_numeric(setting, Some(1.0), None, Some(1.0), Some("MiB"));
+            control_behavior_mut(setting)
+                .enable_when
+                .push(equals_string_condition(
+                    "runtime.kv_cache.disk.mode",
+                    "fixed",
+                ));
+        }
+        "runtime.kv_cache.disk.minimum_free_mib" => {
+            set_numeric(setting, Some(1024.0), None, Some(1.0), Some("MiB"));
         }
         _ => {}
     }

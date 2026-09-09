@@ -3,6 +3,7 @@ mod control_apply_diagnostics;
 mod diagnostics;
 mod discover;
 mod health;
+pub(crate) mod kv_cache;
 pub(crate) mod logs;
 mod mcp;
 mod mesh_hook;
@@ -80,6 +81,7 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 | ("GET", "/api/runtime/stages")
                 | ("GET", "/api/runtime/config-schema")
                 | ("GET", "/api/runtime/config-control-state")
+                | ("GET", "/api/runtime/kv-cache")
                 | ("GET", "/api/runtime/control-bootstrap")
                 | ("GET", "/api/runtime/intents")
                 | ("GET", "/api/runtime/activity")
@@ -87,6 +89,7 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 | ("POST", "/api/runtime/control/scan-refresh")
                 | ("POST", "/api/runtime/control/refresh-inventory")
                 | ("POST", "/api/runtime/control/apply-config")
+                | ("POST", "/api/runtime/control/kv-cache")
                 | ("POST", "/api/runtime/control/load-model")
                 | ("POST", "/api/runtime/control/unload-model")
                 | ("POST", "/api/runtime/control/ensure-model")
@@ -94,6 +97,8 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 | ("POST", "/api/runtime/config/validate")
                 | ("POST", "/api/runtime/mesh-guardrails")
                 | ("POST", "/api/runtime/models")
+                | ("POST", "/api/runtime/kv-cache/prune")
+                | ("DELETE", "/api/runtime/kv-cache")
                 | ("PUT", "/api/runtime/activity/override")
                 | ("DELETE", "/api/runtime/activity/override")
                 | ("GET", "/api/events") => {

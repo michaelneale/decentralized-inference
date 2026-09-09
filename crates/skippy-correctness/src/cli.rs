@@ -20,6 +20,28 @@ pub enum CommandKind {
     NativeMtpOpenAiAb(Box<NativeMtpOpenAiAbArgs>),
     GlmDsaStage0Trace(Box<GlmDsaStage0TraceArgs>),
     StageFaParity(StageFaParityArgs),
+    KvPageGrowth(KvPageGrowthArgs),
+}
+
+#[derive(Args)]
+pub struct KvPageGrowthArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+    /// Tokens prefilled before the first export, standing in for an agent's
+    /// system prefix.
+    #[arg(long, default_value_t = 2048)]
+    pub base_tokens: usize,
+    /// Tokens appended per turn.
+    #[arg(long, default_value_t = 512)]
+    pub turn_tokens: usize,
+    /// Turns appended after the base prefix.
+    #[arg(long, default_value_t = 4)]
+    pub turns: usize,
+    /// Segment size the L3 store cuts at.
+    #[arg(long, default_value_t = 8 * 1024 * 1024)]
+    pub segment_bytes: u64,
+    #[arg(long)]
+    pub json: Option<PathBuf>,
 }
 
 #[derive(Args, Clone)]

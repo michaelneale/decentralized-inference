@@ -23,14 +23,23 @@ PHASE_MANIFEST="$PHASE_ROOT/phase-results.json"
 PHASE_RECORDS="$PHASE_ROOT/.phase-results.jsonl"
 SUITE_STARTED_AT_UNIX_NS=""
 SUITE_FINALIZED=0
+DURABLE_ONLY="${MESH_PRODUCT_INTEGRATION_DURABLE_ONLY:-0}"
 
-readonly -a REQUIRED_PHASES=(
-    dense-standalone
-    dense-openai-sdk
-    dense-constrained-tokio-restart
-    dense-split-kv
-    recurrent-split-kv
-)
+if [[ "$DURABLE_ONLY" == "1" ]]; then
+    readonly -a REQUIRED_PHASES=(durable-l3)
+elif [[ "$DURABLE_ONLY" == "0" ]]; then
+    readonly -a REQUIRED_PHASES=(
+        dense-standalone
+        dense-openai-sdk
+        dense-constrained-tokio-restart
+        dense-split-kv
+        recurrent-split-kv
+        durable-l3
+    )
+else
+    echo "MESH_PRODUCT_INTEGRATION_DURABLE_ONLY must be 0 or 1" >&2
+    exit 2
+fi
 
 case "${PLATFORM}/${BACKEND}" in
     linux/cpu) DEVICE=CPU ;;
@@ -38,6 +47,7 @@ case "${PLATFORM}/${BACKEND}" in
     linux/vulkan) DEVICE=Vulkan0 ;;
     linux/rocm) DEVICE=ROCm0 ;;
     macos/metal) DEVICE=MTL0 ;;
+    windows/cpu) DEVICE=CPU ;;
     *)
         echo "unsupported typed product suite combination: ${PLATFORM}/${BACKEND}" >&2
         exit 2
@@ -153,13 +163,14 @@ append_phase_record() {
     local workdir="$4"
     local log_paths_json="$5"
     local split_evidence_json="$6"
-    local started_at_unix_ns="$7"
-    local ended_at_unix_ns="$8"
-    local exit_code="$9"
+    local durable_l3_evidence_json="$7"
+    local started_at_unix_ns="$8"
+    local ended_at_unix_ns="$9"
+    local exit_code="${10}"
 
     python3 - "$PHASE_RECORDS" "$phase" "$status" "$model_json" \
-        "$workdir" "$log_paths_json" "$split_evidence_json" "$started_at_unix_ns" \
-        "$ended_at_unix_ns" "$exit_code" <<'PY'
+        "$workdir" "$log_paths_json" "$split_evidence_json" "$durable_l3_evidence_json" \
+        "$started_at_unix_ns" "$ended_at_unix_ns" "$exit_code" <<'PY'
 import json
 import sys
 
@@ -171,6 +182,7 @@ import sys
     workdir,
     log_paths_json,
     split_evidence_json,
+    durable_l3_evidence_json,
     started_at_unix_ns,
     ended_at_unix_ns,
     exit_code,
@@ -183,6 +195,7 @@ record = {
     "workdir": workdir,
     "log_paths": json.loads(log_paths_json),
     "split_evidence": json.loads(split_evidence_json),
+    "durable_l3_evidence": json.loads(durable_l3_evidence_json),
     "started_at_unix_ns": int(started_at_unix_ns),
     "ended_at_unix_ns": int(ended_at_unix_ns),
     "exit_code": int(exit_code),
@@ -249,6 +262,7 @@ for record in records:
     seen.add(phase)
     model = record.get("model")
     split_evidence = record.get("split_evidence")
+    durable_l3_evidence = record.get("durable_l3_evidence")
     if (
         record.get("status") not in {"passed", "failed"}
         or not isinstance(model, dict)
@@ -304,6 +318,41 @@ for record in records:
                     or evidence_payload.get("model_label") != expected_model_label
                 ):
                     errors.append(f"invalid split evidence payload for phase: {phase!r}")
+    if phase != "durable-l3":
+        if durable_l3_evidence is not None:
+            errors.append(f"unexpected durable L3 evidence for phase: {phase!r}")
+    elif record.get("status") == "passed":
+        if (
+            not isinstance(durable_l3_evidence, dict)
+            or not isinstance(durable_l3_evidence.get("path"), str)
+            or not durable_l3_evidence["path"]
+            or not isinstance(durable_l3_evidence.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", durable_l3_evidence["sha256"])
+        ):
+            errors.append("missing durable L3 evidence for passed phase: 'durable-l3'")
+        else:
+            evidence_path = durable_l3_evidence["path"]
+            try:
+                with open(evidence_path, "rb") as evidence_file:
+                    raw_evidence = evidence_file.read()
+                actual_digest = hashlib.sha256(raw_evidence).hexdigest()
+                evidence_payload = json.loads(raw_evidence)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                errors.append(f"unreadable durable L3 evidence: {error}")
+            else:
+                labels = [
+                    model.get("model", {}).get("label")
+                    for model in evidence_payload.get("models", [])
+                    if isinstance(model, dict)
+                ]
+                if actual_digest != durable_l3_evidence["sha256"]:
+                    errors.append("durable L3 evidence digest mismatch")
+                if (
+                    evidence_payload.get("kind") != "mesh-llm-durable-l3-restart"
+                    or evidence_payload.get("status") != "passed"
+                    or labels != ["dense", "recurrent"]
+                ):
+                    errors.append("invalid durable L3 evidence payload")
 
 missing = [phase for phase in required_phases if phase not in seen]
 if finalize:
@@ -411,6 +460,58 @@ print(json.dumps({"path": path, "sha256": sha256}, sort_keys=True, separators=("
 PY
 }
 
+verify_durable_l3_phase_evidence() {
+    local phase="$1"
+    local phase_dir="$2"
+    local evidence_path="${phase_dir}/durable-l3-evidence.json"
+    local evidence_sha256
+
+    if [[ "$phase" != "durable-l3" ]]; then
+        printf 'null\n'
+        return 0
+    fi
+    if ! python3 - "$evidence_path" <<'PY' >&2; then
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    evidence = json.load(handle)
+if evidence.get("kind") != "mesh-llm-durable-l3-restart" or evidence.get("status") != "passed":
+    raise SystemExit("durable L3 evidence did not pass")
+models = evidence.get("models")
+if not isinstance(models, list) or [row.get("model", {}).get("label") for row in models] != ["dense", "recurrent"]:
+    raise SystemExit("durable L3 evidence must contain dense and recurrent rows")
+for row in models:
+    if (
+        row.get("process_boundary") is not True
+        or row.get("cache_root_lifecycle") != "preserved"
+        or row.get("exact_output_match") is not True
+        or not isinstance(row.get("restored_cached_tokens"), int)
+        or row["restored_cached_tokens"] <= 0
+        or not isinstance(row.get("l3_fill_count"), int)
+        or row["l3_fill_count"] <= 0
+        or not row.get("payload_kinds")
+        or row.get("configuration", {}).get("source") != "cli"
+    ):
+        raise SystemExit(f"incomplete durable L3 model evidence: {row!r}")
+    model_sha256 = row.get("model", {}).get("sha256")
+    if not isinstance(model_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", model_sha256):
+        raise SystemExit("durable L3 model evidence has invalid fixture digest")
+PY
+        echo "${phase} did not produce independently verifiable durable L3 evidence" >&2
+        return 1
+    fi
+    evidence_sha256="$(fixture_sha256 "$evidence_path")"
+    python3 - "$evidence_path" "$evidence_sha256" <<'PY'
+import json
+import sys
+
+path, sha256 = sys.argv[1:]
+print(json.dumps({"path": path, "sha256": sha256}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 finalize_interrupted_suite() {
     local exit_code="$?"
     trap - EXIT
@@ -443,6 +544,7 @@ run_phase() {
     local phase_exit_code
     local phase_status
     local split_evidence_json=null
+    local durable_l3_evidence_json=null
 
     if ! ensure_phase_is_planned_once "$phase"; then
         write_phase_manifest failed "$phase" 1 || true
@@ -467,10 +569,17 @@ run_phase() {
             split_evidence_json=null
         fi
     fi
+    if [[ "$phase_exit_code" -eq 0 ]]; then
+        if ! durable_l3_evidence_json="$(verify_durable_l3_phase_evidence "$phase" "$phase_dir")"; then
+            phase_exit_code=72
+            phase_status=failed
+            durable_l3_evidence_json=null
+        fi
+    fi
     ended_at_unix_ns="$(phase_now_unix_ns)"
     append_phase_record "$phase" "$phase_status" "$model_json" "$phase_dir" \
-        "$log_paths_json" "$split_evidence_json" "$started_at_unix_ns" "$ended_at_unix_ns" \
-        "$phase_exit_code"
+        "$log_paths_json" "$split_evidence_json" "$durable_l3_evidence_json" \
+        "$started_at_unix_ns" "$ended_at_unix_ns" "$phase_exit_code"
     if [[ "$phase_exit_code" -ne 0 ]]; then
         write_phase_manifest failed "$phase" 1 || true
         SUITE_FINALIZED=1
@@ -479,6 +588,7 @@ run_phase() {
     write_phase_manifest in-progress "" 0
 }
 
+if [[ "$DURABLE_ONLY" != "1" ]]; then
 run_phase dense-standalone dense \
     "[\"$PHASE_ROOT/dense-standalone/server.log\",\"$PHASE_ROOT/dense-standalone/headless.log\"]" env \
     MESH_CI_DEVICE="$DEVICE" \
@@ -522,6 +632,24 @@ run_phase recurrent-split-kv recurrent \
     MESH_TWO_NODE_SPLIT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent \
     MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/recurrent-split-kv" \
     scripts/ci-two-node-split-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$RECURRENT_MODEL"
+fi
+
+run_phase durable-l3 dense \
+    "[\"$PHASE_ROOT/durable-l3/dense-seed.log\",\"$PHASE_ROOT/durable-l3/dense-worker.log\",\"$PHASE_ROOT/durable-l3/dense-restart-seed.log\",\"$PHASE_ROOT/durable-l3/dense-restart-worker.log\",\"$PHASE_ROOT/durable-l3/recurrent-seed.log\",\"$PHASE_ROOT/durable-l3/recurrent-worker.log\",\"$PHASE_ROOT/durable-l3/recurrent-restart-seed.log\",\"$PHASE_ROOT/durable-l3/recurrent-restart-worker.log\"]" env \
+    MESH_TWO_NODE_SPLIT_DEVICE="$DEVICE" \
+    MESH_TWO_NODE_SPLIT_MODEL="$DENSE_MODEL" \
+    MESH_TWO_NODE_SPLIT_MODEL_LABEL=dense \
+    MESH_TWO_NODE_SPLIT_RECURRENT_MODEL="$RECURRENT_MODEL" \
+    MESH_TWO_NODE_SPLIT_RECURRENT_CTX_SIZE=4096 \
+    MESH_TWO_NODE_SPLIT_RECURRENT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent \
+    MESH_TWO_NODE_SPLIT_DURABLE_L3=1 \
+    MESH_TWO_NODE_SPLIT_DURABLE_L3_ROOT="$PHASE_ROOT/durable-l3/cache-roots" \
+    MESH_TWO_NODE_SPLIT_DENSE_ARTIFACT_ID="$DENSE_ARTIFACT_ID" \
+    MESH_TWO_NODE_SPLIT_DENSE_SHA256="$DENSE_SHA256" \
+    MESH_TWO_NODE_SPLIT_RECURRENT_ARTIFACT_ID="$RECURRENT_ARTIFACT_ID" \
+    MESH_TWO_NODE_SPLIT_RECURRENT_SHA256="$RECURRENT_SHA256" \
+    MESH_TWO_NODE_SPLIT_WORK_DIR="$PHASE_ROOT/durable-l3" \
+    scripts/ci-two-node-split-smoke.sh "$MESH_LLM" "$ARTIFACT_DIR" "$DENSE_MODEL"
 
 write_phase_manifest passed "" 1
 SUITE_FINALIZED=1

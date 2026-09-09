@@ -19,6 +19,7 @@ REQUIRED_PHASES = [
     "dense-constrained-tokio-restart",
     "dense-split-kv",
     "recurrent-split-kv",
+    "durable-l3",
 ]
 DENSE_ARTIFACT_ID = "smollm2-q8-inference"
 RECURRENT_ARTIFACT_ID = "family-granite-hybrid"
@@ -83,6 +84,42 @@ case "${STUB_SPLIT_EVIDENCE_MODE:-valid}" in
     missing-*|tampered-*) ;;
     *) exit 64 ;;
 esac
+if [[ "$phase" == durable-l3 ]]; then
+python3 - "$evidence_root/durable-l3-evidence.json" <<'PY'
+import json
+import os
+import sys
+
+rows = []
+for label, kind, artifact_var, sha_var in (
+    ("dense", "full-state", "MESH_TWO_NODE_SPLIT_DENSE_ARTIFACT_ID", "MESH_TWO_NODE_SPLIT_DENSE_SHA256"),
+    ("recurrent", "kv-recurrent", "MESH_TWO_NODE_SPLIT_RECURRENT_ARTIFACT_ID", "MESH_TWO_NODE_SPLIT_RECURRENT_SHA256"),
+):
+    rows.append({
+        "model": {
+            "label": label,
+            "artifact_id": os.environ[artifact_var],
+            "sha256": os.environ[sha_var],
+            "path": f"/{label}.gguf",
+        },
+        "configuration": {"source": "cli"},
+        "cache_root_lifecycle": "preserved",
+        "process_boundary": True,
+        "payload_kinds": [kind],
+        "restored_cached_tokens": 128,
+        "l3_fill_count": 1,
+        "exact_output_match": True,
+    })
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema_version": 1,
+        "kind": "mesh-llm-durable-l3-restart",
+        "status": "passed",
+        "models": rows,
+    }, handle)
+    handle.write("\\n")
+PY
+fi
 """,
                 encoding="utf-8",
             )
@@ -156,6 +193,8 @@ fi
                 "MESH_PRODUCT_INTEGRATION_PHASE_ROOT": str(phase_root),
                 "STUB_SPLIT_EVIDENCE_MODE": split_evidence_mode,
             }
+            if platform == "windows":
+                env["MESH_PRODUCT_INTEGRATION_DURABLE_ONLY"] = "1"
             if failure_phase is not None:
                 env["STUB_FAIL_PHASE"] = failure_phase
 
@@ -186,7 +225,7 @@ fi
             )
             return result, manifest
 
-    def test_success_reconciles_the_exact_five_phases(self) -> None:
+    def test_success_reconciles_the_required_phases(self) -> None:
         result, manifest = self.run_suite()
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -252,6 +291,17 @@ fi
                     )
                 else:
                     self.assertIsNone(phase["split_evidence"])
+                if phase["phase"] == "durable-l3":
+                    self.assertRegex(
+                        phase["durable_l3_evidence"]["sha256"], r"^[0-9a-f]{64}$"
+                    )
+                    self.assertTrue(
+                        phase["durable_l3_evidence"]["path"].endswith(
+                            "durable-l3-evidence.json"
+                        )
+                    )
+                else:
+                    self.assertIsNone(phase["durable_l3_evidence"])
                 self.assertLessEqual(
                     phase["started_at_unix_ns"], phase["ended_at_unix_ns"]
                 )
@@ -263,6 +313,7 @@ fi
             ("linux", "vulkan"): "Vulkan0",
             ("linux", "rocm"): "ROCm0",
             ("macos", "metal"): "MTL0",
+            ("windows", "cpu"): "CPU",
         }
         for (platform, backend), expected_device in cases.items():
             with self.subTest(platform=platform, backend=backend):

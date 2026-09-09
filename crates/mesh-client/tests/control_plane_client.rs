@@ -3,7 +3,8 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use mesh_client::proto::node::{
     CompactModelMetadata, ConfigApplyMode, NodeConfigSnapshot, NodeGpuConfig, NodeModelEntry,
     OwnerControlEnvelope, OwnerControlErrorCode, OwnerControlInventoryEntry,
-    OwnerControlRefreshInventory, OwnerControlRefreshInventoryDisposition,
+    OwnerControlKvCacheOperation, OwnerControlRefreshInventory,
+    OwnerControlRefreshInventoryDisposition,
 };
 use mesh_client::protocol::{
     ALPN_CONTROL_V1, MAX_CONTROL_FRAME_BYTES, NODE_PROTOCOL_GENERATION,
@@ -169,6 +170,7 @@ async fn spawn_success_server_with_refresh_detail(
                                 unload_model: None,
                                 ensure_model: None,
                                 drain_model: None,
+                                kv_cache: None,
                             }),
                             error: None,
                         },
@@ -204,6 +206,7 @@ async fn spawn_success_server_with_refresh_detail(
                                 unload_model: None,
                                 ensure_model: None,
                                 drain_model: None,
+                                kv_cache: None,
                             }),
                             error: None,
                         },
@@ -246,6 +249,39 @@ async fn spawn_success_server_with_refresh_detail(
                                 unload_model: None,
                                 ensure_model: None,
                                 drain_model: None,
+                                kv_cache: None,
+                            }),
+                            error: None,
+                        },
+                    )
+                    .await;
+                    let _ = send.finish();
+                    return;
+                }
+                if let Some(kv_cache) = request.kv_cache {
+                    assert_eq!(
+                        OwnerControlKvCacheOperation::try_from(kv_cache.operation),
+                        Ok(OwnerControlKvCacheOperation::Prune)
+                    );
+                    assert_eq!(kv_cache.target_bytes, Some(1024));
+                    assert_eq!(kv_cache.model_identity.as_deref(), Some("blake3:model"));
+                    write_control_envelope(
+                        &mut send,
+                        OwnerControlEnvelope {
+                            r#gen: NODE_PROTOCOL_GENERATION,
+                            handshake: None,
+                            request: None,
+                            response: Some(mesh_client::proto::node::OwnerControlResponse {
+                                request_id: request.request_id,
+                                kv_cache: Some(
+                                    mesh_client::proto::node::OwnerControlKvCacheResponse {
+                                        status_json:
+                                            br#"{"version":1,"effective":{"state":"active"}}"#
+                                                .to_vec(),
+                                        freed_bytes: Some(512),
+                                    },
+                                ),
+                                ..Default::default()
                             }),
                             error: None,
                         },
@@ -290,6 +326,7 @@ async fn spawn_success_server_with_refresh_detail(
                                 unload_model: None,
                                 ensure_model: None,
                                 drain_model: None,
+                                kv_cache: None,
                             }),
                             error: None,
                         },
@@ -552,6 +589,19 @@ async fn control_plane_client_apply_config_get_watch_refresh_and_close() {
         inventory.entries[0].canonical_model_ref,
         "hf://mesh/refresh-model-GGUF:Q4_K_M"
     );
+
+    let cache = control
+        .kv_cache(
+            OwnerControlKvCacheOperation::Prune,
+            Some(1024),
+            Some("blake3:model".to_string()),
+        )
+        .await
+        .expect("kv_cache should succeed");
+    assert_eq!(cache.freed_bytes, Some(512));
+    let status: serde_json::Value =
+        serde_json::from_slice(&cache.status_json).expect("valid status JSON");
+    assert_eq!(status["version"], 1);
 
     let mut watch = control
         .watch_config(true)

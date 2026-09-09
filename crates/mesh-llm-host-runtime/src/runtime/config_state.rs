@@ -1,6 +1,6 @@
 use anyhow::Result;
 use mesh_llm_config::{
-    ConfigDiagnostic, ConfigDiagnosticSeverity, ConfigPath, LoggingConfig,
+    ConfigDiagnostic, ConfigDiagnosticSeverity, ConfigPath, KvDiskTierConfig, LoggingConfig,
     built_in_config_schema_descriptor, legacy_validation_error_text,
 };
 
@@ -85,6 +85,8 @@ pub(crate) struct PendingConfigApply {
     logging_requires_restart: bool,
     dynamic_logging_only: bool,
     old_logging: LoggingConfig,
+    kv_disk_requires_restart: bool,
+    dynamic_kv_disk_changed: bool,
 }
 
 impl PendingConfigApply {
@@ -120,8 +122,21 @@ impl PendingConfigApply {
         let _ = crate::apply_live_logging_limits(&self.old_logging);
     }
 
+    pub(crate) fn apply_live_kv_disk(&self) -> Option<super::kv_disk_config::KvDiskLiveRollback> {
+        if !self.dynamic_kv_disk_changed {
+            return None;
+        }
+        match super::kv_disk_config::apply_live_kv_disk_limits(&self.config) {
+            Ok(rollback) => Some(rollback),
+            Err(error) => {
+                tracing::warn!(%error, "disk prompt-cache runtime unavailable; retaining limits as staged configuration");
+                None
+            }
+        }
+    }
+
     fn applied_result(&self, apply_mode: ConfigApplyMode) -> ApplyResult {
-        if self.logging_requires_restart {
+        if self.logging_requires_restart || self.kv_disk_requires_restart {
             ApplyResult::AppliedWithRestartRequired {
                 revision: self.revision,
                 hash: self.hash,
@@ -309,6 +324,14 @@ fn logging_dynamic_limits_changed(old: &LoggingConfig, new: &LoggingConfig) -> b
     old.retention_ttl_secs != new.retention_ttl_secs || old.replay_capacity != new.replay_capacity
 }
 
+fn kv_disk_changes_require_restart(old: &KvDiskTierConfig, new: &KvDiskTierConfig) -> bool {
+    old.mode != new.mode || old.directory != new.directory
+}
+
+fn kv_disk_dynamic_limits_changed(old: &KvDiskTierConfig, new: &KvDiskTierConfig) -> bool {
+    old.budget_mib != new.budget_mib || old.minimum_free_mib != new.minimum_free_mib
+}
+
 impl Default for ConfigState {
     fn default() -> Self {
         let config = crate::plugin::MeshConfig::default();
@@ -424,6 +447,10 @@ impl ConfigState {
         let dynamic_logging_only =
             logging_dynamic_limits_changed(&old_logging, &new_config.logging)
                 && !logging_requires_restart;
+        let old_kv_disk = &self.config.runtime.kv_cache.disk;
+        let new_kv_disk = &new_config.runtime.kv_cache.disk;
+        let kv_disk_requires_restart = kv_disk_changes_require_restart(old_kv_disk, new_kv_disk);
+        let dynamic_kv_disk_changed = kv_disk_dynamic_limits_changed(old_kv_disk, new_kv_disk);
 
         ConfigApplyPreparation::Pending(Box::new(PendingConfigApply {
             config: new_config,
@@ -435,6 +462,8 @@ impl ConfigState {
             logging_requires_restart,
             dynamic_logging_only,
             old_logging,
+            kv_disk_requires_restart,
+            dynamic_kv_disk_changed,
         }))
     }
 
@@ -515,12 +544,19 @@ where
         ConfigApplyPreparation::Pending(pending) => *pending,
     };
     let live_logging_applied = pending.apply_live_logging();
+    let live_kv_disk_rollback = pending.apply_live_kv_disk();
+    let live_kv_disk_applied = live_kv_disk_rollback.is_some();
     let persistence = persist(&pending);
     if live_logging_applied && matches!(&persistence, ConfigPersistence::PersistError(_)) {
         // A persistence failure after a live apply is rare, but restore the
         // prior runtime settings before exposing the failure so the
         // configuration and service do not diverge.
         pending.restore_live_logging();
+    }
+    if matches!(&persistence, ConfigPersistence::PersistError(_))
+        && let Some(rollback) = live_kv_disk_rollback
+    {
+        super::kv_disk_config::restore_live_kv_disk_limits(rollback);
     }
     let result = finish(pending, persistence);
 
@@ -530,7 +566,7 @@ where
             hash,
             diagnostics,
             ..
-        } if live_logging_applied => ApplyResult::Applied {
+        } if live_logging_applied || live_kv_disk_applied => ApplyResult::Applied {
             revision,
             hash,
             apply_mode: ConfigApplyMode::Live,

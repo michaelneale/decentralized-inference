@@ -4,6 +4,7 @@ mod hardware_validation;
 mod model;
 mod model_validation;
 mod plugin_validation;
+mod size;
 mod store;
 mod validate;
 mod validation_support;
@@ -31,6 +32,7 @@ pub use plugin_validation::{
     PluginSettingConstraint, PluginSettingSchema, PluginValueKind, PluginValueSchema,
     SUPPORTED_PLUGIN_CONFIG_SCHEMA_VERSION,
 };
+pub use size::{IecSizeParseError, parse_iec_size};
 pub use store::{ConfigStore, config_path, config_to_toml, load_config, parse_config_toml};
 pub use validate::{
     ConfigDiagnostic, ConfigDiagnosticCode, ConfigDiagnosticSchemaSource, ConfigDiagnosticSeverity,
@@ -48,9 +50,9 @@ pub use wiring_validation::wiring_manifest_diagnostics;
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigStore, GpuAssignment, LocalServingNodeConfig, MeshConfig, SpeculativeConfig,
-        built_in_config_schema, canonicalize_built_in_config_identifier, parse_config_toml,
-        validate_config,
+        ConfigApplyMode, ConfigRestartScope, ConfigStore, GpuAssignment, KvDiskTierMode,
+        LocalServingNodeConfig, MeshConfig, SpeculativeConfig, built_in_config_schema,
+        canonicalize_built_in_config_identifier, parse_config_toml, validate_config,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -190,6 +192,99 @@ selection = "cuda12"
             ),
             "unexpected validation error: {err}"
         );
+    }
+
+    #[test]
+    fn disk_cache_config_parses_defaults_and_fixed_mode() {
+        let defaults = parse_config_toml("").expect("empty config should parse");
+        assert_eq!(defaults.runtime.kv_cache.disk.mode, None);
+        assert_eq!(
+            defaults.runtime.kv_cache.disk.effective_mode(),
+            KvDiskTierMode::Off
+        );
+        assert_eq!(defaults.runtime.kv_cache.disk.minimum_free_mib, None);
+        assert_eq!(
+            defaults.runtime.kv_cache.disk.effective_minimum_free_mib(),
+            16_384
+        );
+        assert_eq!(defaults.runtime.kv_cache.disk.budget_mib, None);
+
+        let fixed = parse_config_toml(
+            r#"
+[runtime.kv_cache.disk]
+mode = "fixed"
+directory = "/fast-disk/mesh-kv-cache"
+budget_mib = 32768
+minimum_free_mib = 16384
+"#,
+        )
+        .expect("fixed disk-cache config should parse");
+        assert_eq!(
+            fixed.runtime.kv_cache.disk.mode,
+            Some(KvDiskTierMode::Fixed)
+        );
+        assert_eq!(fixed.runtime.kv_cache.disk.budget_mib, Some(32_768));
+    }
+
+    #[test]
+    fn disk_cache_config_rejects_invalid_mode_budget_and_path_combinations() {
+        for (raw, expected) in [
+            (
+                "[runtime.kv_cache.disk]\nmode = \"fixed\"\n",
+                "budget_mib is required",
+            ),
+            (
+                "[runtime.kv_cache.disk]\nmode = \"auto\"\nbudget_mib = 1024\n",
+                "budget_mib is only valid",
+            ),
+            (
+                "[runtime.kv_cache.disk]\nmode = \"fixed\"\nbudget_mib = 0\n",
+                "must be greater than zero",
+            ),
+            (
+                "[runtime.kv_cache.disk]\ndirectory = \"relative/cache\"\n",
+                "must be an absolute path",
+            ),
+            (
+                "[runtime.kv_cache.disk]\nminimum_free_mib = 1023\n",
+                "must be at least 1024",
+            ),
+        ] {
+            let error = parse_config_toml(raw).expect_err("invalid disk-cache config must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_cache_schema_marks_static_and_live_fields_correctly() {
+        let schema = built_in_config_schema();
+        let setting = |path: &str| {
+            schema
+                .settings
+                .iter()
+                .find(|setting| setting.path.render() == path)
+                .unwrap_or_else(|| panic!("missing schema setting {path}"))
+        };
+        for path in [
+            "runtime.kv_cache.disk.mode",
+            "runtime.kv_cache.disk.directory",
+        ] {
+            assert_eq!(setting(path).apply_mode, ConfigApplyMode::StaticOnLoad);
+            assert_eq!(
+                setting(path).restart_scope,
+                ConfigRestartScope::ProcessRestart
+            );
+        }
+        for path in [
+            "runtime.kv_cache.disk.budget_mib",
+            "runtime.kv_cache.disk.minimum_free_mib",
+        ] {
+            assert_eq!(setting(path).apply_mode, ConfigApplyMode::DynamicApply);
+            assert_eq!(setting(path).restart_scope, ConfigRestartScope::None);
+        }
     }
 
     #[test]
@@ -735,6 +830,8 @@ gpu_id = "pci:0000:65:00.0"
             ("GpuConfig", 1),
             ("RuntimeConfig", 1),
             ("NativeRuntimeConfig", 1),
+            ("RuntimeKvCacheConfig", 1),
+            ("KvDiskTierConfig", 1),
             ("MeshRequirementsConfig", 1),
             ("ModelConfigEntry", 1),
             ("ModelFitConfig", 2),
@@ -763,6 +860,8 @@ gpu_id = "pci:0000:65:00.0"
             "OwnerControlConfig",
             "RuntimeConfig",
             "NativeRuntimeConfig",
+            "RuntimeKvCacheConfig",
+            "KvDiskTierConfig",
             "TelemetryConfig",
             "TelemetryMetricsConfig",
             "AuditConfig",

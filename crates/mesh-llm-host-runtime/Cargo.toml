@@ -54,6 +54,7 @@ openai-frontend = { path = "../openai-frontend", version = "0.76.0-rc9"  }
 skippy-protocol = { path = "../skippy-protocol", version = "0.76.0-rc9"  }
 skippy-coordinator = { path = "../skippy-coordinator", version = "0.76.0-rc9"  }
 skippy-runtime = { path = "../skippy-runtime", version = "0.76.0-rc9"  }
+skippy-cache = { path = "../skippy-cache", version = "0.76.0-rc9"  }
 skippy-ffi = { path = "../skippy-ffi", version = "0.76.0-rc9", default-features = false }
 skippy-model = { path = "../skippy-model", version = "0.76.0-rc9" }
 skippy-server = { path = "../skippy-server", version = "0.76.0-rc9"  }

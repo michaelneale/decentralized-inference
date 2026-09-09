@@ -38,6 +38,20 @@ impl StageOpenAiBackend {
                     json!(restored.token_count),
                 );
                 attrs.insert(
+                    "skippy.exact_cache.source".to_string(),
+                    json!(restored.source),
+                );
+                if restored.source == "l3" {
+                    attrs.insert(
+                        "skippy.exact_cache.fill_ms".to_string(),
+                        json!(restored.fill_ms),
+                    );
+                    attrs.insert(
+                        "skippy.exact_cache.rewarm_enqueued".to_string(),
+                        json!(restored.rewarm_enqueued),
+                    );
+                }
+                attrs.insert(
                     "skippy.kv.matched_prefix_tokens".to_string(),
                     json!(restored.token_count),
                 );

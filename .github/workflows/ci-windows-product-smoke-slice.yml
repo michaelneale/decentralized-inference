@@ -1,0 +1,41 @@
+name: CI Windows Product Smoke Slice
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Immutable product source revision.
+        required: true
+        type: string
+      smoke_matrix:
+        description: JSON Windows smoke rows from the versioned CI plan.
+        required: true
+        type: string
+      timeout_minutes:
+        description: Bounded smoke timeout.
+        required: false
+        default: 45
+        type: number
+    secrets:
+      HF_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  product_integration_cpu:
+    name: Windows CPU durable L3 qualification
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-windows-cpu') }}
+    uses: ./.github/workflows/product-integration-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-windows-amd64-cpu
+      artifact_path: ci-artifacts/windows
+      staged_binary_path: ci-artifacts/windows/mesh-llm.exe
+      platform: windows
+      backend: cpu
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}

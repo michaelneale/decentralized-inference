@@ -69,6 +69,15 @@ matrix. `crates/mesh-llm-config/src/website_docs_parity.rs` separately
 asserts that every key path documented here also appears in the public
 website configuration reference, with the same `Wiring status`.
 
+## Node-local disk prompt cache
+
+| Report section | Report setting name | Config key path | Priority | Owner module | Translation target | Supported modes | Live-apply behavior | Default source | Validation rule | Docs anchor | Test evidence | Notes | Wiring status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| #1576 | Disk cache mode | `runtime.kv_cache.disk.mode` | P0 | `mesh-llm-config` / host runtime | node-scoped `L3CacheManager` | single-stage, staged | process restart | `off` | enum `off`, `auto`, or `fixed` | `#node-local-disk-prompt-cache` | `mesh-llm-config` schema and validation tests | Turning off never deletes existing cache data | wired |
+| #1576 | Disk cache directory | `runtime.kv_cache.disk.directory` | P0 | host runtime | node-scoped cache root | single-stage, staged | process restart | `$MESH_LLM_HOME/kv-cache` | explicit values must be absolute | `#node-local-disk-prompt-cache` | `mesh-llm-config` validation tests | Directory changes do not migrate or delete old data | wired |
+| #1576 | Fixed disk budget | `runtime.kv_cache.disk.budget_mib` | P0 | host runtime / `skippy-cache` | manager hard byte budget | single-stage, staged | applies dynamically | unset | required and > 0 only in fixed mode | `#node-local-disk-prompt-cache` | config precedence and manager limit tests | One shared physical cap per node root; never unbounded | wired |
+| #1576 | Minimum free storage | `runtime.kv_cache.disk.minimum_free_mib` | P0 | host runtime / `skippy-cache` | manager free-space reserve | single-stage, staged | applies dynamically | `16384` MiB | at least `1024` MiB | `#node-local-disk-prompt-cache` | config precedence and low-space transition tests | Writes decline while fills remain available | wired |
+
 
 ## Model fit, context, and KV cache
 

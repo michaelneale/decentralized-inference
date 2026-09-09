@@ -52,6 +52,9 @@ pub use skippy_ffi::{
     ACTIVATION_FLAG_GEMMA3N_ALTUP, ACTIVATION_SIDEBAND_TOKEN_IDS,
     ActivationDType as RuntimeActivationDType, ActivationLayout as RuntimeActivationLayout,
 };
+// KV page descriptor flags. Re-exported so callers can read a page's layout
+// without taking a direct dependency on the raw ABI crate.
+pub use skippy_ffi::{KV_PAGE_FLAG_HAS_K_IDX, KV_PAGE_FLAG_V_TRANSPOSED};
 pub use types::{
     ActivationBoundaryDesc, ActivationDesc, ActivationFrame, ChatReasoningFormat,
     ChatTemplateJsonOptions, ChatTemplateJsonResult, ChatTemplateMessage, ChatTemplateOptions,

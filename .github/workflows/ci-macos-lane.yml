@@ -170,7 +170,7 @@ jobs:
       architecture: ${{ fromJson(inputs.lane_plan_json).matrices.runtime_products[0].architecture }}
       smoke_matrix: ${{ toJson(fromJson(inputs.lane_plan_json).matrices.smoke) }}
       binary_target: target/release/mesh-llm
-      timeout_minutes: 30
+      timeout_minutes: 45
 
   summary:
     name: CI / macOS

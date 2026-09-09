@@ -465,6 +465,19 @@ impl RuntimeState {
         self.session(session_id)?.export_recurrent_state()
     }
 
+    /// Finalize a session's position after page imports on a family with no
+    /// recurrent memory. Pure-attention state carries no snapshot to import,
+    /// so the position is set directly and the tracked count follows it.
+    pub fn set_session_position(&mut self, session_id: &str, token_count: u64) -> Result<()> {
+        self.session(session_id)?.set_position(token_count)?;
+        record_restored_session_token_count(
+            &mut self.session_token_counts,
+            session_id,
+            token_count,
+        );
+        Ok(())
+    }
+
     pub fn import_recurrent_state_for_token_count(
         &mut self,
         session_id: &str,

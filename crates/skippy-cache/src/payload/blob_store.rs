@@ -593,7 +593,7 @@ mod tests {
         }
         assert_eq!(
             blobs.physical_bytes(),
-            expected.values().map(|(bytes, _)| bytes).sum(),
+            expected.values().map(|(bytes, _)| bytes).sum::<u64>(),
             "seed={seed:#x} step={step}"
         );
     }
@@ -797,12 +797,15 @@ mod tests {
                 assert_storage_accounting(&blobs, &owners, seed, step);
                 assert!(
                     blobs.physical_bytes()
-                        >= expected_blocks.keys().map(|block| block.len() as u64).sum(),
+                        >= expected_blocks
+                            .keys()
+                            .map(|block| block.len() as u64)
+                            .sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
                 assert_eq!(
                     blobs.logical_ref_count(),
-                    expected_blocks.values().sum(),
+                    expected_blocks.values().sum::<u64>(),
                     "seed={seed:#x} step={step}"
                 );
             }

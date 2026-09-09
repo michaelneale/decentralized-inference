@@ -115,6 +115,10 @@ produces a clear startup error rather than a partial start.
 | `runtime.reconcile_model_targets` | boolean | `false` | node-level | process restart | wired | none |
 | `runtime.reconcile_model_target_demand_upgrades` | boolean | `false` | node-level | process restart | wired | none |
 | `runtime.native_runtime.mesh_version`<br>`runtime.native_runtime.skippy_abi`<br>`runtime.native_runtime.selection` | string | unset (auto-selected) | node-level | process restart | wired | none |
+| `runtime.kv_cache.disk.mode` | enum | `off` (default), `auto`, `fixed` | node-level | process restart | wired | `--kv-cache-disk` |
+| `runtime.kv_cache.disk.directory` | absolute path | `$MESH_LLM_HOME/kv-cache` | node-level | process restart | wired | `--kv-cache-disk-dir` |
+| `runtime.kv_cache.disk.budget_mib` | integer | required and > 0 only for `fixed` | node-level | applies dynamically | wired | fixed size passed to `--kv-cache-disk` |
+| `runtime.kv_cache.disk.minimum_free_mib` | integer | `16384`; minimum `1024` | node-level | applies dynamically | wired | `--kv-cache-min-free` |
 | `runtime.model_target_demand_upgrade_min_requests` | integer | `2` | node-level | process restart | wired | none |
 | `runtime.model_target_demand_upgrade_max_age_secs` | integer | `3600` | node-level | process restart | wired | none |
 | `advanced.server.alias` | string | unset; per-model alias overrides the default | both | model reload | wired; becomes the served identity used by `/v1/models` and routing | none |

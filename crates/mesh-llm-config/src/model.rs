@@ -111,6 +111,9 @@ pub struct RuntimeConfig {
     pub reconcile_model_target_demand_upgrades: bool,
     #[serde(default)]
     pub native_runtime: NativeRuntimeConfig,
+    /// Node-wide resident and durable KV-cache policy.
+    #[serde(default)]
+    pub kv_cache: RuntimeKvCacheConfig,
     #[serde(default = "default_model_target_demand_upgrade_min_requests")]
     pub model_target_demand_upgrade_min_requests: u64,
     #[serde(default = "default_model_target_demand_upgrade_max_age_secs")]
@@ -130,11 +133,55 @@ impl Default for RuntimeConfig {
             reconcile_model_targets: false,
             reconcile_model_target_demand_upgrades: false,
             native_runtime: NativeRuntimeConfig::default(),
+            kv_cache: RuntimeKvCacheConfig::default(),
             model_target_demand_upgrade_min_requests:
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MIN_REQUESTS,
             model_target_demand_upgrade_max_age_secs:
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MAX_AGE_SECS,
         }
+    }
+}
+
+pub const DEFAULT_KV_DISK_MINIMUM_FREE_MIB: u64 = 16 * 1024;
+pub const MIN_KV_DISK_MINIMUM_FREE_MIB: u64 = 1024;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvDiskTierMode {
+    #[default]
+    Off,
+    Auto,
+    Fixed,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeKvCacheConfig {
+    #[serde(default)]
+    pub disk: KvDiskTierConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct KvDiskTierConfig {
+    #[serde(default)]
+    pub mode: Option<KvDiskTierMode>,
+    /// Absolute node-local root. Absence resolves to `$MESH_LLM_HOME/kv-cache`.
+    #[serde(default)]
+    pub directory: Option<std::path::PathBuf>,
+    /// Hard whole-node cap, required only in fixed mode.
+    #[serde(default)]
+    pub budget_mib: Option<u64>,
+    #[serde(default)]
+    pub minimum_free_mib: Option<u64>,
+}
+
+impl KvDiskTierConfig {
+    pub fn effective_mode(&self) -> KvDiskTierMode {
+        self.mode.unwrap_or_default()
+    }
+
+    pub fn effective_minimum_free_mib(&self) -> u64 {
+        self.minimum_free_mib
+            .unwrap_or(DEFAULT_KV_DISK_MINIMUM_FREE_MIB)
     }
 }
 

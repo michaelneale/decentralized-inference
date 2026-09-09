@@ -27,6 +27,7 @@ fn lifecycle_envelope(request_id: u64, marker: &str) -> crate::proto::node::Owne
             unload_model: None,
             ensure_model: None,
             drain_model: None,
+            kv_cache: None,
         }),
         error: None,
     }

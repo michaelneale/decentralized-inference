@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       platform:
-        description: "Typed operating-system selector: linux or macos."
+        description: "Typed operating-system selector: linux, macos, or windows."
         required: true
         type: string
       backend:
@@ -39,7 +39,7 @@ jobs:
   product_integration:
     name: Product integration (${{ inputs.platform }}/${{ inputs.backend }})
     if: ${{ inputs.backend != 'rocm' || vars.MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true' }}
-    runs-on: ${{ inputs.platform == 'macos' && 'macos-15' || (inputs.backend == 'cuda' || inputs.backend == 'vulkan') && fromJSON('["self-hosted","Linux","X64","amd64","gpu-nvidia","mesh-llm-amd64","mesh-llm"]') || inputs.backend == 'rocm' && fromJSON('["self-hosted","Linux","X64","amd64","gpu-amd","mesh-llm-amd64","mesh-llm"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-2022' || inputs.platform == 'macos' && 'macos-15' || (inputs.backend == 'cuda' || inputs.backend == 'vulkan') && fromJSON('["self-hosted","Linux","X64","amd64","gpu-nvidia","mesh-llm-amd64","mesh-llm"]') || inputs.backend == 'rocm' && fromJSON('["self-hosted","Linux","X64","amd64","gpu-amd","mesh-llm-amd64","mesh-llm"]') || 'ubuntu-24.04' }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     container:
       image: ${{ inputs.platform == 'linux' && inputs.backend == 'cpu' && 'ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d' || '' }}
@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${PLATFORM}/${BACKEND}" in
-            linux/cpu|linux/cuda|linux/vulkan|linux/rocm|macos/metal) ;;
+            linux/cpu|linux/cuda|linux/vulkan|linux/rocm|macos/metal|windows/cpu) ;;
             *) echo "unsupported product integration platform/backend: ${PLATFORM}/${BACKEND}" >&2; exit 2 ;;
           esac
 
@@ -121,6 +121,7 @@ jobs:
         with:
           artifact_name: ${{ inputs.artifact_name }}
           artifact_path: ${{ inputs.artifact_path }}
+          binary_name: ${{ inputs.platform == 'windows' && 'mesh-llm.exe' || 'mesh-llm' }}
           staged_binary_path: ${{ inputs.staged_binary_path }}
           model_cadence: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_target' || github.event.inputs.original_event_name == 'pull_request' || github.event.inputs.original_event_name == 'pull_request_target') && 'pull-request' || 'main' }}
           save_model_cache: ${{ github.ref == 'refs/heads/main' && github.event.inputs.original_event_name != 'pull_request' && github.event.inputs.original_event_name != 'pull_request_target' }}
@@ -128,6 +129,7 @@ jobs:
       - name: Run typed product integration suite
         env:
           MESH_PRODUCT_INTEGRATION_PHASE_ROOT: ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}
+          MESH_PRODUCT_INTEGRATION_DURABLE_ONLY: ${{ inputs.platform == 'windows' && '1' || '0' }}
         run: |
           scripts/ci-product-integration-smoke.sh \
             "${{ inputs.staged_binary_path }}" \
@@ -150,5 +152,7 @@ jobs:
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/phase-results.json
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence.json
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/split-evidence-snapshots/*.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/durable-l3-evidence.json
+            ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/durable-*/*.json
             ${{ runner.temp }}/product-integration-${{ inputs.platform }}-${{ inputs.backend }}/*/*.log
           if-no-files-found: error

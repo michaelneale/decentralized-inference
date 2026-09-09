@@ -174,7 +174,7 @@ class TwoNodeSplitSmokeTests(unittest.TestCase):
     def test_readiness_reconciles_persisted_snapshots_from_both_observers(self):
         script = SMOKE_SCRIPT.read_text(encoding="utf-8")
 
-        self.assertEqual(script.count('wait_for_split_topology "'), 2)
+        self.assertEqual(script.count('wait_for_split_topology "'), 3)
         for observer in ("seed", "worker"):
             for snapshot in ("status", "stages", "models"):
                 self.assertIn(f"{observer}-{snapshot}.json", script)

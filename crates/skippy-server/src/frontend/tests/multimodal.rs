@@ -468,6 +468,7 @@ async fn real_multimodal_split_smoke_when_fixture_is_set() -> Result<()> {
             native_mtp_enabled: true,
             continuous_batching: true,
             openai: None,
+            l3_manager: None,
         });
     let ready = connect_endpoint_ready(&stage1_addr.to_string(), 120);
     if let Err(error) = ready {

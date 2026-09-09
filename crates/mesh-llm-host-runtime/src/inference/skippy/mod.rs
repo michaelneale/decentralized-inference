@@ -589,6 +589,7 @@ fn embedded_openai_args_from(
         generation_receipt: serving_hooks.generation_receipt(),
         linear_proposal_ingress: serving_hooks.linear_proposal_ingress(),
         openai_guardrails: None,
+        l3_manager: crate::runtime::kv_disk_config::node_kv_disk_manager(),
     })
 }
 

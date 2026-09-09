@@ -341,6 +341,7 @@ async fn spawn_owner_control_test_server() -> OwnerControlTestServer {
                 unload_model: None,
                 ensure_model: None,
                 drain_model: None,
+                kv_cache: None,
             }),
             error: None,
         };
@@ -425,6 +426,7 @@ async fn spawn_owner_control_apply_test_server(
                     unload_model: None,
                     ensure_model: None,
                     drain_model: None,
+                    kv_cache: None,
                 }),
                 error: None,
             },

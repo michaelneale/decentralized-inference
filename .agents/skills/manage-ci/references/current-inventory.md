@@ -154,7 +154,7 @@ it after the protected-main runner-contract update is active.
 | `ci-website-lane.yml` | Console and website graph; reusable from PRs and dispatchable for main/manual |
 | `ci-linux-lane.yml` | Linux host/runtime/product/Rust/SDK/smoke graph with one platform-local UI producer |
 | `ci-macos-lane.yml` | macOS host/runtime/product/platform/Swift/Metal graph with one platform-local UI producer |
-| `ci-windows-lane.yml` | Windows host/runtime/product/platform graph with one platform-local UI producer |
+| `ci-windows-lane.yml` | Windows host/runtime/product/platform graph plus the CPU durable-L3 product qualification, with one platform-local UI producer |
 | `ci-quality-slice.yml` | Contracts, format, Clippy and generated CLI inventory freshness; additive protected authority sentinel |
 | `ci-web-slice.yml` | Console quality, console Playwright E2E, public website build, and CLI explorer browser validation |
 | `ci-ui-artifact-slice.yml` | Immutable console distribution producer; release callers prepare one source/version-bound UI with complete file checksums, shared by all hosts and SDK resources |
@@ -164,7 +164,7 @@ it after the protected-main runner-contract update is active.
 | `ci-{linux,macos,windows}-runtime-slice.yml` | Platform-pure native runtime producers |
 | `ci-{linux,macos,windows}-product-slice.yml` | Platform-pure composition-only product consumers |
 | `ci-platform-checks-slice.yml` | macOS portable/unit, Windows portable, and Windows log-store privacy ACL checks |
-| `ci-linux-product-smoke-slice.yml`, `ci-macos-product-smoke-slice.yml` | Platform-local callers of the typed CPU/CUDA/Vulkan (`gpu-nvidia` self-hosted), conditional ROCm (`gpu-amd`), and Metal product-integration suite plus model-download. The suite stages the registry-pinned SmolLM2 Q8 and IBM Granite 4.0 H Q4 pair once, runs dense standalone/SDK/restart, then dense passive-client split routing and strict recurrent `KvRecurrent` validation. Each split phase persists strict-whitelist seed/worker node, mesh, and peer identity plus stage/model snapshots, then atomically reconciles exact two-observer, topology/run/model/package/manifest, two-stage contiguous-cut and bind-address, ready-status, and served-model agreement. A capped five-minute wall-clock deadline with parallel, bounded endpoint capture finalizes failure evidence before workflow cancellation; the status projection excludes invite tokens, nested fields, and unrelated paths. Product reconciliation independently verifies both evidence files, records their paths and SHA-256 digests in `phase-results.json`, rejects missing or modified evidence, and uploads every JSON snapshot/evidence file with logs on success or failure. ROCm skips unless `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; accelerator product-integration rows remain outside the checked plan pending live qualification. |
+| `ci-{linux,macos,windows}-product-smoke-slice.yml` | Platform-local callers of the typed CPU/CUDA/Vulkan (`gpu-nvidia` self-hosted), conditional ROCm (`gpu-amd`), Metal, and Windows CPU product-integration suite plus model-download. The suite stages the registry-pinned SmolLM2 Q8 and IBM Granite 4.0 H Q4 pair once, runs dense standalone/SDK/restart, dense passive-client split routing, strict recurrent `KvRecurrent` validation, and a separately reconciled durable-L3 phase. That phase preserves per-node roots and identities across full process restarts for both model families, requires active CLI-sourced disk configuration, persisted inventory, a post-restart L3 fill with cached tokens and exact output, then verifies status and clear. Windows CPU runs the durable phase alone on `windows-2022`; Linux CPU and macOS Metal run the complete suite. Evidence paths and SHA-256 digests are recorded in `phase-results.json` and every status, response, split snapshot, and log uploads on success or failure. ROCm skips unless `MESH_ROCM_INFERENCE_RUNNER_ENABLED` is exactly `true`; accelerator product-integration rows remain outside the checked plan pending live qualification. |
 | `ci-linux-sdk-slice.yml`, `ci-macos-sdk-slice.yml` | Platform-local Rust/Kotlin/Swift smoke consumers; SDK producers are independent top-level calls and each smoke receives the lane-local immutable UI artifact |
 | `ci-runner-contract-slice.yml` | Provider/cache/plan trust and main runner-image checks |
 | `native-sdk-artifact.yml` | Typed native SDK producer |
@@ -319,7 +319,7 @@ does not grant; GitHub rejects at run creation with a **zero-job
 `actionlint` cannot see it. Containerizing surfaced this because
 `packages: read` (needed to pull the private GHCR runner images) has to be
 granted at *every* hop, and
-`ci-linux-product-smoke-slice.yml` / `ci-macos-product-smoke-slice.yml` sat at
+the platform product-smoke slices sat at
 `contents: read` between granted parents and requesting children.
 `scripts/tests/test_ci_workflow_permission_contract.py` walks every local
 `uses: ./.github/workflows/X.yml` edge and asserts the caller's effective
@@ -708,7 +708,7 @@ Current image references and historical null evidence remain unchanged.
 
 The `product-smoke` catalog role covers both the legacy `smoke.yml` job and
 the typed `product-integration-smoke.yml` job. The latter uses the same pinned
-CPU image only for Linux CPU; accelerator and macOS paths retain their existing
+CPU image only for Linux CPU; accelerator, macOS, and Windows paths retain their
 container opt-outs. The inventory has 9 images, 32 roles and 33 literal workflow image bindings.
 
 ### Qualified lean UI consumers

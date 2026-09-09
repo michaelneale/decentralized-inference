@@ -78,6 +78,8 @@ jobs:
       source_sha: ${{ needs.plan.outputs.source_sha }}
       original_event_name: push
       supersession_key: main-${{ github.sha }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   required:
     name: Main / Windows

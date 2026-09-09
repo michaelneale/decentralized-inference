@@ -60,6 +60,14 @@ mkdir -p "$WORK_DIR"
 # must fit platform SUN_LEN limits, especially on macOS where TMPDIR is long.
 PROCESS_ROOT="${MESH_TWO_NODE_SPLIT_PROCESS_ROOT:-$(mktemp -d "/tmp/m2split.XXXXXX")}"
 CLIENT_ROUTING="${MESH_TWO_NODE_SPLIT_CLIENT_ROUTING:-0}"
+DURABLE_L3="${MESH_TWO_NODE_SPLIT_DURABLE_L3:-0}"
+DURABLE_L3_ROOT="${MESH_TWO_NODE_SPLIT_DURABLE_L3_ROOT:-${WORK_DIR}/durable-l3-roots}"
+DURABLE_L3_EVIDENCE_PATH="${WORK_DIR}/durable-l3-evidence.json"
+DURABLE_L3_RECORDS="${WORK_DIR}/.durable-l3-evidence.jsonl"
+DENSE_ARTIFACT_ID="${MESH_TWO_NODE_SPLIT_DENSE_ARTIFACT_ID:-unspecified}"
+DENSE_MODEL_SHA256="${MESH_TWO_NODE_SPLIT_DENSE_SHA256:-unspecified}"
+RECURRENT_ARTIFACT_ID="${MESH_TWO_NODE_SPLIT_RECURRENT_ARTIFACT_ID:-unspecified}"
+RECURRENT_MODEL_SHA256="${MESH_TWO_NODE_SPLIT_RECURRENT_SHA256:-unspecified}"
 CLIENT_API_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_API_PORT:-9369}"
 CLIENT_CONSOLE_PORT="${MESH_TWO_NODE_SPLIT_CLIENT_CONSOLE_PORT:-3163}"
 PRIMARY_MODEL_LABEL="${MESH_TWO_NODE_SPLIT_MODEL_LABEL:-}"
@@ -77,6 +85,15 @@ MODEL_LABEL="$PRIMARY_MODEL_LABEL"
 SPLIT_EVIDENCE_PATH=""
 SPLIT_SNAPSHOT_DIR=""
 SPLIT_RECONCILE_LOG=""
+
+if [[ "$DURABLE_L3" != "0" && "$DURABLE_L3" != "1" ]]; then
+    echo "MESH_TWO_NODE_SPLIT_DURABLE_L3 must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "$DURABLE_L3" == "1" ]]; then
+    mkdir -p "$DURABLE_L3_ROOT"
+    : >"$DURABLE_L3_RECORDS"
+fi
 
 echo "=== CI Two-Node Split Smoke ==="
 echo "  mesh-llm:       $MESH_LLM"
@@ -97,6 +114,7 @@ echo "  ctx size:       ${CTX_SIZE:-model default}"
 echo "  max vram:       ${MAX_VRAM}GB"
 echo "  device:         $DEVICE"
 echo "  client routing: $CLIENT_ROUTING"
+echo "  durable L3:     $DURABLE_L3"
 
 if [[ ! -x "$MESH_LLM" ]]; then
     echo "Missing executable mesh-llm binary: $MESH_LLM" >&2
@@ -293,6 +311,11 @@ descendant_pids() {
 kill_tree() {
     local pid="${1:-}"
     [[ -n "$pid" ]] || return 0
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1 || true
+        wait "$pid" 2>/dev/null || true
+        return 0
+    fi
     local children
     children="$(descendant_pids "$pid" | sort -u || true)"
     kill "$pid" 2>/dev/null || true
@@ -652,12 +675,24 @@ start_node() {
     if [[ -n "$CTX_SIZE" ]]; then
         args+=(--ctx-size "$CTX_SIZE")
     fi
+    if [[ "$DURABLE_L3" == "1" ]]; then
+        args+=(
+            --kv-cache-disk 2GiB
+            --kv-cache-disk-dir "${DURABLE_L3_ROOT}/${label}"
+            --kv-cache-min-free 1GiB
+        )
+    fi
 
-    HOME="$home" \
-        MESH_LLM_RUNTIME_ROOT="$runtime" \
-        MESH_LLM_EPHEMERAL_KEY=1 \
-        SKIPPY_TELEMETRY_STDERR=1 \
-        "$MESH_LLM" "${args[@]}" >"$log_file" 2>&1 &
+    local -a node_env=(
+        env
+        "HOME=$home"
+        "MESH_LLM_RUNTIME_ROOT=$runtime"
+        "SKIPPY_TELEMETRY_STDERR=1"
+    )
+    if [[ "$DURABLE_L3" != "1" ]]; then
+        node_env+=("MESH_LLM_EPHEMERAL_KEY=1")
+    fi
+    "${node_env[@]}" "$MESH_LLM" "${args[@]}" >"$log_file" 2>&1 &
     printf '%s\n' "$!"
 }
 
@@ -975,6 +1010,297 @@ raise SystemExit(
 PY
 }
 
+capture_kv_cache_statuses() {
+    local prefix="$1"
+    "$MESH_LLM" kv-cache status --port "$SEED_CONSOLE_PORT" --json \
+        >"${prefix}-seed.json"
+    "$MESH_LLM" kv-cache status --port "$WORKER_CONSOLE_PORT" --json \
+        >"${prefix}-worker.json"
+}
+
+durable_population_ready() {
+    python3 - "$1-seed.json" "$1-worker.json" <<'PY'
+import json
+import sys
+
+statuses = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+if any(status.get("effective", {}).get("state") != "active" for status in statuses):
+    raise SystemExit(1)
+if sum(len(status.get("inventory") or []) for status in statuses) == 0:
+    raise SystemExit(1)
+if sum((status.get("activity") or {}).get("writes", 0) for status in statuses) == 0:
+    raise SystemExit(1)
+PY
+}
+
+wait_for_durable_population() {
+    local prefix="$1"
+    local deadline=$(( $(date +%s) + READINESS_TIMEOUT_SECONDS ))
+    while [[ "$(date +%s)" -lt "$deadline" ]]; do
+        if capture_kv_cache_statuses "$prefix" 2>/dev/null && \
+            durable_population_ready "$prefix" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "durable L3 did not publish restorable state before restart" >&2
+    capture_kv_cache_statuses "$prefix" 2>/dev/null || true
+    return 1
+}
+
+record_durable_restart() {
+    local evidence_dir="$1"
+    local artifact_id model_sha256
+    case "$MODEL_LABEL" in
+        dense)
+            artifact_id="$DENSE_ARTIFACT_ID"
+            model_sha256="$DENSE_MODEL_SHA256"
+            ;;
+        recurrent)
+            artifact_id="$RECURRENT_ARTIFACT_ID"
+            model_sha256="$RECURRENT_MODEL_SHA256"
+            ;;
+        *)
+            echo "unsupported durable L3 model label: $MODEL_LABEL" >&2
+            return 1
+            ;;
+    esac
+    python3 - "$DURABLE_L3_RECORDS" "$MODEL_LABEL" "$MODEL" "$artifact_id" \
+        "$model_sha256" "$EXPECTED_EXACT_PAYLOAD_KIND" \
+        "${DURABLE_L3_ROOT}/seed" "${DURABLE_L3_ROOT}/worker" \
+        "$evidence_dir" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+(
+    records_path,
+    model_label,
+    model_path,
+    artifact_id,
+    model_sha256,
+    expected_payload_kind,
+    seed_root,
+    worker_root,
+    evidence_dir,
+) = sys.argv[1:]
+root = Path(evidence_dir)
+
+def load(name):
+    with (root / name).open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+before = {node: load(f"before-{node}.json") for node in ("seed", "worker")}
+restart_before = {
+    node: load(f"restart-before-{node}.json") for node in ("seed", "worker")
+}
+after = {node: load(f"after-{node}.json") for node in ("seed", "worker")}
+cleared = {node: load(f"cleared-{node}.json") for node in ("seed", "worker")}
+warm_response = load("warm-response.json")
+restored_response = load("restored-response.json")
+
+for stage, statuses in (
+    ("before", before),
+    ("restart-before", restart_before),
+    ("after", after),
+    ("cleared", cleared),
+):
+    for node, status in statuses.items():
+        effective = status.get("effective") or {}
+        if effective.get("state") != "active" or effective.get("reason") is not None:
+            raise SystemExit(f"{stage} {node} disk tier is not active: {effective!r}")
+        configured = status.get("configured") or {}
+        sources = configured.get("sources") or {}
+        if configured.get("mode") != "fixed" or configured.get("budget_bytes") != 2 * 1024**3:
+            raise SystemExit(f"{stage} {node} has unexpected disk configuration: {configured!r}")
+        if configured.get("minimum_free_bytes") != 1024**3:
+            raise SystemExit(f"{stage} {node} has unexpected free-space reserve: {configured!r}")
+        if any(sources.get(field) != "cli" for field in ("mode", "budget", "directory", "minimum_free")):
+            raise SystemExit(f"{stage} {node} configuration source is not CLI: {sources!r}")
+
+before_inventory = sum(len(status.get("inventory") or []) for status in before.values())
+restart_inventory = sum(
+    len(status.get("inventory") or []) for status in restart_before.values()
+)
+if before_inventory == 0 or restart_inventory == 0:
+    raise SystemExit("durable inventory was missing before or after process restart")
+
+before_writes = sum((status.get("activity") or {}).get("writes", 0) for status in before.values())
+restart_fills = sum((status.get("activity") or {}).get("fills", 0) for status in after.values())
+restart_initial_fills = sum(
+    (status.get("activity") or {}).get("fills", 0) for status in restart_before.values()
+)
+if before_writes <= 0:
+    raise SystemExit("the population process recorded no durable L3 writes")
+if restart_initial_fills != 0 or restart_fills <= 0:
+    raise SystemExit(
+        f"restart did not prove an L3 fill: before={restart_initial_fills}, after={restart_fills}"
+    )
+
+usage = restored_response.get("usage") or {}
+prompt_tokens = usage.get("prompt_tokens")
+cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+if not isinstance(prompt_tokens, int) or not isinstance(cached_tokens, int) or cached_tokens <= 0:
+    raise SystemExit(f"restart response did not report restored tokens: {usage!r}")
+
+def output_text(response):
+    try:
+        return response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise SystemExit(f"response omitted assistant output: {response!r}")
+
+warm_output = output_text(warm_response)
+restored_output = output_text(restored_response)
+if warm_output != restored_output:
+    raise SystemExit(
+        f"restart output diverged: warm={warm_output!r}, restored={restored_output!r}"
+    )
+
+payload_kinds = sorted({
+    entry.get("payload_kind")
+    for status in restart_before.values()
+    for entry in status.get("inventory") or []
+    if isinstance(entry, dict) and isinstance(entry.get("payload_kind"), str)
+})
+if not payload_kinds:
+    raise SystemExit("durable inventory did not identify a payload kind")
+if expected_payload_kind and expected_payload_kind not in payload_kinds:
+    raise SystemExit(
+        f"expected payload kind {expected_payload_kind!r}, observed {payload_kinds!r}"
+    )
+
+for node, status in cleared.items():
+    if status.get("inventory"):
+        raise SystemExit(f"clear left {node} inventory behind")
+    if (status.get("usage") or {}).get("used_bytes") != 0:
+        raise SystemExit(f"clear left {node} managed bytes behind: {status.get('usage')!r}")
+
+record = {
+    "model": {
+        "label": model_label,
+        "artifact_id": artifact_id,
+        "sha256": model_sha256,
+        "path": model_path,
+    },
+    "configuration": {
+        "source": "cli",
+        "mode": "fixed",
+        "budget_bytes": 2 * 1024**3,
+        "minimum_free_bytes": 1024**3,
+        "roots": {"seed": seed_root, "worker": worker_root},
+    },
+    "cache_root_lifecycle": "preserved",
+    "process_boundary": True,
+    "payload_kinds": payload_kinds,
+    "statuses": {
+        "before_stop": before,
+        "after_restart_before_request": restart_before,
+        "after_restore": after,
+        "after_clear": cleared,
+    },
+    "restored_prompt_tokens": prompt_tokens,
+    "restored_cached_tokens": cached_tokens,
+    "l3_fill_count": restart_fills,
+    "exact_output_match": True,
+    "status_command": "mesh-llm kv-cache status --json",
+    "clear_command": "mesh-llm kv-cache clear --yes --json",
+}
+with open(records_path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+run_durable_restart_probe() {
+    [[ "$DURABLE_L3" == "1" ]] || return 0
+    local request_path="$1"
+    local warm_response_path="$2"
+    local evidence_dir="${WORK_DIR}/durable-${MODEL_LABEL}"
+    mkdir -p "$evidence_dir"
+    cp "$request_path" "$evidence_dir/request.json"
+    cp "$warm_response_path" "$evidence_dir/warm-response.json"
+    wait_for_durable_population "$evidence_dir/before"
+
+    kill_tree "$CLIENT_PID"
+    CLIENT_PID=""
+    kill_tree "$WORKER_PID"
+    WORKER_PID=""
+    kill_tree "$SEED_PID"
+    SEED_PID=""
+
+    SEED_LOG="${WORK_DIR}/${MODEL_LABEL}-restart-seed.log"
+    WORKER_LOG="${WORK_DIR}/${MODEL_LABEL}-restart-worker.log"
+    SEED_PID="$(start_node seed "" "$SEED_API_PORT" "$SEED_CONSOLE_PORT" "$SEED_BIND_PORT" "$SEED_LOG")"
+    wait_for_seed_token "${MODEL_LABEL} durable restart: "
+    WORKER_PID="$(start_node worker "$TOKEN" "$WORKER_API_PORT" "$WORKER_CONSOLE_PORT" "$WORKER_BIND_PORT" "$WORKER_LOG")"
+    DRIVER_LABEL=""
+    DRIVER_API_PORT=""
+    wait_for_split_topology "${MODEL_LABEL} durable restart: "
+    MODEL_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("model_id", ""))' "$SPLIT_EVIDENCE_PATH")"
+    [[ -n "$MODEL_ID" ]] || {
+        echo "durable restart split evidence did not return a model id" >&2
+        return 1
+    }
+    sleep "$REQUEST_SETTLE_SECONDS"
+    capture_kv_cache_statuses "$evidence_dir/restart-before"
+    python3 - "$MODEL_ID" "$evidence_dir/request.json" <<'PY'
+import json
+import os
+import sys
+
+model, path = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["model"] = model
+temporary = f"{path}.tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+os.replace(temporary, path)
+PY
+    curl -fsS --max-time 180 \
+        "http://127.0.0.1:${DRIVER_API_PORT}/v1/chat/completions" \
+        -H 'content-type: application/json' \
+        -d @"$evidence_dir/request.json" \
+        -o "$evidence_dir/restored-response.json"
+    sleep "$REQUEST_SETTLE_SECONDS"
+    capture_kv_cache_statuses "$evidence_dir/after"
+    "$MESH_LLM" kv-cache clear --port "$SEED_CONSOLE_PORT" --yes --json \
+        >"$evidence_dir/clear-seed.json"
+    "$MESH_LLM" kv-cache clear --port "$WORKER_CONSOLE_PORT" --yes --json \
+        >"$evidence_dir/clear-worker.json"
+    capture_kv_cache_statuses "$evidence_dir/cleared"
+    record_durable_restart "$evidence_dir"
+}
+
+write_durable_l3_evidence() {
+    [[ "$DURABLE_L3" == "1" ]] || return 0
+    python3 - "$DURABLE_L3_RECORDS" "$DURABLE_L3_EVIDENCE_PATH" \
+        "$([[ -n "$RECURRENT_MODEL" ]] && printf 'dense,recurrent' || printf '%s' "$PRIMARY_MODEL_LABEL")" <<'PY'
+import json
+import os
+import sys
+
+records_path, output_path, expected_labels = sys.argv[1:]
+with open(records_path, encoding="utf-8") as handle:
+    records = [json.loads(line) for line in handle if line.strip()]
+expected = expected_labels.split(",")
+observed = [record.get("model", {}).get("label") for record in records]
+if observed != expected:
+    raise SystemExit(f"durable L3 evidence models differ: expected {expected}, observed {observed}")
+evidence = {
+    "schema_version": 1,
+    "kind": "mesh-llm-durable-l3-restart",
+    "status": "passed",
+    "models": records,
+}
+temporary = f"{output_path}.tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(evidence, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, output_path)
+PY
+}
+
 prefix_validated=0
 for attempt in $(seq 1 "$PREFIX_ATTEMPTS"); do
     payload_dir="${PREFIX_PAYLOAD_ROOT}/attempt-${attempt}"
@@ -1025,6 +1351,9 @@ if [[ "$prefix_validated" -ne 1 ]]; then
 fi
 
 assert_expected_stage_payload
+
+run_durable_restart_probe "${payload_dir}/prompt-${PREFIX_REQUEST_COUNT}.json" \
+    "${response_dir}/response-${PREFIX_REQUEST_COUNT}.json"
 
 echo "Two-node split smoke passed for model leg: ${MODEL_LABEL:-default}"
 
@@ -1114,5 +1443,10 @@ if [[ -n "$RECURRENT_MODEL" ]]; then
 
     assert_expected_stage_payload
 
+    run_durable_restart_probe "${payload_dir}/prompt-${PREFIX_REQUEST_COUNT}.json" \
+        "${response_dir}/response-${PREFIX_REQUEST_COUNT}.json"
+
     echo "Two-node split smoke passed for model leg: recurrent"
 fi
+
+write_durable_l3_evidence
