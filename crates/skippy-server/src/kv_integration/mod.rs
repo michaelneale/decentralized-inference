@@ -148,7 +148,13 @@ pub(crate) struct ExactStateByteLimits {
 #[derive(Clone)]
 pub struct KvStageIntegration {
     pub(crate) mode: StageKvMode,
+    /// The in-process cache representation. Dense models keep native resident
+    /// KV here even when a durable tier is configured, so enabling disk does
+    /// not replace the fast warm path with serialized state import.
     pub(crate) payload: StagePrefixCachePayload,
+    /// Exportable representation written to and restored from L3. This is
+    /// separate from `payload` because resident KV is native and borrow-only.
+    pub(crate) durable_payload: Option<StagePrefixCachePayload>,
     pub(crate) correctness_mode: bool,
     pub(crate) trust_local_writes: bool,
     pub(crate) checkpoint_policy: SparseCheckpointPolicy,
@@ -502,7 +508,14 @@ impl KvStageIntegration {
     }
 
     pub(crate) fn payload_is_exact_state(&self) -> bool {
-        self.payload.is_exact_state()
+        self.exact_state_payload().is_some()
+    }
+
+    pub(crate) fn exact_state_payload(&self) -> Option<StagePrefixCachePayload> {
+        self.payload
+            .is_exact_state()
+            .then_some(self.payload)
+            .or(self.durable_payload)
     }
 
     pub fn should_lookup(&self) -> bool {
