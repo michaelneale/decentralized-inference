@@ -540,6 +540,19 @@
       ],
       "image_id": "public-web",
       "scope": "release"
+    },
+    "runtime-seed-canary": {
+      "image_id": "public-cpu",
+      "scope": "ordinary",
+      "bindings": [
+        {
+          "workflow": "depot-canary.yml",
+          "job": "runtime_seed",
+          "matrix_selector": null,
+          "image_expression": "{image}",
+          "epoch_field": null
+        }
+      ]
     }
   },
   "runtime_rows": {

@@ -188,7 +188,7 @@ values with every literal workflow image binding and the actual planner rows.
 Its focused tests run through the existing `just ci-validate` discovery. This
 catalog adds no planner authority and changes no cache keys.
 Historical receipt, provenance and workload-coverage fields are explicitly
-unknown. `diagnose` reports the runtime architecture guard mismatch separately;
+unknown. `diagnose` reports deliberate runtime seed exclusion;
 matching image identity does not qualify the host seed for native runtime work.
 
 Some CI jobs run inside a `container:` pinned to a digest from the
@@ -514,7 +514,7 @@ fail-open policy.
 - `configure-sccache-gha`: event/provider-derived compiler-cache setup.
 - `restore-sccache-seed`: exact-key restore of the trusted 2 GiB Linux seed;
   central runner policy permits it only for GitHub-hosted selections, and
-  runtime rows must match the seed's container image and toolchain epoch.
+  native runtime restore is explicitly disabled after zero-reuse qualification.
 - `capture-sccache-stats`: machine-readable cache evidence. Warm consumers with
   a positive floor fail when no cache requests are observable; the zero-floor
   SafeTensors observation remains non-failing and emits a wiring warning.
@@ -545,14 +545,14 @@ trusted-main caches. Same-repository PRs normally use GitHub's ref-scoped cache;
 eligible PR jobs may temporarily use Depot's shared cross-branch
 namespace under `ci/DEPOT_PR_RISK_EXCEPTION.md`. That namespace is treated as
 untrusted input, not an authority or correctness boundary. Linux Clippy,
-Rust-test, host, and runtime jobs restore one bounded trusted sccache seed
+Rust-test and host jobs restore one bounded trusted sccache seed
 instead of per-row Cargo target archives. The protected warmer's
 `just ci-sccache-seed-build` recipe covers the dominant `mesh-llm` Clippy graph
 and the isolated `mesh-llm-cli` test graph used by the Rust-test matrix. Depot
 selections cannot restore that
 seed through their cross-trust cache proxy. Its exact key fingerprints the
-warmer image and toolchain epoch, so mismatched native-runtime rows are cold and
-do not restore it. These four high-fanout families disable per-object GHA
+warmer image and toolchain epoch. Native-runtime rows explicitly remain cold
+after three verified warm samples observed zero reuse. These four high-fanout families disable per-object GHA
 publication on every provider. Exact Linux static ABI, Swift ABI, macOS Metal unit ABI,
 and Windows native ABI caches may publish into GitHub's isolated PR merge-ref
 scope for same-PR reruns. UI installs (`ui_quality`, `ui_e2e`, `ui_artifact`) point pnpm at the runner
@@ -709,7 +709,7 @@ Current image references and historical null evidence remain unchanged.
 The `product-smoke` catalog role covers both the legacy `smoke.yml` job and
 the typed `product-integration-smoke.yml` job. The latter uses the same pinned
 CPU image only for Linux CPU; accelerator and macOS paths retain their existing
-container opt-outs. The inventory has 9 images, 31 roles and 32 literal workflow image bindings.
+container opt-outs. The inventory has 9 images, 32 roles and 33 literal workflow image bindings.
 
 ### Qualified lean UI consumers
 
@@ -719,3 +719,18 @@ The catalog retains the admitted run `34256062098` attempt 1 cohort for UI/brows
 other historical receipts and CPU seed workload coverage remain unknown.
 See [CI topology](../../../../ci/ci.md#qualified-lean-ui-consumers) for admission
 scope and the required candidate-branch lane execution before merge.
+
+### Existing-seed CPU runtime canary
+
+`depot-canary.yml` has an isolated manual `runtime-seed` mode with three cold/warm
+pairs on fresh GitHub-hosted CPU jobs. It restores only the admitted main seed,
+never saves caches or changes production eligibility, and retains negative or
+inconclusive results. The catalog tracks this qualification restore separately
+from the five production restore-action bindings, including the explicitly
+disabled runtime binding. See [CI topology](../../../../ci/ci.md#existing-seed-cpu-runtime-canary)
+for identity, measurements and the completed qualification limits.
+
+Runtime exclusion evidence: run `34272984200/1`, source
+`1f4545616e98db715e37c57e1196cbdc975a010e`, observed zero reuse in all three
+verified warm samples. Full-cohort timing remains inconclusive because pairs 1/2
+had different CPUs. See [retained evidence](../../../../ci/runtime-seed-evidence/34272984200-1/README.md).

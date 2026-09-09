@@ -60,8 +60,8 @@ class RunnerImageIdentityTests(unittest.TestCase):
         paths = list((self.root / ".github/workflows").glob("*.yml")) + [self.root / "ci/slices.yml", self.root / "ci/ownership.yml"]
         before = {path: path.read_bytes() for path in paths}
         self.assertEqual(IDENTITY.check(self.catalog, self.root), {
-            "images": 9, "roles": 31, "workflow_bindings": 32,
-            "runtime_rows": 4, "seed_consumers": 5,
+            "images": 9, "roles": 32, "workflow_bindings": 33,
+            "runtime_rows": 4, "seed_consumers": 6,
         })
         self.assertEqual(before, {path: path.read_bytes() for path in paths})
 
@@ -160,7 +160,7 @@ class RunnerImageIdentityTests(unittest.TestCase):
             for binding in role["bindings"]:
                 if binding["workflow"] == original:
                     binding["workflow"] = renamed
-        self.assertEqual(IDENTITY.check(self.catalog, self.root)["workflow_bindings"], 32)
+        self.assertEqual(IDENTITY.check(self.catalog, self.root)["workflow_bindings"], 33)
         self.replace(".github/workflows/" + renamed, self.image("public-web"), self.image("public-cpu"))
         self.assert_drift("image reference drift")
 
@@ -214,16 +214,22 @@ class RunnerImageIdentityTests(unittest.TestCase):
         self.replace(".github/workflows/ci-linux-host-slice.yml", "uses: ./.github/actions/restore-sccache-seed", "uses: ./.github/actions/another-action")
         self.assert_drift("restore action census drift")
 
-    def test_runtime_seed_guard_image_drift_fails(self) -> None:
-        self.replace(".github/workflows/ci-linux-runtime-slice.yml", self.image("public-cpu"), self.image("public-web"))
-        self.assert_drift("runtime seed guard container_image drift")
+    def test_runtime_seed_reenablement_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", 'allow_trusted_seed: "false"', 'allow_trusted_seed: "true"')
+        self.assert_drift("runtime seed restore is deliberately disabled")
 
-    def test_architecture_diagnostics_do_not_claim_workload_coverage(self) -> None:
-        path = self.root / ".github/workflows/ci-linux-runtime-slice.yml"
-        import re
-        path.write_text(re.sub(r"matrix\.runtime\.architecture == '[^']+'", "matrix.runtime.architecture == 'fixture-mismatch'", path.read_text()))
+    def test_runtime_seed_expression_reenablement_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", 'allow_trusted_seed: "false"', "allow_trusted_seed: ${{ needs.runner_policy.outputs.allow_trusted_sccache_seed }}")
+        self.assert_drift("runtime seed restore is deliberately disabled")
+
+    def test_runtime_seed_missing_allow_field_fails(self) -> None:
+        self.replace(".github/workflows/ci-linux-runtime-slice.yml", '          allow_trusted_seed: "false"\n', '')
+        with self.assertRaises(IDENTITY.IdentityError):
+            IDENTITY.check(self.catalog, self.root)
+
+    def test_runtime_seed_diagnostics_report_deliberate_exclusion(self) -> None:
         messages = IDENTITY.diagnose(self.catalog, self.root)
-        self.assertTrue(any("fixture-mismatch" in message and "separate workload coverage decision" in message for message in messages))
+        self.assertTrue(any("deliberately disabled" in message for message in messages))
         self.assertTrue(any("workload coverage is unqualified" in message for message in messages))
 
     def test_sdk_rust_epoch_stays_separate_from_native_epoch(self) -> None:
@@ -360,6 +366,26 @@ class RunnerImageIdentityTests(unittest.TestCase):
                     path.unlink()
                 else:
                     path.write_text(original)
+
+    def test_runtime_seed_canary_key_producer_cannot_be_overridden(self) -> None:
+        path = self.root / ".github/workflows/depot-canary.yml"
+        original = path.read_text()
+        command = "python3 scripts/runtime-seed-canary.py preflight runtime-seed-evidence"
+        mutations = {
+            "override": original.replace(command, command + "; echo key=other >> $GITHUB_OUTPUT"),
+            "missing": original.replace("id: seed_key", "id: other_key"),
+            "duplicate": original + "      - name: duplicate key\n        id: seed_key\n        run: true\n",
+            "unused expression": original.replace("CANARY_KEY:", "UNUSED_KEY:"),
+        }
+        for name, contents in mutations.items():
+            with self.subTest(case=name):
+                # Duplicate inside the canary job, not after the summary job.
+                if name == "duplicate":
+                    contents = original.replace("  runtime_seed_summary:", "      - name: duplicate key\n        id: seed_key\n        run: true\n\n  runtime_seed_summary:")
+                path.write_text(contents)
+                with self.assertRaises(IDENTITY.IdentityError):
+                    IDENTITY.check(self.catalog, self.root)
+        path.write_text(original)
 
 if __name__ == "__main__":
     unittest.main()
