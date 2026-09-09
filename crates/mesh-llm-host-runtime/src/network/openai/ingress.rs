@@ -8,7 +8,7 @@ use crate::network::openai::client_stream::ClientStream;
 use crate::network::openai::transport as proxy;
 use crate::network::router;
 use crate::plugin::openai_exchange::{
-    OpenAiExchangeChannel, OpenAiExchangeDispatchPath, OpenAiExchangeEnvelope,
+    ClientNonceSource, OpenAiExchangeChannel, OpenAiExchangeDispatchPath, OpenAiExchangeEnvelope,
 };
 use mesh_llm_events::audit::{audit_events, emit_audit};
 use mesh_llm_events::{OutputEvent, emit_event};
@@ -26,6 +26,25 @@ fn plugin_route_status(outcome: &proxy::RouteDispatchOutcome) -> Option<u16> {
     }
 }
 
+/// Map a `RemoteMesh` forwarded nonce's origin marker (see
+/// [`proxy::BufferedHttpRequest::capsule_nonce_headers`]) to the tri-state a
+/// plugin uses to judge trust. An origin marker present means THIS frontend
+/// minted the nonce (the client sent none, so a fallback was generated at
+/// ingress); its absence means the value came from the client unchanged.
+/// `None` exactly when there is no nonce to report at all.
+fn remote_mesh_nonce_source(
+    nonce: &Option<String>,
+    nonce_origin: &Option<String>,
+) -> Option<ClientNonceSource> {
+    nonce.as_ref().map(|_| {
+        if nonce_origin.is_some() {
+            ClientNonceSource::SidecarGeneratedFallback
+        } else {
+            ClientNonceSource::ClientSupplied
+        }
+    })
+}
+
 enum AutoRouteResolution {
     Continue {
         effective_model: Option<String>,
@@ -39,6 +58,16 @@ struct IngressRouteContext<'a> {
     targets: &'a election::ModelTargets,
     affinity: &'a affinity::AffinityRouter,
     plugin_manager: Option<&'a crate::plugin::PluginManager>,
+    /// Explicit exchange channel for the remote-mesh publish pair.
+    /// When `None`, falls back to `plugin_manager` as the channel
+    /// (production path). Set to `Some` in tests to inject a recording double,
+    /// because the production call sites set `plugin_manager: None` in tests
+    /// and the publish calls are guarded by `if let Some(plugin_manager) =
+    /// ctx.plugin_manager` — making them invisible to a test that passes
+    /// `plugin_manager: None`. This field lets a test inject a channel without
+    /// requiring a live `PluginManager`.
+    #[cfg(test)]
+    exchange_channel: Option<&'a dyn OpenAiExchangeChannel>,
 }
 
 struct ProxyConnectionContext<'a> {
@@ -499,7 +528,46 @@ async fn route_missing_local_model(
 ) -> proxy::RouteDispatchOutcome {
     // Try remote mesh first.
     if let Some(mesh_targets) = remote_mesh_targets(ctx, model_name).await {
-        return proxy::route_model_request(
+        // This node is routing the exchange to a peer, not serving it --
+        // publish the same effective/terminal pair try_route_plugin_model
+        // already does for its own dispatch below, with `RemoteMesh` in
+        // place of `RawProxy`, so a plugin on the ROUTING node can observe
+        // this exchange too (previously it observed nothing at all for a
+        // routed exchange). No marker exists on this path yet -- a peer's
+        // `X-Capsule-Id` response header is not read back here -- so
+        // capsule_id stays absent, same as the plugin-served terminal event
+        // just below.
+        let exchange_id = uuid::Uuid::new_v4().to_string();
+        // The client-contributed capsule nonce, already stabilized (and, if
+        // the client sent none, minted) by `finalize_forwarded_request` at
+        // ingress -- read back off the already-buffered request rather than
+        // minted here: a second fallback minted on THIS node would not match
+        // whatever was already stamped into the request this node forwards
+        // to the peer byte-for-byte, breaking "same nonce both sides."
+        let (forwarded_nonce, nonce_origin) = request.capsule_nonce_headers();
+        let nonce_source = remote_mesh_nonce_source(&forwarded_nonce, &nonce_origin);
+        // In tests, `exchange_channel` may be injected directly so the publish
+        // pair is observable even when `plugin_manager` is `None`. In
+        // production (and in non-test builds) `plugin_manager` is the channel.
+        #[cfg(test)]
+        let channel: Option<&dyn OpenAiExchangeChannel> = ctx.exchange_channel.or_else(|| {
+            ctx.plugin_manager
+                .map(|pm| pm as &dyn OpenAiExchangeChannel)
+        });
+        #[cfg(not(test))]
+        let channel: Option<&dyn OpenAiExchangeChannel> = ctx
+            .plugin_manager
+            .map(|pm| pm as &dyn OpenAiExchangeChannel);
+        if let Some(ch) = channel {
+            ch.publish(&OpenAiExchangeEnvelope::effective_remote_mesh(
+                exchange_id.clone(),
+                model_name,
+                forwarded_nonce.clone(),
+                nonce_source,
+            ))
+            .await;
+        }
+        let outcome = proxy::route_model_request(
             ctx.node.clone(),
             tcp_stream,
             &mesh_targets,
@@ -512,6 +580,17 @@ async fn route_missing_local_model(
             },
         )
         .await;
+        if let Some(ch) = channel {
+            ch.publish(&OpenAiExchangeEnvelope::terminal_remote_mesh(
+                exchange_id,
+                model_name,
+                plugin_route_status(&outcome),
+                forwarded_nonce,
+                nonce_source,
+            ))
+            .await;
+        }
+        return outcome;
     }
 
     // Check if the model is known locally but unavailable
@@ -1157,6 +1236,8 @@ async fn handle_api_proxy_connection(
                 targets: &targets,
                 affinity: &affinity,
                 plugin_manager: plugin_manager.as_ref(),
+                #[cfg(test)]
+                exchange_channel: None,
             };
             handle_buffered_api_request(
                 tcp_stream,

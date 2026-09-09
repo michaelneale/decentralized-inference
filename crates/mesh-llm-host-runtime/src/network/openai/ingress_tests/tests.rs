@@ -1,12 +1,28 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::logging::{
     LoggingService, OpenAiLifecycleAttachment, RawMeshLifecycleOwners, RawMeshRequestLifecycle,
     TerminalOutcome,
 };
+use crate::plugin::openai_exchange::{OpenAiExchangeChannel, OpenAiExchangeEnvelope};
+use async_trait::async_trait;
 use mesh_llm_events::logging::{events::LifecycleEvent, identifiers::RequestId};
 
 use super::*;
+
+/// Recording double for `OpenAiExchangeChannel` — accumulates every published
+/// envelope so tests can assert on count, dispatch path, exchange id, and nonce.
+#[derive(Default)]
+struct RecordingChannel {
+    events: Mutex<Vec<OpenAiExchangeEnvelope>>,
+}
+
+#[async_trait]
+impl OpenAiExchangeChannel for RecordingChannel {
+    async fn publish(&self, event: &OpenAiExchangeEnvelope) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
 
 fn large_tokenize_request(model: &str) -> proxy::BufferedHttpRequest {
     proxy::BufferedHttpRequest {
@@ -245,6 +261,7 @@ async fn moa_single_worker_stays_in_gateway() {
             targets: &targets,
             affinity: &affinity,
             plugin_manager: None,
+            exchange_channel: None,
         },
     };
     let lifecycle = OpenAiLifecycleAttachment::unowned();
@@ -484,6 +501,7 @@ async fn api_proxy_tokenizer_route_ignores_generation_context_budget() {
         targets: &targets,
         affinity: &affinity,
         plugin_manager: None,
+        exchange_channel: None,
     };
     let raw_before_decision = request.raw.clone();
 
@@ -908,4 +926,397 @@ fn disconnect_is_dropped_and_cannot_audit_model_access_as_success() {
     assert!(model_access_succeeded(
         proxy::RouteDispatchOutcome::Responded(200)
     ));
+}
+
+// --- #1668 round-2: call-site test for route_missing_local_model ---
+
+/// Seed a `mesh::Node` with one admitted `Host` peer serving `model` at a
+/// fake address. `hosts_for_model` returns the peer's `EndpointId` without
+/// any gossip round trip, so `remote_mesh_targets` returns `Some` and
+/// `route_missing_local_model` takes the remote-mesh branch.
+fn test_remote_peer(seed: u32, model: &str) -> mesh::PeerInfo {
+    // Deterministic fake id derived from seed so callers can build multiple
+    // non-colliding peers.
+    let secret = {
+        let mut bytes = [0u8; 32];
+        let seed_bytes = seed.to_le_bytes();
+        bytes[..4].copy_from_slice(&seed_bytes);
+        bytes[4] = 0xde;
+        bytes[5] = 0xad;
+        iroh::SecretKey::try_from(bytes).expect("fixed-length test key")
+    };
+    let peer_id = iroh::EndpointId::from(secret.public());
+    mesh::PeerInfo {
+        id: peer_id,
+        addr: iroh::EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        },
+        mesh_id: None,
+        mesh_policy_hash: None,
+        genesis_policy: None,
+        // Host role is required for `accepts_http_inference()` and
+        // therefore for `routes_http_model()` and `hosts_for_model()`.
+        role: mesh::NodeRole::Host { http_port: 9337 },
+        first_joined_mesh_ts: None,
+        models: vec![model.to_string()],
+        vram_bytes: 16 * 1024 * 1024 * 1024,
+        rtt_ms: None,
+        model_source: None,
+        // admitted: true required for `is_admitted()`.
+        admitted: true,
+        serving_models: vec![model.to_string()],
+        hosted_models: vec![model.to_string()],
+        hosted_models_known: true,
+        available_models: vec![],
+        requested_models: vec![],
+        explicit_model_interests: vec![],
+        last_seen: std::time::Instant::now(),
+        last_mentioned: std::time::Instant::now(),
+        version: None,
+        gpu_name: None,
+        hostname: None,
+        is_soc: None,
+        gpu_vram: None,
+        gpu_reserved_bytes: None,
+        gpu_mem_bandwidth_gbps: None,
+        gpu_compute_tflops_fp32: None,
+        gpu_compute_tflops_fp16: None,
+        available_model_metadata: vec![],
+        experts_summary: None,
+        available_model_sizes: std::collections::HashMap::new(),
+        served_model_descriptors: vec![],
+        served_model_runtime: vec![],
+        owner_attestation: None,
+        release_attestation_summary: crate::ReleaseAttestationSummary::default(),
+        artifact_transfer_supported: false,
+        stage_protocol_generation_supported: false,
+        stage_status_list_supported: false,
+        local_gguf_content_id_supported: false,
+        advertised_model_throughput: vec![],
+        cache_affinity: None,
+        display_rtt: None,
+        selected_path: None,
+        propagated_latency: None,
+        owner_summary: crate::crypto::OwnershipSummary::default(),
+        inference_admission_state: None,
+    }
+}
+
+/// Verifies that `route_missing_local_model` enters the remote-mesh branch
+/// when at least one admitted peer serves the requested model, AND that the
+/// function publishes BOTH the effective-request and terminal envelopes on
+/// that branch via `IngressRouteContext::exchange_channel`.
+///
+/// This test was previously defective (erlich review): it passed
+/// `plugin_manager: None`, so the two publish calls — both guarded by
+/// `if let Some(plugin_manager) = ctx.plugin_manager` — were never executed,
+/// and the test could not observe the publish pair it claimed to prove. The
+/// fix adds a `#[cfg(test)]` `exchange_channel` field to `IngressRouteContext`
+/// that accepts a recording double injected here without needing a live
+/// `PluginManager`.
+///
+/// erlich's four required assertions:
+///   (1) TWO messages published (effective + terminal)
+///   (2) `dispatch_path: RemoteMesh` on both envelopes
+///   (3) matching `exchange_id` across the pair
+///   (4) the SAME nonce on both (matches the nonce in the forwarded request)
+///
+/// Failure proof: if either publish call in `route_missing_local_model` is
+/// deleted, `events.len()` drops to 1 and assertion (1) fails. Run:
+///   `cargo test -p mesh-llm-host-runtime route_missing_local_model 2>&1`
+/// with one publish removed to confirm the test catches the defect.
+#[tokio::test]
+async fn route_missing_local_model_enters_remote_mesh_branch_when_peer_serves_model() {
+    use crate::plugin::openai_exchange::{OpenAiExchangeDispatchPath, OpenAiExchangePhase};
+
+    let model = "acme/remote-model:Q4_K_M";
+    let node = mesh::Node::new_for_tests(crate::mesh::NodeRole::Worker)
+        .await
+        .expect("test node");
+    node.insert_test_peer(test_remote_peer(1, model)).await;
+
+    let targets = election::ModelTargets::default();
+    let affinity = affinity::AffinityRouter::new();
+
+    // Recording double — accumulates every envelope the publish calls emit.
+    let recording = RecordingChannel::default();
+
+    // Loopback TCP pair — the server side becomes the ClientStream.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("local addr");
+    let client_connect = tokio::net::TcpStream::connect(addr);
+    let server_accept = async { listener.accept().await.map(|(s, _)| s) };
+    let (_client_side, server_side) = tokio::join!(client_connect, server_accept);
+    let tcp_stream = server_side.expect("accept server side");
+
+    // Build a minimal chat-completion request stamped with a client nonce so
+    // `capsule_nonce_headers()` returns `Some`. The nonce must survive into
+    // both published envelopes unchanged (assertion 4).
+    let body =
+        br#"{"model":"acme/remote-model:Q4_K_M","messages":[{"role":"user","content":"hi"}]}"#;
+    let nonce = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    let raw = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nx-capsule-client-nonce: {nonce}\r\n\r\n",
+        len = body.len(),
+        nonce = nonce,
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(body.iter().copied())
+    .collect::<Vec<u8>>();
+    let request = proxy::BufferedHttpRequest {
+        raw,
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: body.len(),
+        completion_tokens: None,
+        stream: None,
+        model_name: Some(model.to_owned()),
+        request_object_request_ids: Vec::new(),
+        response_adapter: proxy::ResponseAdapter::OpenAiChatCompletionsJson,
+        correlation_id: None,
+    };
+
+    // Confirm the nonce header round-trips through the raw bytes before the
+    // function reads it — a prerequisite for assertion (4).
+    let (parsed_nonce, _origin) = request.capsule_nonce_headers();
+    assert_eq!(
+        parsed_nonce.as_deref(),
+        Some(nonce),
+        "nonce header must be readable from the raw request bytes"
+    );
+
+    let ctx = IngressRouteContext {
+        node: &node,
+        targets: &targets,
+        affinity: &affinity,
+        plugin_manager: None,
+        // Inject the recording double so both publish calls are observable
+        // even though plugin_manager is None.
+        exchange_channel: Some(&recording),
+    };
+    let lifecycle = OpenAiLifecycleAttachment::unowned();
+
+    let outcome = route_missing_local_model(
+        tcp_stream.into(),
+        &request,
+        &ctx,
+        model,
+        None,
+        lifecycle.route_observer(),
+    )
+    .await;
+
+    // A 404 would mean remote_mesh_targets returned None (peer not seen).
+    // Any other outcome — Failed, Dropped, or a non-404 status — proves the
+    // remote-mesh branch was entered, which is what this test pins.
+    assert!(
+        !matches!(outcome, proxy::RouteDispatchOutcome::Responded(404)),
+        "expected remote-mesh branch (not 404), got {outcome:?} — \
+         the test peer may not be visible to hosts_for_model()"
+    );
+
+    let events = recording.events.lock().unwrap();
+
+    // (1) TWO messages published — effective + terminal.
+    // If either publish call is deleted this assertion is the first to fail.
+    assert_eq!(
+        events.len(),
+        2,
+        "route_missing_local_model must publish both the effective-request \
+         and terminal envelopes on the remote-mesh branch; got {} event(s)",
+        events.len()
+    );
+
+    // (2) Both envelopes carry `RemoteMesh` as the dispatch path.
+    assert_eq!(
+        events[0].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "effective envelope must carry RemoteMesh dispatch path"
+    );
+    assert_eq!(
+        events[1].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "terminal envelope must carry RemoteMesh dispatch path"
+    );
+
+    // Sanity: correct phases.
+    assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+    assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+
+    // (3) Matching exchange_id across the pair.
+    assert!(
+        !events[0].exchange_id.is_empty(),
+        "exchange_id must be non-empty"
+    );
+    assert_eq!(
+        events[0].exchange_id, events[1].exchange_id,
+        "effective and terminal envelopes must share the same exchange_id"
+    );
+
+    // (4) The SAME nonce on both envelopes, matching the request's nonce header.
+    assert_eq!(
+        events[0].nonce.as_deref(),
+        Some(nonce),
+        "effective envelope must carry the forwarded client nonce"
+    );
+    assert_eq!(
+        events[0].nonce, events[1].nonce,
+        "effective and terminal envelopes must carry the same nonce"
+    );
+}
+
+/// Verifies that `route_missing_local_model` sets `nonce_source =
+/// Some(SidecarGeneratedFallback)` on both published envelopes when the
+/// request carries BOTH `x-capsule-client-nonce` AND `x-capsule-nonce-origin`.
+///
+/// The `remote_mesh_nonce_source` helper (ingress.rs lines 35-46) maps:
+/// - nonce=Some, nonce_origin=None  → `ClientSupplied`   (covered by the
+///   sibling test above)
+/// - nonce=Some, nonce_origin=Some  → `SidecarGeneratedFallback`  ← this test
+///
+/// This test exercises the second branch by stamping both headers on the raw
+/// request, then asserting that every published envelope reports
+/// `nonce_source == Some(SidecarGeneratedFallback)`.
+#[tokio::test]
+async fn route_missing_local_model_sidecar_generated_nonce_origin_sets_sidecar_fallback_source() {
+    use crate::plugin::openai_exchange::{
+        ClientNonceSource, OpenAiExchangeDispatchPath, OpenAiExchangePhase,
+    };
+
+    let model = "acme/remote-model:Q4_K_M";
+    let node = mesh::Node::new_for_tests(crate::mesh::NodeRole::Worker)
+        .await
+        .expect("test node");
+    node.insert_test_peer(test_remote_peer(1, model)).await;
+
+    let targets = election::ModelTargets::default();
+    let affinity = affinity::AffinityRouter::new();
+
+    let recording = RecordingChannel::default();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let addr = listener.local_addr().expect("local addr");
+    let client_connect = tokio::net::TcpStream::connect(addr);
+    let server_accept = async { listener.accept().await.map(|(s, _)| s) };
+    let (_client_side, server_side) = tokio::join!(client_connect, server_accept);
+    let tcp_stream = server_side.expect("accept server side");
+
+    // Build a request stamped with BOTH x-capsule-client-nonce AND
+    // x-capsule-nonce-origin. The presence of x-capsule-nonce-origin signals
+    // that the frontend generated the nonce as a fallback (SidecarGeneratedFallback).
+    let body =
+        br#"{"model":"acme/remote-model:Q4_K_M","messages":[{"role":"user","content":"hi"}]}"#;
+    let nonce = "b2c3d4e5-f6a7-8901-bcde-f12345678901";
+    let raw = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nx-capsule-client-nonce: {nonce}\r\nx-capsule-nonce-origin: frontend\r\n\r\n",
+        len = body.len(),
+        nonce = nonce,
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(body.iter().copied())
+    .collect::<Vec<u8>>();
+    let request = proxy::BufferedHttpRequest {
+        raw,
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: body.len(),
+        completion_tokens: None,
+        stream: None,
+        model_name: Some(model.to_owned()),
+        request_object_request_ids: Vec::new(),
+        response_adapter: proxy::ResponseAdapter::OpenAiChatCompletionsJson,
+        correlation_id: None,
+    };
+
+    // Confirm both headers are readable before the routing function runs.
+    let (parsed_nonce, parsed_origin) = request.capsule_nonce_headers();
+    assert_eq!(
+        parsed_nonce.as_deref(),
+        Some(nonce),
+        "nonce header must be readable from the raw request bytes"
+    );
+    assert!(
+        parsed_origin.is_some(),
+        "nonce-origin header must be readable from the raw request bytes"
+    );
+
+    let ctx = IngressRouteContext {
+        node: &node,
+        targets: &targets,
+        affinity: &affinity,
+        plugin_manager: None,
+        exchange_channel: Some(&recording),
+    };
+    let lifecycle = OpenAiLifecycleAttachment::unowned();
+
+    let outcome = route_missing_local_model(
+        tcp_stream.into(),
+        &request,
+        &ctx,
+        model,
+        None,
+        lifecycle.route_observer(),
+    )
+    .await;
+
+    assert!(
+        !matches!(outcome, proxy::RouteDispatchOutcome::Responded(404)),
+        "expected remote-mesh branch (not 404), got {outcome:?}"
+    );
+
+    let events = recording.events.lock().unwrap();
+
+    assert_eq!(
+        events.len(),
+        2,
+        "route_missing_local_model must publish both the effective-request \
+         and terminal envelopes on the remote-mesh branch; got {} event(s)",
+        events.len()
+    );
+
+    assert_eq!(
+        events[0].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "effective envelope must carry RemoteMesh dispatch path"
+    );
+    assert_eq!(
+        events[1].dispatch_path,
+        OpenAiExchangeDispatchPath::RemoteMesh,
+        "terminal envelope must carry RemoteMesh dispatch path"
+    );
+
+    assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+    assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+
+    // Both envelopes must report SidecarGeneratedFallback because
+    // x-capsule-nonce-origin was present on the request.
+    assert_eq!(
+        events[0].nonce_source,
+        Some(ClientNonceSource::SidecarGeneratedFallback),
+        "effective envelope must carry SidecarGeneratedFallback nonce_source \
+         when x-capsule-nonce-origin is present"
+    );
+    assert_eq!(
+        events[1].nonce_source,
+        Some(ClientNonceSource::SidecarGeneratedFallback),
+        "terminal envelope must carry SidecarGeneratedFallback nonce_source \
+         when x-capsule-nonce-origin is present"
+    );
 }

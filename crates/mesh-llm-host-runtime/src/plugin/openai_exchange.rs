@@ -29,6 +29,12 @@ pub enum OpenAiExchangeDispatchPath {
     /// The raw-proxy ingress (`network/openai/ingress.rs`), used for
     /// plugin-served models; never sees a typed `ChatCompletionRequest`.
     RawProxy,
+    /// The raw-proxy ingress routes this exchange to a peer on the mesh
+    /// rather than serving it locally (`route_missing_local_model`'s
+    /// remote-mesh branch). This node is the requester/router, not the
+    /// server, for the exchange this envelope describes — a downstream
+    /// plugin must not treat it as the served-side event.
+    RemoteMesh,
 }
 
 /// Which moment in an exchange's lifecycle an [`OpenAiExchangeEnvelope`]
@@ -84,6 +90,19 @@ pub struct OpenAiExchangeEnvelope {
     pub nonce: Option<String>,
     /// Which side contributed `nonce` — see [`ClientNonceSource`]. `None`
     /// exactly when `nonce` is `None` (no marker minted).
+    ///
+    /// **Asymmetry across routing-node pairs:** when node A minted the
+    /// fallback nonce (the client sent none), A reads its own
+    /// `x-capsule-nonce-origin` header and reports
+    /// `SidecarGeneratedFallback`. Node B strips that header deliberately
+    /// (anti-smuggling, `request_parse.rs:582`) so it sees a
+    /// well-formed nonce with no origin marker and reports `ClientSupplied`
+    /// for the same nonce. Both are locally correct: A reports what it
+    /// minted; B cannot trust the origin claim. A consumer joining both
+    /// halves on the same nonce will observe two different `nonce_source`
+    /// values — this is NOT a bug. Use the routing node's own envelope to
+    /// judge whether the nonce was client-supplied or sidecar-generated;
+    /// do not compare across nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce_source: Option<ClientNonceSource>,
 }
@@ -122,6 +141,74 @@ impl OpenAiExchangeEnvelope {
             status,
             capsule_id: marker.as_ref().map(|marker| marker.capsule_id.clone()),
             nonce: marker.as_ref().map(|marker| marker.nonce.clone()),
+            nonce_source,
+        }
+    }
+
+    /// Effective-request envelope for the `RemoteMesh` dispatch path,
+    /// carrying the nonce this node is about to forward to the peer
+    /// unchanged — so a plugin observing only the effective event already
+    /// knows what a later client ack must sign over, rather than having to
+    /// wait for the terminal event. `capsule_id` stays absent: this node
+    /// mints nothing on this path.
+    ///
+    /// **`nonce_source` asymmetry:** when the routing node (node A) minted
+    /// the fallback nonce, it reports `SidecarGeneratedFallback` here.
+    /// The receiving peer (node B) strips the `x-capsule-nonce-origin`
+    /// header (anti-smuggling) and therefore reports `ClientSupplied` for
+    /// the same nonce on its own envelope. Both are locally correct; a
+    /// consumer joining both envelopes will see two different `nonce_source`
+    /// values for the same nonce — see the field-level doc on
+    /// [`OpenAiExchangeEnvelope::nonce_source`] for the full explanation.
+    pub fn effective_remote_mesh(
+        exchange_id: impl Into<String>,
+        model: impl Into<String>,
+        nonce: Option<String>,
+        nonce_source: Option<ClientNonceSource>,
+    ) -> Self {
+        Self {
+            exchange_id: exchange_id.into(),
+            dispatch_path: OpenAiExchangeDispatchPath::RemoteMesh,
+            phase: OpenAiExchangePhase::EffectiveRequest,
+            model: model.into(),
+            status: None,
+            capsule_id: None,
+            nonce,
+            nonce_source,
+        }
+    }
+
+    /// Terminal envelope for the `RemoteMesh` dispatch path — a routing node
+    /// observing (not serving) an exchange it forwarded to a peer.
+    ///
+    /// Unlike [`Self::terminal`]'s `marker`, which bundles a capsule_id this
+    /// node minted together with the nonce that capsule is correlated
+    /// against, a routing node mints nothing here: `nonce` is the same
+    /// client-contributed value forwarded to the peer unchanged (present
+    /// only when the request already carries a stabilized nonce). No peer
+    /// response header is read back on this path, so `capsule_id` stays
+    /// absent, same as the plugin-served terminal event.
+    ///
+    /// **`nonce_source` asymmetry:** same as [`Self::effective_remote_mesh`]
+    /// — node A reports `SidecarGeneratedFallback` when it minted the nonce;
+    /// node B strips the origin header (anti-smuggling) and reports
+    /// `ClientSupplied` for the identical nonce. See
+    /// [`OpenAiExchangeEnvelope::nonce_source`] for the full explanation.
+    pub fn terminal_remote_mesh(
+        exchange_id: impl Into<String>,
+        model: impl Into<String>,
+        status: Option<u16>,
+        nonce: Option<String>,
+        nonce_source: Option<ClientNonceSource>,
+    ) -> Self {
+        Self {
+            exchange_id: exchange_id.into(),
+            dispatch_path: OpenAiExchangeDispatchPath::RemoteMesh,
+            phase: OpenAiExchangePhase::Terminal,
+            model: model.into(),
+            status,
+            capsule_id: None,
+            nonce,
             nonce_source,
         }
     }
@@ -563,5 +650,122 @@ mod tests {
             events[3].exchange_id, events[0].exchange_id,
             "slow exchange's terminal event pairs with its own effective event"
         );
+    }
+
+    // --- #1668 review round: RemoteMesh / RawProxy envelope shapes ---
+    //
+    // Shape tests only — these call envelope constructors directly and assert
+    // on the fields they set. They do NOT invoke `route_missing_local_model`
+    // or `try_route_plugin_model`, so they would still pass if the publish
+    // calls inside those routing functions were deleted. Real end-to-end
+    // publish coverage (including both envelopes being emitted and their
+    // nonce_source values) lives in `ingress_tests::tests`.
+
+    /// Verifies the envelope constructor shape for the RemoteMesh effective +
+    /// terminal pair: both envelopes carry `RemoteMesh` dispatch path, the
+    /// nonce and nonce_source are threaded onto both, and `capsule_id` is
+    /// absent on both (this node mints nothing on the remote-mesh path).
+    ///
+    /// // Shape test only — does not invoke the routing function.
+    /// // Real publish coverage is in ingress_tests::tests.
+    #[tokio::test]
+    async fn envelope_shape_remote_mesh_effective_and_terminal_carry_nonce_fields() {
+        let channel = RecordingChannel::default();
+        let nonce = Some("6d7d8d2e-3f4a-4b5c-8d9e-0a1b2c3d4e5f".to_string());
+        let nonce_source = Some(ClientNonceSource::ClientSupplied);
+
+        channel
+            .publish(&OpenAiExchangeEnvelope::effective_remote_mesh(
+                "exch-rm-1",
+                "hermes-2-pro-mistral-7b",
+                nonce.clone(),
+                nonce_source,
+            ))
+            .await;
+        channel
+            .publish(&OpenAiExchangeEnvelope::terminal_remote_mesh(
+                "exch-rm-1",
+                "hermes-2-pro-mistral-7b",
+                Some(200),
+                nonce.clone(),
+                nonce_source,
+            ))
+            .await;
+
+        let events = channel.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one effective-request, one terminal");
+
+        assert_eq!(
+            events[0].dispatch_path,
+            OpenAiExchangeDispatchPath::RemoteMesh
+        );
+        assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+        assert_eq!(events[0].nonce, nonce);
+        assert_eq!(events[0].nonce_source, nonce_source);
+        assert!(events[0].capsule_id.is_none());
+
+        assert_eq!(
+            events[1].dispatch_path,
+            OpenAiExchangeDispatchPath::RemoteMesh
+        );
+        assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+        assert_eq!(events[1].exchange_id, events[0].exchange_id);
+        assert_eq!(events[1].status, Some(200));
+        assert_eq!(events[1].nonce, nonce);
+        assert_eq!(events[1].nonce_source, nonce_source);
+        assert!(events[1].capsule_id.is_none());
+    }
+
+    /// Verifies the envelope constructor shape for the RawProxy effective +
+    /// terminal pair: both envelopes carry `RawProxy` dispatch path, and
+    /// nonce/nonce_source/capsule_id are all absent (the raw-proxy path never
+    /// runs through `openai-frontend`'s `OpenAiHookPolicy`, so no marker is
+    /// minted).
+    ///
+    /// // Shape test only — does not invoke the routing function.
+    /// // Real publish coverage is in ingress_tests::tests.
+    #[tokio::test]
+    async fn envelope_shape_raw_proxy_effective_and_terminal_have_no_marker() {
+        let channel = RecordingChannel::default();
+
+        channel
+            .publish(&OpenAiExchangeEnvelope::effective(
+                "exch-rp-1",
+                OpenAiExchangeDispatchPath::RawProxy,
+                "acme/plugin-model",
+            ))
+            .await;
+        channel
+            .publish(&OpenAiExchangeEnvelope::terminal(
+                "exch-rp-1",
+                OpenAiExchangeDispatchPath::RawProxy,
+                "acme/plugin-model",
+                Some(200),
+                None,
+                None,
+            ))
+            .await;
+
+        let events = channel.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one effective-request, one terminal");
+
+        assert_eq!(
+            events[0].dispatch_path,
+            OpenAiExchangeDispatchPath::RawProxy
+        );
+        assert_eq!(events[0].phase, OpenAiExchangePhase::EffectiveRequest);
+        assert!(events[0].nonce.is_none());
+        assert!(events[0].capsule_id.is_none());
+
+        assert_eq!(
+            events[1].dispatch_path,
+            OpenAiExchangeDispatchPath::RawProxy
+        );
+        assert_eq!(events[1].phase, OpenAiExchangePhase::Terminal);
+        assert_eq!(events[1].exchange_id, events[0].exchange_id);
+        assert_eq!(events[1].status, Some(200));
+        assert!(events[1].nonce.is_none());
+        assert!(events[1].nonce_source.is_none());
+        assert!(events[1].capsule_id.is_none());
     }
 }
