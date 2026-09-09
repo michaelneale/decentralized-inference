@@ -550,23 +550,19 @@ impl crate::mesh::Node {
     }
 }
 
-/// Select an inference target for a model request from a caller-supplied candidate
-/// list instead of pulling it from `targets`. This avoids cloning the entire
-/// `ModelTargets` when the caller has already reordered the candidates (e.g. by
-/// context capacity).
-pub fn select_model_target_from_candidates(
+/// Select from an already health-filtered snapshot. Callers that also reserve
+/// or retry targets must use this same snapshot for those decisions.
+pub(crate) fn select_model_target_from_eligible_candidates(
     targets: &election::ModelTargets,
     candidates: &[election::InferenceTarget],
-    model: &str,
     parsed_body: Option<&Value>,
     affinity: &AffinityRouter,
     cache_target: Option<election::InferenceTarget>,
 ) -> TargetSelection {
-    let eligible_candidates = affinity.route_eligible_candidates(model, candidates);
     let routing = routing_keys(parsed_body);
     shared_affinity::select_model_target_from_keys(
         targets,
-        &eligible_candidates,
+        candidates,
         &routing,
         &affinity.prefix,
         cache_target,
@@ -809,10 +805,9 @@ mod tests {
         );
         let candidates = targets.candidates("qwen");
         let cached = election::InferenceTarget::Remote(id_b);
-        let selection = select_model_target_from_candidates(
+        let selection = select_model_target_from_eligible_candidates(
             &targets,
             &candidates,
-            "qwen",
             Some(&req_a),
             &affinity,
             Some(cached.clone()),
