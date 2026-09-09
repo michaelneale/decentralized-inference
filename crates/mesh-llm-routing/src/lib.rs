@@ -26,7 +26,76 @@ pub fn total_model_bytes(model: &Path) -> u64 {
             return total;
         }
     }
-    std::fs::metadata(model).map(|m| m.len()).unwrap_or(0)
+    match std::fs::metadata(model) {
+        Ok(metadata) if metadata.is_dir() => {
+            // A SafeTensors checkpoint directory (model.safetensors +
+            // tokenizer/config siblings) reports the directory inode's size
+            // (~4 KiB) as its length. Sum the checkpoint files instead so
+            // memory planning charges the real weight bytes; a directory of
+            // plain GGUFs is not a loadable single model, but summing its
+            // files is still the least-wrong size estimate for routing.
+            dir_file_bytes(model)
+        }
+        Ok(metadata) => metadata.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Sum the regular-file sizes directly inside `dir` (non-recursive; model
+/// checkpoint directories are flat).
+fn dir_file_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_model_reports_summed_file_bytes() {
+        // A SafeTensors checkpoint dir must report the summed weight-file
+        // bytes, not the directory inode's ~4 KiB st_size — memory planning
+        // charges this quantity against the KV budget.
+        let dir =
+            std::env::temp_dir().join(format!("mesh-routing-total-bytes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.safetensors"), vec![0u8; 4096]).unwrap();
+        std::fs::write(dir.join("config.json"), vec![0u8; 128]).unwrap();
+        std::fs::create_dir(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested").join("ignored.bin"), vec![0u8; 999_999]).unwrap();
+        let total = total_model_bytes(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(total, 4096 + 128);
+    }
+
+    #[test]
+    fn file_model_reports_its_own_bytes() {
+        let file = std::env::temp_dir().join(format!(
+            "mesh-routing-total-bytes-file-{}",
+            std::process::id()
+        ));
+        std::fs::write(&file, vec![0u8; 2048]).unwrap();
+        let total = total_model_bytes(&file);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(total, 2048);
+    }
+
+    #[test]
+    fn missing_model_reports_zero() {
+        assert_eq!(
+            total_model_bytes(Path::new("/nonexistent/mesh-routing-missing-model")),
+            0
+        );
+    }
 }
 
 /// The current inference target selected by runtime planning.

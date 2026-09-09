@@ -98,6 +98,50 @@ impl ProgressTracker {
     }
 }
 
+/// Latest measured buffer sizes parsed from native log lines, keyed by the
+/// line's kind (compute vs KV). These are what llama.cpp actually allocated
+/// during `sched_reserve`, and are the ground truth the memory planner should
+/// charge instead of the KV-scaled estimate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeasuredNativeBuffers {
+    pub compute_mib: Option<f64>,
+    pub kv_mib: Option<f64>,
+    /// Lane count (`parallel`) the buffers were measured at. Compute buffers
+    /// scale ~linearly with lanes (measured 399/783/1551 MiB at 2/4/8 lanes
+    /// on the 5080, granite), so re-planning at a different lane count must
+    /// scale the compute charge. `None` until a plan resolves lanes.
+    pub lane_count: Option<u32>,
+}
+
+/// Snapshot of the measured native buffer sizes observed so far in this
+/// process. The native log callback is synchronous with model open, so by the
+/// time `skippy_model_open` returns, the `sched_reserve` buffer lines have
+/// already been parsed. The snapshot is returned whenever the aggregator is
+/// reachable; its fields stay `None` until a buffer line is observed (e.g.
+/// native log forwarding disabled).
+pub fn measured_native_buffers() -> Option<MeasuredNativeBuffers> {
+    let aggregator = native_log_aggregator().lock().ok()?;
+    Some(MeasuredNativeBuffers {
+        compute_mib: aggregator.measured_compute_mib,
+        kv_mib: aggregator.measured_kv_mib,
+        lane_count: aggregator.measured_lane_count,
+    })
+}
+
+/// Record the lane count (`parallel`) the host runtime planned for the model
+/// currently being opened. Called by the host when a plan resolves lanes, so
+/// the measured compute-buffer footprint carries the lane count it was
+/// measured at; a re-plan at a different lane count scales the compute charge
+/// accordingly.
+pub fn record_measured_lane_count(lane_count: u32) {
+    if lane_count == 0 {
+        return;
+    }
+    if let Ok(mut aggregator) = native_log_aggregator().lock() {
+        aggregator.measured_lane_count = Some(lane_count);
+    }
+}
+
 #[derive(Debug, Default)]
 struct ModelMetadataHighlights {
     architecture: Option<String>,
@@ -192,6 +236,16 @@ struct NativeLogAggregator {
     tensor_groups: Vec<(String, usize)>,
     tensor_groups_emitted: bool,
     kv_layers_seen: BTreeSet<usize>,
+    /// Latest measured buffer sizes parsed from native log lines. Updated by
+    /// the memory/kv_cache arms of `summarize_native_log_line`; read via
+    /// [`measured_native_buffers`] after model open completes.
+    measured_compute_mib: Option<f64>,
+    measured_kv_mib: Option<f64>,
+    /// Lane count the current measured buffers were measured at, recorded by
+    /// the host runtime when a plan resolves lanes (see
+    /// `record_measured_lane_count`). Used to scale the compute charge when a
+    /// re-plan chooses a different lane count.
+    measured_lane_count: Option<u32>,
 }
 
 fn native_log_file() -> &'static Mutex<Option<LineWriter<File>>> {
@@ -246,6 +300,12 @@ impl NativeLogAggregator {
         self.tensor_groups.clear();
         self.tensor_groups_emitted = false;
         self.kv_layers_seen.clear();
+        // A new model load invalidates the previous model's measured buffer
+        // sizes: buffer scales are model/shape-specific, and charging one
+        // model's HWM against another's budget would be wrong both directions.
+        self.measured_compute_mib = None;
+        self.measured_kv_mib = None;
+        self.measured_lane_count = None;
     }
 
     fn process_line(&mut self, line: &str) -> Vec<NativeLogEvent> {
@@ -346,11 +406,37 @@ impl NativeLogAggregator {
             return events;
         }
 
+        self.record_measured_buffer_size(s);
+
         if let Some(event) = summarize_native_log_line(s) {
             events.push(event);
         }
 
         events
+    }
+
+    /// Track the largest measured buffer size per kind. A later, smaller line
+    /// (e.g. a per-graph reserve for a shorter context) must not lower the
+    /// high-water mark recorded at full context init. CPU-offload lines are
+    /// skipped: the snapshot feeds VRAM planning, and a CPU-resident buffer
+    /// larger than the accelerator's must not be charged against VRAM.
+    fn record_measured_buffer_size(&mut self, line: &str) {
+        if !line.contains("buffer size") || line.to_ascii_uppercase().contains("CPU") {
+            return;
+        }
+        if let Some(mib) = parse_buffer_size_mib(line) {
+            if line.contains("compute buffer size") {
+                self.measured_compute_mib = match self.measured_compute_mib {
+                    Some(seen) if seen >= mib => Some(seen),
+                    _ => Some(mib),
+                };
+            } else if line.contains("KV buffer size") {
+                self.measured_kv_mib = match self.measured_kv_mib {
+                    Some(seen) if seen >= mib => Some(seen),
+                    _ => Some(mib),
+                };
+            }
+        }
     }
 
     fn flush_metadata_summary(&mut self) -> Vec<NativeLogEvent> {
@@ -431,6 +517,49 @@ fn should_suppress_native_log_line(line: &str) -> bool {
             && (line.contains(": filtered") || line.contains(": dev =")))
 }
 
+fn parse_buffer_size_mib(line: &str) -> Option<f64> {
+    // Native buffer-size lines print the value with a fixed-width field, e.g.
+    // `sched_reserve:        CUDA0 compute buffer size =   579.83 MiB` or
+    // `llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB`. Capture the
+    // last `<number> MiB` occurrence on the line.
+    let rest = line.rfind("MiB")?;
+    let prefix = line[..rest].trim_end();
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    prefix[start..].trim().parse::<f64>().ok()
+}
+
+fn buffer_size_params(line: &str) -> Vec<(String, Value)> {
+    // Structured facts for memory-planning telemetry: the measured buffer size
+    // (the number llama.cpp actually allocated) plus the device the line names.
+    // These are the inputs the topology planner will consume in place of its
+    // KV-scaled compute-buffer estimate.
+    let mut params = Vec::new();
+    if let Some(mib) = parse_buffer_size_mib(line) {
+        params.push(("buffer_mib".to_string(), Value::from(mib)));
+    }
+    let device = if line.contains("CUDA0") {
+        Some("CUDA0")
+    } else if line.contains("CUDA1") {
+        Some("CUDA1")
+    } else if line.contains("Metal") {
+        Some("Metal")
+    } else if line.to_ascii_uppercase().contains("CPU") {
+        Some("CPU")
+    } else {
+        None
+    };
+    if let Some(device) = device {
+        params.push((
+            "backend_device".to_string(),
+            Value::String(device.to_string()),
+        ));
+    }
+    params
+}
+
 fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
     if let Some((category, params)) = cpu_offload_diagnostic_params(line) {
         return Some(NativeLogEvent {
@@ -493,20 +622,30 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         || line.contains("compute buffer size")
         || line.contains("scratch buffer")
     {
+        let params = if line.contains("buffer size") {
+            buffer_size_params(line)
+        } else {
+            Vec::new()
+        };
         return Some(NativeLogEvent {
             message: line.to_string(),
             category: "memory",
-            params: Vec::new(),
+            params,
         });
     }
 
     if line.starts_with("llama_kv_cache:")
         && (line.contains("buffer size") || line.contains("size = ") || line.contains("attn_rot"))
     {
+        let params = if line.contains("buffer size") {
+            buffer_size_params(line)
+        } else {
+            Vec::new()
+        };
         return Some(NativeLogEvent {
             message: line.to_string(),
             category: "kv_cache",
-            params: Vec::new(),
+            params,
         });
     }
 
@@ -1090,6 +1229,100 @@ mod tests {
                     .iter()
                     .any(|(key, value)| key == "q4_K" && value == &Value::from(70_u64))
         }));
+    }
+
+    #[test]
+    fn aggregator_records_measured_buffers_for_snapshot_api() {
+        let mut aggregator = NativeLogAggregator::default();
+        aggregator.process_line("sched_reserve:        CUDA0 compute buffer size =   579.83 MiB");
+        aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // A later, smaller reserve for a shorter context must not lower the
+        // recorded high-water mark for either kind.
+        aggregator.process_line("sched_reserve:        CUDA0 compute buffer size =   512.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1024.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // CPU-offloaded buffers must stay excluded even when larger: the
+        // planner charges accelerator memory, not system RAM.
+        aggregator.process_line("load_tensors: CPU_Mapped model buffer size =  2048.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CPU KV buffer size =  4096.00 MiB");
+        aggregator.process_line("llama_kv_cache:        CPU compute buffer size =  8192.00 MiB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+        assert_eq!(aggregator.measured_kv_mib, Some(1088.00));
+
+        // Model-agnostic summary lines carry no buffer size to record.
+        aggregator.process_line("VRAM used: 12.4 GB");
+        assert_eq!(aggregator.measured_compute_mib, Some(579.83));
+
+        // register/unregister reset clears the snapshot for the next model.
+        aggregator.reset();
+        assert_eq!(aggregator.measured_compute_mib, None);
+        assert_eq!(aggregator.measured_kv_mib, None);
+    }
+
+    #[test]
+    fn aggregator_parses_measured_compute_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator
+                .process_line("sched_reserve:        CUDA0 compute buffer size =   579.83 MiB"),
+            vec![NativeLogEvent {
+                message: "sched_reserve:        CUDA0 compute buffer size =   579.83 MiB"
+                    .to_string(),
+                category: "memory",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(579.83_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("CUDA0".to_string())
+                    ),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn aggregator_parses_measured_kv_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB"),
+            vec![NativeLogEvent {
+                message: "llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB".to_string(),
+                category: "kv_cache",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(1088.00_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("CUDA0".to_string())
+                    ),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn aggregator_parses_metal_compute_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator
+                .process_line("sched_reserve:        Metal compute buffer size =  312.50 MiB"),
+            vec![NativeLogEvent {
+                message: "sched_reserve:        Metal compute buffer size =  312.50 MiB"
+                    .to_string(),
+                category: "memory",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(312.5_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("Metal".to_string())
+                    ),
+                ],
+            }]
+        );
     }
 
     #[test]

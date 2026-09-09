@@ -1,7 +1,8 @@
 use super::capacity::runtime_model_required_bytes;
 use super::context_planning::{
-    RuntimeResourcePlan, RuntimeResourcePlanInput, RuntimeResourcePlanningProfile,
-    plan_runtime_resources,
+    MeasuredBufferFootprint, RuntimeResourcePlan, RuntimeResourcePlanInput,
+    RuntimeResourcePlanningProfile, plan_runtime_resources,
+    reconcile_memory_plan_with_measurements,
 };
 use super::split_planning::format_gb;
 use crate::api;
@@ -22,6 +23,7 @@ use skippy_server::serving_hooks::SharedModelServingHooksFactory;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::operational_logging::{
@@ -710,7 +712,10 @@ pub(super) async fn start_local_openai_model(
         kv_cache_quant,
         local_layer_fraction,
         planning_profile: spec.planning_profile,
+        measured_buffers: measured_buffers_footprint(local_model_bytes),
     });
+    record_last_planned_context_length(plan.context_length);
+    skippy_runtime::record_measured_lane_count(plan.slots as u32);
 
     if let Some(package) = package {
         start_local_package_v2_model(spec, model_name, package, plan, compact_meta.as_ref()).await
@@ -730,6 +735,29 @@ async fn start_local_skippy_model(
     tokio::sync::oneshot::Receiver<()>,
 )> {
     let context_length = plan.context_length;
+    if let Some(breakdown) = plan.breakdown.as_ref() {
+        tracing::info!(
+            model = model_name,
+            memory_plan.vram_bytes = breakdown.vram_bytes,
+            memory_plan.model_bytes = breakdown.model_bytes,
+            memory_plan.kv_budget_bytes = breakdown.kv_budget_bytes,
+            memory_plan.planned_kv_bytes = breakdown.planned_kv_bytes,
+            memory_plan.kv_bytes_per_token = breakdown.kv_bytes_per_token,
+            memory_plan.context_length = breakdown.context_length,
+            memory_plan.slots = breakdown.slots,
+            memory_plan.slots_source = if breakdown.slots_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.context_source = if breakdown.context_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            "memory plan resolved: charged estimates at plan time; compare with measured buffer_mib native events"
+        );
+    }
     let fallback_projector_path = mmproj_path_for_model(&model_name).filter(|path| path.exists());
     let mut resolved = resolve_local_openai_skippy_config(
         &spec,
@@ -790,6 +818,7 @@ async fn start_local_skippy_model(
     })
     .await
     .context("join load skippy direct GGUF task")??;
+    emit_measured_memory_reconciliation(&model_name, &plan);
     let _ = emit_event(OutputEvent::ModelLoaded {
         model: model_name.clone(),
         bytes: None,
@@ -813,6 +842,105 @@ async fn start_local_skippy_model(
         },
         death_rx,
     ))
+}
+
+/// Context length the measured buffers were observed at, recorded by the
+/// host planner when it resolves the plan that builds the native context.
+/// Zero until a plan resolves.
+static LAST_PLANNED_CONTEXT_LENGTH: AtomicU32 = AtomicU32::new(0);
+
+/// Record the context length the current plan is building the native context
+/// at, so measured buffer sizes can later be tied to their context length.
+pub(super) fn record_last_planned_context_length(ctx: u32) {
+    LAST_PLANNED_CONTEXT_LENGTH.store(ctx, Ordering::Relaxed);
+}
+
+/// Context length the measured native buffers were observed at. Zero until a
+/// plan resolves.
+pub(super) fn last_planned_context_length() -> u32 {
+    LAST_PLANNED_CONTEXT_LENGTH.load(Ordering::Relaxed)
+}
+
+/// Measured native buffer footprint for the budget-driven planner: the
+/// high-water compute/KV buffer sizes from this process's context init, read
+/// back after model open. The KV measurement is tied to the context length
+/// the plan actually built, so the budget-driven path can scale KV linearly
+/// when re-solving for a deeper context.
+///
+/// `model_bytes` keys the measurement to the model being started: the
+/// process-wide high-water mark is only trusted when it was recorded for the
+/// same model size. A different model's measurements must not be charged
+/// against this model's budget (buffer shapes are model-specific), so a
+/// mismatch degrades to the estimate ladder instead.
+fn measured_buffers_footprint(model_bytes: u64) -> Option<MeasuredBufferFootprint> {
+    let measured = skippy_runtime::measured_native_buffers()?;
+    // Only trust the footprint when it belongs to this model: the aggregator
+    // HWM covers the whole process lifetime (it decays only on the next
+    // model-load reset), so without the key a re-open after teardown — or a
+    // start of a different model in the same process — would charge stale or
+    // foreign buffers. Model size is a coarse key, but it is exactly the
+    // quantity the planner charges the footprint against.
+    if LAST_MEASURED_MODEL_BYTES.load(Ordering::Relaxed) != model_bytes {
+        return None;
+    }
+    let compute_bytes = measured.compute_mib.map(mib_to_bytes)?;
+    let kv_bytes = measured.kv_mib.map(mib_to_bytes)?;
+    let context_length = last_planned_context_length();
+    if context_length == 0 {
+        return None;
+    }
+    Some(MeasuredBufferFootprint {
+        compute_bytes,
+        kv_bytes,
+        context_length,
+        lane_count: measured.lane_count.unwrap_or(0),
+    })
+}
+
+/// Model weight bytes the current measured native buffers were recorded for.
+/// Set when a start of that model finishes opening (see
+/// [`emit_measured_memory_reconciliation`]); gates
+/// [`measured_buffers_footprint`] against charging one model's measurements
+/// against another model's budget.
+static LAST_MEASURED_MODEL_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn mib_to_bytes(mib: f64) -> u64 {
+    (mib * 1024.0 * 1024.0).round() as u64
+}
+
+/// Reconcile the charged memory plan against the buffers llama.cpp actually
+/// allocated at context init, once the native model has finished opening.
+///
+/// The native log callback is synchronous with model open, so by the time the
+/// load future resolves the `sched_reserve` compute/KV buffer lines have been
+/// parsed and [`skippy_runtime::measured_native_buffers`] holds the measured
+/// sizes. Emitted for both start paths (direct GGUF and package-v2); split
+/// stage loads reconcile on their own seam.
+fn emit_measured_memory_reconciliation(model_name: &str, plan: &RuntimeResourcePlan) {
+    let Some(breakdown) = plan.breakdown.as_ref() else {
+        return;
+    };
+    let measured = skippy_runtime::measured_native_buffers();
+    let reconciliation = reconcile_memory_plan_with_measurements(breakdown, measured);
+    if reconciliation.measured_compute_bytes.is_some() || reconciliation.measured_kv_bytes.is_some()
+    {
+        // Stamp the model the measurements belong to so a later start in this
+        // process only trusts them for the same model
+        // (see [`measured_buffers_footprint`]).
+        LAST_MEASURED_MODEL_BYTES.store(breakdown.model_bytes, Ordering::Relaxed);
+    }
+    let memory_plan_measured =
+        measured.is_some_and(|m| m.compute_mib.is_some() || m.kv_mib.is_some());
+    tracing::info!(
+        model = model_name,
+        memory_plan.measured_available = memory_plan_measured,
+        memory_plan.charged_compute_reserve_bytes = reconciliation.charged_compute_reserve_bytes,
+        memory_plan.measured_compute_bytes = reconciliation.measured_compute_bytes.unwrap_or(0),
+        memory_plan.measured_kv_bytes = reconciliation.measured_kv_bytes.unwrap_or(0),
+        memory_plan.residual_free_bytes = reconciliation.residual_free_bytes.unwrap_or(0),
+        memory_plan.measured_residual_available = reconciliation.residual_free_bytes.is_some(),
+        "memory plan reconciled with measured native buffers"
+    );
 }
 
 async fn start_local_package_v2_model(
@@ -856,6 +984,30 @@ async fn start_local_package_v2_model(
         )
     };
     let context_length = plan.context_length;
+    if let Some(breakdown) = plan.breakdown.as_ref() {
+        tracing::info!(
+            model = model_name,
+            memory_plan.vram_bytes = breakdown.vram_bytes,
+            memory_plan.model_bytes = breakdown.model_bytes,
+            memory_plan.kv_budget_bytes = breakdown.kv_budget_bytes,
+            memory_plan.planned_kv_bytes = breakdown.planned_kv_bytes,
+            memory_plan.kv_bytes_per_token = breakdown.kv_bytes_per_token,
+            memory_plan.context_length = breakdown.context_length,
+            memory_plan.slots = breakdown.slots,
+            memory_plan.slots_source = if breakdown.slots_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.context_source = if breakdown.context_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.package = "v2",
+            "memory plan resolved: charged estimates at plan time; compare with measured buffer_mib native events"
+        );
+    }
     let fallback_projector_path = package_projector_path
         .or_else(|| mmproj_path_for_model(&model_name).filter(|path| path.exists()));
     let mut resolved = resolve_local_openai_skippy_config(
@@ -952,6 +1104,7 @@ async fn start_local_package_v2_model(
     })
     .await
     .context("join load skippy package-v2 task")??;
+    emit_measured_memory_reconciliation(&model_name, &plan);
     let _ = emit_event(OutputEvent::ModelLoaded {
         model: model_ref,
         bytes: None,
