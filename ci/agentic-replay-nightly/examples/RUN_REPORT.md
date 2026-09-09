@@ -1,5 +1,7 @@
 # Agentic Replay Nightly Run — 2026-09-09
 
+> Illustrative layout only. These values are not observed benchmark evidence.
+
 - **Source:** `mesh-llm` @ `c28f0e2cc0f9a3e7d1b24c5e8f6a90d21c3b47e5` (main)
 - **Runner:** `micstudio` — Mac15,14, Apple M3 Ultra, 80 GPU cores, 256 GB unified memory, macOS 26.6.2 (Metal 4)
 - **Backend binary SHA-256:** `9f1c…e7a2`

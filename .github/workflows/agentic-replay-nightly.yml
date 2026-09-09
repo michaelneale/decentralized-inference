@@ -32,8 +32,6 @@ jobs:
       # normalizes it into HF_HOME/HF_HUB_CACHE so `hf download` is only a
       # cache-miss backfill. Dataset writes go through the runner-local hf CLI.
       HF_HUB_OFFLINE: "1"
-      HISTORY_LOCAL: ${{ github.workspace }}/.replay-history-cache
-      OUTPUT_DIR: ${{ github.workspace }}/replay-artifacts
       GATE_ENABLED: ${{ vars.MESH_AGENTIC_REPLAY_GATE_ENABLED || '0' }}
     steps:
       - name: Verify pinned replay runner
@@ -67,8 +65,14 @@ jobs:
           if [[ "$missing" == "1" ]]; then exit 1; fi
           export HF_HOME="$HF_CACHE"
           export HF_HUB_CACHE="$HF_CACHE/hub"
-          echo "HF_HOME=$HF_HOME" >> "$GITHUB_ENV"
-          echo "HF_HUB_CACHE=$HF_HUB_CACHE" >> "$GITHUB_ENV"
+          export HISTORY_LOCAL="$RUNNER_TEMP/agentic-replay-history"
+          export OUTPUT_DIR="$RUNNER_TEMP/agentic-replay-artifacts"
+          {
+            echo "HF_HOME=$HF_HOME"
+            echo "HF_HUB_CACHE=$HF_HUB_CACHE"
+            echo "HISTORY_LOCAL=$HISTORY_LOCAL"
+            echo "OUTPUT_DIR=$OUTPUT_DIR"
+          } >> "$GITHUB_ENV"
 
       - name: Record hardware fingerprint
         run: |
@@ -86,7 +90,7 @@ jobs:
           }))
           PY
 
-      - name: Verify pinned model artifacts
+      - name: Verify pinned replay inputs
         run: |
           set -euo pipefail
           python3 - "$MATRIX_FILE" <<'PY' > "$RUNNER_TEMP/agentic-replay-models.tsv"
@@ -117,28 +121,28 @@ jobs:
           PY
           done < "$RUNNER_TEMP/agentic-replay-models.tsv"
 
-      - name: Replay each pinned model
-        run: |
-          set -euo pipefail
-          LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
-          LEVEL_ARGS=()
-          for level in $LEVELS; do LEVEL_ARGS+=(--concurrency "$level"); done
-          IFS=$'\t' read -r DATASET_ID DATASET_REVISION DATASET_RELATIVE_PATH DATASET_SHA256 < <(
-            python3 - "$MATRIX_FILE" <<'PY'
+          python3 - "$MATRIX_FILE" evals/skippy-competitive-benchmark.json <<'PY' > "$RUNNER_TEMP/agentic-replay-dataset.tsv"
           import json, pathlib, re, sys
-          replay = json.loads(pathlib.Path(sys.argv[1]).read_text())["replay"]
-          revision = replay.get("dataset_revision", "")
-          digest = replay.get("dataset_sha256", "")
-          if not re.fullmatch(r"[0-9a-f]{40}", revision):
-              raise SystemExit("dataset_revision must be an immutable 40-hex commit")
-          if not re.fullmatch(r"[0-9a-f]{64}", digest):
-              raise SystemExit("dataset_sha256 must be a 64-hex digest")
-          print("\t".join((replay["dataset"], revision, replay["dataset_file"], digest)))
+          matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())["replay"]
+          canonical = json.loads(pathlib.Path(sys.argv[2]).read_text())["thoughtworks"]["dataset"]
+          dataset = {
+              "repo": matrix.get("dataset"),
+              "revision": matrix.get("dataset_revision"),
+              "filename": matrix.get("dataset_file"),
+              "sha256": matrix.get("dataset_sha256"),
+          }
+          if dataset != canonical:
+              raise SystemExit("nightly dataset pin must match the agentic-replay harness pin")
+          if not re.fullmatch(r"[0-9a-f]{40}", dataset["revision"] or ""):
+              raise SystemExit("dataset revision must be an immutable 40-hex commit")
+          if not re.fullmatch(r"[0-9a-f]{64}", dataset["sha256"] or ""):
+              raise SystemExit("dataset sha256 must be a 64-hex digest")
+          print("\t".join((dataset["repo"], dataset["revision"], dataset["filename"], dataset["sha256"])))
           PY
-          )
-          DATASET_FILE=$(HF_HUB_OFFLINE=0 hf download "$DATASET_ID" "$DATASET_RELATIVE_PATH" \
-            --repo-type dataset --revision "$DATASET_REVISION")
-          python3 - "$DATASET_FILE" "$DATASET_SHA256" <<'PY'
+          IFS=$'\t' read -r dataset_repo dataset_revision dataset_file dataset_sha < "$RUNNER_TEMP/agentic-replay-dataset.tsv"
+          dataset_path=$(HF_HUB_OFFLINE=0 hf download "$dataset_repo" "$dataset_file" \
+            --repo-type dataset --revision "$dataset_revision")
+          python3 - "$dataset_path" "$dataset_sha" <<'PY'
           import hashlib, pathlib, sys
           path, expected = pathlib.Path(sys.argv[1]), sys.argv[2]
           digest = hashlib.sha256()
@@ -148,9 +152,16 @@ jobs:
           actual = digest.hexdigest()
           if actual != expected:
               raise SystemExit(f"dataset SHA-256 mismatch: expected={expected} actual={actual}")
-          print(f"verified replay dataset: {actual}")
+          print(f"verified trajectory dataset: {actual}")
           PY
-          echo "DATASET_FILE=$DATASET_FILE" >> "$GITHUB_ENV"
+          echo "DATASET_FILE=$dataset_path" >> "$GITHUB_ENV"
+
+      - name: Replay each pinned model
+        run: |
+          set -euo pipefail
+          LEVELS=$(python3 -c "import json;print(' '.join(map(str, json.load(open('$MATRIX_FILE'))['replay']['concurrency'])))")
+          LEVEL_ARGS=()
+          for level in $LEVELS; do LEVEL_ARGS+=(--concurrency "$level"); done
           FAILED=0
           for family in $(python3 -c "import json;print(' '.join(m['family'] for m in json.load(open('$MATRIX_FILE'))['models']))"); do
             model_uri=$(python3 -c "import json;m=[m for m in json.load(open('$MATRIX_FILE'))['models'] if m['family']=='$family'][0];print(m['repo']+'@'+m['revision']+'/'+m['file'])")
@@ -232,7 +243,7 @@ jobs:
           args=(
             --matrix "$MATRIX_FILE"
             --replay-dir "$OUTPUT_DIR"
-            --label pr
+            --label main
             --hardware "$OUTPUT_DIR/hardware.json"
             --source-sha "$(git rev-parse HEAD)"
             --replay <(python3 -c "import json;print(json.dumps(json.load(open('$MATRIX_FILE'))['replay']))")
@@ -282,5 +293,5 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: replay-artifacts
-          path: replay-artifacts/
+          path: ${{ runner.temp }}/agentic-replay-artifacts/
           retention-days: 30

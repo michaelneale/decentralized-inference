@@ -41,6 +41,16 @@ def validate_model_pin(model: dict[str, Any]) -> None:
         raise ValueError(f"{family}: sha256 must be a 64-hex digest")
 
 
+def validate_replay_pin(replay: dict[str, Any]) -> None:
+    """Reject mutable or unverifiable trajectory inputs."""
+    revision = replay.get("dataset_revision")
+    digest = replay.get("dataset_sha256")
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("dataset_revision must be an immutable 40-hex commit")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("dataset_sha256 must be a 64-hex digest")
+
+
 def stable_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -54,7 +64,7 @@ def load_cells(replay_root: Path, family: str, label: str) -> list[dict[str, Any
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError(f"expected a JSON object: {path}")
-        value["_mtime"] = dt.datetime.utcfromtimestamp(path.stat().st_mtime)
+        value["_mtime"] = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.UTC)
         cells.append(value)
     if not cells:
         raise FileNotFoundError(f"no replay cells matched {replay_root / pattern}")
@@ -72,6 +82,7 @@ def build_rows(
 ) -> list[dict[str, Any]]:
     """Group cells by concurrency and emit one history row per level."""
     validate_model_pin(model)
+    validate_replay_pin(replay)
     by_concurrency: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for cell in cells:
         by_concurrency[int(cell["concurrency"])].append(cell)
@@ -89,8 +100,14 @@ def build_rows(
             1000.0 * s for c in group for s in c.get("ttft_samples", [])
         )
         cache_pcts = [c["cache_pct"] for c in group if c.get("cache_pct") is not None]
-        finish_reason_length = sum(
-            int(c.get("finish_reason_length_requests", 0)) for c in group
+        length_finishes = sum(
+            int(
+                c.get(
+                    "finish_reason_length_requests",
+                    c.get("budget_exhausted_requests", 0),
+                )
+            )
+            for c in group
         )
         newest = max(c["_mtime"] for c in group)
 
@@ -107,6 +124,11 @@ def build_rows(
         replay_params = {k: v for k, v in replay.items() if k != "concurrency"} | {
             "concurrency": concurrency
         }
+        complete = (
+            requests > 0
+            and failed == 0
+            and successful + failed == requests
+        )
         rows.append(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -148,16 +170,10 @@ def build_rows(
                 ),
                 "cache_hit_pct": mean_or_none(cache_pcts),
                 "finish_reason_length_pct": (
-                    100.0 * finish_reason_length / successful if successful else None
+                    100.0 * length_finishes / successful if successful else None
                 ),
-                "complete": (
-                    requests > 0 and failed == 0 and successful + failed == requests
-                ),
-                "artifact_result": (
-                    "ok"
-                    if requests > 0 and failed == 0 and successful + failed == requests
-                    else "incomplete"
-                ),
+                "complete": complete,
+                "artifact_result": "ok" if complete else "incomplete",
             }
         )
     return rows
@@ -177,14 +193,31 @@ def load_baseline(root: Path) -> dict[str, list[dict[str, Any]]]:
     return runs
 
 
+def incomplete_problem(row: dict[str, Any]) -> str | None:
+    if row["complete"]:
+        return None
+    successful = int(row["successful_requests"])
+    failed = int(row["failed_requests"])
+    requests = int(row["prompt_count"])
+    reasons: list[str] = []
+    if failed:
+        reasons.append(f"{failed} failed")
+    if successful + failed != requests:
+        reasons.append(f"{successful + failed} of {requests} requests accounted for")
+    if requests <= 0:
+        reasons.append("no requests recorded")
+    detail = "; ".join(reasons) or "completion contract not satisfied"
+    return (
+        f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
+        f"incomplete run ({detail})"
+    )
+
+
 def compare(row: dict[str, Any], prior: list[dict[str, Any]]) -> list[str]:
     problems: list[str] = []
-    if not row["complete"]:
-        problems.append(
-            f"{row['cohort']['model']} c{row['replay']['concurrency']}: "
-            f"incomplete run ({row['successful_requests']} successful, "
-            f"{row['failed_requests']} failed, {row['prompt_count']} expected)"
-        )
+    incomplete = incomplete_problem(row)
+    if incomplete is not None:
+        problems.append(incomplete)
         return problems
     prior = [
         r
@@ -250,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     matrix = json.loads(args.matrix.read_text(encoding="utf-8"))
     hardware = json.loads(args.hardware.read_text(encoding="utf-8"))
     replay = json.loads(args.replay.read_text(encoding="utf-8"))
+    validate_replay_pin(replay)
 
     rows: list[dict[str, Any]] = []
     for model in matrix["models"]:
@@ -257,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             cells = load_cells(args.replay_dir, model["family"], args.label)
         except FileNotFoundError as error:
-            print(f"warning: {error}", file=sys.stderr)
+            print(f"warning: {error}; preserving other family results", file=sys.stderr)
             continue
         rows.extend(
             build_rows(
@@ -275,30 +309,32 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
 
-    problems: list[str] = []
+    integrity_problems = [
+        problem for row in rows if (problem := incomplete_problem(row)) is not None
+    ]
     if not rows:
-        problems.append("no replay history rows were produced")
-    baseline: dict[str, list[dict[str, Any]]] = {}
+        integrity_problems.append("no replay rows were produced")
+
+    regression_problems: list[str] = []
     if args.baseline and args.baseline.is_dir():
         baseline = load_baseline(args.baseline)
-    for row in rows:
-        prior = [
-            r for r in baseline.get(baseline_key(row), [])
-            # Keep the benchmark shape stable here. compare() separately
-            # requires the same model digest while allowing source SHA to
-            # change between the baseline and candidate.
-            if r.get("replay", {}).get("trajectories_per_framework")
-            == row["replay"].get("trajectories_per_framework")
-            and r.get("replay", {}).get("passes") == row["replay"].get("passes")
-        ]
-        problems.extend(compare(row, prior))
+        for row in rows:
+            if not row["complete"]:
+                continue
+            prior = [
+                r for r in baseline.get(baseline_key(row), [])
+                # Source SHA intentionally changes across history. All replay
+                # inputs, including dataset identity, must otherwise match.
+                if r.get("replay") == row["replay"]
+            ]
+            regression_problems.extend(compare(row, prior))
+    problems = [*integrity_problems, *regression_problems]
     if problems:
         print("regressions detected:", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
-        integrity_failed = not rows or any(not row["complete"] for row in rows)
-        if integrity_failed or args.gate:
-            return 1
+    if integrity_problems or (args.gate and regression_problems):
+        return 1
     print(f"wrote {len(rows)} history rows to {args.output}")
     return 0
 

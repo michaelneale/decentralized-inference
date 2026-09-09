@@ -51,11 +51,18 @@ class AgenticReplayTest(unittest.TestCase):
             ],
         )
 
-    def test_single_ref_supports_absolute_measurement(self) -> None:
-        with mock.patch.object(BENCH, "git", return_value="a" * 40):
-            specs = BENCH.parse_ref_specs(REPO, ["main=HEAD"])
+    def test_single_ref_runs_once_per_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            with mock.patch.object(BENCH, "git", return_value="a" * 40):
+                specs = BENCH.parse_ref_specs(repo, ["main=HEAD"])
 
-        self.assertEqual(specs, [BENCH.RefSpec("main", "HEAD", "a" * 40)])
+        order = BENCH.ab_order(specs, 2)
+
+        self.assertEqual(
+            [(pass_index, spec.label) for pass_index, spec in order],
+            [(0, "main"), (1, "main")],
+        )
 
     def test_trajectory_replay_uses_recorded_history_in_strict_turn_order(self) -> None:
         trajectory = {
@@ -205,6 +212,45 @@ class AgenticReplayTest(unittest.TestCase):
         self.assertEqual(
             result["error"], "stream ended without terminal [DONE] marker"
         )
+
+    def test_stream_request_records_terminal_finish_reason(self) -> None:
+        class CompleteResponse:
+            status = 200
+
+            def __iter__(self):
+                return iter(
+                    [
+                        b'data: {"choices":[{"delta":{"content":"done"}}]}\n',
+                        b'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":8,"prompt_tokens":10}}\n',
+                        b"data: [DONE]\n",
+                    ]
+                )
+
+        class CompleteConnection:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def request(self, *_args, **_kwargs):
+                pass
+
+            def getresponse(self):
+                return CompleteResponse()
+
+            def close(self):
+                pass
+
+        with mock.patch.object(BENCH.http.client, "HTTPConnection", CompleteConnection):
+            result = BENCH.stream_request(
+                "request-1",
+                [{"role": "user", "content": "task"}],
+                [],
+                {"session_id": "session-1"},
+                "model",
+                8,
+                10,
+            )
+
+        self.assertEqual(result["finish_reason"], "length")
 
     def test_output_hash_ignores_tool_call_chunking_and_generated_ids(self) -> None:
         chunked = {}

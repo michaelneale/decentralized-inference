@@ -809,10 +809,11 @@ def stream_request(
             choices = event.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
-            event_finish_reason = choices[0].get("finish_reason")
-            if isinstance(event_finish_reason, str):
-                finish_reason = event_finish_reason
-            delta = choices[0].get("delta")
+            choice = choices[0]
+            candidate_finish_reason = choice.get("finish_reason")
+            if isinstance(candidate_finish_reason, str):
+                finish_reason = candidate_finish_reason
+            delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
             content = delta.get("content")
@@ -2326,7 +2327,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--ref",
         action="append",
         required=True,
-        help="repeatable LABEL=GIT_REF; use one ref for absolute measurements or multiple distinct commits for comparison",
+        help=(
+            "repeatable LABEL=GIT_REF; use one ref for absolute measurements; "
+            "multiple labels must resolve to distinct commits"
+        ),
     )
     parser.add_argument("--model", required=True, help="model URI or local package path")
     parser.add_argument(

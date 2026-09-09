@@ -123,6 +123,9 @@
       "required": [
         "mode",
         "dataset",
+        "dataset_revision",
+        "dataset_file",
+        "dataset_sha256",
         "trajectories_per_framework",
         "passes",
         "warmup_turns",
@@ -136,11 +139,16 @@
         "dataset": {
           "type": "string"
         },
+        "dataset_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dataset_file": {
+          "type": "string"
+        },
         "dataset_sha256": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "trajectories_per_framework": {
           "type": "integer"

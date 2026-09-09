@@ -3,6 +3,8 @@
 
 # MeshLLM Coding-Agent Serving Benchmark
 
+> Illustrative layout only. These values are not observed benchmark evidence.
+
 How fast can a Mac Studio M3 Ultra (256 GB, Metal 4) serve real agentic coding
 workloads on mesh-llm? Measured nightly by replaying pinned Thoughtworks
 agentic-coding trajectories (`opencode`/`goose`/`pi` framework traffic)
