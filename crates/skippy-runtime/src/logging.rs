@@ -431,6 +431,49 @@ fn should_suppress_native_log_line(line: &str) -> bool {
             && (line.contains(": filtered") || line.contains(": dev =")))
 }
 
+fn parse_buffer_size_mib(line: &str) -> Option<f64> {
+    // Native buffer-size lines print the value with a fixed-width field, e.g.
+    // `sched_reserve:        CUDA0 compute buffer size =   579.83 MiB` or
+    // `llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB`. Capture the
+    // last `<number> MiB` occurrence on the line.
+    let rest = line.rfind("MiB")?;
+    let prefix = line[..rest].trim_end();
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    prefix[start..].trim().parse::<f64>().ok()
+}
+
+fn buffer_size_params(line: &str) -> Vec<(String, Value)> {
+    // Structured facts for memory-planning telemetry: the measured buffer size
+    // (the number llama.cpp actually allocated) plus the device the line names.
+    // These are the inputs the topology planner will consume in place of its
+    // KV-scaled compute-buffer estimate.
+    let mut params = Vec::new();
+    if let Some(mib) = parse_buffer_size_mib(line) {
+        params.push(("buffer_mib".to_string(), Value::from(mib)));
+    }
+    let device = if line.contains("CUDA0") {
+        Some("CUDA0")
+    } else if line.contains("CUDA1") {
+        Some("CUDA1")
+    } else if line.contains("Metal") {
+        Some("Metal")
+    } else if line.to_ascii_uppercase().contains("CPU") {
+        Some("CPU")
+    } else {
+        None
+    };
+    if let Some(device) = device {
+        params.push((
+            "backend_device".to_string(),
+            Value::String(device.to_string()),
+        ));
+    }
+    params
+}
+
 fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
     if let Some((category, params)) = cpu_offload_diagnostic_params(line) {
         return Some(NativeLogEvent {
@@ -493,20 +536,30 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         || line.contains("compute buffer size")
         || line.contains("scratch buffer")
     {
+        let params = if line.contains("buffer size") {
+            buffer_size_params(line)
+        } else {
+            Vec::new()
+        };
         return Some(NativeLogEvent {
             message: line.to_string(),
             category: "memory",
-            params: Vec::new(),
+            params,
         });
     }
 
     if line.starts_with("llama_kv_cache:")
         && (line.contains("buffer size") || line.contains("size = ") || line.contains("attn_rot"))
     {
+        let params = if line.contains("buffer size") {
+            buffer_size_params(line)
+        } else {
+            Vec::new()
+        };
         return Some(NativeLogEvent {
             message: line.to_string(),
             category: "kv_cache",
-            params: Vec::new(),
+            params,
         });
     }
 
@@ -1090,6 +1143,67 @@ mod tests {
                     .iter()
                     .any(|(key, value)| key == "q4_K" && value == &Value::from(70_u64))
         }));
+    }
+
+    #[test]
+    fn aggregator_parses_measured_compute_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator
+                .process_line("sched_reserve:        CUDA0 compute buffer size =   579.83 MiB"),
+            vec![NativeLogEvent {
+                message: "sched_reserve:        CUDA0 compute buffer size =   579.83 MiB"
+                    .to_string(),
+                category: "memory",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(579.83_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("CUDA0".to_string())
+                    ),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn aggregator_parses_measured_kv_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator.process_line("llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB"),
+            vec![NativeLogEvent {
+                message: "llama_kv_cache:        CUDA0 KV buffer size =  1088.00 MiB".to_string(),
+                category: "kv_cache",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(1088.00_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("CUDA0".to_string())
+                    ),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn aggregator_parses_metal_compute_buffer_size() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator
+                .process_line("sched_reserve:        Metal compute buffer size =  312.50 MiB"),
+            vec![NativeLogEvent {
+                message: "sched_reserve:        Metal compute buffer size =  312.50 MiB"
+                    .to_string(),
+                category: "memory",
+                params: vec![
+                    ("buffer_mib".to_string(), Value::from(312.5_f64)),
+                    (
+                        "backend_device".to_string(),
+                        Value::String("Metal".to_string())
+                    ),
+                ],
+            }]
+        );
     }
 
     #[test]

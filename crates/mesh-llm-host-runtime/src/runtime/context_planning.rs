@@ -99,6 +99,36 @@ impl RuntimeResourcePlanningProfile {
 pub(super) struct RuntimeResourcePlan {
     pub(super) context_length: u32,
     pub(super) slots: usize,
+    /// Structured breakdown of the inputs and intermediate results the planner
+    /// used, emitted once per model start so every later memory-planning change
+    /// is measurable in production logs. `None` only for plans built outside
+    /// [`plan_runtime_resources`].
+    pub(super) breakdown: Option<RuntimeResourcePlanBreakdown>,
+}
+
+/// The measured-vs-charged picture at plan time. All byte fields are the
+/// planner's *charges* (estimates), not runtime measurements — the point of
+/// carrying them is to compare against the measured KV/compute buffer sizes
+/// llama.cpp reports at context init (forwarded as structured
+/// `buffer_mib`/`backend_device` native log events by `skippy-runtime`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RuntimeResourcePlanBreakdown {
+    pub(super) vram_bytes: u64,
+    pub(super) model_bytes: u64,
+    /// KV budget after the 85% utilization tax (`usable_kv_cache_budget`).
+    pub(super) kv_budget_bytes: u64,
+    /// Planned KV allocation: context_length x kv_bytes_per_token.
+    pub(super) planned_kv_bytes: u64,
+    /// Per-token KV cost used by the plan (layer-fraction scaled).
+    pub(super) kv_bytes_per_token: u64,
+    pub(super) slots: usize,
+    pub(super) context_length: u32,
+    /// True when slots came from the flat auto default rather than an
+    /// explicit override.
+    pub(super) slots_auto: bool,
+    /// True when the context length came from planning rather than an
+    /// explicit override.
+    pub(super) context_auto: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +158,8 @@ pub(super) struct RuntimeResourcePlanInput<'a> {
 /// override via CLI flags), and an explicit `--ctx-size` override bypasses this
 /// entirely.
 pub(super) fn plan_runtime_resources(input: RuntimeResourcePlanInput<'_>) -> RuntimeResourcePlan {
+    let context_auto = input.ctx_size_override.is_none();
+    let slots_auto = input.parallel_override.is_none();
     let context_length = input
         .ctx_size_override
         .unwrap_or_else(|| planned_context_length(&input));
@@ -135,9 +167,32 @@ pub(super) fn plan_runtime_resources(input: RuntimeResourcePlanInput<'_>) -> Run
         .parallel_override
         .unwrap_or_else(planned_parallel_slots);
 
+    let kv_bytes_per_token = input
+        .metadata
+        .and_then(|metadata| {
+            input
+                .kv_cache_quant
+                .kv_cache_bytes_per_token(metadata)
+                .map(|bytes| scale_by_layer_fraction(bytes, &input))
+        })
+        .unwrap_or(0);
+    let kv_budget_bytes = usable_kv_cache_budget(input.vram_bytes, input.model_bytes);
+    let planned_kv_bytes = kv_bytes_per_token.saturating_mul(u64::from(context_length));
+
     RuntimeResourcePlan {
         context_length,
         slots,
+        breakdown: Some(RuntimeResourcePlanBreakdown {
+            vram_bytes: input.vram_bytes,
+            model_bytes: input.model_bytes,
+            kv_budget_bytes,
+            planned_kv_bytes,
+            kv_bytes_per_token,
+            slots,
+            context_length,
+            slots_auto,
+            context_auto,
+        }),
     }
 }
 

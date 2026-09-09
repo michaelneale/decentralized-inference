@@ -730,6 +730,29 @@ async fn start_local_skippy_model(
     tokio::sync::oneshot::Receiver<()>,
 )> {
     let context_length = plan.context_length;
+    if let Some(breakdown) = plan.breakdown.as_ref() {
+        tracing::info!(
+            model = model_name,
+            memory_plan.vram_bytes = breakdown.vram_bytes,
+            memory_plan.model_bytes = breakdown.model_bytes,
+            memory_plan.kv_budget_bytes = breakdown.kv_budget_bytes,
+            memory_plan.planned_kv_bytes = breakdown.planned_kv_bytes,
+            memory_plan.kv_bytes_per_token = breakdown.kv_bytes_per_token,
+            memory_plan.context_length = breakdown.context_length,
+            memory_plan.slots = breakdown.slots,
+            memory_plan.slots_source = if breakdown.slots_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.context_source = if breakdown.context_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            "memory plan resolved: charged estimates at plan time; compare with measured buffer_mib native events"
+        );
+    }
     let fallback_projector_path = mmproj_path_for_model(&model_name).filter(|path| path.exists());
     let mut resolved = resolve_local_openai_skippy_config(
         &spec,
@@ -856,6 +879,30 @@ async fn start_local_package_v2_model(
         )
     };
     let context_length = plan.context_length;
+    if let Some(breakdown) = plan.breakdown.as_ref() {
+        tracing::info!(
+            model = model_name,
+            memory_plan.vram_bytes = breakdown.vram_bytes,
+            memory_plan.model_bytes = breakdown.model_bytes,
+            memory_plan.kv_budget_bytes = breakdown.kv_budget_bytes,
+            memory_plan.planned_kv_bytes = breakdown.planned_kv_bytes,
+            memory_plan.kv_bytes_per_token = breakdown.kv_bytes_per_token,
+            memory_plan.context_length = breakdown.context_length,
+            memory_plan.slots = breakdown.slots,
+            memory_plan.slots_source = if breakdown.slots_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.context_source = if breakdown.context_auto {
+                "auto"
+            } else {
+                "override"
+            },
+            memory_plan.package = "v2",
+            "memory plan resolved: charged estimates at plan time; compare with measured buffer_mib native events"
+        );
+    }
     let fallback_projector_path = package_projector_path
         .or_else(|| mmproj_path_for_model(&model_name).filter(|path| path.exists()));
     let mut resolved = resolve_local_openai_skippy_config(
