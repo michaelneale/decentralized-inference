@@ -24,20 +24,6 @@ fn main() {
         return;
     }
 
-    let link_mode =
-        std::env::var("LLAMA_STAGE_LINK_MODE").or_else(|_| std::env::var("SKIPPY_LLAMA_LINK_MODE"));
-    if link_mode.as_deref() == Ok("dynamic") {
-        if let Ok(lib_dir) =
-            std::env::var("LLAMA_STAGE_LIB_DIR").or_else(|_| std::env::var("SKIPPY_LLAMA_LIB_DIR"))
-        {
-            println!("cargo:rustc-link-search=native={lib_dir}");
-        }
-        println!("cargo:rustc-link-lib=dylib=mtmd");
-        println!("cargo:rustc-link-lib=dylib=llama-common");
-        println!("cargo:rustc-link-lib=dylib=llama");
-        return;
-    }
-
     let workspace_root = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"),
     )
@@ -61,6 +47,27 @@ fn main() {
             }
         })
         .unwrap_or_else(|_| default_build_dir(&workspace_root, &backend));
+    let link_mode =
+        std::env::var("LLAMA_STAGE_LINK_MODE").or_else(|_| std::env::var("SKIPPY_LLAMA_LINK_MODE"));
+    if link_mode.as_deref() == Ok("dynamic") {
+        if let Ok(lib_dir) =
+            std::env::var("LLAMA_STAGE_LIB_DIR").or_else(|_| std::env::var("SKIPPY_LLAMA_LIB_DIR"))
+        {
+            println!("cargo:rustc-link-search=native={lib_dir}");
+        }
+        println!("cargo:rustc-link-lib=dylib=mtmd");
+        println!("cargo:rustc-link-lib=dylib=llama-common");
+        println!("cargo:rustc-link-lib=dylib=llama");
+        if target.contains("linux") && backend == "cuda" {
+            // Driverless builders use the toolkit's link-time driver stub.
+            // Resolve the same library CMake selected without embedding its
+            // directory in RPATH or copying it into the runtime package.
+            let cmake_cache = build_dir.join("CMakeCache.txt");
+            println!("cargo:rerun-if-changed={}", cmake_cache.display());
+            link_linux_lib_from_cache(&cmake_cache, "CUDA_cuda_driver_LIBRARY", "cuda");
+        }
+        return;
+    }
     ensure_static_native_ready(&workspace_root, &build_dir, &target, &backend);
 
     let search_dirs = [
