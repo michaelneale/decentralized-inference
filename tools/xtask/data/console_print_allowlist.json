@@ -2691,19 +2691,19 @@
   ],
   "crates/mesh-llm/src/commands/plugin_cli.rs": [
     {
-      "line": 206,
+      "line": 207,
       "macro_name": "print!"
     },
     {
-      "line": 212,
+      "line": 213,
       "macro_name": "println!"
     },
     {
-      "line": 232,
+      "line": 233,
       "macro_name": "eprint!"
     },
     {
-      "line": 236,
+      "line": 237,
       "macro_name": "print!"
     }
   ],
@@ -2795,19 +2795,19 @@
   ],
   "crates/mesh-llm/src/lib.rs": [
     {
-      "line": 302,
+      "line": 305,
       "macro_name": "print!"
     },
     {
-      "line": 384,
+      "line": 389,
       "macro_name": "print!"
     },
     {
-      "line": 385,
+      "line": 390,
       "macro_name": "print!"
     },
     {
-      "line": 386,
+      "line": 391,
       "macro_name": "eprintln!"
     }
   ],
