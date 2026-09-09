@@ -38,6 +38,7 @@ struct Args {
     wait_for_jobs: bool,
     job_poll_interval: Duration,
     catalog_direct: bool,
+    republish: bool,
     confirm: bool,
     dry_run: bool,
 }
@@ -215,36 +216,47 @@ async fn main() -> Result<()> {
             continue;
         }
         let status = candidate_status(&hf_client, &candidate, args.retry_queued_after).await?;
-        match status {
-            QueueStatus::Published { repo } => {
-                println!(
-                    "skip {}: already has published layer package {}",
-                    candidate.model.repo_id, repo
-                );
-                continue;
+        if args.republish
+            && matches!(
+                status,
+                QueueStatus::Published { .. }
+                    | QueueStatus::Cataloged { .. }
+                    | QueueStatus::Failed { .. }
+            )
+        {
+            // Replacement policy: republish v2 over the existing package in place.
+        } else {
+            match status {
+                QueueStatus::Published { repo } => {
+                    println!(
+                        "skip {}: already has published layer package {}",
+                        candidate.model.repo_id, repo
+                    );
+                    continue;
+                }
+                QueueStatus::Cataloged { repo } => {
+                    println!(
+                        "skip {}: already has layer package {} in meshllm/catalog",
+                        candidate.model.repo_id, repo
+                    );
+                    continue;
+                }
+                QueueStatus::Queued { repo } => {
+                    println!(
+                        "skip {}: already recently queued layer package {}",
+                        candidate.model.repo_id, repo
+                    );
+                    continue;
+                }
+                QueueStatus::Failed { repo } => {
+                    println!(
+                        "skip {}: layer package job previously failed for {}",
+                        candidate.model.repo_id, repo
+                    );
+                    continue;
+                }
+                QueueStatus::Missing | QueueStatus::StaleQueued => {}
             }
-            QueueStatus::Cataloged { repo } => {
-                println!(
-                    "skip {}: already has layer package {} in meshllm/catalog",
-                    candidate.model.repo_id, repo
-                );
-                continue;
-            }
-            QueueStatus::Queued { repo } => {
-                println!(
-                    "skip {}: already recently queued layer package {}",
-                    candidate.model.repo_id, repo
-                );
-                continue;
-            }
-            QueueStatus::Failed { repo } => {
-                println!(
-                    "skip {}: layer package job previously failed for {}",
-                    candidate.model.repo_id, repo
-                );
-                continue;
-            }
-            QueueStatus::Missing | QueueStatus::StaleQueued => {}
         }
 
         let source_total_bytes = candidate_source_total_bytes(&candidate);
@@ -353,6 +365,7 @@ impl Args {
             wait_for_jobs: false,
             job_poll_interval: Duration::from_secs(60),
             catalog_direct: true,
+            republish: false,
             confirm: false,
             dry_run: true,
         };
@@ -403,6 +416,7 @@ impl Args {
                 }
                 "--catalog-direct" => args.catalog_direct = true,
                 "--no-catalog-direct" => args.catalog_direct = false,
+                "--republish" => args.republish = true,
                 "--confirm" => {
                     args.confirm = true;
                     args.dry_run = false;
@@ -465,7 +479,8 @@ fn print_help() {
            --wait-for-jobs\n\
            --job-poll-seconds N\n\
            --split-candidate-vram-gib GiB\n\
-           --no-catalog-direct"
+           --no-catalog-direct\n\
+           --republish (re-queue even if published/catalogued; replaces the existing package in place)"
     );
 }
 
@@ -1378,6 +1393,7 @@ mod tests {
             wait_for_jobs: true,
             job_poll_interval: Duration::from_secs(60),
             catalog_direct: true,
+            republish: false,
             confirm: true,
             dry_run: false,
         };
