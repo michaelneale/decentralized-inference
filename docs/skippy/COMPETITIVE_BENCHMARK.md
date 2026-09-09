@@ -164,20 +164,6 @@ produce every requested external-backend number; preflight then fails before
 timing if either runtime or any model input is missing. The next controlled
 CUDA rerun uses this flag with both vLLM and SGLang.
 
-The independent `nightly-competitive-benchmark.yml` workflow runs trusted
-`main` on the persistent Linux `white` GPU runner when
-`MESH_NIGHTLY_COMPETITIVE_ENABLED=1`, or through a manual dispatch selected
-from `main`. Its fixed `[self-hosted, Linux, X64, cuda]` selector is followed by
-a fail-closed check that `RUNNER_NAME` is exactly `white`.
-`MESH_NIGHTLY_COMPETITIVE_*` repository variables point at pre-baked native
-libraries, model/tokenizer inputs, Thoughtworks manifest, pinned llama.cpp
-checkout/server, llama-benchy executable, and the Hugging Face CLI used when
-history is enabled. The runner installs and downloads no tools or model inputs
-during a timed run. Partial evidence uploads even when a cell fails, and the
-rendered summary identifies a promotion candidate only after correctness,
-full-load completion, and positive mean throughput deltas over fixed Mesh in
-both synthetic and Thoughtworks workloads.
-
 Mesh arms pin `--generation-queue-capacity 256` and
 `--generation-admission-timeout-secs 600`; these are benchmark overrides, not
 production defaults. Active `--generation-concurrency` remains equal to the

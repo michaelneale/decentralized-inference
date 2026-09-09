@@ -29,24 +29,6 @@ BENCH = load_module()
 
 
 class CompetitiveBenchmarkTest(unittest.TestCase):
-    def test_nightly_workflow_is_trusted_main_only_and_capacity_matched(self) -> None:
-        workflow = (
-            REPO / ".github" / "workflows" / "nightly-competitive-benchmark.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("github.event_name == 'schedule'", workflow)
-        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
-        self.assertIn("github.repository == 'Mesh-LLM/mesh-llm'", workflow)
-        self.assertIn("github.ref == 'refs/heads/main'", workflow)
-        self.assertIn("ref: main", workflow)
-        self.assertIn("persist-credentials: false", workflow)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, cuda]", workflow)
-        self.assertIn("EXPECTED_BENCHMARK_RUNNER_NAME: white", workflow)
-        self.assertNotIn("\n  pull_request:", workflow)
-        self.assertNotIn("\n  push:", workflow)
-        self.assertIn("--capacity-match-comparison-kv", workflow)
-
     def test_checked_in_plan_covers_both_platforms_all_models_and_full_ladder(self) -> None:
         config = BENCH.load_config(CONFIG)
         plan = BENCH.build_plan(

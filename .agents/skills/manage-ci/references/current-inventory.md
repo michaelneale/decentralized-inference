@@ -30,22 +30,6 @@ Read it with `../SKILL.md` and `ci/ci.md` before editing CI.
 
 Other scheduled, deployment, Docker, package, canary and cache-warming
 workflows are independent of required PR readiness.
-`nightly-competitive-benchmark.yml` is an opt-in daily or explicit manual
-trusted-main benchmark on the persistent Linux `white` runner. Placement uses
-the fixed `[self-hosted, Linux, X64, cuda]` label set and then fails closed
-unless `RUNNER_NAME` is exactly `white`. It has read-only permissions, never
-accepts a ref or runner label, installs no tools, consumes pre-baked inputs
-selected by `MESH_NIGHTLY_COMPETITIVE_*` repository variables, and retains
-complete or partial benchmark/report evidence for 30 days. The pre-baked
-Hugging Face CLI is selected explicitly by
-`MESH_NIGHTLY_COMPETITIVE_HF_CLI`; it is required only when history is enabled.
-The workflow captures stable GPU/driver identity plus observed clocks and
-temperature.
-When `MESH_PERFORMANCE_HISTORY_ENABLED=1`, it requires the dataset repo
-variable and write-token secret, downloads prior immutable JSONL shards,
-verifies the checked-in schema, emits an exact-cohort regression report, and
-appends one source/run-addressed shard. Thresholds and promotion remain
-report-only reviewed decisions.
 `nightly-stability.yml` calls the fixed GitHub-hosted
 `nightly-stability-run.yml`; the reusable run executes both the general
 stability harness and the existing KV tool-loop/prefix-reuse harness, preserves
