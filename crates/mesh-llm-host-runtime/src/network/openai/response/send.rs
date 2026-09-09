@@ -148,6 +148,14 @@ pub(crate) async fn send_400_observed(
     send_error_observed(stream, 400, msg, route_observer).await
 }
 
+pub(crate) async fn send_409_observed(
+    stream: ClientStream,
+    msg: &str,
+    route_observer: OpenAiRouteObserver<'_>,
+) -> std::io::Result<()> {
+    send_error_observed(stream, 409, msg, route_observer).await
+}
+
 pub(crate) async fn send_503_observed(
     stream: ClientStream,
     reason: &str,

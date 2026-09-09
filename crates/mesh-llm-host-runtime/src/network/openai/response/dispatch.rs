@@ -18,9 +18,12 @@ pub(in crate::network::openai::response) struct RelayAttemptContext<'a> {
     pub(in crate::network::openai::response) request_id: RequestId,
     pub(in crate::network::openai::response) disconnect_message: &'a str,
     pub(in crate::network::openai::response) commit_message: &'a str,
+    pub(in crate::network::openai::response) served_by: Option<&'a str>,
     pub(in crate::network::openai::response) route_observer: OpenAiRouteObserver<'a>,
 }
 
+/// Relay one probed upstream response through the adapter, error, or success path.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::network::openai::response) async fn relay_probed_response<R: AsyncRead + Unpin>(
     tcp_stream: &mut ClientStream,
     reader: &mut R,
@@ -28,6 +31,7 @@ pub(in crate::network::openai::response) async fn relay_probed_response<R: Async
     _request_id: RequestId,
     retry_policy: ResponseRetryPolicy,
     response_adapter: ResponseAdapter,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     if let Some(result) = relay_adapted_response(
@@ -36,6 +40,7 @@ pub(in crate::network::openai::response) async fn relay_probed_response<R: Async
         probe.clone(),
         retry_policy,
         response_adapter,
+        served_by,
         route_observer,
     )
     .await?
@@ -47,7 +52,7 @@ pub(in crate::network::openai::response) async fn relay_probed_response<R: Async
         return Ok(RouteAttemptResult::RetryableContextOverflow);
     }
     if !(200..300).contains(&probe.status_code) {
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?
@@ -58,6 +63,7 @@ pub(in crate::network::openai::response) async fn relay_probed_response<R: Async
         probe,
         parsed,
         retry_policy,
+        served_by,
         route_observer,
     )
     .await
@@ -69,6 +75,7 @@ async fn relay_adapted_response<R: AsyncRead + Unpin>(
     probe: ResponseProbe,
     retry_policy: ResponseRetryPolicy,
     response_adapter: ResponseAdapter,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<Option<RouteAttemptResult>> {
     match response_adapter {
@@ -78,6 +85,7 @@ async fn relay_adapted_response<R: AsyncRead + Unpin>(
                 reader,
                 probe,
                 retry_policy,
+                served_by,
                 route_observer,
             )
             .await?,
@@ -88,6 +96,7 @@ async fn relay_adapted_response<R: AsyncRead + Unpin>(
                 reader,
                 probe,
                 retry_policy,
+                served_by,
                 route_observer,
             )
             .await?,
@@ -98,6 +107,7 @@ async fn relay_adapted_response<R: AsyncRead + Unpin>(
                 reader,
                 probe,
                 retry_policy,
+                served_by,
                 route_observer,
             )
             .await?,
@@ -108,6 +118,7 @@ async fn relay_adapted_response<R: AsyncRead + Unpin>(
                 reader,
                 probe,
                 retry_policy,
+                served_by,
                 route_observer,
             )
             .await?,
@@ -132,6 +143,7 @@ pub(in crate::network::openai::response) async fn relay_attempted_response<R: As
         context.request_id,
         retry_policy,
         response_adapter,
+        context.served_by,
         context.route_observer,
     )
     .await

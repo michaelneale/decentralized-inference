@@ -1038,3 +1038,97 @@ fn capsule_nonce_headers_from_raw_returns_none_without_headers() {
     assert_eq!(nonce, None);
     assert_eq!(origin, None);
 }
+
+fn request_with_raw(raw: &[u8]) -> BufferedHttpRequest {
+    BufferedHttpRequest {
+        raw: raw.to_vec(),
+        method: "POST".to_owned(),
+        path: "/v1/chat/completions".to_owned(),
+        client_path: "/v1/chat/completions".to_owned(),
+        request_id: RequestId::default(),
+        body_json: None,
+        body_json_attempted: false,
+        body_bytes: None,
+        body_len_bytes: 0,
+        completion_tokens: None,
+        stream: None,
+        model_name: None,
+        request_object_request_ids: Vec::new(),
+        response_adapter: ResponseAdapter::None,
+        correlation_id: None,
+    }
+}
+
+#[test]
+fn mesh_routing_header_values_absent_is_empty() {
+    let request = request_with_raw(
+        concat!(
+            "POST /v1/chat/completions HTTP/1.1\r\n",
+            "host: 127.0.0.1\r\n",
+            "\r\n",
+            "{}",
+        )
+        .as_bytes(),
+    );
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
+    assert!(target.is_empty());
+    assert!(exclude.is_empty());
+}
+
+#[test]
+fn mesh_routing_header_values_reads_both_headers_verbatim() {
+    let request = request_with_raw(
+        concat!(
+            "POST /v1/chat/completions HTTP/1.1\r\n",
+            "host: 127.0.0.1\r\n",
+            "x-mesh-target: aabbcc\r\n",
+            "x-mesh-exclude: 112233,445566\r\n",
+            "\r\n",
+            "{}",
+        )
+        .as_bytes(),
+    );
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
+    assert_eq!(target, vec!["aabbcc".to_string()]);
+    assert_eq!(exclude, vec!["112233,445566".to_string()]);
+}
+
+#[test]
+fn mesh_routing_header_values_surfaces_every_duplicate_x_mesh_target() {
+    // Ambiguity (more than one value) is the router's call, not this
+    // parser's -- it must see every occurrence, not just the first.
+    let request = request_with_raw(
+        concat!(
+            "POST /v1/chat/completions HTTP/1.1\r\n",
+            "host: 127.0.0.1\r\n",
+            "x-mesh-target: aabbcc\r\n",
+            "x-mesh-target: ddeeff\r\n",
+            "\r\n",
+            "{}",
+        )
+        .as_bytes(),
+    );
+    let (target, exclude) = request.mesh_routing_header_values().unwrap();
+    assert_eq!(target, vec!["aabbcc".to_string(), "ddeeff".to_string()]);
+    assert!(exclude.is_empty());
+}
+
+#[test]
+fn mesh_routing_header_values_rejects_non_utf8_x_mesh_target() {
+    let mut raw =
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1\r\nx-mesh-target: ".to_vec();
+    raw.extend_from_slice(&[0xff, 0xfe]);
+    raw.extend_from_slice(b"\r\n\r\n{}");
+    let request = request_with_raw(&raw);
+    assert!(request.mesh_routing_header_values().is_err());
+}
+
+#[test]
+fn mesh_routing_header_values_rejects_non_utf8_x_mesh_exclude() {
+    let mut raw =
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: 127.0.0.1\r\nx-mesh-exclude: ".to_vec();
+    raw.extend_from_slice(&[0xff, 0xfe]);
+    raw.extend_from_slice(b"\r\n\r\n{}");
+    let request = request_with_raw(&raw);
+    assert!(request.mesh_routing_header_values().is_err());
+}

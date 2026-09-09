@@ -1,8 +1,8 @@
 use super::cache_cost::{CacheCostObservation, parse_cache_cost_from_json_body};
 use super::common::{ResponseRetryPolicy, RouteAttemptResult, parse_token_usage_from_json_body};
 use super::probe::{
-    ResponseProbe, append_capsule_nonce_headers, response_is_event_stream,
-    try_parse_response_headers,
+    ResponseProbe, append_capsule_nonce_headers, append_mesh_served_by_header,
+    response_is_event_stream, try_parse_response_headers,
 };
 use super::relay::{relay_error_response, relay_success_response};
 use crate::logging::{OpenAiRouteObserver, OpenAiStreamArtifactCapture};
@@ -67,6 +67,7 @@ impl ResponsesStreamRelayState {
     }
 }
 
+/// Relay a streaming chat-completions upstream response, normalizing tool-call ids.
 pub(in crate::network::openai::response) async fn relay_normalized_chat_completion_stream<
     R: AsyncRead + Unpin,
 >(
@@ -74,6 +75,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     reader: &mut R,
     probe: ResponseProbe,
     retry_policy: ResponseRetryPolicy,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     if retry_policy.context_overflow && probe.retryable_context_overflow {
@@ -82,7 +84,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
 
     if !(200..300).contains(&probe.status_code) {
         route_observer.stream_error("upstream_status");
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?
@@ -94,6 +96,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
             probe,
             parsed,
             retry_policy,
+            served_by,
             route_observer,
         )
         .await;
@@ -111,6 +114,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
         parsed.client_nonce.as_deref(),
         parsed.nonce_origin.as_deref(),
     );
+    append_mesh_served_by_header(&mut header, served_by);
     header.push_str("Connection: close\r\n\r\n");
     tcp_stream.write_all(header.as_bytes()).await?;
     let mut response_capture = route_observer.begin_stream_response_capture();
@@ -209,6 +213,7 @@ pub(in crate::network::openai::response) async fn relay_normalized_chat_completi
     })
 }
 
+/// Relay a streaming chat-completions upstream response translated into Responses-API SSE.
 pub(in crate::network::openai::response) async fn relay_translated_responses_stream<
     R: AsyncRead + Unpin,
 >(
@@ -216,6 +221,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_str
     reader: &mut R,
     probe: ResponseProbe,
     retry_policy: ResponseRetryPolicy,
+    served_by: Option<&str>,
     route_observer: OpenAiRouteObserver<'_>,
 ) -> Result<RouteAttemptResult> {
     fn should_parse_stream_chunk(data: &str, model_missing: bool, usage_missing: bool) -> bool {
@@ -276,7 +282,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_str
 
     if !(200..300).contains(&probe.status_code) {
         route_observer.stream_error("upstream_status");
-        return relay_error_response(tcp_stream, reader, probe, route_observer).await;
+        return relay_error_response(tcp_stream, reader, probe, served_by, route_observer).await;
     }
 
     let parsed = try_parse_response_headers(&probe.buffered)?
@@ -291,6 +297,7 @@ pub(in crate::network::openai::response) async fn relay_translated_responses_str
         parsed.client_nonce.as_deref(),
         parsed.nonce_origin.as_deref(),
     );
+    append_mesh_served_by_header(&mut header, served_by);
     header.push_str("Connection: close\r\n\r\n");
     tcp_stream.write_all(header.as_bytes()).await?;
     let mut response_capture = route_observer.begin_stream_response_capture();
@@ -724,6 +731,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -812,6 +820,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::capture_test_observer(RequestId::new(), &observer_capture),
             )
             .await
@@ -887,6 +896,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -940,6 +950,7 @@ mod tests {
                     request_id: RequestId::new(),
                     disconnect_message: "test client disconnected",
                     commit_message: "test stream relay failed",
+                    served_by: None,
                     route_observer: OpenAiRouteObserver::default(),
                 },
                 ResponseRetryPolicy::next_target_available(false),
@@ -989,6 +1000,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -1032,6 +1044,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -1091,6 +1104,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await
@@ -1148,6 +1162,7 @@ mod tests {
                 &mut upstream_reader,
                 probe,
                 ResponseRetryPolicy::next_target_available(false),
+                None,
                 OpenAiRouteObserver::default(),
             )
             .await

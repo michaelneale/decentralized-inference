@@ -4,6 +4,12 @@ pub(crate) struct RouteModelRequestContext<'a> {
     pub(crate) required_tokens: Option<u32>,
     pub(crate) affinity: &'a AffinityRouter,
     pub(crate) route_observer: OpenAiRouteObserver<'a>,
+    /// Hex-encoded `EndpointId` to echo back as `x-mesh-served-by` once the
+    /// response is delivered. Set only when the caller (an `x-mesh-target`
+    /// forced single-candidate dispatch) already knows the exact peer that
+    /// will serve the request; `None` everywhere else, including ordinary
+    /// multi-candidate remote-mesh routing.
+    pub(crate) served_by_header: Option<&'a str>,
 }
 
 pub async fn route_model_request(
@@ -23,6 +29,7 @@ pub async fn route_model_request(
         required_tokens: context.required_tokens,
         affinity: context.affinity,
         route_observer: context.route_observer,
+        served_by_header: context.served_by_header,
     };
     route_model_request_inner(args).await
 }
@@ -36,6 +43,7 @@ struct RouteModelRequestArgs<'a> {
     required_tokens: Option<u32>,
     affinity: &'a AffinityRouter,
     route_observer: OpenAiRouteObserver<'a>,
+    served_by_header: Option<&'a str>,
 }
 
 struct RouteModelState {
@@ -90,6 +98,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
         required_tokens,
         affinity,
         route_observer,
+        served_by_header,
     } = args;
     let route_started = Instant::now();
     let mut tcp_stream = tcp_stream;
@@ -148,6 +157,7 @@ async fn route_model_request_inner(args: RouteModelRequestArgs<'_>) -> RouteDisp
                 retry_policy,
                 response_adapter: request.response_adapter,
                 route_observer,
+                served_by: served_by_header,
             },
         )
         .await;
