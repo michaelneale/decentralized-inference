@@ -135,6 +135,10 @@ def main() -> int:
     parser.add_argument("--cadence", required=True)
     parser.add_argument("--require-single-file", action="store_true")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument(
+        "--github-output-prefix",
+        help="safe prefix prepended to every GitHub output name",
+    )
     parser.add_argument("--verify-root", type=Path)
     args = parser.parse_args()
     try:
@@ -147,11 +151,17 @@ def main() -> int:
             _verify(artifact, args.verify_root)
         summary = _summary(artifact)
         if args.github_output is not None:
+            prefix = args.github_output_prefix or ""
+            if prefix and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*_", prefix):
+                raise ManifestError(
+                    "github output prefix must end in '_' and contain only "
+                    "ASCII letters, digits, and underscores"
+                )
             with args.github_output.open("a", encoding="utf-8") as output:
                 for name, value in summary.items():
                     if "\n" in value or "\r" in value:
                         raise ManifestError(f"output {name} must be single-line")
-                    output.write(f"{name}={value}\n")
+                    output.write(f"{prefix}{name}={value}\n")
         elif args.verify_root is None:
             print(json.dumps(summary, sort_keys=True))
     except (OSError, json.JSONDecodeError, ManifestError) as error:

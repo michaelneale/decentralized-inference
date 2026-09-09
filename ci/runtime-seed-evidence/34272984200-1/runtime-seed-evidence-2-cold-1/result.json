@@ -1,0 +1,69 @@
+{
+  "action_seconds": 530.9080461359999,
+  "arm": "cold",
+  "assembler_hits": 0,
+  "assembler_misses": 139,
+  "build_dir": ".deps/llama.cpp/build-stage-abi-dynamic-cpu",
+  "cache": {
+    "created_at": "2026-09-08T13:18:41.056426000Z",
+    "id": 7456497330,
+    "key": "mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-9522c1c392ee2b2554146347af6629ecfb45ccba2b8b849deb844fe93c53f09f",
+    "last_accessed_at": "2026-09-08T20:09:24.848489000Z",
+    "ref": "refs/heads/main",
+    "size_in_bytes": 235465265,
+    "version": "6e0f5d9449f86cfe3ca2e00b7bb4d1ce5034f7275d4c6135aa59f5f733af8d8a"
+  },
+  "cache_after_restore": {
+    "created_at": "2026-09-08T13:18:41.056426000Z",
+    "id": 7456497330,
+    "key": "mesh-llm-sccache-seed-linux-x86_64-img-8d93de6b-epoch-8d93de6b-v2-9522c1c392ee2b2554146347af6629ecfb45ccba2b8b849deb844fe93c53f09f",
+    "last_accessed_at": "2026-09-08T20:09:24.848489000Z",
+    "ref": "refs/heads/main",
+    "size_in_bytes": 235465265,
+    "version": "6e0f5d9449f86cfe3ca2e00b7bb4d1ce5034f7275d4c6135aa59f5f733af8d8a"
+  },
+  "cache_hit": false,
+  "classification": "measured",
+  "eligibility_changed": false,
+  "epoch": "mesh-llm-cuda-runner-sha256-8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d",
+  "hit_rate": 0.0,
+  "host_cpu": {
+    "Architecture:": "x86_64",
+    "CPU(s):": "4",
+    "Model name:": "AMD EPYC 7763 64-Core Processor",
+    "Thread(s) per core:": "2",
+    "Vendor ID:": "AuthenticAMD"
+  },
+  "image": "ghcr.io/mesh-llm/mesh-llm-cuda-runner@sha256:8d93de6ba30173e825a16fdecf011f9c632edc6e1259df7289e491b0a05f829d",
+  "initial_outputs_absent": true,
+  "kernel": "Linux 6.17.0-1022-azure x86_64",
+  "language_hits": {},
+  "language_misses": {
+    "Assembler": 139,
+    "C/C++": 603,
+    "Rust": 304
+  },
+  "manifest_and_checksum_hashes": {
+    "runtime-input/meshllm-native-runtime-linux-x86_64-cpu.tar.gz.sha256": "98f3fa024ade05da72b29d66b1b4c94eb851e29ecd74571bc26d88d40de561d6",
+    "runtime-input/meshllm-native-runtime-linux-x86_64-cpu/manifest.json": "3d2f7b7b29e36cd847295c8d24390bc6fca1613df3ca08b353104dd6024f7c94"
+  },
+  "native_cacheable_requests": 603,
+  "native_hits": 0,
+  "native_preparation_and_build_seconds": null,
+  "packaging_seconds": null,
+  "pair": 2,
+  "phase_timing_note": "derive optional observed split from timestamped job log",
+  "publisher_run": 34230668171,
+  "publisher_source": "a6487dd64de7d0df4a2d72145d18ab33be0f0a9c",
+  "restore_seconds": 0.44389340999998694,
+  "run_attempt": "1",
+  "run_id": "34272984200",
+  "runner_class": "github-hosted/ubuntu-24.04/X64",
+  "runner_image_os": "ubuntu24",
+  "runner_image_version": null,
+  "schema": 1,
+  "source": "1f4545616e98db715e37c57e1196cbdc975a010e",
+  "total_seconds": 532.242198177,
+  "verified": true,
+  "warm_floor_passed": true
+}

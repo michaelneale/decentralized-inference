@@ -21,10 +21,10 @@ pub use cache::{
     current_skippy_abi_version, default_native_runtime_cache, host_runtime_profile,
     native_runtime_cache, native_runtime_versions_match_current_sdk,
 };
-pub use install::install_native_runtime;
+pub use install::{NativeRuntimeResolutionError, RejectedCandidate, install_native_runtime};
 pub use manifest::{
     NativeRuntimeCatalogSources, default_manifest_url, default_release_manifest_url,
-    load_release_manifest,
+    load_release_manifest, load_release_manifest_with_sources,
 };
 pub use types::{
     CURRENT_MESH_VERSION, NATIVE_RUNTIME_CACHE_DIR_ENV, NATIVE_RUNTIME_MANIFEST_URL_ENV,
@@ -43,8 +43,8 @@ pub(crate) use install::{
 };
 #[cfg(test)]
 pub(crate) use manifest::{
-    load_release_manifest_with_sources, manifest_url, release_manifest_checksum_url,
-    url_without_query, verify_release_manifest_checksum,
+    manifest_url, normalize_sha256, release_manifest_checksum_url, url_without_query,
+    verify_release_manifest_checksum,
 };
 
 #[cfg(test)]
@@ -417,6 +417,22 @@ mod tests {
         );
         assert_eq!(
             url_without_query("https://example.invalid/native-runtimes.json"),
+            "https://example.invalid/native-runtimes.json"
+        );
+    }
+
+    #[test]
+    fn manifest_diagnostic_urls_redact_fragments() {
+        // A fragment can carry a token just like a query; catalog reports
+        // must not echo either.
+        assert_eq!(
+            url_without_query(
+                "https://example.invalid/native-runtimes.json?token=secret#access=abc"
+            ),
+            "https://example.invalid/native-runtimes.json"
+        );
+        assert_eq!(
+            url_without_query("https://example.invalid/native-runtimes.json#access=abc"),
             "https://example.invalid/native-runtimes.json"
         );
     }
@@ -996,6 +1012,9 @@ mod tests {
             .filter(|artifact| artifact.id == "meshllm-native-runtime-windows-x86_64-cpu")
             .count();
         assert_eq!(cpu_entries, 1, "{:?}", manifest.artifacts);
+        assert_eq!(sources.bundle_artifacts, 0);
+        assert_eq!(sources.bundle_duplicates_of_catalog, 1);
+        assert_eq!(sources.bundle_duplicates_of_bundles, 0);
 
         let profile = HostRuntimeProfile {
             os: "windows".to_string(),
@@ -1019,6 +1038,350 @@ mod tests {
             matches!(resolution.source, NativeRuntimeSource::Bundle { ref path } if path == &bundle.canonicalize().unwrap()),
             "the bundled copy must win over the download: {:?}",
             resolution.source
+        );
+    }
+
+    #[test]
+    fn catalog_sources_describe_every_consulted_source() {
+        let sources = NativeRuntimeCatalogSources {
+            manifest_url: Some("https://example.invalid/native-runtimes.json".to_string()),
+            manifest_artifacts: 12,
+            bundle_dirs: vec![PathBuf::from("C:/app/native-runtimes/cpu")],
+            bundle_artifacts: 1,
+            ..Default::default()
+        };
+        let lines = sources.describe();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains(
+                "release catalog https://example.invalid/native-runtimes.json (12 artifacts)"
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("bundle directories (1 runtimes: 1 added to the catalog)"),
+            "{lines:?}"
+        );
+
+        let shared = NativeRuntimeCatalogSources {
+            manifest_url: Some("https://example.invalid/native-runtimes.json".to_string()),
+            manifest_artifacts: 12,
+            bundle_dirs: vec![
+                PathBuf::from("C:/app/native-runtimes/cpu"),
+                PathBuf::from("C:/extra/cpu"),
+                PathBuf::from("C:/extra/cuda12"),
+            ],
+            bundle_artifacts: 1,
+            bundle_duplicates_of_catalog: 1,
+            bundle_duplicates_of_bundles: 1,
+            ..Default::default()
+        };
+        let lines = shared.describe();
+        assert!(
+            lines[1].contains(
+                "bundle directories (3 runtimes: 1 added to the catalog, 1 already listed by the release catalog, 1 duplicates of another bundle directory)"
+            ),
+            "{lines:?}"
+        );
+
+        let offline = NativeRuntimeCatalogSources {
+            manifest_url: Some("https://example.invalid/native-runtimes.json".to_string()),
+            remote_error: Some("connection refused".to_string()),
+            bundle_dirs: vec![PathBuf::from("C:/app/native-runtimes/cpu")],
+            bundle_artifacts: 1,
+            ..Default::default()
+        };
+        let lines = offline.describe();
+        assert!(
+            lines[0].contains("unavailable, using bundles only: connection refused"),
+            "{lines:?}"
+        );
+
+        let no_network = NativeRuntimeCatalogSources::default();
+        let lines = no_network.describe();
+        assert!(
+            lines[0].contains("no release catalog consulted"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("no native runtime bundle directories"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_gpu_selection_failure_names_the_catalogs_and_the_rejected_candidates() {
+        let _guard = MANIFEST_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(NATIVE_RUNTIME_MANIFEST_URL_ENV);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("native-runtimes/cpu");
+        write_bundle(&bundle, &windows_cpu_bundle_artifact());
+        // The only cuda candidate needs CUDA 12 on a host whose driver stops
+        // at CUDA 11, so an explicit cuda request must fail loudly instead of
+        // resolving against the bundled cpu runtime.
+        let manifest_path =
+            release_manifest_file(temp.path(), vec![windows_cuda_release_artifact()]);
+        let (manifest, sources) = block_on_load(NativeRuntimeManifestOptions {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            manifest_path: Some(manifest_path),
+            bundle_dirs: vec![bundle],
+            allow_default_manifest_url: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let profile = HostRuntimeProfile {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+            target_triple: Some("x86_64-pc-windows-msvc".to_string()),
+            available_flavors: std::collections::BTreeSet::from([
+                NativeRuntimeBackendKind::Cpu,
+                NativeRuntimeBackendKind::Cuda,
+            ]),
+            gpus: Vec::new(),
+            cuda: Some(HostCudaProfile {
+                toolkit_majors: std::collections::BTreeSet::new(),
+                driver_max_major: Some(11),
+                driver_version: None,
+                gpu_arches: std::collections::BTreeSet::from(["89".to_string()]),
+            }),
+            rocm: None,
+            vulkan: None,
+        };
+        let cache = native_runtime_cache(Some(&temp.path().join("cache"))).unwrap();
+        let selection = RuntimeSelection::Backend {
+            kind: NativeRuntimeBackendKind::Cuda,
+            cuda_toolkit_major: None,
+        };
+        let resolver = NativeRuntimeResolver::new(CURRENT_MESH_VERSION, profile, manifest, cache)
+            .with_skippy_abi_version(current_skippy_abi_version())
+            .with_bundle_dirs(sources.bundle_dirs.clone());
+        let resolver_error = resolver.resolve(&selection).unwrap_err();
+        let evaluated = resolver.evaluate(&selection).unwrap();
+
+        let failure =
+            NativeRuntimeResolutionError::rejected(sources, selection.clone(), &evaluated);
+        let explanation = failure.explanation_lines().join("\n");
+
+        assert_eq!(
+            failure.summary,
+            "no compatible native runtime: 1 candidate(s) rejected, 1 set aside"
+        );
+        assert_eq!(failure.candidates.len(), 1);
+        assert_eq!(failure.set_aside, 1);
+        assert!(!failure.enumeration_failed);
+        assert!(
+            explanation.contains("catalog: manifest file"),
+            "{explanation}"
+        );
+        assert!(
+            explanation
+                .contains("catalog: bundle directories (1 runtimes: 1 added to the catalog)"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("candidate meshllm-native-runtime-windows-x86_64-cuda12: CUDA driver too old: runtime requires CUDA 12, driver supports up to CUDA 11"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("1 other candidates were set aside"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("the cuda runtime was requested explicitly"),
+            "{explanation}"
+        );
+
+        // As the outermost context of the resolver's error: one line on top,
+        // the resolver's verdict underneath, and the structure recoverable.
+        let wrapped = resolver_error.context(failure.clone());
+        assert!(!wrapped.to_string().contains('\n'), "{wrapped}");
+        assert_eq!(wrapped.to_string(), failure.summary);
+        let causes = wrapped
+            .chain()
+            .skip(1)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(
+            causes[0].contains("no compatible native runtime found for Skippy ABI"),
+            "{causes:?}"
+        );
+        let recovered = wrapped
+            .downcast_ref::<NativeRuntimeResolutionError>()
+            .expect("the structured explanation is recoverable from the anyhow error");
+        assert_eq!(recovered, &failure);
+        let json = serde_json::to_value(recovered).unwrap();
+        assert_eq!(json["set_aside"], 1);
+        assert_eq!(
+            json["candidates"][0]["id"],
+            "meshllm-native-runtime-windows-x86_64-cuda12"
+        );
+    }
+
+    #[test]
+    fn recommended_selection_sets_aside_other_platforms_instead_of_listing_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut linux_cuda = windows_cuda_release_artifact();
+        linux_cuda.id = "meshllm-native-runtime-linux-x86_64-cuda12".to_string();
+        linux_cuda.platform = NativeRuntimePlatform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            target: Some("x86_64-unknown-linux-gnu".to_string()),
+        };
+        let manifest_path = release_manifest_file(
+            temp.path(),
+            vec![windows_cuda_release_artifact(), linux_cuda],
+        );
+        let (manifest, sources) = block_on_load(NativeRuntimeManifestOptions {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            manifest_path: Some(manifest_path),
+            bundle_dirs: Vec::new(),
+            allow_default_manifest_url: false,
+            ..Default::default()
+        })
+        .unwrap();
+        // A Windows host whose driver stops at CUDA 11: the Windows cuda12
+        // runtime is the only plausible candidate, the Linux one is noise.
+        let profile = HostRuntimeProfile {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+            target_triple: Some("x86_64-pc-windows-msvc".to_string()),
+            available_flavors: std::collections::BTreeSet::from([
+                NativeRuntimeBackendKind::Cpu,
+                NativeRuntimeBackendKind::Cuda,
+            ]),
+            gpus: Vec::new(),
+            cuda: Some(HostCudaProfile {
+                toolkit_majors: std::collections::BTreeSet::new(),
+                driver_max_major: Some(11),
+                driver_version: None,
+                gpu_arches: std::collections::BTreeSet::from(["89".to_string()]),
+            }),
+            rocm: None,
+            vulkan: None,
+        };
+        let cache = native_runtime_cache(Some(&temp.path().join("cache"))).unwrap();
+        let resolver = NativeRuntimeResolver::new(CURRENT_MESH_VERSION, profile, manifest, cache)
+            .with_skippy_abi_version(current_skippy_abi_version());
+        assert!(resolver.resolve(&RuntimeSelection::Recommended).is_err());
+        let evaluated = resolver.evaluate(&RuntimeSelection::Recommended).unwrap();
+
+        let failure = NativeRuntimeResolutionError::rejected(
+            sources,
+            RuntimeSelection::Recommended,
+            &evaluated,
+        );
+
+        assert_eq!(failure.candidates.len(), 1, "{failure:?}");
+        assert_eq!(
+            failure.candidates[0].id,
+            "meshllm-native-runtime-windows-x86_64-cuda12"
+        );
+        assert_eq!(failure.set_aside, 1);
+        let explanation = failure.explanation_lines().join("\n");
+        assert!(!explanation.contains("linux"), "{explanation}");
+        assert!(
+            explanation.contains("1 other candidates were set aside"),
+            "{explanation}"
+        );
+        assert!(
+            !explanation.contains("requested explicitly"),
+            "{explanation}"
+        );
+    }
+
+    #[test]
+    fn enumeration_failure_is_not_reported_as_a_catalog_mismatch() {
+        let failure = NativeRuntimeResolutionError::enumeration_failed(
+            NativeRuntimeCatalogSources::default(),
+            RuntimeSelection::Recommended,
+        );
+        let lines = failure.explanation_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("could not be enumerated")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("set aside")),
+            "{lines:?}"
+        );
+
+        let wrapped =
+            anyhow::anyhow!("native runtime cache root is not readable").context(failure.clone());
+        assert_eq!(
+            wrapped.to_string(),
+            "native runtime candidates could not be enumerated"
+        );
+        assert!(
+            wrapped
+                .chain()
+                .skip(1)
+                .any(|cause| cause.to_string().contains("cache root is not readable")),
+            "the original cause must survive underneath the explanation"
+        );
+        let recovered = wrapped
+            .downcast_ref::<NativeRuntimeResolutionError>()
+            .unwrap();
+        assert!(recovered.enumeration_failed);
+        assert!(recovered.candidates.is_empty());
+    }
+
+    #[test]
+    fn release_manifest_checksum_url_drops_fragments() {
+        assert_eq!(
+            release_manifest_checksum_url("https://host/native-runtimes.json#tok"),
+            "https://host/native-runtimes.json.sha256"
+        );
+        assert_eq!(
+            release_manifest_checksum_url("https://host/native-runtimes.json?token=1#tok"),
+            "https://host/native-runtimes.json.sha256?token=1"
+        );
+    }
+
+    #[test]
+    fn invalid_sha256_error_does_not_echo_the_value() {
+        let err =
+            normalize_sha256("{\"mesh_version\": \"0.76.0\", \"artifacts\": []}").unwrap_err();
+        let message = err.to_string();
+        assert!(!message.contains("mesh_version"), "{message}");
+        assert!(
+            message.contains("expected 64 hexadecimal characters"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_runtime_reached_through_two_bundle_directories_is_counted_as_a_bundle_duplicate() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("native-runtimes/cpu");
+        let second = temp.path().join("extra/cpu");
+        write_bundle(&first, &windows_cpu_bundle_artifact());
+        write_bundle(&second, &windows_cpu_bundle_artifact());
+        let manifest_path =
+            release_manifest_file(temp.path(), vec![windows_cuda_release_artifact()]);
+
+        let (manifest, sources) = block_on_load(NativeRuntimeManifestOptions {
+            mesh_version: CURRENT_MESH_VERSION.to_string(),
+            manifest_path: Some(manifest_path),
+            bundle_dirs: vec![first, second],
+            allow_default_manifest_url: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(manifest.artifacts.len(), 2, "{:?}", manifest.artifacts);
+        assert_eq!(sources.bundle_artifacts, 1);
+        assert_eq!(sources.bundle_duplicates_of_catalog, 0);
+        assert_eq!(sources.bundle_duplicates_of_bundles, 1);
+        let lines = sources.describe();
+        assert!(
+            lines[1].contains(
+                "bundle directories (2 runtimes: 1 added to the catalog, 1 duplicates of another bundle directory)"
+            ),
+            "{lines:?}"
         );
     }
 }

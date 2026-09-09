@@ -404,5 +404,290 @@ class SkippyLlamaParityTests(unittest.TestCase):
         )
 
 
+class BoundaryRegistrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def test_unregistered_runnable_row_fails_without_reason(self):
+        rows = [{"llama_model": "somearch", "status": "certified"}]
+        failures = self.parity.validate_boundary_registration(rows, set())
+        self.assertEqual(failures, 1)
+
+    def test_certified_row_with_reason_fails_even_when_registered(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "unsupported_reason": "non-causal encoder",
+            }
+        ]
+        # Certified rows may never carry an unsupported_reason, regardless
+        # of hook state — that combination is a manifest error.
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
+
+    def test_unregistered_candidate_row_with_reason_fails(self):
+        # A runnable candidate with an unsupported_reason is an ambiguous
+        # state (runnable-but-unsupported) — reject it exactly like the
+        # certified case, even when hooks are registered.
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "candidate",
+                "unsupported_reason": "non-causal encoder",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+
+    def test_candidate_stateful_row_with_reason_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "candidate_stateful",
+                "unsupported_reason": "ambiguous leftover",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 1)
+
+    def test_registered_row_with_reason_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "unsupported_reason": "stale classification",
+            }
+        ]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 1)
+
+    def test_registered_row_without_reason_passes(self):
+        rows = [{"llama_model": "somearch", "status": "certified"}]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, {"somearch"}), 0)
+
+    def test_non_runnable_statuses_skipped(self):
+        rows = [{"llama_model": "otherarch", "status": "implementation_base"}]
+        self.assertEqual(self.parity.validate_boundary_registration(rows, set()), 0)
+
+
+class CoverageExpansionTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    @staticmethod
+    def _row(model: str, family: str | None = None) -> dict:
+        row = {
+            "llama_model": model,
+            "status": "needs_boundary_registration",
+        }
+        if family is not None:
+            row["family"] = family
+        return row
+
+    def test_selects_deterministic_lexicographic_first(self):
+        # 2+ rows: the pick is stable and lexicographic on
+        # (llama_model, family), independent of input order.
+        rows = [
+            self._row("zeta", "zeta_family"),
+            self._row("alpha", "alpha_family"),
+            self._row("mid", "mid_family"),
+        ]
+        for order in (rows, list(reversed(rows)), [rows[1], rows[0], rows[2]]):
+            target = self.parity.coverage_expansion_target(order, set())
+            self.assertEqual(target["llama_model"], "alpha")
+            self.assertEqual(target["family"], "alpha_family")
+
+    def test_skips_rows_already_registered(self):
+        # A row whose hooks already landed but whose manifest status is
+        # stale must not be chosen — that is reclassification work, not
+        # coverage expansion.
+        rows = [
+            self._row("alpha", "alpha_family"),
+            self._row("zeta", "zeta_family"),
+        ]
+        target = self.parity.coverage_expansion_target(rows, {"alpha"})
+        self.assertEqual(target["llama_model"], "zeta")
+
+    def test_no_gaps_returns_none(self):
+        self.assertIsNone(self.parity.coverage_expansion_target([], set()))
+        self.assertIsNone(
+            self.parity.coverage_expansion_target(
+                [self._row("alpha"), self._row("zeta")], {"alpha", "zeta"}
+            )
+        )
+
+    def test_skips_rows_with_unsupported_reason(self):
+        rows = [
+            {
+                "llama_model": "alpha",
+                "status": "needs_boundary_registration",
+                "unsupported_reason": "blocked upstream",
+            },
+            self._row("zeta", "zeta_family"),
+        ]
+        target = self.parity.coverage_expansion_target(rows, set())
+        self.assertEqual(target["llama_model"], "zeta")
+
+    def test_needs_boundary_registration_rows_lists_pending(self):
+        rows = [
+            {"llama_model": "aaa", "status": "certified"},
+            {"llama_model": "bbb", "status": "certified"},
+            {
+                "llama_model": "ccc",
+                "status": "certified",
+                "unsupported_reason": "deliberate",
+            },
+            {"llama_model": "ddd", "status": "certified"},
+        ]
+        pending = self.parity.needs_boundary_registration_rows(rows, {"ddd"})
+        self.assertEqual(pending, ["aaa", "bbb"])
+
+
+class BoundaryRegisteredModelsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def _models_dir(self, tmp: Path):
+        models = tmp / "src" / "models"
+        models.mkdir(parents=True)
+        return models
+
+    def test_both_hooks_required(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            models = self._models_dir(tmp)
+            (models / "full.cpp").write_text("begin_block(inpL, il);\nend_block(cur, il);\n")
+            (models / "half.cpp").write_text("begin_block(inpL, il);\n")
+            registered = self.parity.boundary_registered_models(tmp)
+        self.assertEqual(registered, {"full"})
+
+    def test_comment_only_mentions_do_not_register(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            models = self._models_dir(tmp)
+            # Both names appear only in comments/docs — no real calls.
+            (models / "commented.cpp").write_text(
+                "// registers begin_block(inpL, il) and end_block(cur, il)\n"
+                "/* block boundaries: begin_block / end_block hooks */\n"
+                "void f() {}\n"
+            )
+            registered = self.parity.boundary_registered_models(tmp)
+        self.assertEqual(registered, set())
+
+    def test_missing_models_dir_is_empty(self):
+        with tempfile.TemporaryDirectory() as tmp_name:
+            self.assertEqual(self.parity.boundary_registered_models(Path(tmp_name)), set())
+
+
+class ModelPinTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+
+    def test_valid_pin_passes(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {
+                    "repo": "org/some-gguf",
+                    "revision": "0" * 40,
+                    "file": "model-Q4_K_M.gguf",
+                    "size_bytes": 123,
+                    "blob_sha256": "a" * 64,
+                },
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 0)
+
+    def test_floating_pin_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {"repo": "org/some-gguf"},
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 1)
+
+    def test_malformed_blob_fails(self):
+        rows = [
+            {
+                "llama_model": "somearch",
+                "status": "certified",
+                "model_pin": {
+                    "repo": "org/some-gguf",
+                    "revision": "0" * 40,
+                    "file": "model.gguf",
+                    "size_bytes": 5,
+                    "blob_sha256": "not-hex",
+                },
+            }
+        ]
+        self.assertEqual(self.parity.validate_model_pins(rows), 1)
+
+
+class PinManifestJoinTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parity = load_module()
+        self.certified_dir = ROOT / "ci/llama-canary"
+        self._original = (self.certified_dir / "family-certified.json").read_text(
+            encoding="utf-8"
+        )
+        self.addCleanup(
+            lambda: (self.certified_dir / "family-certified.json").write_text(
+                self._original, encoding="utf-8"
+            )
+        )
+
+    def _write_certified(self, models: list[dict]) -> None:
+        import json
+
+        (self.certified_dir / "family-certified.json").write_text(
+            json.dumps({"schema_version": 1, "policy": {}, "models": models}),
+            encoding="utf-8",
+        )
+
+    def _pin(self, size=10, blob="a" * 64, repo="org/some-gguf", revision="0" * 40):
+        return {
+            "llama_model": "somearch",
+            "status": "certified",
+            "model_pin": {
+                "repo": repo,
+                "revision": revision,
+                "file": "model.gguf",
+                "size_bytes": size,
+                "blob_sha256": blob,
+                "selector": "Q4_K_M",
+            },
+        }
+
+    def _artifact(self, size=10, blob="a" * 64, repo="org/some-gguf", revision="0" * 40):
+        return {
+            "artifact": {
+                "repo": repo,
+                "revision": revision,
+                "selector": "Q4_K_M",
+                "file_integrity": {
+                    "model.gguf": {"size_bytes": size, "blob_id": blob}
+                },
+            }
+        }
+
+    def test_matching_pin_joins(self):
+        self._write_certified([self._artifact()])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 0)
+
+    def test_unknown_pin_fails(self):
+        self._write_certified([])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 1)
+
+    def test_disagreeing_integrity_fails(self):
+        self._write_certified([self._artifact(size=999)])
+        self.assertEqual(self.parity.validate_pin_manifest_join([self._pin()]), 1)
+
+    def test_pin_without_manifest_entry_passes_when_no_pin_rows(self):
+        self._write_certified([])
+        self.assertEqual(self.parity.validate_pin_manifest_join([]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

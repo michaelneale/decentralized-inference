@@ -16,6 +16,9 @@ pub(crate) struct StageDeploymentContext<'a> {
     pub(crate) run_id: &'a str,
     pub(crate) model_id: &'a str,
     pub(crate) package: &'a StagePackageInfo,
+    pub(crate) admission: skippy_protocol::StageAdmissionDescriptor,
+    pub(crate) participant_set_hash: &'a str,
+    pub(crate) topology_hash: &'a str,
     pub(crate) family_policy: &'a FamilyPolicy,
     pub(crate) ctx_size: u32,
     pub(crate) lane_count: u32,
@@ -51,6 +54,19 @@ pub(crate) fn remote_stage_load_request(
         stage_index: stage.stage_index,
         layer_start: stage.layer_start,
         layer_end: stage.layer_end,
+        admission: context.admission.clone(),
+        participant_set_hash: context.participant_set_hash.to_string(),
+        topology_hash: context.topology_hash.to_string(),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
+        topology_stages: vec![super::StageTopologyStageDescriptor {
+            stage_id: stage.stage_id.clone(),
+            stage_index: stage.stage_index,
+            node_id: stage.node_id,
+            layer_start: stage.layer_start,
+            layer_end: stage.layer_end,
+            bind_addr: "127.0.0.1:0".to_string(),
+        }],
         model_path: Some(context.package.package_ref.clone()),
         source_model_bytes: context.package.source_model_bytes,
         source_model_sha256: Some(context.package.source_model_sha256.clone()),
@@ -107,6 +123,7 @@ pub(crate) fn stage0_config(
         materialized_path: None,
         materialized_pinned: false,
         model_path: Some(context.package.package_ref.clone()),
+        model_part_paths: Vec::new(),
         projector_path: context
             .projector_path
             .clone()
@@ -118,6 +135,8 @@ pub(crate) fn stage0_config(
         batch_max_tokens: None,
         glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
         generation_signal_window: None,
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: context.runtime_settings.activation_codec_policy,
         stage_id: stage0.stage_id.clone(),
         stage_index: stage0.stage_index,
         layer_start: stage0.layer_start,
@@ -144,6 +163,7 @@ pub(crate) fn stage0_config(
         swa_full: context.runtime_settings.swa_full,
         cache_idle_slots: context.runtime_settings.cache_idle_slots,
         filter_tensors_on_load: true,
+        resident_tensor_names: Vec::new(),
         checkpoint_quantization: None,
         checkpoint_imatrix: None,
         checkpoint_imatrix_sha256: None,
@@ -191,6 +211,7 @@ pub(crate) fn stage_topology_instance(
         model_id: context.model_id.to_string(),
         package_ref: context.package.package_ref.clone(),
         manifest_sha256: context.package.manifest_sha256.clone(),
+        admissions: Default::default(),
         stages: stages
             .iter()
             .map(|stage| mesh::StageAssignment {
@@ -264,6 +285,9 @@ mod tests {
             run_id: "run-a",
             model_id: "model-a",
             package: &package,
+            admission: crate::inference::skippy::test_stage_admission(4, 8),
+            participant_set_hash: "participants",
+            topology_hash: "topology-hash",
             family_policy: &crate::inference::skippy::family_policy::family_policy_for_model_path(
                 "model.gguf",
             ),
@@ -293,6 +317,7 @@ mod tests {
                 kv_unified: Some(true),
                 swa_full: Some(false),
                 cache_idle_slots: Some(3),
+                activation_codec_policy: Default::default(),
             },
         };
         let request = remote_stage_load_request(

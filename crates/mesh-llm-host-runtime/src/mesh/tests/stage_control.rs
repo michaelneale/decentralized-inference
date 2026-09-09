@@ -23,6 +23,12 @@ fn test_stage_status(
         node_id: Some(node_id),
         layer_start: stage_index * 12,
         layer_end: (stage_index + 1) * 12,
+        admission: Some(crate::inference::skippy::test_stage_admission(
+            stage_index * 12,
+            (stage_index + 1) * 12,
+        )),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bind_addr: bind_addr.to_string(),
         input_activation_boundary: None,
@@ -51,6 +57,29 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         stage_index: 1,
         layer_start: 12,
         layer_end: 24,
+        admission: crate::inference::skippy::test_stage_admission(12, 24),
+        participant_set_hash: "participants".to_string(),
+        topology_hash: "topology".to_string(),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
+        topology_stages: vec![
+            crate::inference::skippy::StageTopologyStageDescriptor {
+                stage_id: "stage-0".to_string(),
+                stage_index: 0,
+                node_id: make_test_endpoint_id(0x60),
+                layer_start: 0,
+                layer_end: 12,
+                bind_addr: "127.0.0.1:9000".to_string(),
+            },
+            crate::inference::skippy::StageTopologyStageDescriptor {
+                stage_id: "stage-1".to_string(),
+                stage_index: 1,
+                node_id: make_test_endpoint_id(0x80),
+                layer_start: 12,
+                layer_end: 24,
+                bind_addr: "127.0.0.1:0".to_string(),
+            },
+        ],
         model_path: Some("/model.gguf".to_string()),
         source_model_bytes: Some(123_456_789),
         source_model_sha256: None,
@@ -88,6 +117,7 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
             kv_unified: Some(true),
             swa_full: Some(false),
             cache_idle_slots: Some(5),
+            activation_codec_policy: Default::default(),
         },
         native_mtp_enabled: true,
         shutdown_generation: 7,
@@ -120,7 +150,7 @@ async fn stage_control_bundle_gate_rejects_legacy_peer() -> Result<()> {
     assert!(
         error
             .to_string()
-            .contains("does not advertise the required generation-7 control bundle"),
+            .contains("does not advertise the required generation-8 control bundle"),
         "unexpected error: {error:#}"
     );
 
@@ -149,6 +179,9 @@ fn test_preparation_status(
         stage_index: 1,
         layer_start: 12,
         layer_end: 24,
+        admission: Some(crate::inference::skippy::test_stage_admission(12, 24)),
+        activation_codec: skippy_protocol::StageActivationCodec::default(),
+        activation_codec_policy: Default::default(),
         state,
         bytes_done: Some(1024),
         bytes_total: Some(4096),
@@ -230,6 +263,33 @@ fn content_addressed_status_redacts_projector_at_wire_boundary() {
 }
 
 #[test]
+fn status_conversions_preserve_activation_codec_policy() {
+    let node_id = make_test_endpoint_id(0x91);
+    let mut load = test_stage_load_request();
+    load.activation_codec_policy = skippy_protocol::StageActivationCodecPolicy::AutoLosslessV1;
+
+    let status = stage_status_from_load(&load, crate::inference::skippy::StageRuntimeState::Ready);
+    assert_eq!(status.activation_codec_policy, load.activation_codec_policy);
+    let runtime = stage_runtime_status_from_snapshot(Some(node_id), status);
+    assert_eq!(runtime.activation_codec_policy, load.activation_codec_policy);
+    let snapshot = stage_snapshot_from_runtime_status(
+        &runtime,
+        crate::inference::skippy::StageRuntimeState::Ready,
+        None,
+    );
+    assert_eq!(snapshot.activation_codec_policy, load.activation_codec_policy);
+    let preparation = stage_preparation_status_from_load(
+        &load,
+        crate::inference::skippy::StagePreparationState::Ready,
+        None,
+    );
+    assert_eq!(
+        preparation.activation_codec_policy,
+        load.activation_codec_policy
+    );
+}
+
+#[test]
 fn strict_local_load_uses_distinct_fail_closed_proto_command() {
     let requester = make_test_endpoint_id(0x85);
     let digest = "a".repeat(64);
@@ -256,6 +316,10 @@ fn strict_local_load_uses_distinct_fail_closed_proto_command() {
     assert!(decoded.local_source_required);
     assert!(decoded.model_path.is_none());
     assert!(decoded.projector_path.is_none());
+    assert_eq!(
+        decoded.admission,
+        crate::inference::skippy::test_stage_admission(12, 24)
+    );
 }
 
 #[test]
@@ -564,6 +628,54 @@ fn empty_stage_control_status_list_response_round_trips_as_empty() {
     assert!(statuses.is_empty());
 }
 
+#[tokio::test]
+async fn locally_executing_status_excludes_peer_snapshots() -> Result<()> {
+    let node = Node::new_for_tests(crate::mesh::NodeRole::Worker).await?;
+    let local_status = test_stage_status(
+        node.id(),
+        "stage-0",
+        0,
+        "127.0.0.1:51234",
+        crate::inference::skippy::StageRuntimeState::Ready,
+    );
+    let peer_id = make_test_endpoint_id(0x44);
+    let peer_status = test_stage_status(
+        peer_id,
+        "stage-1",
+        1,
+        "127.0.0.1:51235",
+        crate::inference::skippy::StageRuntimeState::Ready,
+    );
+    for status in [local_status, peer_status] {
+        let node_id = status.node_id;
+        node.record_stage_status(
+            node_id,
+            crate::mesh::stage_proto::stage_snapshot_from_runtime_status(
+                &status,
+                status.state,
+                status.error.clone(),
+            ),
+        )
+        .await;
+    }
+
+    let statuses = node
+        .locally_executing_stage_statuses(&crate::inference::skippy::StageStatusFilter {
+            topology_id: Some("topology-a".to_string()),
+            run_id: Some("run-a".to_string()),
+            stage_id: None,
+        })
+        .await;
+
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].stage_id, "stage-0");
+    assert_eq!(
+        statuses[0].state,
+        crate::inference::skippy::StageRuntimeState::Ready
+    );
+    Ok(())
+}
+
 #[test]
 fn stage_status_updates_materialized_topology_endpoint() {
     let node_id = EndpointId::from(SecretKey::from_bytes(&[0x31; 32]).public());
@@ -574,6 +686,7 @@ fn stage_status_updates_materialized_topology_endpoint() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![StageAssignment {
             stage_id: "stage-1".to_string(),
             stage_index: 1,
@@ -608,6 +721,7 @@ fn public_stage_topologies_hide_worker_only_load_fragments() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![StageAssignment {
             stage_id: "stage-1".to_string(),
             stage_index: 1,
@@ -642,6 +756,7 @@ fn full_stage_topology_remains_visible_after_status_updates() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -690,6 +805,7 @@ fn active_stage_topology_replaces_previous_generation_for_model() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -727,6 +843,7 @@ fn active_stage_topology_replaces_previous_generation_for_model() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -768,6 +885,7 @@ fn stage_topology_withdraw_removes_active_topology_and_statuses() {
         model_id: "model-a".to_string(),
         package_ref: "gguf:///model.gguf".to_string(),
         manifest_sha256: "direct-gguf:1:model.gguf".to_string(),
+        admissions: Default::default(),
         stages: vec![
             StageAssignment {
                 stage_id: "stage-0".to_string(),
@@ -886,6 +1004,32 @@ fn active_stage_missing_from_runtime_marks_cached_stage_failed() {
         status.error.as_deref(),
         Some("stage status missing from runtime")
     );
+}
+
+#[test]
+fn starting_stage_missing_from_runtime_is_retried() {
+    let node_id = EndpointId::from(SecretKey::from_bytes(&[0x43; 32]).public());
+    let mut state = StageTopologyState::default();
+    state.record_status(test_stage_status(
+        node_id,
+        "stage-1",
+        1,
+        "127.0.0.1:51234",
+        crate::inference::skippy::StageRuntimeState::Starting,
+    ));
+    let cached = state.active_statuses().into_iter().next().unwrap();
+
+    state.record_status_refresh_failure(
+        &cached,
+        crate::mesh::stage_transport::StageStatusRefreshFailure::MissingFromRuntime,
+    );
+
+    let status = state.runtime_statuses().into_iter().next().unwrap();
+    assert_eq!(
+        status.state,
+        crate::inference::skippy::StageRuntimeState::Starting
+    );
+    assert_eq!(status.error, None);
 }
 
 #[test]

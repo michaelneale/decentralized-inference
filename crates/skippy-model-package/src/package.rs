@@ -1,20 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use model_artifact::{ModelArtifactFile, ResolvedModelArtifact};
 use model_hf::HfModelRepository;
 use model_ref::{format_canonical_ref, normalize_gguf_distribution_id, parse_model_ref};
 use serde::{Deserialize, Serialize};
-use skippy_runtime::{ModelInfo, TensorInfo};
 
-use crate::hash::file_sha256;
-use crate::plan::{layer_count, stage_plan_from_tensors};
-use crate::progress::{PackageProgress, format_bytes};
-use crate::write::{ModelSource, local_artifact_files, write_json_file, write_stage_artifact};
+use crate::write::local_artifact_files;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct PackageManifest {
@@ -155,16 +149,6 @@ pub(crate) struct PackageProjector {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PackageArtifactSpec {
-    stage_index: u32,
-    layer_start: u32,
-    layer_end: u32,
-    includes_embeddings: bool,
-    includes_output: bool,
-    relative_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct ArtifactHook {
     pub(crate) command: Option<PathBuf>,
 }
@@ -194,195 +178,10 @@ pub(crate) struct PackageSourceIdentity {
     pub(crate) files: Vec<ModelArtifactFile>,
 }
 
-pub(crate) fn write_package(
+pub(crate) fn resolve_package_input(
     model: String,
-    out_dir: PathBuf,
-    projectors: Vec<PathBuf>,
-    artifact_hook: ArtifactHook,
-    artifact_transform: ArtifactHook,
     explicit: ExplicitSourceIdentity,
-    resume_existing_artifacts: bool,
-) -> Result<()> {
-    let input = resolve_package_input(model, explicit)?;
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create output directory {}", out_dir.display()))?;
-    fs::create_dir_all(out_dir.join("shared"))
-        .with_context(|| format!("create shared directory {}", out_dir.display()))?;
-    fs::create_dir_all(out_dir.join("layers"))
-        .with_context(|| format!("create layers directory {}", out_dir.display()))?;
-    if !projectors.is_empty() {
-        fs::create_dir_all(out_dir.join("projectors"))
-            .with_context(|| format!("create projectors directory {}", out_dir.display()))?;
-    }
-
-    let source = ModelSource::open(&input.model_path)?;
-    let tensors = &source.tensors;
-    let layer_count = layer_count(tensors)?;
-    let source_sha256 = file_sha256(&input.model_path)?;
-    let mut progress = PackageProgress::new(3 + layer_count as usize + projectors.len() + 1);
-
-    progress.start_step("shared/metadata.gguf")?;
-    let metadata = write_package_artifact(
-        &source,
-        tensors,
-        PackageArtifactSpec {
-            stage_index: 0,
-            layer_start: 0,
-            layer_end: 0,
-            includes_embeddings: false,
-            includes_output: false,
-            relative_path: PathBuf::from("shared/metadata.gguf"),
-        },
-        &out_dir,
-        &artifact_hook,
-        &artifact_transform,
-        resume_existing_artifacts,
-    )?;
-    progress.finish_step(&artifact_progress_detail(&metadata))?;
-    progress.start_step("shared/embeddings.gguf")?;
-    let embeddings = write_package_artifact(
-        &source,
-        tensors,
-        PackageArtifactSpec {
-            stage_index: 1,
-            layer_start: 0,
-            layer_end: 0,
-            includes_embeddings: true,
-            includes_output: false,
-            relative_path: PathBuf::from("shared/embeddings.gguf"),
-        },
-        &out_dir,
-        &artifact_hook,
-        &artifact_transform,
-        resume_existing_artifacts,
-    )?;
-    progress.finish_step(&artifact_progress_detail(&embeddings))?;
-    progress.start_step("shared/output.gguf")?;
-    let output = write_package_artifact(
-        &source,
-        tensors,
-        PackageArtifactSpec {
-            stage_index: 2,
-            layer_start: layer_count,
-            layer_end: layer_count,
-            includes_embeddings: false,
-            includes_output: true,
-            relative_path: PathBuf::from("shared/output.gguf"),
-        },
-        &out_dir,
-        &artifact_hook,
-        &artifact_transform,
-        resume_existing_artifacts,
-    )?;
-    progress.finish_step(&artifact_progress_detail(&output))?;
-
-    let mut layers = Vec::new();
-    for layer_index in 0..layer_count {
-        let relative = PathBuf::from(format!("layers/layer-{layer_index:03}.gguf"));
-        progress.start_step(&relative.display().to_string())?;
-        let artifact = write_package_artifact(
-            &source,
-            tensors,
-            PackageArtifactSpec {
-                stage_index: 1000 + layer_index,
-                layer_start: layer_index,
-                layer_end: layer_index + 1,
-                includes_embeddings: false,
-                includes_output: false,
-                relative_path: relative,
-            },
-            &out_dir,
-            &artifact_hook,
-            &artifact_transform,
-            resume_existing_artifacts,
-        )?;
-        progress.finish_step(&artifact_progress_detail(&artifact))?;
-        layers.push(PackageLayer {
-            layer_index,
-            path: artifact.path,
-            tensor_count: artifact.tensor_count,
-            tensor_bytes: artifact.tensor_bytes,
-            artifact_bytes: artifact.artifact_bytes,
-            sha256: artifact.sha256,
-        });
-    }
-
-    let mut package_projectors = Vec::new();
-    for (index, projector) in projectors.iter().enumerate() {
-        progress.start_step(&projector.display().to_string())?;
-        let package_projector =
-            copy_projector_artifact(projector, index, &out_dir, &artifact_hook)?;
-        progress.finish_step(&projector_progress_detail(&package_projector))?;
-        package_projectors.push(package_projector);
-    }
-
-    let manifest = PackageManifest {
-        schema_version: 1,
-        model_id: input.model_id,
-        source_model: PackageSourceModel {
-            path: input.model_path.display().to_string(),
-            sha256: source_sha256,
-            repo: input.source_identity.repo,
-            revision: input.source_identity.revision,
-            primary_file: input.source_identity.primary_file,
-            canonical_ref: input.source_identity.canonical_ref,
-            distribution_id: input.source_identity.distribution_id,
-            files: input.source_identity.files,
-        },
-        format: "layer-package".to_string(),
-        layer_count,
-        generation: package_generation(tensors),
-        shared: PackageShared {
-            metadata,
-            embeddings,
-            output,
-        },
-        projectors: package_projectors,
-        layers,
-        skippy_abi_version: format!(
-            "{}.{}.{}",
-            skippy_ffi::ABI_VERSION_MAJOR,
-            skippy_ffi::ABI_VERSION_MINOR,
-            skippy_ffi::ABI_VERSION_PATCH
-        ),
-        created_at_unix_secs: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock before Unix epoch")?
-            .as_secs(),
-    };
-
-    let manifest_path = out_dir.join("model-package.json");
-    progress.start_step("model-package.json")?;
-    write_json_file(&manifest_path, &manifest)?;
-    let manifest_bytes = fs::metadata(&manifest_path)
-        .with_context(|| format!("read manifest metadata {}", manifest_path.display()))?
-        .len();
-    progress.finish_step(&format!(
-        "model-package.json {}",
-        format_bytes(manifest_bytes)
-    ))?;
-    progress.finish()?;
-    println!("{}", serde_json::to_string_pretty(&manifest)?);
-    Ok(())
-}
-
-fn artifact_progress_detail(artifact: &PackageArtifact) -> String {
-    format!(
-        "{} {}",
-        artifact.path,
-        format_bytes(artifact.artifact_bytes)
-    )
-}
-
-fn projector_progress_detail(projector: &PackageProjector) -> String {
-    format!(
-        "{} {}",
-        projector.path,
-        format_bytes(projector.artifact_bytes)
-    )
-}
-
-fn resolve_package_input(model: String, explicit: ExplicitSourceIdentity) -> Result<PackageInput> {
+) -> Result<PackageInput> {
     let path = PathBuf::from(&model);
     if path.exists() {
         return resolve_local_package_input(path, explicit);
@@ -508,103 +307,6 @@ pub(crate) fn model_distribution_id(model: &Path) -> Option<String> {
         })
 }
 
-pub(crate) fn write_package_artifact(
-    source: &ModelSource,
-    tensors: &[TensorInfo],
-    spec: PackageArtifactSpec,
-    out_dir: &Path,
-    artifact_hook: &ArtifactHook,
-    artifact_transform: &ArtifactHook,
-    resume_existing_artifacts: bool,
-) -> Result<PackageArtifact> {
-    let stage = stage_plan_from_tensors(
-        spec.stage_index as usize,
-        spec.layer_start,
-        spec.layer_end,
-        spec.includes_embeddings,
-        spec.includes_output,
-        tensors,
-    );
-    let path = out_dir.join(&spec.relative_path);
-    if !should_resume_package_artifact(&path, resume_existing_artifacts) {
-        write_stage_artifact(source, &stage, &path)?;
-    }
-    let relative_path = spec.relative_path.display().to_string();
-    run_artifact_hook(artifact_transform, &path, &relative_path)?;
-    let artifact = read_package_artifact(&path, &spec.relative_path)?;
-    run_artifact_hook(artifact_hook, &path, &artifact.path)?;
-    Ok(artifact)
-}
-
-pub(crate) fn should_resume_package_artifact(path: &Path, resume_existing_artifacts: bool) -> bool {
-    resume_existing_artifacts && path.is_file()
-}
-
-fn read_package_artifact(path: &Path, relative_path: &Path) -> Result<PackageArtifact> {
-    let artifact_info = ModelInfo::open(path)
-        .with_context(|| format!("open package artifact {}", path.display()))?;
-    let artifact_tensors = artifact_info
-        .tensors()
-        .with_context(|| format!("read package artifact tensors {}", path.display()))?;
-    let metadata =
-        fs::metadata(path).with_context(|| format!("read artifact metadata {}", path.display()))?;
-    Ok(PackageArtifact {
-        path: relative_path.display().to_string(),
-        tensor_count: artifact_tensors.len(),
-        tensor_bytes: artifact_tensors.iter().map(|tensor| tensor.byte_size).sum(),
-        artifact_bytes: metadata.len(),
-        sha256: file_sha256(path)?,
-    })
-}
-
-fn copy_projector_artifact(
-    projector: &Path,
-    index: usize,
-    out_dir: &Path,
-    artifact_hook: &ArtifactHook,
-) -> Result<PackageProjector> {
-    if !projector.is_file() {
-        bail!("projector is not a file: {}", projector.display());
-    }
-    let info = ModelInfo::open(projector)
-        .with_context(|| format!("open multimodal projector GGUF {}", projector.display()))?;
-    let tensors = info
-        .tensors()
-        .with_context(|| format!("read multimodal projector tensors {}", projector.display()))?;
-    let file_name = projector
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| format!("mmproj-{index:03}.gguf"));
-    let relative_path = PathBuf::from("projectors").join(file_name);
-    let output_path = out_dir.join(&relative_path);
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create projector directory {}", parent.display()))?;
-    }
-    fs::copy(projector, &output_path).with_context(|| {
-        format!(
-            "copy multimodal projector {} to {}",
-            projector.display(),
-            output_path.display()
-        )
-    })?;
-    let metadata = fs::metadata(&output_path)
-        .with_context(|| format!("read projector metadata {}", output_path.display()))?;
-
-    let package_projector = PackageProjector {
-        kind: "mmproj".to_string(),
-        path: relative_path.to_string_lossy().replace('\\', "/"),
-        tensor_count: tensors.len(),
-        tensor_bytes: tensors.iter().map(|tensor| tensor.byte_size).sum(),
-        artifact_bytes: metadata.len(),
-        sha256: file_sha256(&output_path)?,
-    };
-    run_artifact_hook(artifact_hook, &output_path, &package_projector.path)?;
-    Ok(package_projector)
-}
-
 pub(crate) fn run_artifact_hook(
     artifact_hook: &ArtifactHook,
     absolute_path: &Path,
@@ -626,68 +328,4 @@ pub(crate) fn run_artifact_hook(
         );
     }
     Ok(())
-}
-
-pub(crate) fn package_generation(tensors: &[TensorInfo]) -> Option<PackageGeneration> {
-    let mtp_layers = native_mtp_layer_indices(tensors);
-    if mtp_layers.is_empty() {
-        return None;
-    }
-
-    let strategy_id = "mtp".to_string();
-    let mut strategies = BTreeMap::new();
-    let mut proposers = BTreeMap::new();
-    proposers.insert(
-        strategy_id.clone(),
-        PackageSpeculativeProposer {
-            proposer_type: "native-mtp".to_string(),
-            prediction_depth: Some(1),
-            layer_indices: mtp_layers.clone(),
-            ngram_min: None,
-            ngram_max: None,
-            max_proposal_tokens: None,
-            history_scope: None,
-        },
-    );
-    strategies.insert(
-        strategy_id.clone(),
-        PackageSpeculativeStrategy {
-            strategy_type: "native-mtp".to_string(),
-            prediction_depth: Some(1),
-            layer_indices: mtp_layers,
-            window_policy: Some(PackageWindowPolicy {
-                default: "fixed".to_string(),
-                initial_window: 1,
-                min_window: 1,
-                max_window: 1,
-                pipeline_depth: None,
-            }),
-            proposer: Some(strategy_id.clone()),
-            primary: None,
-            extender: None,
-            extension_policy: None,
-        },
-    );
-
-    Some(PackageGeneration {
-        speculative_decoding: Some(PackageSpeculativeDecoding {
-            default: strategy_id,
-            proposers,
-            strategies,
-        }),
-    })
-}
-
-pub(crate) fn native_mtp_layer_indices(tensors: &[TensorInfo]) -> Vec<u32> {
-    tensors
-        .iter()
-        .filter(|tensor| is_native_mtp_tensor_name(&tensor.name))
-        .filter_map(|tensor| tensor.layer_index)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn is_native_mtp_tensor_name(name: &str) -> bool {
-    name.contains(".nextn.")
 }

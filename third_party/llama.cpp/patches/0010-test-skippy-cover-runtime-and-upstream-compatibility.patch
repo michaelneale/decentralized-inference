@@ -1,0 +1,1579 @@
+From a0ac2dda6cca8b1583a50082257edaf2f430c23e Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:40 +1000
+Subject: [PATCH] test(skippy): cover runtime and upstream compatibility
+
+---
+ tests/CMakeLists.txt                          |  22 ++
+ tests/test-chat-auto-parser.cpp               |  47 +++
+ tests/test-chat.cpp                           | 285 ++++++++++++++++-
+ tests/test-llama-archs.cpp                    | 122 ++++++-
+ tests/test-skippy-activation-layout.cpp       |  64 ++++
+ tests/test-skippy-kv-cells-contiguous.cpp     |  20 ++
+ tests/test-skippy-kv-page-export.cpp          | 261 +++++++++++++++
+ tests/test-skippy-model-loader-accounting.cpp | 301 ++++++++++++++++++
+ .../test-skippy-recurrent-state-roundtrip.cpp | 159 +++++++++
+ ...st-skippy-verify-checkpoint-retirement.cpp |  26 ++
+ 10 files changed, 1293 insertions(+), 14 deletions(-)
+ create mode 100644 tests/test-skippy-activation-layout.cpp
+ create mode 100644 tests/test-skippy-kv-cells-contiguous.cpp
+ create mode 100644 tests/test-skippy-kv-page-export.cpp
+ create mode 100644 tests/test-skippy-model-loader-accounting.cpp
+ create mode 100644 tests/test-skippy-recurrent-state-roundtrip.cpp
+ create mode 100644 tests/test-skippy-verify-checkpoint-retirement.cpp
+
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index fe3d14ffc..ed156f339 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -152,6 +152,12 @@ llama_build(test-recurrent-state-rollback.cpp)
+ llama_build(test-save-load-state.cpp)
+ 
+ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
++    llama_build_and_test(test-skippy-kv-page-export.cpp)
++    llama_build_and_test(test-skippy-verify-checkpoint-retirement.cpp)
++    llama_build_and_test(test-skippy-kv-cells-contiguous.cpp)
++    llama_build_and_test(test-skippy-recurrent-state-roundtrip.cpp)
++    llama_build_and_test(test-skippy-activation-layout.cpp)
++    target_include_directories(test-skippy-activation-layout PRIVATE ${PROJECT_SOURCE_DIR}/src)
+     # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)
+     llama_build_and_test(test-unicode.cpp)
+     llama_build_and_test(test-sampling.cpp)
+@@ -211,6 +217,22 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+         FIXTURES_SETUP generate-models
+     )
+ 
++    llama_build_and_test(
++        test-skippy-model-loader-accounting.cpp
++        LABEL main
++        ARGS "${MODEL_DIR}/gemma-dense.gguf"
++    )
++    target_include_directories(test-skippy-model-loader-accounting PRIVATE ${PROJECT_SOURCE_DIR}/src)
++    set_tests_properties(test-skippy-model-loader-accounting PROPERTIES FIXTURES_REQUIRED generate-models)
++
++    llama_test(
++        test-skippy-model-loader-accounting
++        NAME test-skippy-model-loader-accounting-moe
++        LABEL main
++        ARGS "${MODEL_DIR}/qwen2moe-moe.gguf"
++    )
++    set_tests_properties(test-skippy-model-loader-accounting-moe PROPERTIES FIXTURES_REQUIRED generate-models)
++
+     llama_test(
+         test-recurrent-state-rollback
+         LABEL main
+diff --git a/tests/test-chat-auto-parser.cpp b/tests/test-chat-auto-parser.cpp
+index 5aa948251..78df176dd 100644
+--- a/tests/test-chat-auto-parser.cpp
++++ b/tests/test-chat-auto-parser.cpp
+@@ -74,9 +74,11 @@ static void test_laguna_s_preserve_reasoning(testing & t);
+ static void test_laguna_xs2_analysis(testing & t);
+ static void test_laguna_xs2_reasoning_detection(testing & t);
+ static void test_laguna_xs2_tool_format(testing & t);
++static void test_nemotron_lazy_tool_trigger(testing & t);
+ 
+ // CohereForAI template analysis tests
+ static void test_cohere_reasoning_detection(testing & t);
++static void test_thinking_alias_reasoning_detection(testing & t);
+ static void test_cohere_analysis(testing & t);
+ 
+ // SmolLM3 template analysis tests
+@@ -1764,6 +1766,7 @@ static common_chat_template load_nemotron_template(testing & t) {
+ static void test_nemotron_analysis(testing & t) {
+     t.test("Nemotron reasoning detection", test_nemotron_reasoning_detection);
+     t.test("Nemotron tool format", test_nemotron_tool_format);
++    t.test("Nemotron lazy tool trigger", test_nemotron_lazy_tool_trigger);
+ }
+ 
+ static void test_nemotron_reasoning_detection(testing & t) {
+@@ -1929,12 +1932,56 @@ static void test_laguna_xs2_analysis(testing & t) {
+     t.test("Laguna-XS.2(v5) tool format", test_laguna_xs2_tool_format);
+ }
+ 
++static void test_nemotron_lazy_tool_trigger(testing & t) {
++    common_chat_template tmpl = load_nemotron_template(t);
++
++    generation_params params;
++    params.messages              = json::array({ json{{"role", "user"}, {"content", "Call the test function."}} });
++    params.tools                 = build_tools_definition();
++    params.tool_choice           = COMMON_CHAT_TOOL_CHOICE_AUTO;
++    params.add_generation_prompt = true;
++    params.enable_thinking       = true;
++    params.extra_context         = json::object();
++
++    auto generated = peg_generator::generate_parser(tmpl, params);
++
++    t.assert_true("auto tools should use lazy grammar", generated.grammar_lazy);
++    t.assert_equal("should emit one lazy grammar trigger", size_t(1), generated.grammar_triggers.size());
++    if (!generated.grammar_triggers.empty()) {
++        t.assert_equal("lazy trigger should be a word trigger", static_cast<int>(COMMON_GRAMMAR_TRIGGER_TYPE_WORD),
++                       static_cast<int>(generated.grammar_triggers[0].type));
++        t.assert_equal("lazy trigger should trim trailing whitespace", "<tool_call>", generated.grammar_triggers[0].value);
++    }
++    t.assert_true("grammar should still preserve the full tool marker",
++                  generated.grammar.find("tool-call ::= \"<tool_call>\\n\"") != std::string::npos);
++}
++
+ static common_chat_template load_cohere_template(testing & t) {
+     return load_template(t, "models/templates/CohereForAI-c4ai-command-r7b-12-2024-tool_use.jinja");
+ }
+ 
+ static void test_cohere_analysis(testing & t) {
+     t.test("Cohere reasoning detection", test_cohere_reasoning_detection);
++    t.test("thinking field reasoning detection", test_thinking_alias_reasoning_detection);
++}
++
++static void test_thinking_alias_reasoning_detection(testing & t) {
++    const std::string template_source = R"(
++{%- for message in messages %}
++{%- if message.role == 'user' %}<|USER|>{{ message.content }}
++{%- elif message.role == 'assistant' %}<|ASSISTANT|>{% if message.thinking %}<|START_THINKING|>{{ message.thinking }}<|END_THINKING|>{% endif %}<|START_RESPONSE|>{{ message.content }}<|END_RESPONSE|>
++{%- endif %}
++{%- endfor %}
++{%- if add_generation_prompt %}<|ASSISTANT|>{% endif %})";
++    common_chat_template tmpl(template_source, "", "");
++
++    struct autoparser analysis;
++    analysis.analyze_template(tmpl);
++
++    t.assert_equal("thinking alias should use tag-based reasoning", reasoning_mode::TAG_BASED,
++                   analysis.reasoning.mode);
++    t.assert_equal("thinking alias start marker", "<|START_THINKING|>", analysis.reasoning.start);
++    t.assert_equal("thinking alias end marker", "<|END_THINKING|>", analysis.reasoning.end);
+ }
+ 
+ static void test_cohere_reasoning_detection(testing & t) {
+diff --git a/tests/test-chat.cpp b/tests/test-chat.cpp
+index 7918f0ffc..635e0d662 100644
+--- a/tests/test-chat.cpp
++++ b/tests/test-chat.cpp
+@@ -436,6 +436,21 @@ static common_chat_tool special_function_tool{
+         "required": ["arg1"]
+     })",
+ };
++static common_chat_tool lookup_fixture_fact_tool{
++    /* .name = */ "lookup_fixture_fact",
++    /* .description = */ "Return one deterministic fact from the agent reliability fixture.",
++    /* .parameters = */ R"({
++        "type": "object",
++        "properties": {
++            "key": {
++                "type": "string",
++                "enum": ["codeword"]
++            }
++        },
++        "required": ["key"],
++        "additionalProperties": false
++    })",
++};
+ static common_chat_tool special_function_tool_with_optional_param{
+     /* .name = */ "special_function_with_opt",
+     /* .description = */ "I'm special but have optional stuff",
+@@ -1453,6 +1468,8 @@ class peg_tester {
+ 
+     const std::string & template_path() const { return template_path_; }
+ 
++    common_chat_templates * templates() const { return tmpls_.get(); }
++
+     peg_test_builder test(const std::string & input);
+ };
+ 
+@@ -1622,20 +1639,34 @@ static void test_msgs_oaicompat_json_conversion() {
+                               "]"),
+                   common_chat_msgs_to_json_oaicompat({ message_assist_call_python }).dump(2));
+ 
+-    auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\", \"tool_calls\": []}]"));
++    auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
+     assert_equals<size_t>(1, res.size());
+     assert_equals<std::string>(res[0].role, "assistant");
+     assert_equals(true, res[0].content.empty());
+     assert_equals(true, res[0].tool_calls.empty());
++    assert_equals(false, res[0].content_present);
++    assert_equals(
++        std::string("[{\"role\":\"assistant\"}]"),
++        common_chat_msgs_to_json_oaicompat(res).dump());
++
++    auto null_content =
++        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[]}]"));
++    assert_equals<size_t>(1, null_content.size());
++    assert_equals(true, null_content[0].content_present);
++    assert_equals(true, null_content[0].content_is_null);
++    assert_equals(
++        std::string("[{\"role\":\"assistant\",\"content\":null}]"),
++        common_chat_msgs_to_json_oaicompat(null_content).dump());
++
++    auto empty_content =
++        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[]}]"));
++    assert_equals<size_t>(1, empty_content.size());
++    assert_equals(true, empty_content[0].content_present);
++    assert_equals(false, empty_content[0].content_is_null);
++    assert_equals(
++        std::string("[{\"role\":\"assistant\",\"content\":\"\"}]"),
++        common_chat_msgs_to_json_oaicompat(empty_content).dump());
+ 
+-    try {
+-        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
+-        throw std::runtime_error("Expected exception");
+-    } catch (const std::exception & e) {
+-        if (std::string(e.what()).find("'content'") == std::string::npos) {
+-            throw std::runtime_error("Expected exception about missing 'content'");
+-        }
+-    }
+ }
+ 
+ static void test_msg_token_delimiters_split() {
+@@ -2935,6 +2966,97 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+             .run();
+     }
+ 
++    {
++        // Inkling / TML typed content blocks: <|end_message|> separates blocks, <|content_model_end_sampling|> ends the turn.
++        auto tst = peg_tester("models/templates/Inkling.jinja", detailed_debug);
++
++        // reasoning + visible answer
++        tst.test("<|content_thinking|>I'm\nthinking<|end_message|>"
++                 "<|message_model|><|content_text|>Hello, world!\nWhat's up?<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .expect(message_assist_thoughts)
++            .run();
++
++        // Visible answer only (reasoning_effort=0 -> no thinking block).
++        tst.test("<|content_text|>Hello, world!\nWhat's up?<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .expect(message_assist)
++            .run();
++
++        // Empty thinking block, then the answer.
++        tst.test("<|content_thinking|><|end_message|>"
++                 "<|message_model|><|content_text|>Hello, world!\nWhat's up?<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .expect(message_assist)
++            .run();
++
++        // single tool call with reasoning; the bare tool-name echo and role opener are dropped
++        tst.test("<|content_thinking|>I'm\nthinking<|end_message|>"
++                 "<|message_model|>special_function<|content_invoke_tool_json|>"
++                 "{\"name\":\"special_function\",\"args\":{\"arg1\":1}}<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .tools({ special_function_tool })
++            .expect(message_with_reasoning_and_tool_call("I'm\nthinking", "special_function", "{\"arg1\": 1}"))
++            .run();
++
++        // Tool call, no reasoning.
++        tst.test("<|message_model|>special_function<|content_invoke_tool_json|>"
++                 "{\"name\":\"special_function\",\"args\":{\"arg1\":1}}<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .tools({ special_function_tool })
++            .expect(message_assist_call)
++            .run();
++
++        // Inkling also emits the OpenAI key spelling despite the canonical
++        // history template using "args".
++        tst.test("lookup_fixture_fact<|content_invoke_tool_json|>"
++                 "{\"name\":\"lookup_fixture_fact\",\"arguments\":{\"key\":\"codeword\"}}<|end_message|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .tools({ lookup_fixture_fact_tool })
++            .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
++            .enable_thinking(false)
++            .parallel_tool_calls(false)
++            .expect(simple_assist_msg("", "", "lookup_fixture_fact", "{\"key\":\"codeword\"}"))
++            .run();
++
++        // regression: the tool branch must not swallow a pure-text answer
++        tst.test("<|content_thinking|>I'm\nthinking<|end_message|>"
++                 "<|message_model|><|content_text|>Hello, world!\nWhat's up?<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .tools({ special_function_tool })
++            .expect(message_assist_thoughts)
++            .run();
++
++        // tools available, content only, no thinking (reasoning_effort=0 leak scenario)
++        tst.test("<|content_text|>Hello, world!\nWhat's up?<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .tools({ special_function_tool })
++            .expect(message_assist)
++            .run();
++
++        // parallel tool calls are separate marker-wrapped blocks
++        tst.test("<|message_model|>special_function<|content_invoke_tool_json|>"
++                 "{\"name\":\"special_function\",\"args\":{\"arg1\":1}}<|end_message|>"
++                 "<|message_model|>python<|content_invoke_tool_json|>"
++                 "{\"name\":\"python\",\"args\":{\"code\":\"print('hey')\"}}<|end_message|>"
++                 "<|content_model_end_sampling|>")
++            .reasoning_format(COMMON_REASONING_FORMAT_DEEPSEEK)
++            .parallel_tool_calls(true)
++            .tools({ special_function_tool, python_tool })
++            .expect_tool_calls({
++                { "special_function", R"({"arg1": 1})", "" },
++                { "python", "{\"code\": \"print('hey')\"}", "" },
++            })
++            .run();
++    }
++
+     {
+         // Google Gemma 2 2B - does not support tool calling
+         auto tst = peg_tester("models/templates/google-gemma-2-2b-it.jinja");
+@@ -4305,6 +4427,15 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+     {
+         auto tst = peg_tester("models/templates/GLM-4.7-Flash.jinja", detailed_debug);
+ 
++        static const common_chat_tool terminal_tool{
++            "terminal", "Run or interact with a terminal command",
++            R"({"type":"object","properties":{"security_risk":{"type":"string"},"summary":{"type":"string"},"command":{"type":"string"},"is_input":{"type":"boolean"},"timeout":{"type":"integer"},"reset":{"type":"boolean"}},"required":["command","security_risk"]})",
++        };
++        static const common_chat_tool think_tool{
++            "think", "Record reasoning",
++            R"({"type":"object","properties":{"summary":{"type":"string"},"thought":{"type":"string"}},"required":["thought"]})",
++        };
++
+         // Pure content (no reasoning)
+         tst.test("Hello, world!\nWhat's up?")
+             .enable_thinking(false)
+@@ -4331,6 +4462,70 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+             .expect_reconstruction()
+             .run();
+ 
++        // OpenAI tool arguments are object members: required and optional
++        // fields may be interleaved in any order. These are exact ordering
++        // shapes observed in a multi-tool agent regression case.
++        tst.test(
++               "<tool_call>terminal"
++               "<arg_key>command</arg_key><arg_value>C-c</arg_value>"
++               "<arg_key>is_input</arg_key><arg_value>true</arg_value>"
++               "<arg_key>security_risk</arg_key><arg_value>LOW</arg_value>"
++               "</tool_call>")
++            .enable_thinking(false)
++            .tools({ terminal_tool, think_tool })
++            .expect_tool_calls({
++                { "terminal", R"({"command":"C-c","is_input":true,"security_risk":"LOW"})", {} },
++            })
++            .run();
++
++        tst.test(
++               "<tool_call>think"
++               "<arg_key>summary</arg_key><arg_value>Inspect the failure</arg_value>"
++               "<arg_key>thought</arg_key><arg_value>Check the process state.</arg_value>"
++               "</tool_call>")
++            .enable_thinking(false)
++            .tools({ terminal_tool, think_tool })
++            .expect_tool_calls({
++                { "think", R"({"summary":"Inspect the failure","thought":"Check the process state."})", {} },
++            })
++            .run();
++
++        // Flexible ordering must not weaken the schema's presence and
++        // uniqueness rules. permute() requires every required argument exactly
++        // once, so the grammar itself rejects a call that omits or duplicates a
++        // required argument -- no bespoke mapper-side "missing/duplicate
++        // argument" error, matching the generic JSON tool path.
++        common_chat_templates_inputs validation_inputs;
++        validation_inputs.messages = { message_user };
++        validation_inputs.tools = { terminal_tool, think_tool };
++        validation_inputs.enable_thinking = false;
++        auto validation_parser = make_peg_parser(tst.templates(), validation_inputs, detailed_debug);
++
++        // Omitting a required argument does not match the tool grammar.
++        try {
++            validation_parser.parse(
++                "<tool_call>terminal"
++                "<arg_key>command</arg_key><arg_value>pwd</arg_value>"
++                "</tool_call>", false);
++            throw std::runtime_error("Expected missing required tagged argument to be rejected by the grammar");
++        } catch (const std::exception & e) {
++            assert_contains(e.what(), "does not match the expected");
++        }
++
++        // Duplicating a required argument does not match either: permute()
++        // consumes each required argument exactly once and the surplus copy has
++        // no slot in the grammar.
++        try {
++            validation_parser.parse(
++                "<tool_call>think"
++                "<arg_key>thought</arg_key><arg_value>one</arg_value>"
++                "<arg_key>thought</arg_key><arg_value>two</arg_value>"
++                "</tool_call>", false);
++            throw std::runtime_error("Expected duplicate required tagged argument to be rejected by the grammar");
++        } catch (const std::exception & e) {
++            assert_contains(e.what(), "does not match the expected");
++        }
++
+         // Tool call with reasoning (forced-open mode)
+         tst.test(
+                "I'm\nthinking</think>"
+@@ -4442,7 +4637,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
+                 "Thinking.\n"
+                 "</think>"
+                 "<tool_call>get_weather"
+-                "<arg_key>city</arg_key><arg_value>Tokyo</arg_value>"
++                "<arg_key>country</arg_key><arg_value>Japan</arg_value>"
+                 "</tool_call>\n";
+ 
+             bool got_runtime_error = false;
+@@ -6815,6 +7010,65 @@ static void test_template_generation_prompt() {
+         check(tmpls, continuation_content(),   "<|im_start|>assistant\n<think>\nI'm thinking\n</think>\n\nHello, ");
+         check(tmpls, continuation_reasoning(), "<|im_start|>assistant\n<think>\nI'm");
+     }
++
++    {
++        // The Inkling template consumes the generic reasoning_effort kwarg;
++        // verify the llama.cpp renderer distinguishes disabled, high, and max.
++        auto tmpls = read_templates("models/templates/Inkling.jinja");
++        auto render_effort = [&](const char * effort) {
++            common_chat_templates_inputs inputs;
++            inputs.messages              = { message_user };
++            inputs.add_generation_prompt = true;
++            inputs.chat_template_kwargs["reasoning_effort"] = json(effort).dump();
++            return common_chat_templates_apply(tmpls.get(), inputs).prompt;
++        };
++        const auto off  = render_effort("none");
++        const auto high = render_effort("high");
++        const auto max  = render_effort("max");
++        assert_contains(off, "Thinking effort level: 0");
++        assert_contains(high, "Thinking effort level: 0.9");
++        assert_contains(max, "Thinking effort level: 0.99");
++        if (off == high || high == max || off == max) {
++            throw std::runtime_error("reasoning effort modes must render distinct prompts");
++        }
++    }
++
++    {
++        // The stage alias hardening must win when thinking is explicitly disabled.
++        auto render_disabled = [](const char * template_path) {
++            auto tmpls = read_templates(template_path);
++            common_chat_templates_inputs inputs;
++            inputs.messages              = { message_user };
++            inputs.add_generation_prompt = true;
++            inputs.enable_thinking       = false;
++            inputs.chat_template_kwargs["enable_thinking"] = "false";
++            inputs.chat_template_kwargs["enableThinking"] = "false";
++            inputs.chat_template_kwargs["enable_reasoning"] = "false";
++            inputs.chat_template_kwargs["use_reasoning"] = "false";
++            inputs.chat_template_kwargs["reasoning_enabled"] = "false";
++            inputs.chat_template_kwargs["use_thinking"] = "false";
++            inputs.chat_template_kwargs["thinking_enabled"] = "false";
++            inputs.chat_template_kwargs["enable_think"] = "false";
++            inputs.chat_template_kwargs["think_enabled"] = "false";
++            inputs.chat_template_kwargs["reasoning_effort"] = "0";
++
++            json request_kwargs = {{"reasoning_effort", "none"}};
++            for (const auto & [key, value] : request_kwargs.items()) {
++                inputs.chat_template_kwargs[key] = value.dump();
++            }
++            if (!inputs.enable_thinking) {
++                inputs.chat_template_kwargs["reasoning_effort"] = "0";
++            }
++            return common_chat_templates_apply(tmpls.get(), inputs).prompt;
++        };
++
++        const auto qwen = render_disabled("models/templates/Qwen-Qwen3-0.6B.jinja");
++        assert_contains(qwen, "<think>\n\n</think>\n\n");
++        const auto gpt_oss = render_disabled("models/templates/openai-gpt-oss-120b.jinja");
++        assert_contains(gpt_oss, "Reasoning: 0");
++        const auto inkling = render_disabled("models/templates/Inkling.jinja");
++        assert_contains(inkling, "Thinking effort level: 0");
++    }
+ }
+ 
+ // Test the developer role to system workaround with a simple mock template
+@@ -7157,6 +7411,7 @@ static void test_msg_diffs_compute() {
+ int main(int argc, char ** argv) {
+     bool detailed_debug    = false;
+     bool only_run_filtered = false;
++    bool only_run_generation_prompt = false;
+ 
+     // Check for --template and --detailed flags
+     for (int i = 1; i < argc; i++) {
+@@ -7174,9 +7429,19 @@ int main(int argc, char ** argv) {
+             g_force_reconstruction_test = true;
+             only_run_filtered          = true;
+         }
++        if (arg == "--generation-prompt") {
++            only_run_generation_prompt = true;
++            only_run_filtered          = true;
++        }
+     }
+ 
+     if (only_run_filtered) {
++        if (only_run_generation_prompt) {
++            test_template_generation_prompt();
++            std::cout << "\n[chat] All generation prompt tests passed!" << '\n';
++            return 0;
++        }
++
+         test_template_output_peg_parsers(detailed_debug);
+         std::cout << "\n[chat] All template tests passed!" << '\n';
+         return 0;
+diff --git a/tests/test-llama-archs.cpp b/tests/test-llama-archs.cpp
+index 35a3286e4..b8a8400da 100644
+--- a/tests/test-llama-archs.cpp
++++ b/tests/test-llama-archs.cpp
+@@ -14,6 +14,7 @@
+ #include <cinttypes>
+ #include <cstddef>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <cstdint>
+ #include <random>
+@@ -79,10 +80,24 @@ static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32
+     return ret;
+ }
+ 
+-static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
++enum class glm_dsa_indexshare_fixture {
++    DEFAULT,
++    CONFLICTING_METADATA,
++    SHARED_FIRST,
++    FULL_SHARED,
++    FULL_SHARED_SHARED,
++    PERIODIC_FULL_SHARED,
++};
++
++static gguf_context_ptr get_gguf_ctx(
++        const llm_arch arch,
++        const bool moe,
++        const glm_dsa_indexshare_fixture glm_dsa_indexshare = glm_dsa_indexshare_fixture::DEFAULT,
++        const uint32_t context_length = 256,
++        const uint32_t glm_dsa_indexer_top_k = 8) {
+     gguf_context_ptr ret(gguf_init_empty());
+     llama_model_saver ms(arch, ret.get());
+-    const uint32_t n_ctx = 256;
++    const uint32_t n_ctx = context_length;
+ 
+     uint32_t n_vocab = 128;
+     uint32_t n_embd  = 256;
+@@ -262,9 +277,19 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+     ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
+               arch == LLM_ARCH_QWEN4EXP ? n_embd_head : uint32_t(128));
+ 
+-    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        uint32_t(8));
++    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        arch == LLM_ARCH_GLM_DSA ? glm_dsa_indexer_top_k : uint32_t(8));
+     ms.add_kv(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE,   uint32_t(4));
+     ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS, uint32_t(1));
++    if (arch == LLM_ARCH_GLM_DSA) {
++        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY, uint32_t(1));
++        ms.add_kv(LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET, uint32_t(0));
++        std::vector<uint32_t> indexer_types;
++        indexer_types.reserve(n_layer);
++        for (uint32_t il = 0; il < n_layer; il++) {
++            indexer_types.push_back(il % 2 ? 0 : 1);
++        }
++        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
++    }
+     ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
+ 
+     if (arch == LLM_ARCH_DEEPSEEK4) {
+@@ -345,9 +370,57 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
+     return true;
+ }
+ 
++static void set_test_env(const char * name, const char * value) {
++#if defined(_WIN32)
++    _putenv_s(name, value);
++#else
++    setenv(name, value, true);
++#endif
++}
++
++static void unset_test_env(const char * name) {
++#if defined(_WIN32)
++    _putenv_s(name, "");
++#else
++    unsetenv(name);
++#endif
++}
++
++static bool test_env_enabled(const char * name) {
++    const char * value = getenv(name);
++    return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
++}
++
++class scoped_test_env {
++public:
++    scoped_test_env(const char * name, const char * value) : name(name) {
++        const char * old_value = getenv(name);
++        if (old_value != nullptr) {
++            had_old_value = true;
++            this->old_value = old_value;
++        }
++        set_test_env(name, value);
++    }
++
++    ~scoped_test_env() {
++        if (had_old_value) {
++            set_test_env(name, old_value.c_str());
++        } else {
++            unset_test_env(name);
++        }
++    }
++
++private:
++    const char * name;
++    bool had_old_value = false;
++    std::string old_value;
++};
++
+ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+         struct gguf_context * gguf_ctx, FILE * file, const size_t seed, const std::vector<ggml_backend_dev_t> & devs,
+-        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false) {
++        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false,
++        ggml_backend_sched_eval_callback cb_eval = nullptr, void * cb_eval_user_data = nullptr,
++        const llama_flash_attn_type flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO) {
+     GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
+     llama_model_params model_params = llama_model_default_params();
+     model_params.progress_callback = silent_model_load_progress;
+@@ -363,6 +436,9 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+     if (!encode) {
+         ctx_params.n_ubatch = 64;
+     }
++    ctx_params.flash_attn_type = flash_attn_type;
++    ctx_params.cb_eval = cb_eval;
++    ctx_params.cb_eval_user_data = cb_eval_user_data;
+ 
+     size_t tmp = seed;
+     llama_model_ptr model(gguf_ctx != nullptr ?
+@@ -378,6 +454,20 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
+     return std::make_pair(std::move(model), std::move(lctx));
+ }
+ 
++static void decode_tokens(llama_context * lctx, const std::vector<llama_token> & tokens, llama_pos start_pos, bool output_all = true) {
++    llama_batch batch = llama_batch_init(tokens.size(), 0, 1);
++    for (size_t i = 0; i < tokens.size(); ++i) {
++        const bool output = output_all || i + 1 == tokens.size();
++        common_batch_add(batch, tokens[i], start_pos + (llama_pos) i, {0}, output);
++    }
++    batch.n_tokens = tokens.size();
++    if (llama_decode(lctx, batch)) {
++        llama_batch_free(batch);
++        throw std::runtime_error("failed to decode batch");
++    }
++    llama_batch_free(batch);
++}
++
+ static std::vector<float> get_logits(
+         llama_model * model, llama_context * lctx, const std::vector<llama_token> & tokens, bool encode = false) {
+     const uint32_t n_vocab  = llama_vocab_n_tokens(llama_model_get_vocab(model));
+@@ -517,6 +607,10 @@ static bool arch_supported(const llm_arch arch) {
+     if (arch == LLM_ARCH_DEEPSEEK2OCR) {
+         return false;
+     }
++    if (arch == LLM_ARCH_INKLING) {
++        return false; // TODO fixture params for the arch-specific hparams (d_rel, rel_extent, shortconv, logit_scale_denom)
++    }
++
+     // FIXME: these hit scheduler/view-backed-output issues with WebGPU on CI.
+ #ifdef GGML_USE_WEBGPU
+     if (arch == LLM_ARCH_DEEPSEEK32 || arch == LLM_ARCH_GLM_DSA || arch == LLM_ARCH_DOTS3NOTE || arch == LLM_ARCH_QWEN4EXP) {
+@@ -535,6 +629,20 @@ static bool arch_supported(const llm_arch arch) {
+     return true;
+ }
+ 
++static bool glm_dsa_backend_config_supported(const std::vector<ggml_backend_dev_t> & devs) {
++    for (ggml_backend_dev_t dev : devs) {
++        switch (ggml_backend_dev_type(dev)) {
++            case GGML_BACKEND_DEVICE_TYPE_CPU:
++            case GGML_BACKEND_DEVICE_TYPE_GPU:
++            case GGML_BACKEND_DEVICE_TYPE_IGPU:
++                break;
++            default:
++                return false;
++        }
++    }
++    return true;
++}
++
+ static int save_models(const llm_arch target_arch, const size_t seed, const ggml_log_level log_level, const std::string & dir) {
+     struct user_data_t {
+         struct {
+@@ -700,6 +808,12 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
+                 std::string status_roundtrip = "\033[1;33mSKIP\033[0m";
+                 char nmse_str[12] = {0};
+                 bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
++                if (arch == LLM_ARCH_GLM_DSA && !glm_dsa_backend_config_supported(dc.devs)) {
++                    skip = true;
++                }
++#if defined(GGML_USE_WEBGPU)
++                skip = true; // FIXME
++#endif // GGML_USE_WEBGPU
+                 if (!skip) {
+                     if (logits_cpu.empty()) {
+                         model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode);
+diff --git a/tests/test-skippy-activation-layout.cpp b/tests/test-skippy-activation-layout.cpp
+new file mode 100644
+index 000000000..42a518677
+--- /dev/null
++++ b/tests/test-skippy-activation-layout.cpp
+@@ -0,0 +1,64 @@
++#include "../src/llama-model.h"
++#include "../src/skippy/activation_internal.h"
++#include "../src/skippy/runtime_types.h"
++
++#include <cstdio>
++#include <memory>
++
++static bool expect_hidden_bytes(
++        llm_arch arch,
++        uint32_t n_embd,
++        uint32_t n_embd_out,
++        uint32_t hyperconnection_count,
++        size_t expected) {
++    std::unique_ptr<llama_model> model(llama_model_create(arch, llama_model_default_params()));
++    if (!model) {
++        return false;
++    }
++    model->hparams.n_embd = n_embd;
++    model->hparams.n_embd_out_impl = n_embd_out;
++    model->hparams.dsv4_hc_mult = hyperconnection_count;
++
++    skippy_model stage_model = {};
++    stage_model.model = model.get();
++    skippy_session session = {};
++    session.stage_model = &stage_model;
++    return skippy_activation_hidden_bytes(&session, 3) == expected;
++}
++
++int main() {
++    constexpr size_t tokens = 3;
++    constexpr size_t f32_bytes = sizeof(float);
++
++    if (!expect_hidden_bytes(
++                LLM_ARCH_QWEN4EXP,
++                2560,
++                10240,
++                4,
++                tokens * 10240 * f32_bytes)) {
++        std::fprintf(stderr, "Qwen4Exp activation frame did not use the wide hyper-connected residual\n");
++        return 1;
++    }
++
++    if (!expect_hidden_bytes(
++                LLM_ARCH_DEEPSEEK4,
++                2560,
++                10240,
++                4,
++                tokens * 10240 * f32_bytes)) {
++        std::fprintf(stderr, "DeepSeek4 activation frame did not use the wide hyper-connected residual\n");
++        return 2;
++    }
++
++    if (!expect_hidden_bytes(
++                LLM_ARCH_LLAMA,
++                2560,
++                10240,
++                0,
++                tokens * 2560 * f32_bytes)) {
++        std::fprintf(stderr, "ordinary activation frame unexpectedly used model output width\n");
++        return 3;
++    }
++
++    return 0;
++}
+diff --git a/tests/test-skippy-kv-cells-contiguous.cpp b/tests/test-skippy-kv-cells-contiguous.cpp
+new file mode 100644
+index 000000000..0e95c35b2
+--- /dev/null
++++ b/tests/test-skippy-kv-cells-contiguous.cpp
+@@ -0,0 +1,20 @@
++#include "../src/llama-kv-cells.h"
++
++int main() {
++    llama_kv_cells cells;
++    cells.resize(8);
++    for (uint32_t i = 0; i < 4; ++i) {
++        cells.pos_set(i, static_cast<llama_pos>(i));
++        cells.seq_add(i, 0);
++    }
++    if (!cells.seq_pos_is_cell_contiguous(0)) return 1;
++
++    cells.mv(1, 4);
++    if (cells.seq_pos_is_cell_contiguous(0)) return 2;
++    cells.mv(4, 1);
++    if (!cells.seq_pos_is_cell_contiguous(0)) return 3;
++
++    if (!cells.seq_rm(2, 0)) return 4;
++    if (cells.seq_pos_is_cell_contiguous(0)) return 5;
++    return 0;
++}
+diff --git a/tests/test-skippy-kv-page-export.cpp b/tests/test-skippy-kv-page-export.cpp
+new file mode 100644
+index 000000000..96937c8dc
+--- /dev/null
++++ b/tests/test-skippy-kv-page-export.cpp
+@@ -0,0 +1,261 @@
++#include "skippy.h"
++
++#include "../src/llama-batch.h"
++#include "../src/llama-kv-cache.h"
++#include "../src/llama-model.h"
++
++#include <cstdio>
++#include <memory>
++#include <string>
++#include <vector>
++
++int main() {
++    std::unique_ptr<llama_model> model(llama_model_create(LLM_ARCH_LLAMA, llama_model_default_params()));
++    if (!model) {
++        fprintf(stderr, "failed to create test model\n");
++        return 1;
++    }
++    llama_hparams hparams = {};
++    hparams.n_layer_all = 2;
++    hparams.n_layer_nextn = 1;
++    hparams.n_embd_head_k_full = 4;
++    hparams.n_embd_head_v_full = 4;
++    hparams.n_embd_head_k_swa = 4;
++    hparams.n_embd_head_v_swa = 4;
++    hparams.n_embd_head_k_mla_impl = 4;
++    hparams.n_embd_head_v_mla_impl = 4;
++    hparams.n_head_arr[0] = 1;
++    hparams.n_head_kv_arr[0] = 1;
++
++    llama_kv_cache kv(
++            *model,
++            hparams,
++            GGML_TYPE_F32,
++            GGML_TYPE_F32,
++            true,
++            false,
++            true,
++            1,
++            1,
++            1,
++            0,
++            LLAMA_SWA_TYPE_NONE,
++            nullptr,
++            [](int32_t il) { return il == 0; },
++            {},
++            {});
++
++    llama_pos pos = 0;
++    llama_seq_id seq_id = 0;
++    llama_seq_id * seq_ids = &seq_id;
++    int32_t n_seq_id = 1;
++    llama_ubatch ubatch = {};
++    ubatch.n_tokens = 1;
++    ubatch.n_pos = 1;
++    ubatch.pos = &pos;
++    ubatch.n_seq_id = &n_seq_id;
++    ubatch.seq_id = &seq_ids;
++
++    llama_kv_cache::slot_info slot = {};
++    slot.s0 = 0;
++    slot.s1 = 0;
++    slot.strm = { 0 };
++    slot.idxs = {{ 0 }};
++    kv.apply_ubatch(slot, ubatch);
++
++    skippy_kv_page_desc desc = {};
++    size_t payload_bytes = 0;
++    std::string error;
++    if (!kv.stage_export_kv_page(
++                0,
++                0,
++                1,
++                0,
++                1,
++                &desc,
++                nullptr,
++                0,
++                &payload_bytes,
++                error)) {
++        fprintf(stderr, "K-only KV page sizing failed: %s\n", error.c_str());
++        return 1;
++    }
++    if ((desc.flags & SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED) == 0 ||
++            desc.v_row_bytes != 0 ||
++            desc.v_element_bytes != 0 ||
++            payload_bytes == 0) {
++        fprintf(stderr, "unexpected K-only transposed KV page descriptor\n");
++        return 1;
++    }
++
++    std::vector<uint8_t> payload(payload_bytes);
++    if (!kv.stage_export_kv_page(
++                0,
++                0,
++                1,
++                0,
++                1,
++                &desc,
++                payload.data(),
++                payload.size(),
++                &payload_bytes,
++                error)) {
++        fprintf(stderr, "K-only KV page export failed: %s\n", error.c_str());
++        return 1;
++    }
++
++    if (payload_bytes != payload.size()) {
++        fprintf(stderr, "K-only KV page export byte count mismatch\n");
++        return 1;
++    }
++
++    llama_kv_cache restore_kv(
++            *model,
++            hparams,
++            GGML_TYPE_F32,
++            GGML_TYPE_F32,
++            true,
++            false,
++            true,
++            1,
++            1,
++            1,
++            0,
++            LLAMA_SWA_TYPE_NONE,
++            nullptr,
++            [](int32_t il) { return il == 0; },
++            {},
++            {});
++    restore_kv.apply_ubatch(slot, ubatch);
++
++    desc.layer_end = 2;
++    if (!restore_kv.stage_import_kv_page(
++                0,
++                desc,
++                payload.data(),
++                payload.size(),
++                error)) {
++        fprintf(stderr, "K-only KV page import failed: %s\n", error.c_str());
++        return 1;
++    }
++
++    uint8_t empty_payload = 0;
++    skippy_kv_page_desc invalid_range_desc = desc;
++    invalid_range_desc.layer_start = 1;
++    invalid_range_desc.layer_end = 2;
++    invalid_range_desc.layer_count = 0;
++    invalid_range_desc.payload_bytes = 0;
++    if (restore_kv.stage_import_kv_page(
++                0,
++                invalid_range_desc,
++                &empty_payload,
++                0,
++                error)) {
++        fprintf(stderr, "out-of-bounds KV page layer range was accepted\n");
++        return 1;
++    }
++    if (restore_kv.seq_pos_min(0) != 0) {
++        fprintf(stderr, "out-of-bounds KV page import mutated the existing page\n");
++        return 1;
++    }
++    error.clear();
++
++    llama_kv_cache filtered_kv(
++            *model,
++            hparams,
++            GGML_TYPE_F32,
++            GGML_TYPE_F32,
++            true,
++            false,
++            true,
++            1,
++            1,
++            1,
++            0,
++            LLAMA_SWA_TYPE_NONE,
++            nullptr,
++            [](int32_t) { return false; },
++            {},
++            {});
++    filtered_kv.apply_ubatch(slot, ubatch);
++
++    skippy_kv_page_desc empty_range_desc = desc;
++    empty_range_desc.layer_count = 0;
++    empty_range_desc.payload_bytes = 0;
++    if (filtered_kv.stage_import_kv_page(
++                0,
++                empty_range_desc,
++                &empty_payload,
++                0,
++                error)) {
++        fprintf(stderr, "empty KV page layer selection was accepted\n");
++        return 1;
++    }
++    if (filtered_kv.seq_pos_min(0) != 0) {
++        fprintf(stderr, "empty KV page layer selection mutated the existing page\n");
++        return 1;
++    }
++    error.clear();
++
++    restore_kv.seq_cp(0, 1, 0, 1);
++    if (restore_kv.stage_import_kv_page(
++                0,
++                desc,
++                payload.data(),
++                payload.size(),
++                error)) {
++        fprintf(stderr, "KV page import unexpectedly allocated a shared occupied cell\n");
++        return 1;
++    }
++    if (restore_kv.seq_pos_min(0) != 0 || restore_kv.seq_pos_min(1) != 0) {
++        fprintf(stderr, "failed KV page allocation did not preserve the existing page\n");
++        return 1;
++    }
++    error.clear();
++
++    skippy_kv_page_desc roundtrip_desc = {};
++    size_t roundtrip_bytes = 0;
++    if (!restore_kv.stage_export_kv_page(
++                0,
++                0,
++                1,
++                0,
++                1,
++                &roundtrip_desc,
++                nullptr,
++                0,
++                &roundtrip_bytes,
++                error)) {
++        fprintf(stderr, "K-only KV page round-trip sizing failed: %s\n", error.c_str());
++        return 1;
++    }
++    if (roundtrip_bytes != payload.size() ||
++            roundtrip_desc.flags != desc.flags ||
++            roundtrip_desc.k_row_bytes != desc.k_row_bytes ||
++            roundtrip_desc.v_row_bytes != 0 ||
++            roundtrip_desc.v_element_bytes != 0) {
++        fprintf(stderr, "unexpected K-only transposed KV page round-trip descriptor\n");
++        return 1;
++    }
++    std::vector<uint8_t> roundtrip_payload(roundtrip_bytes);
++    if (!restore_kv.stage_export_kv_page(
++                0,
++                0,
++                1,
++                0,
++                1,
++                &roundtrip_desc,
++                roundtrip_payload.data(),
++                roundtrip_payload.size(),
++                &roundtrip_bytes,
++                error)) {
++        fprintf(stderr, "K-only KV page round-trip export failed: %s\n", error.c_str());
++        return 1;
++    }
++    if (roundtrip_payload != payload) {
++        fprintf(stderr, "K-only KV page payload changed after round trip\n");
++        return 1;
++    }
++
++    return 0;
++}
+diff --git a/tests/test-skippy-model-loader-accounting.cpp b/tests/test-skippy-model-loader-accounting.cpp
+new file mode 100644
+index 000000000..7e87226dc
+--- /dev/null
++++ b/tests/test-skippy-model-loader-accounting.cpp
+@@ -0,0 +1,306 @@
++#include "llama.h"
++#include "llama-model-loader.h"
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <unordered_set>
++#include <vector>
++
++struct progress_state {
++    float last = 0.0f;
++    bool bounded = true;
++    bool monotonic = true;
++    bool progressed_after_completion = false;
++    size_t completion_count = 0;
++};
++
++static bool observe_progress(float progress, void * user_data) {
++    auto * state = static_cast<progress_state *>(user_data);
++    constexpr float tolerance = 1e-6f;
++
++    state->bounded &= std::isfinite(progress) && progress >= -tolerance && progress <= 1.0f + tolerance;
++    state->monotonic &= progress + tolerance >= state->last;
++    if (progress == 1.0f) {
++        state->completion_count++;
++    } else if (state->completion_count > 0) {
++        state->progressed_after_completion = true;
++    }
++    state->last = progress;
++    return true;
++}
++
++class stage_filter_guard {
++public:
++    explicit stage_filter_guard(const std::unordered_set<std::string> & resident_tensor_names = {}) {
++        llama_model_loader_stage_filter filter;
++        filter.enabled = true;
++        filter.layer_start = 0;
++        filter.layer_end = 1;
++        filter.include_embeddings = true;
++        filter.include_output = true;
++        filter.resident_tensor_names = resident_tensor_names;
++        llama_model_loader_set_stage_filter(filter);
++    }
++
++    ~stage_filter_guard() {
++        llama_model_loader_clear_stage_filter();
++    }
++};
++
++static llama_model_loader make_loader(const char * model_path, llama_load_mode load_mode = LLAMA_LOAD_MODE_NONE) {
++    std::vector<std::string> splits;
++    return llama_model_loader(
++            nullptr,
++            nullptr,
++            nullptr,
++            model_path,
++            splits,
++            false,
++            nullptr,
++            load_mode,
++            false,
++            true,
++            false,
++            nullptr,
++            nullptr);
++}
++
++static bool check_exact_resident_filter(const char * model_path) {
++    llama_model_loader loader = make_loader(model_path);
++    std::unordered_set<std::string> resident_tensor_names;
++    for (const auto & [name, _] : loader.weights_map) {
++        resident_tensor_names.insert(name);
++    }
++    if (resident_tensor_names.empty()) {
++        std::fprintf(stderr, "model has no resident tensor names\n");
++        return false;
++    }
++
++    llama_model_params params = llama_model_default_params();
++    llama_model * model = nullptr;
++    {
++        stage_filter_guard filter(resident_tensor_names);
++        model = llama_model_load_from_file(model_path, params);
++    }
++    if (model == nullptr) {
++        std::fprintf(stderr, "exact resident tensor filter rejected complete closure\n");
++        return false;
++    }
++    llama_model_free(model);
++
++    resident_tensor_names.insert("skippy.missing.admitted.tensor");
++    {
++        stage_filter_guard filter(resident_tensor_names);
++        model = llama_model_load_from_file(model_path, params);
++    }
++    if (model != nullptr) {
++        llama_model_free(model);
++        std::fprintf(stderr, "exact resident tensor filter accepted an absent tensor\n");
++        return false;
++    }
++    return true;
++}
++
++static ggml_context_ptr make_accounting_context(const ggml_tensor * weight) {
++    const size_t tensor_count = 2;
++    ggml_init_params params = {
++        /*.mem_size   =*/ tensor_count * ggml_tensor_overhead(),
++        /*.mem_buffer =*/ nullptr,
++        /*.no_alloc   =*/ true,
++    };
++    ggml_context_ptr ctx(ggml_init(params));
++    if (ctx == nullptr) {
++        return nullptr;
++    }
++
++    ggml_tensor * duplicate = ggml_dup_tensor(ctx.get(), weight);
++    ggml_set_name(duplicate, ggml_get_name(weight));
++    ggml_tensor * tied = ggml_dup_tensor(ctx.get(), weight);
++    ggml_set_name(tied, ggml_get_name(weight));
++    return ctx;
++}
++
++static ggml_context_ptr make_synthetic_context(const ggml_tensor * weight) {
++    ggml_init_params params = {
++        /*.mem_size   =*/ ggml_tensor_overhead(),
++        /*.mem_buffer =*/ nullptr,
++        /*.no_alloc   =*/ true,
++    };
++    ggml_context_ptr ctx(ggml_init(params));
++    if (ctx != nullptr) {
++        ggml_tensor * synthetic = ggml_dup_tensor(ctx.get(), weight);
++        ggml_set_name(synthetic, "skippy.synthetic.after-completion");
++    }
++    return ctx;
++}
++
++static llama_buf_map make_buffer_map(
++        const llama_model_loader & loader,
++        ggml_backend_buffer_t buffer) {
++    llama_buf_map buffers;
++    for (uint32_t idx = 0; idx < loader.files.size(); ++idx) {
++        buffers.emplace(idx, buffer);
++    }
++    return buffers;
++}
++
++static bool check_context_load_lifecycle(const char * model_path) {
++    llama_model_loader loader = make_loader(model_path, LLAMA_LOAD_MODE_MMAP);
++    if (loader.weights_map.empty()) {
++        std::fprintf(stderr, "model has no weights\n");
++        return false;
++    }
++
++    const ggml_tensor * weight = loader.weights_map.begin()->second.tensor;
++    ggml_context_ptr accounting_ctx = make_accounting_context(weight);
++    ggml_context_ptr synthetic_ctx = make_synthetic_context(weight);
++    if (accounting_ctx == nullptr || synthetic_ctx == nullptr) {
++        std::fprintf(stderr, "failed to allocate accounting contexts\n");
++        return false;
++    }
++
++    ggml_context * accounting_ctx_raw = accounting_ctx.get();
++    ggml_context * synthetic_ctx_raw = synthetic_ctx.get();
++    const auto cpu_buft = ggml_backend_cpu_buffer_type();
++    loader.ctx_map.emplace(cpu_buft, std::move(accounting_ctx));
++    loader.init_mappings(false);
++
++    const size_t weight_size = ggml_nbytes(weight);
++    const size_t expected = 2 * weight_size;
++    if (loader.size_data != expected) {
++        std::fprintf(
++                stderr,
++                "context accounting mismatch: expected %zu bytes, got %zu\n",
++                expected,
++                loader.size_data);
++        return false;
++    }
++
++    ggml_backend_buffer_ptr accounting_buffer {
++        ggml_backend_alloc_ctx_tensors_from_buft(accounting_ctx_raw, cpu_buft)
++    };
++    ggml_backend_buffer_ptr synthetic_buffer {
++        ggml_backend_alloc_ctx_tensors_from_buft(synthetic_ctx_raw, cpu_buft)
++    };
++    if (accounting_buffer == nullptr || synthetic_buffer == nullptr) {
++        std::fprintf(stderr, "failed to allocate CPU accounting buffers\n");
++        return false;
++    }
++
++    llama_buf_map accounting_buffers = make_buffer_map(loader, accounting_buffer.get());
++    llama_buf_map synthetic_buffers = make_buffer_map(loader, synthetic_buffer.get());
++    progress_state progress;
++
++    if (!loader.load_all_data(accounting_ctx_raw, accounting_buffers, nullptr, observe_progress, &progress)) {
++        std::fprintf(stderr, "accounting context load was cancelled\n");
++        return false;
++    }
++    if (loader.size_done != loader.size_data) {
++        std::fprintf(
++                stderr,
++                "accounting context did not complete: loaded %zu of %zu bytes\n",
++                loader.size_done,
++                loader.size_data);
++        return false;
++    }
++    if (!loader.load_all_data(synthetic_ctx_raw, synthetic_buffers, nullptr, observe_progress, &progress)) {
++        std::fprintf(stderr, "synthetic context load was cancelled\n");
++        return false;
++    }
++    // The final 1.0 callback is emitted only after load_all_data tears down the
++    // mmap fragments. The post-completion synthetic-only context must not emit
++    // it again, so a single completion proves that cleanup ran exactly once.
++    if (!progress.bounded || !progress.monotonic || progress.completion_count != 1 ||
++            progress.progressed_after_completion) {
++        std::fprintf(stderr, "tied-weight progress lifecycle was invalid\n");
++        return false;
++    }
++    return true;
++}
++
++static bool check_contextless_fallback(const char * model_path) {
++    llama_model_loader loader = make_loader(model_path);
++    size_t expected = 0;
++    for (const auto & [_, weight] : loader.weights_map) {
++        expected += ggml_nbytes(weight.tensor);
++    }
++
++    loader.init_mappings(false);
++    if (loader.size_data != expected) {
++        std::fprintf(
++                stderr,
++                "contextless accounting mismatch: expected %zu bytes, got %zu\n",
++                expected,
++                loader.size_data);
++        return false;
++    }
++    return true;
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 2) {
++        std::fprintf(stderr, "usage: %s MODEL\n", argv[0]);
++        return EXIT_FAILURE;
++    }
++
++    llama_backend_init();
++
++    if (!check_context_load_lifecycle(argv[1]) ||
++            !check_contextless_fallback(argv[1]) ||
++            !check_exact_resident_filter(argv[1])) {
++        llama_backend_free();
++        return EXIT_FAILURE;
++    }
++
++    progress_state progress;
++    llama_model_params params = llama_model_default_params();
++    params.load_mode = LLAMA_LOAD_MODE_MMAP;
++    params.n_gpu_layers = 99;
++    params.progress_callback = observe_progress;
++    params.progress_callback_user_data = &progress;
++    llama_model_loader accounting_loader = make_loader(argv[1]);
++    std::unordered_set<std::string> resident_tensor_names;
++    for (const auto & [name, _] : accounting_loader.weights_map) {
++        resident_tensor_names.insert(name);
++    }
++
++    llama_model * model = nullptr;
++    {
++        stage_filter_guard filter(resident_tensor_names);
++        model = llama_model_load_from_file(argv[1], params);
++    }
++
++    const bool loaded = model != nullptr;
++    if (model != nullptr) {
++        llama_model_free(model);
++    }
++    llama_backend_free();
++
++    if (!loaded) {
++        std::fprintf(stderr, "filtered model load failed\n");
++        return EXIT_FAILURE;
++    }
++    if (!progress.bounded) {
++        std::fprintf(stderr, "model-load progress escaped [0, 1]\n");
++        return EXIT_FAILURE;
++    }
++    if (!progress.monotonic) {
++        std::fprintf(stderr, "model-load progress regressed\n");
++        return EXIT_FAILURE;
++    }
++    if (progress.completion_count != 1) {
++        std::fprintf(
++                stderr,
++                "model-load completion callback count mismatch: expected 1, got %zu\n",
++                progress.completion_count);
++        return EXIT_FAILURE;
++    }
++    if (progress.progressed_after_completion) {
++        std::fprintf(stderr, "model-load progress continued after completion\n");
++        return EXIT_FAILURE;
++    }
++
++    return EXIT_SUCCESS;
++}
+diff --git a/tests/test-skippy-recurrent-state-roundtrip.cpp b/tests/test-skippy-recurrent-state-roundtrip.cpp
+new file mode 100644
+index 000000000..9ef80a6ce
+--- /dev/null
++++ b/tests/test-skippy-recurrent-state-roundtrip.cpp
+@@ -0,0 +1,159 @@
++#include "../src/llama-batch.h"
++#include "../src/llama-io.h"
++#include "../src/llama-memory-recurrent.h"
++#include "../src/llama-model.h"
++
++#include "ggml-backend.h"
++
++#include <cstdio>
++#include <cstring>
++#include <memory>
++#include <stdexcept>
++#include <vector>
++
++class buffer_writer final : public llama_io_write_i {
++public:
++    void write(const void * src, size_t size) override {
++        const auto * bytes = static_cast<const uint8_t *>(src);
++        data.insert(data.end(), bytes, bytes + size);
++    }
++
++    void write_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
++        const size_t old_size = data.size();
++        data.resize(old_size + size);
++        ggml_backend_tensor_get(tensor, data.data() + old_size, offset, size);
++    }
++
++    size_t n_bytes() override {
++        return data.size();
++    }
++
++    std::vector<uint8_t> data;
++};
++
++class buffer_reader final : public llama_io_read_i {
++public:
++    explicit buffer_reader(const std::vector<uint8_t> & data) : data(data) {}
++
++    void read(void * dst, size_t size) override {
++        require(size);
++        std::memcpy(dst, data.data() + offset, size);
++        offset += size;
++    }
++
++    void read_tensor(ggml_tensor * tensor, size_t tensor_offset, size_t size) override {
++        require(size);
++        ggml_backend_tensor_set(tensor, data.data() + offset, tensor_offset, size);
++        offset += size;
++    }
++
++    size_t n_bytes() override {
++        return offset;
++    }
++
++private:
++    void require(size_t size) const {
++        if (size > data.size() - offset) {
++            throw std::runtime_error("unexpectedly reached end of recurrent-state buffer");
++        }
++    }
++
++    const std::vector<uint8_t> & data;
++    size_t offset = 0;
++};
++
++static llama_memory_recurrent make_memory(const llama_model & model) {
++    return llama_memory_recurrent(
++            model,
++            GGML_TYPE_F32,
++            GGML_TYPE_F32,
++            false,
++            4,
++            2,
++            0,
++            {});
++}
++
++int main() {
++    std::unique_ptr<llama_model> model(llama_model_create(LLM_ARCH_MAMBA, llama_model_default_params()));
++    if (!model) {
++        std::fprintf(stderr, "failed to create test model\n");
++        return 1;
++    }
++
++    model->hparams.n_layer_all = 1;
++    model->hparams.n_embd_r_impl = 4;
++    model->hparams.ssm_d_state = 2;
++    model->hparams.ssm_d_inner = 2;
++
++    auto source = make_memory(*model);
++    llama_pos source_pos = 7;
++    llama_seq_id source_seq_id = 0;
++    llama_seq_id * source_seq_ids = &source_seq_id;
++    int32_t source_n_seq_id = 1;
++    llama_ubatch source_batch = {};
++    source_batch.b_equal_seqs = 1;
++    source_batch.n_tokens = 1;
++    source_batch.n_seq_tokens = 1;
++    source_batch.n_seqs = 1;
++    source_batch.n_pos = 1;
++    source_batch.pos = &source_pos;
++    source_batch.n_seq_id = &source_n_seq_id;
++    source_batch.seq_id = &source_seq_ids;
++    if (!source.find_slot(source_batch)) {
++        std::fprintf(stderr, "failed to allocate source recurrent cell\n");
++        return 2;
++    }
++
++    const std::vector<float> source_r = { 1.0f, 2.0f, 3.0f, 4.0f };
++    const std::vector<float> source_s = { 5.0f, 6.0f, 7.0f, 8.0f };
++    ggml_backend_tensor_set(source.r_l[0], source_r.data(), 0, source_r.size() * sizeof(float));
++    ggml_backend_tensor_set(source.s_l[0], source_s.data(), 0, source_s.size() * sizeof(float));
++
++    buffer_writer writer;
++    source.state_write(writer, source_seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++
++    uint32_t cell_count = 0;
++    llama_pos serialized_pos = -1;
++    uint32_t serialized_n_seq_id = 1;
++    std::memcpy(&cell_count, writer.data.data(), sizeof(cell_count));
++    std::memcpy(&serialized_pos, writer.data.data() + sizeof(cell_count), sizeof(serialized_pos));
++    std::memcpy(
++            &serialized_n_seq_id,
++            writer.data.data() + sizeof(cell_count) + sizeof(serialized_pos),
++            sizeof(serialized_n_seq_id));
++    if (cell_count != 1 || serialized_pos != source_pos || serialized_n_seq_id != 0) {
++        std::fprintf(stderr, "unexpected single-sequence recurrent-state metadata\n");
++        return 3;
++    }
++
++    auto destination = make_memory(*model);
++    constexpr llama_seq_id destination_seq_id = 1;
++    buffer_reader reader(writer.data);
++    destination.state_read(reader, destination_seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++
++    if (reader.n_bytes() != writer.n_bytes()) {
++        std::fprintf(stderr, "recurrent-state round-trip byte count mismatch\n");
++        return 4;
++    }
++    if (destination.seq_pos_min(destination_seq_id) != source_pos ||
++            destination.seq_pos_max(destination_seq_id) != source_pos) {
++        std::fprintf(stderr, "recurrent-state position was not preserved across sequence ids\n");
++        return 5;
++    }
++    if (destination.seq_pos_min(source_seq_id) != -1) {
++        std::fprintf(stderr, "recurrent state retained the source sequence id\n");
++        return 6;
++    }
++
++    std::vector<float> restored_r(source_r.size());
++    std::vector<float> restored_s(source_s.size());
++    ggml_backend_tensor_get(destination.r_l[0], restored_r.data(), 0, restored_r.size() * sizeof(float));
++    ggml_backend_tensor_get(destination.s_l[0], restored_s.data(), 0, restored_s.size() * sizeof(float));
++    if (restored_r != source_r || restored_s != source_s) {
++        std::fprintf(stderr, "recurrent tensor data changed during cross-sequence restore\n");
++        return 7;
++    }
++
++    return 0;
++}
+diff --git a/tests/test-skippy-verify-checkpoint-retirement.cpp b/tests/test-skippy-verify-checkpoint-retirement.cpp
+new file mode 100644
+index 000000000..d09acccb4
+--- /dev/null
++++ b/tests/test-skippy-verify-checkpoint-retirement.cpp
+@@ -0,0 +1,26 @@
++#include "../src/skippy-verify-checkpoint.h"
++
++#include <cstddef>
++#include <vector>
++
++struct checkpoint {
++    bool valid;
++    int token_start;
++    size_t token_count;
++};
++
++int main() {
++    std::vector<checkpoint> checkpoints;
++    for (int window = 0; window < 129; ++window) {
++        checkpoints.push_back({true, window * 4, 4});
++        if (!skippy_retire_verify_checkpoint_exact(checkpoints, window * 4, 4)) return 1;
++        if (!checkpoints.empty()) return 2;
++    }
++
++    checkpoints = {{true, 10, 4}, {true, 14, 4}, {true, 18, 4}};
++    if (!skippy_retire_verify_checkpoint_exact(checkpoints, 14, 4)) return 3;
++    if (checkpoints.size() != 2 || checkpoints[0].token_start != 10 || checkpoints[1].token_start != 18) return 4;
++    if (skippy_retire_verify_checkpoint_exact(checkpoints, 14, 4)) return 5;
++    if (skippy_retire_verify_checkpoint_exact(checkpoints, 10, 3)) return 6;
++    return 0;
++}

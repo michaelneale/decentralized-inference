@@ -4,6 +4,7 @@ use crate::{
     ABI_VERSION_MAJOR, ABI_VERSION_MINOR, ABI_VERSION_PATCH, NativeMtpDraft, SamplingConfig,
 };
 
+pub const FEATURE_STAGE_PLAN: u64 = 1 << 17;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
@@ -278,6 +279,8 @@ pub struct RuntimeConfig {
     pub use_mmap_prefetch: bool,
     pub use_mmap_buffer: bool,
     pub filter_tensors_on_load: bool,
+    pub resident_tensor_names: *const *const c_char,
+    pub resident_tensor_name_count: usize,
     pub include_embeddings: bool,
     pub include_output: bool,
     pub mtp_source: MtpSource,

@@ -111,6 +111,21 @@ message LoadStage {
   optional string source_model_sha256 = 45;
   SourceResolutionPolicy source_resolution_policy = 46;
   optional string runtime_profile = 47;
+  StageAdmissionDescriptor admission = 48;
+  string participant_set_hash = 49;
+  string topology_hash = 50;
+  StageActivationCodec activation_codec = 51;
+  StageActivationCodecPolicy activation_codec_policy = 53;
+  repeated StageTopologyStage topology_stages = 52;
+}
+
+message StageTopologyStage {
+  string stage_id = 1;
+  uint32 stage_index = 2;
+  bytes node_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  string bind_addr = 6;
 }
 
 message StageLoadRuntimeSettings {
@@ -125,6 +140,7 @@ message StageLoadRuntimeSettings {
   optional bool kv_unified = 9;
   optional bool swa_full = 10;
   optional uint32 cache_idle_slots = 11;
+  StageActivationCodecPolicy activation_codec_policy = 36;
 }
 
 message StopStage {
@@ -212,6 +228,12 @@ message ActivationBoundaryDescriptor {
   uint64 required_sidebands = 7;
 }
 
+message StageAdmissionIdle {}
+
+message StageAdmissionAdmitted {
+  StageAdmissionDescriptor descriptor = 1;
+}
+
 message StageStatus {
   string topology_id = 1;
   string run_id = 2;
@@ -246,6 +268,14 @@ message StageStatus {
   uint64 lease_until_unix_ms = 31;
   optional ActivationBoundaryDescriptor input_activation_boundary = 32;
   optional ActivationBoundaryDescriptor output_activation_boundary = 33;
+  reserved 34;
+  reserved "admission";
+  StageActivationCodec activation_codec = 35;
+  StageActivationCodecPolicy activation_codec_policy = 36;
+  oneof admission_state {
+    StageAdmissionIdle idle = 37;
+    StageAdmissionAdmitted admitted = 38;
+  }
 }
 
 message StageStatusList {
@@ -298,6 +328,60 @@ message StagePreparationStatus {
   uint64 coordinator_term = 17;
   optional string coordinator_id = 18;
   uint64 lease_until_unix_ms = 19;
+  reserved 20;
+  reserved "admission";
+  StageActivationCodec activation_codec = 21;
+  StageActivationCodecPolicy activation_codec_policy = 22;
+  oneof admission_state {
+    StageAdmissionIdle idle = 23;
+    StageAdmissionAdmitted admitted = 24;
+  }
+}
+
+enum StageActivationCodec {
+  STAGE_ACTIVATION_CODEC_UNSPECIFIED = 0;
+  STAGE_ACTIVATION_CODEC_RAW_F32_V1 = 1;
+  STAGE_ACTIVATION_CODEC_F16_RNE_V1 = 2;
+  STAGE_ACTIVATION_CODEC_BF16_RNE_V1 = 3;
+  STAGE_ACTIVATION_CODEC_S8_ROW_F32_RNE_V1 = 4;
+}
+
+enum StageActivationCodecPolicy {
+  STAGE_ACTIVATION_CODEC_POLICY_UNSPECIFIED = 0;
+  STAGE_ACTIVATION_CODEC_POLICY_FIXED_V1 = 1;
+  STAGE_ACTIVATION_CODEC_POLICY_AUTO_LOSSLESS_V1 = 2;
+}
+
+message StageAdmissionDescriptor {
+  uint32 version = 1;
+  string package_id = 2;
+  string plan_id = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  repeated string resident_tensor_ids = 6;
+  repeated StageAdmissionSidecar sidecars = 7;
+  repeated StageAdmissionProfile profiles = 8;
+}
+
+message StageAdmissionSidecar {
+  StageAdmissionSidecarKind kind = 1;
+  string artifact_id = 2;
+  optional string name = 3;
+}
+
+enum StageAdmissionSidecarKind {
+  STAGE_ADMISSION_SIDECAR_KIND_UNSPECIFIED = 0;
+  STAGE_ADMISSION_SIDECAR_KIND_MMPROJ = 1;
+}
+
+message StageAdmissionProfile {
+  string profile_id = 1;
+  string graph_identity = 2;
+  string profile_identity = 3;
+  string slice_identity = 4;
+  string source_snapshot_identity = 5;
+  string graph_configuration_id = 6;
+  string backend_id = 7;
 }
 
 enum SourceModelKind {

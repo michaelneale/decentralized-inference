@@ -36,7 +36,8 @@ RECIPES_BY_FILE: Final = {
     "just/skippy.just": {
         "bench-corpus", "competitive-benchmark-build", "family-certify",
         "metrics-server", "metrics-server-build",
-        "skippy-native-tests", "skippy-openai-smoke", "skippy-quantize-build",
+        "skippy-native-full-replay", "skippy-native-tests", "skippy-openai-smoke",
+        "skippy-quantize-build",
         "skippy-quantize-release-build", "skippy-quantize-standalone-build",
         "skippy-quantize-standalone-release-build", "skippy-wan-lab-build-bins",
         "spec-bench",

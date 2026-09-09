@@ -99,6 +99,7 @@ class SccacheEvidenceTests(unittest.TestCase):
             ("ci-windows-host-slice.yml", "windows_host"): policy,
             ("ci-windows-runtime-slice.yml", "windows_runtime"): policy,
             ("cache-warm-sccache.yml", "warm"): "false",
+            ("depot-canary.yml", "runtime_seed"): "false",
             ("hf-download-smoke.yml", "hf_download_smoke"): "true",
             ("native-sdk-artifact.yml", "linux_native_sdk_artifact"): policy,
             ("native-sdk-artifact.yml", "macos_native_sdk_artifact"): policy,
@@ -614,10 +615,10 @@ class SccacheEvidenceTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"', restore)
 
-    def test_runtime_seed_restore_requires_matching_image_and_epoch(self) -> None:
+    def test_runtime_seed_restore_is_deliberately_disabled(self) -> None:
         runtime = WORKFLOWS["runtime"].read_text(encoding="utf-8")
-        self.assertIn(f"matrix.runtime.container_image == '{SEED_IMAGE}'", runtime)
-        self.assertIn(f"matrix.runtime.toolchain_epoch == '{SEED_EPOCH}'", runtime)
+        self.assertIn('allow_trusted_seed: "false"', runtime)
+        self.assertIn("uses: ./.github/actions/restore-sccache-seed", runtime)
 
     def test_instrumented_workflows_use_unique_evidence_artifacts(self) -> None:
         for workflow_name in INSTRUMENTED:

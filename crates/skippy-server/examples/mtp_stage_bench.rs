@@ -56,33 +56,45 @@ fn message(
     pos_start: i32,
     token_ids: Vec<i32>,
     activation_width: usize,
-) -> StageWireMessage {
+) -> Result<StageWireMessage> {
     let mut state = StageStateHeader::new(kind);
     state.seq_id = 0;
     state.prompt_token_count = 1;
     state.decode_step = 0;
     state.current_token = token_ids.first().copied().unwrap_or(1);
     state.source_stage_index = 0;
-    StageWireMessage {
+    let token_count = i32::try_from(token_ids.len()).context("token count exceeds i32")?;
+    let activation_width_i32 =
+        i32::try_from(activation_width).context("activation width exceeds i32")?;
+    let f32_payload = vec![
+        0;
+        token_ids
+            .len()
+            .checked_mul(activation_width)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+            .context("activation payload size overflow")?
+    ];
+    let activation = skippy_protocol::binary::encode_activation_payload_with_state_flags(
+        state.activation_codec,
+        token_count,
+        activation_width_i32,
+        &f32_payload,
+        state.flags,
+    )?;
+    Ok(StageWireMessage {
         kind,
         pos_start,
-        token_count: i32::try_from(token_ids.len()).unwrap_or(i32::MAX),
+        token_count,
         state,
         request_id,
         session_id,
         sampling: None,
         chat_sampling_metadata: None,
-        activation: vec![
-            0;
-            token_ids
-                .len()
-                .saturating_mul(activation_width)
-                .saturating_mul(std::mem::size_of::<f32>())
-        ],
+        activation,
         tokens: token_ids,
         positions: Vec::new(),
         raw_bytes: Vec::new(),
-    }
+    })
 }
 
 fn run_request(addr: &str, index: usize, activation_width: usize) -> Result<serde_json::Value> {
@@ -102,7 +114,7 @@ fn run_request(addr: &str, index: usize, activation_width: usize) -> Result<serd
         0,
         vec![1],
         activation_width,
-    );
+    )?;
     write_stage_message(&mut stream, &decode).context("write native-MTP decode")?;
     stream.flush().ok();
     let decode_reply = recv_reply(&mut stream).context("receive native-MTP decode")?;
@@ -124,7 +136,7 @@ fn run_request(addr: &str, index: usize, activation_width: usize) -> Result<serd
             1,
             vec![decode_reply.predicted, draft_token],
             activation_width,
-        );
+        )?;
         verify.state.seq_id = 1;
         write_stage_message(&mut stream, &verify).context("write native-MTP verify")?;
         stream.flush().ok();
@@ -141,7 +153,7 @@ fn run_request(addr: &str, index: usize, activation_width: usize) -> Result<serd
             1,
             vec![0, 0],
             activation_width,
-        );
+        )?;
         retire.tokens.clear();
         retire.activation.clear();
         retire.state.source_stage_index = -1;
@@ -155,7 +167,7 @@ fn run_request(addr: &str, index: usize, activation_width: usize) -> Result<serd
         0,
         Vec::new(),
         activation_width,
-    );
+    )?;
     write_stage_message(&mut stream, &stop).context("write stage stop")?;
     stream.flush().ok();
     let stop_reply = recv_reply(&mut stream).context("receive stage stop")?;

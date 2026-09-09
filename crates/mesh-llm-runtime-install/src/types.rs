@@ -72,6 +72,9 @@ pub struct NativeRuntimeInstallOutcome {
     pub status: NativeRuntimeInstallStatus,
     pub runtime: InstalledNativeRuntime,
     pub resolution: mesh_llm_native_runtime::NativeRuntimeResolution,
+    /// Which catalogs were consulted to reach this resolution.
+    #[serde(default)]
+    pub sources: crate::manifest::NativeRuntimeCatalogSources,
 }
 
 impl Default for NativeRuntimeManifestOptions {

@@ -15,11 +15,13 @@ pub(crate) enum Command {
     Inspect {
         model: PathBuf,
     },
+    /// Offline schema-v1 planning tool; its output is not admitted for serving.
     Plan {
         model: PathBuf,
         #[arg(long)]
         stages: usize,
     },
+    /// Offline schema-v1 slice writer; its output is not admitted for serving.
     Write {
         model: PathBuf,
         #[arg(long)]
@@ -35,6 +37,7 @@ pub(crate) enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Offline schema-v1 stage writer; its output is not admitted for serving.
     WriteStages {
         model: PathBuf,
         #[arg(long)]
@@ -42,6 +45,7 @@ pub(crate) enum Command {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// Emit the source-complete v2 package used by graph-admitted serving.
     WritePackage {
         model: String,
         #[arg(long)]
@@ -62,6 +66,18 @@ pub(crate) enum Command {
         source_file: Option<String>,
         #[arg(long)]
         resume_existing_artifacts: bool,
+    },
+    /// Verify byte-preserving v2 packages against independent local source files.
+    VerifyPackageV2 {
+        package: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        /// Logical source primary filename, if different from the local filename.
+        #[arg(long)]
+        source_file: Option<String>,
+        /// Independent originals for all declared projector sidecars.
+        #[arg(long = "source-projector")]
+        source_projectors: Vec<PathBuf>,
     },
     Validate {
         full: PathBuf,

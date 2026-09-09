@@ -165,6 +165,56 @@ class PrepareLlamaTests(unittest.TestCase):
                 result.stderr,
             )
 
+    def test_generated_series_accepts_windows_crlf_checkout(self) -> None:
+        """Generated shard names remain valid when Git checks series out as CRLF."""
+        with tempfile.TemporaryDirectory(prefix="mesh-llm-prepare-crlf-") as temp_dir:
+            root = Path(temp_dir)
+            upstream = root / "upstream"
+            author = root / "author"
+            workdir = root / "workdir"
+            patch_dir = root / "patches"
+            generated_dir = patch_dir / "generated"
+            pin_file = root / "upstream.txt"
+
+            self.run_git(root, "init", "--initial-branch=master", str(upstream))
+            self.run_git(upstream, "config", "user.name", "Test Author")
+            self.run_git(upstream, "config", "user.email", "test@example.com")
+            (upstream / "sample.txt").write_text("base\n", encoding="utf-8")
+            self.run_git(upstream, "add", "sample.txt")
+            self.run_git(upstream, "commit", "-m", "base")
+            pin_file.write_text(
+                f"{self.run_git(upstream, 'rev-parse', 'HEAD', capture_output=True).stdout.strip()}\n",
+                encoding="utf-8",
+            )
+
+            self.run_git(root, "clone", str(upstream), str(author))
+            self.run_git(author, "config", "user.name", "Test Author")
+            self.run_git(author, "config", "user.email", "test@example.com")
+            (author / "sample.txt").write_text("generated\n", encoding="utf-8")
+            self.run_git(author, "commit", "-am", "generated family change")
+            generated_dir.mkdir(parents=True)
+            patch = self.run_git(
+                author, "format-patch", "-1", "--stdout", capture_output=True
+            ).stdout
+            filename = "0001-family-test.patch"
+            (generated_dir / filename).write_text(patch, encoding="utf-8")
+            (generated_dir / "series").write_bytes(f"{filename}\r\n".encode())
+
+            env = os.environ | {
+                "LLAMA_UPSTREAM_URL": str(upstream),
+                "LLAMA_WORKDIR": str(workdir),
+                "LLAMA_PIN_FILE": str(pin_file),
+                "LLAMA_PATCH_DIR": str(patch_dir),
+                "LLAMA_GIT_MAX_ATTEMPTS": "1",
+            }
+            subprocess.run(
+                [str(PREPARE_LLAMA), "pinned"], cwd=ROOT, check=True, env=env
+            )
+
+            self.assertEqual(
+                (workdir / "sample.txt").read_text(encoding="utf-8"), "generated\n"
+            )
+
     def test_patch_application_has_deterministic_commit_identity(self) -> None:
         """Equivalent clean preparations produce one reusable patched SHA."""
         with tempfile.TemporaryDirectory(prefix="mesh-llm-prepare-identity-") as temp_dir:
@@ -246,7 +296,7 @@ class PrepareLlamaTests(unittest.TestCase):
                     (workdir / ".mesh-llm-prepare-schema")
                     .read_text(encoding="utf-8")
                     .strip(),
-                    "3",
+                    "4",
                 )
                 self.assertFalse(hook_marker.exists())
 

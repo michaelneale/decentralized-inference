@@ -30,7 +30,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
-use skippy_protocol::binary::{WireMessageKind, read_stage_message, send_ready};
+use skippy_protocol::binary::{WireMessageKind, read_stage_message_for_codec_policy, send_ready};
 use skippy_runtime::ActivationBoundaryDesc;
 
 pub(in crate::binary_transport) mod async_forwarder;
@@ -50,6 +50,9 @@ use self::session_tracker::ConnectionSessionOwnership;
 /// How often a waiting connection worker rechecks the shutdown flag, matching
 /// the downstream DOWNSTREAM_SHUTDOWN_POLL cadence in stage_execution.
 const WORKER_SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// Darwin `recv`/`peek` error for an expired `SO_RCVTIMEO` (os error 22).
+const EINVAL: i32 = 22;
 
 #[derive(Default)]
 struct ConnectionWorkerControl {
@@ -98,13 +101,38 @@ impl ConnectionWorkerControl {
     /// message bytes are consumed and the worker never sits in an
     /// uninterruptible blocking read: `TcpStream::shutdown` on a tracked
     /// clone does not unblock an in-flight `read` on Windows (#1538).
+    ///
+    /// Darwin quirk: when a blocking socket has `SO_RCVTIMEO` set, an expired
+    /// timeout surfaces from `peek` as `EINVAL` (os error 22), not
+    /// `WouldBlock`/`TimedOut`. Treating EINVAL as fatal here killed healthy
+    /// stage connections on their first idle poll (two-node split smoke:
+    /// "wait for the first binary stage message: Invalid argument (os error
+    /// 22)"). We therefore tolerate EINVAL only while our own read timeout is
+    /// provably in effect — `timeout_armed` is captured when we set it, so the
+    /// guard cannot drift from the socket state — and a timeout-less EINVAL
+    /// still fails the connection loudly.
+    ///
+    /// The tail `set_read_timeout(None)` is best-effort for the same reason:
+    /// during teardown Darwin can reject the clear with EINVAL too, and that
+    /// cleanup failure must not flip an already-decided poll outcome into a
+    /// connection error. For the same teardown window, if even arming the
+    /// timeout fails with EINVAL while shutdown is in progress, report
+    /// `Ok(false)` — the worker is winding down either way.
     fn wait_for_readable(&self, stream: &TcpStream) -> io::Result<bool> {
-        stream.set_read_timeout(Some(WORKER_SHUTDOWN_POLL))?;
+        let timeout_armed = match stream.set_read_timeout(Some(WORKER_SHUTDOWN_POLL)) {
+            Ok(()) => true,
+            // Darwin rejects SO_RCVTIMEO operations with EINVAL (os error 22)
+            // on a socket that has been shut down for teardown. If the worker
+            // is shutting down, that is the expected outcome, not an error.
+            Err(_) if self.is_shutting_down() => return Ok(false),
+            Err(error) => return Err(error),
+        };
         let mut probe = [0u8; 1];
         let ready = loop {
             if self.is_shutting_down() {
                 break false;
             }
+            let probe_started = Instant::now();
             match stream.peek(&mut probe) {
                 Ok(_) => break true,
                 Err(error)
@@ -114,13 +142,23 @@ impl ConnectionWorkerControl {
                             | io::ErrorKind::WouldBlock
                             | io::ErrorKind::TimedOut
                     ) => {}
+                Err(error)
+                    if timeout_armed
+                        && error.raw_os_error() == Some(EINVAL)
+                        && probe_started.elapsed() >= WORKER_SHUTDOWN_POLL => {}
                 Err(error) => {
                     let _ = stream.set_read_timeout(None);
                     return Err(error);
                 }
             }
         };
-        stream.set_read_timeout(None)?;
+        // Best-effort cleanup: on Darwin, clearing SO_RCVTIMEO during
+        // connection teardown can itself fail with EINVAL once the peer (or
+        // our own shutdown path) has closed the socket. The poll outcome is
+        // already established at this point, so a failing timeout clear must
+        // not flip a healthy idle shutdown into "binary stage connection
+        // failed: Invalid argument (os error 22)".
+        let _ = stream.set_read_timeout(None);
         Ok(ready)
     }
 }
@@ -466,14 +504,18 @@ fn run_binary_stage(
                     {
                         return Ok(());
                     }
-                    let first_message =
-                        match read_stage_message(&mut upstream, input_activation_width) {
-                            Ok(message) => message,
-                            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                                return Ok(());
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
+                    let first_message = match read_stage_message_for_codec_policy(
+                        &mut upstream,
+                        input_activation_width,
+                        config.activation_codec,
+                        config.activation_codec_policy,
+                    ) {
+                        Ok(message) => message,
+                        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     if first_message.kind == WireMessageKind::PredictionReturnOpen {
                         if config.stage_index == 0 {
                             return prediction_returns
@@ -560,7 +602,7 @@ mod shutdown_tests {
     use anyhow::anyhow;
     use skippy_runtime::ActivationBoundaryDesc;
     use std::{
-        io::Read,
+        io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::{
             Arc,
@@ -625,6 +667,71 @@ mod shutdown_tests {
         let error = activation_width_from_graph("output", Some(f32_boundary(0)), true)
             .expect_err("empty graph boundary must fail");
         assert!(error.to_string().contains("zero elements"));
+    }
+
+    #[test]
+    fn idle_poll_survives_a_full_read_timeout_expiry() {
+        // Regression: on Darwin a SO_RCVTIMEO expiry inside `peek` surfaces
+        // as EINVAL (os error 22). The worker must keep polling on an idle
+        // connection instead of failing it, and must still observe data
+        // arriving after several expired polls.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let control = Arc::new(ConnectionWorkerControl::default());
+        control.track(&server).unwrap();
+        let task_control = control.clone();
+        let task = thread::spawn(move || {
+            let started = Instant::now();
+            let mut ready = false;
+            while !ready {
+                match task_control.wait_for_readable(&server) {
+                    Ok(became_ready) => ready = became_ready,
+                    Err(error) => panic!("idle poll must not fail: {error}"),
+                }
+            }
+            assert!(ready, "connection must become readable after data arrives");
+            assert!(
+                started.elapsed() >= Duration::from_millis(200),
+                "at least two timeout polls must have expired before data arrived"
+            );
+            let mut byte = [0u8; 1];
+            server.read_exact(&mut byte).unwrap();
+            assert_eq!(byte[0], b'x');
+            task_control.clear();
+        });
+        thread::sleep(Duration::from_millis(250));
+        client.write_all(b"x").unwrap();
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = done_tx.send(task.join().is_ok());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker must finish")
+        );
+    }
+
+    #[test]
+    fn shutdown_poll_on_a_shut_down_socket_stays_ok() {
+        // Regression: during teardown on Darwin, the tail
+        // `set_read_timeout(None)` fails with EINVAL once the socket has been
+        // shut down ("Invalid argument (os error 22)" at shutdown). The
+        // cleanup is best-effort — the poll's already-decided outcome must be
+        // reported as Ok instead of surfacing a connection error.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let control = Arc::new(ConnectionWorkerControl::default());
+        control.track(&server).unwrap();
+        control.shutdown();
+        let result = control.wait_for_readable(&server);
+        assert!(
+            result.is_ok(),
+            "poll after shutdown must not fail: {:?}",
+            result.err()
+        );
     }
 
     #[test]

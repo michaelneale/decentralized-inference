@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,7 +84,7 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         self.assertIn("scripts/prepare-llama.sh pinned || return 1", wrapper)
         self.assertIn('prepared_upstream="$(tr -d \'[:space:]\' < "$ROOT/.deps/llama.cpp/.mesh-llm-upstream-sha")"', wrapper)
         self.assertIn('[[ "$prepared_upstream" != "$UPSTREAM_SHA" ]]', wrapper)
-        self.assertIn("  prepare_repair_target || return 1\n  arch -arm64", wrapper)
+        self.assertIn("  prepare_repair_target || return 1\n  # Battery-mode repairs", wrapper)
 
         # Both entry modes establish the pinned target before the first
         # publish_work_in_progress call can create or update the repair PR.
@@ -233,7 +235,12 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
         # use the same arch -arm64 guard as the workflow's own build step,
         # and refuse to certify a non-arm64 archive (run 33140672269 rebuilt
         # x86_64 from a plain build-llama.sh call).
-        self.assertIn("arch -arm64 scripts/build-llama.sh -DCMAKE_OSX_ARCHITECTURES=arm64", wrapper)
+        self.assertIn(
+            "LLAMA_STAGE_UPSTREAM_TESTS=ON uv run --no-project --with jinja2==3.1.6 --",
+            wrapper,
+        )
+        self.assertIn("arch -arm64 scripts/build-llama.sh", wrapper)
+        self.assertIn("-DCMAKE_OSX_ARCHITECTURES=arm64 || return 1", wrapper)
         self.assertIn("refusing to certify: native archive is not arm64", wrapper)
 
     def test_push_failure_names_the_likely_permission_cause(self) -> None:
@@ -282,6 +289,94 @@ class LlamaCanaryAgentRepairContractTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(0, script.returncode, script.stderr)
+
+    def test_battery_mode_certification_executes_the_full_live_matrix(self) -> None:
+        """A battery-mode repair cannot certify without executing every
+        pinned live package-v2 row and the generated-family-patch gate."""
+        wrapper = REPAIR.read_text(encoding="utf-8")
+        run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
+        # Source transformation replaces the one-family expansion target.
+        # Battery-mode certification validates the manifests and runs the
+        # complete pinned live matrix before the family battery can pass.
+        self.assertIn('if [[ "$MODE" == "battery" ]]; then', run_battery)
+        self.assertIn("skippy-llama-parity.py --llama-src .deps/llama.cpp", run_battery)
+        self.assertIn('skippy-canary-live-matrix.sh --prepare', run_battery)
+        self.assertNotIn('--model', run_battery)
+        self.assertIn("repair cannot certify", run_battery)
+        self.assertIn("check-skippy-generated-family-patch.sh", run_battery)
+        # Validate runs before the live matrix; the generated-patch check and
+        # family battery run only after the native build succeeds.
+        self.assertLess(
+            run_battery.index("skippy-llama-parity.py --llama-src"),
+            run_battery.index("skippy-canary-live-matrix.sh"),
+        )
+        self.assertLess(
+            run_battery.index("skippy-canary-live-matrix.sh"),
+            run_battery.index("skippy-family-battery.sh"),
+        )
+        self.assertLess(
+            run_battery.index("check-skippy-generated-family-patch.sh"),
+            run_battery.index("skippy-family-battery.sh"),
+        )
+
+    def test_one_family_coverage_target_is_retired(self) -> None:
+        wrapper = REPAIR.read_text(encoding="utf-8")
+        run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
+        self.assertNotIn("next-boundary-target --json", run_battery)
+        self.assertNotIn("llama-canary-coverage-target.json", wrapper)
+        self.assertNotIn("coverage_model", run_battery)
+        self.assertIn("single generated family patch", run_battery)
+
+    def test_generated_patch_failure_blocks_certification(self) -> None:
+        wrapper = REPAIR.read_text(encoding="utf-8")
+        run_battery = wrapper[wrapper.index("run_battery() {"):wrapper.index("post_green_review_turn()")]
+        self.assertIn("if ! scripts/check-skippy-generated-family-patch.sh", run_battery)
+        self.assertIn("generated model-family patch is stale or invalid", run_battery)
+        patch_failure = run_battery.split(
+            "if ! scripts/check-skippy-generated-family-patch.sh", 1
+        )[1].split("fi", 1)[0]
+        self.assertIn("return 1", patch_failure)
+
+    def test_runnable_row_carrying_unsupported_reason_is_rejected(self) -> None:
+        """validate must reject candidate/candidate_stateful rows carrying
+        an unsupported_reason — only non-runnable rows may carry one."""
+        parity = ROOT / "scripts" / "skippy-llama-parity.py"
+        sys.path.insert(0, str(parity.parent))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "skippy_llama_parity_validate", parity
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        for status in ("certified", "candidate", "candidate_stateful"):
+            rows = [
+                {
+                    "llama_model": "somearch",
+                    "status": status,
+                    "unsupported_reason": "ambiguous leftover",
+                }
+            ]
+            self.assertEqual(
+                module.validate_boundary_registration(rows, {"somearch"}),
+                1,
+                f"{status} row with a reason must fail even when registered",
+            )
+        # A non-runnable classification with a reason stays legal.
+        self.assertEqual(
+            module.validate_boundary_registration(
+                [
+                    {
+                        "llama_model": "x",
+                        "status": "non_causal_aux",
+                        "unsupported_reason": "non-causal encoder",
+                    }
+                ],
+                set(),
+            ),
+            0,
+        )
 
 
 if __name__ == "__main__":

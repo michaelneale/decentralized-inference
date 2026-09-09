@@ -1,6 +1,6 @@
 use skippy_protocol::{FlashAttentionType, LoadMode, StageConfig};
 
-pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1/native-kv-page-v2";
+pub const NATIVE_KV_RUNTIME_ABI_VERSION: &str = "stage-abi-0.1.52/native-kv-page-v3";
 pub const NATIVE_KV_DTYPE: &str = "ggml-native-kv";
 const NATIVE_KV_LAYER_CONTIGUOUS_LAYOUT: i32 = 4;
 
@@ -71,6 +71,17 @@ fn update_platform_identity(hasher: &mut blake3::Hasher) {
 /// configured cache types, so it cannot stand in for them.
 fn update_layout_identity(hasher: &mut blake3::Hasher, config: &StageConfig) {
     hasher.update(b"kv-layout-identity-v1");
+    // Resident activation checkpoints are restored into the same execution
+    // flow as native KV pages. A different activation codec can change the
+    // numerical state seen by downstream stages, so it must produce a distinct
+    // cache namespace even when the model, layers, and KV layout are equal.
+    hasher.update(b"activation-codec:");
+    hasher.update(
+        config
+            .activation_codec_policy
+            .identity(config.activation_codec)
+            .as_bytes(),
+    );
     hasher.update(config.cache_type_k.as_bytes());
     hasher.update(b"/");
     hasher.update(config.cache_type_v.as_bytes());
@@ -569,6 +580,7 @@ mod identity_completeness_tests {
             materialized_path: None,
             materialized_pinned: false,
             model_path: None,
+            model_part_paths: Vec::new(),
             checkpoint_quantization: None,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
@@ -580,6 +592,8 @@ mod identity_completeness_tests {
             batch_max_tokens: None,
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
+            activation_codec: Default::default(),
+            activation_codec_policy: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,
@@ -606,6 +620,7 @@ mod identity_completeness_tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,
@@ -636,6 +651,26 @@ mod identity_completeness_tests {
         assert_ne!(
             prefix_identity(&quality, 0, &[1, 2, 3, 4]).page_id,
             prefix_identity(&saver, 0, &[1, 2, 3, 4]).page_id
+        );
+    }
+
+    #[test]
+    fn activation_codec_changes_page_identity() {
+        let f16 = StageConfig {
+            activation_codec: skippy_protocol::StageActivationCodec::F16RneV1,
+            activation_codec_policy: Default::default(),
+            ..test_config()
+        };
+        let exact = StageConfig {
+            activation_codec: skippy_protocol::StageActivationCodec::RawF32V1,
+            activation_codec_policy: Default::default(),
+            ..test_config()
+        };
+
+        assert_ne!(hash_of(&f16), hash_of(&exact));
+        assert_ne!(
+            prefix_identity(&f16, 0, &[1, 2, 3, 4]).page_id,
+            prefix_identity(&exact, 0, &[1, 2, 3, 4]).page_id
         );
     }
 
@@ -848,6 +883,7 @@ mod identity_stability_tests {
             materialized_path: None,
             materialized_pinned: false,
             model_path: None,
+            model_part_paths: Vec::new(),
             checkpoint_quantization: None,
             checkpoint_imatrix: None,
             checkpoint_imatrix_sha256: None,
@@ -859,6 +895,8 @@ mod identity_stability_tests {
             batch_max_tokens: None,
             glm_dsa_policy: skippy_protocol::GlmDsaPolicy::Auto,
             generation_signal_window: None,
+            activation_codec: Default::default(),
+            activation_codec_policy: Default::default(),
             stage_id: "stage-0".to_string(),
             stage_index: 0,
             layer_start: 0,
@@ -885,6 +923,7 @@ mod identity_stability_tests {
             swa_full: None,
             cache_idle_slots: None,
             filter_tensors_on_load: false,
+            resident_tensor_names: Vec::new(),
             selected_device: None,
             kv_cache: None,
             native_mtp_enabled: true,

@@ -81,6 +81,7 @@ fn cli_model_exact_config_ref_resolves_pinned_backend_and_keeps_cli_overrides() 
     let mut plans = vec![StartupModelPlan {
         declared_ref: "Qwen3-8B-Q4_K_M".into(),
         resolved_path: PathBuf::from("/tmp/Qwen3-8B-Q4_K_M.gguf"),
+        preindexed_split_package: None,
         mmproj_path: specs[0].mmproj_ref.clone(),
         ctx_size: specs[0].ctx_size,
         gpu_id: specs[0].gpu_id.clone(),

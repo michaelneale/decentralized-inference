@@ -1,0 +1,78 @@
+From e9c3a5ca3c4d392c3ce9dee5a88a61c13f71df08 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Mon, 7 Sep 2026 06:23:51 +1000
+Subject: [PATCH] build(skippy): wire runtime and native tests
+
+---
+ CMakeLists.txt            | 10 ++++++++++
+ common/CMakeLists.txt     |  2 ++
+ tools/mtmd/CMakeLists.txt |  1 +
+ 3 files changed, 13 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1d4bcf45f..9de023d3d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit
+ project("llama.cpp" C CXX)
+ include(CheckIncludeFileCXX)
+ 
++option(LLAMA_STAGE_BUILD_TESTS "Build private Skippy native application probes" OFF)
++if (LLAMA_STAGE_BUILD_TESTS)
++    enable_testing()
++endif()
++
+ ### llama.cpp version
+ set(LLAMA_VERSION_MAJOR 0)
+ set(LLAMA_VERSION_MINOR 3)
+@@ -271,6 +276,7 @@ set(LLAMA_BIN_INSTALL_DIR     ${CMAKE_INSTALL_BINDIR}     CACHE PATH "Location o
+ 
+ set(LLAMA_PUBLIC_HEADERS
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama.h
++    ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy.h
+     ${CMAKE_CURRENT_SOURCE_DIR}/include/llama-cpp.h)
+ 
+ set_target_properties(llama
+@@ -278,6 +284,10 @@ set_target_properties(llama
+         PUBLIC_HEADER "${LLAMA_PUBLIC_HEADERS}")
+ 
+ install(TARGETS llama LIBRARY PUBLIC_HEADER)
++install(
++    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/skippy
++    DESTINATION ${LLAMA_INCLUDE_INSTALL_DIR}
++    FILES_MATCHING PATTERN "*.h")
+ 
+ if (LLAMA_BUILD_COMMON)
+     install(TARGETS llama-common LIBRARY)
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index 36f1e0cd5..6d139e7bb 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -100,6 +100,7 @@ add_library(${TARGET}
+     reasoning-budget.h
+     sampling.cpp
+     sampling.h
++    stage-chat.cpp
+     speculative.cpp
+     speculative.h
+     subproc.cpp
+@@ -138,6 +139,7 @@ endif()
+ 
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
++    target_compile_definitions(${TARGET} PRIVATE SKIPPY_COMMON_BUILD)
+ 
+     # TODO: make fine-grained exports in the future
+     set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+diff --git a/tools/mtmd/CMakeLists.txt b/tools/mtmd/CMakeLists.txt
+index e60c9c878..7b886d4e4 100644
+--- a/tools/mtmd/CMakeLists.txt
++++ b/tools/mtmd/CMakeLists.txt
+@@ -42,6 +42,7 @@ add_library(mtmd
+             models/granite4-vision.cpp
+             models/hunyuanvl.cpp
+             models/internvl.cpp
++            models/inkling.cpp
+             models/kimivl.cpp
+             models/kimik25.cpp
+             models/nemotron-v2-vl.cpp

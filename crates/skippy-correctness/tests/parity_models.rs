@@ -4,9 +4,10 @@ use std::collections::BTreeSet;
 mod harness;
 
 use harness::{
-    activation_handoff_matches_full_model, assert_manifest_row_complete,
+    FULL_LATTICE_MAX_LAYERS, activation_handoff_matches_full_model, assert_manifest_row_complete,
     cache_state_restore_matches_recompute, graph_boundary_contract_matches_stage_roles,
-    mixed_iteration_matches_serial, p0_p1_manifest_rows,
+    mixed_iteration_matches_serial, p0_p1_manifest_rows, representative_cut_lattice,
+    representative_cut_lattice_matches_full_model,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,6 +53,63 @@ macro_rules! family_module {
 }
 
 family_module!(p0_llama_llama, "p0", "llama", "llama");
+
+#[test]
+fn representative_cut_lattice_covers_both_coverage_modes() {
+    let reviewed = representative_cut_lattice(16, Some((5, 11))).unwrap();
+    assert_eq!(reviewed.first(), Some(&(1, 2)));
+    assert_eq!(reviewed.last(), Some(&(14, 15)));
+    assert!(
+        reviewed.contains(&(5, 11)),
+        "reviewed pair must be included"
+    );
+    assert_eq!(
+        reviewed.len(),
+        reviewed.iter().collect::<BTreeSet<_>>().len()
+    );
+    let expected: BTreeSet<(u32, u32)> = (1..15)
+        .flat_map(|s| [(s, s + 1), (1, s + 1), (s, 15)])
+        .chain(std::iter::once((5, 11)))
+        .collect();
+    assert_eq!(reviewed, expected.into_iter().collect::<Vec<_>>());
+
+    let full = representative_cut_lattice(FULL_LATTICE_MAX_LAYERS, None).unwrap();
+    let full_expected: BTreeSet<(u32, u32)> = (1..FULL_LATTICE_MAX_LAYERS - 1)
+        .flat_map(|s1| ((s1 + 1)..FULL_LATTICE_MAX_LAYERS).map(move |s2| (s1, s2)))
+        .collect();
+    assert_eq!(full.len(), full_expected.len());
+    assert_eq!(full, full_expected.into_iter().collect::<Vec<_>>());
+    assert_eq!(full.len(), 55); // (12-1)(12-2)/2
+    assert_eq!(full.first(), Some(&(1, 2)));
+    assert_eq!(full.last(), Some(&(10, 11)));
+
+    assert!(representative_cut_lattice(2, None).is_err());
+    assert!(representative_cut_lattice(0, None).is_err());
+    let dropped = representative_cut_lattice(6, Some((3, 9))).unwrap();
+    assert!(!dropped.contains(&(3, 9)));
+}
+
+#[test]
+#[ignore = "downloads and loads model-family GGUF artifacts"]
+fn p0_llama_representative_cut_lattice_matches_full_model() {
+    representative_cut_lattice_matches_full_model(FamilySpec {
+        priority: "p0",
+        llama_model: "llama",
+        family: "llama",
+    })
+    .unwrap();
+}
+
+#[test]
+fn manifest_row_is_complete_for_p0_llama_fixture() {
+    assert_manifest_row_complete(FamilySpec {
+        priority: "p0",
+        llama_model: "llama",
+        family: "llama",
+    })
+    .unwrap();
+}
+
 family_module!(p0_qwen2_qwen2, "p0", "qwen2", "qwen2");
 family_module!(p0_qwen3_qwen3_dense, "p0", "qwen3", "qwen3_dense");
 
@@ -121,6 +179,7 @@ family_module!(p0_command_r_command_r, "p0", "command-r", "command_r");
 family_module!(p0_cohere2_cohere2, "p0", "cohere2", "cohere2");
 family_module!(p0_minimax_m2_minimax_m27, "p0", "minimax-m2", "minimax_m27");
 family_module!(p0_lfm2_lfm2, "p0", "lfm2", "lfm2");
+family_module!(p0_lfm2_lfm2_vl, "p0", "lfm2", "lfm2_vl");
 family_module!(
     p0_hunyuan_dense_hunyuan_dense,
     "p0",
@@ -369,6 +428,11 @@ const FAMILY_SPECS: &[FamilySpec] = &[
     },
     FamilySpec {
         priority: "p0",
+        llama_model: "lfm2",
+        family: "lfm2_vl",
+    },
+    FamilySpec {
+        priority: "p0",
         llama_model: "hunyuan-dense",
         family: "hunyuan_dense",
     },
@@ -610,7 +674,7 @@ const FAMILY_SPECS: &[FamilySpec] = &[
 ];
 
 #[test]
-fn p0_p1_manifest_rows_all_have_family_modules() {
+fn certified_p0_p1_manifest_rows_all_have_family_modules() {
     let expected = p0_p1_manifest_rows();
     let declared = FAMILY_SPECS
         .iter()
@@ -624,6 +688,6 @@ fn p0_p1_manifest_rows_all_have_family_modules() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         expected, declared,
-        "every P0/P1 manifest row must have a dedicated test module"
+        "every certified P0/P1 manifest row must have a dedicated test module"
     );
 }

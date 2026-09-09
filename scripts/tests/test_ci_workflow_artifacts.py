@@ -166,80 +166,64 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         )
 
     def test_cuda_smoke_uses_the_registered_gpu_runner_labels(self):
-        product_smoke = (
-            WORKFLOWS / "ci-linux-product-smoke-slice.yml"
-        ).read_text()
-        smoke = (WORKFLOWS / "smoke.yml").read_text()
+        product_smoke = (WORKFLOWS / "product-integration-smoke.yml").read_text()
 
-        self.assertIn("runner: gpu-nvidia", product_smoke)
         self.assertIn(
             '["self-hosted","Linux","X64","amd64","gpu-nvidia",'
             '"mesh-llm-amd64","mesh-llm"]',
-            smoke,
+            product_smoke,
         )
-        self.assertIn("if: inputs.runner == 'gpu-nvidia'", smoke)
-        self.assertIn("cuda-cudart-12-9", smoke)
-        self.assertIn("libcublas-12-9", smoke)
+        self.assertIn("inputs.platform == 'linux' && inputs.backend == 'cuda'", product_smoke)
+        self.assertIn("cuda-cudart-12-9", product_smoke)
+        self.assertIn("libcublas-12-9", product_smoke)
+
+    def test_product_integration_supports_accelerator_backends(self):
+        product_smoke = (WORKFLOWS / "product-integration-smoke.yml").read_text()
+        linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
+        product_script = (ROOT / "scripts/ci-product-integration-smoke.sh").read_text()
+
+        self.assertIn("inputs.backend == 'vulkan'", product_smoke)
+        self.assertIn("MESH_ROCM_INFERENCE_RUNNER_ENABLED == 'true'", product_smoke)
+        self.assertIn('"gpu-amd"', product_smoke)
+        self.assertIn("vulkaninfo --summary", product_smoke)
+        self.assertIn("rocminfo", product_smoke)
+        self.assertIn("product_integration_vulkan:", linux)
+        self.assertIn("product_integration_rocm:", linux)
+        self.assertIn("linux/vulkan) DEVICE=Vulkan0", product_script)
+        self.assertIn("linux/rocm) DEVICE=ROCm0", product_script)
 
     def test_two_node_split_smoke_covers_dense_and_recurrent_models(self):
-        workflow = (
-            WORKFLOWS / "ci-linux-product-smoke-slice.yml"
-        ).read_text()
-        scripted = (WORKFLOWS / "scripted-binary-smoke.yml").read_text()
+        workflow = (WORKFLOWS / "product-integration-smoke.yml").read_text()
+        restore = (ROOT / ".github/actions/restore-product-integration-inputs/action.yml").read_text()
+        product_script = (ROOT / "scripts/ci-product-integration-smoke.sh").read_text()
         smoke_script = (ROOT / "scripts/ci-two-node-split-smoke.sh").read_text()
 
-        self.assertIn("two_node_split:", workflow)
-        self.assertIn("name: KV caching smoke (dense + recurrent)", workflow)
-        self.assertIn("two-node-split", workflow)
-        self.assertEqual(
-            workflow.count("smoke_script: scripts/ci-two-node-split-smoke.sh"),
-            1,
-        )
-        self.assertIn(
-            "SmolLM2-135M-Instruct-GGUF/resolve/"
-            "9e6855bc4be717fca1ef21360a1db4b29d5c559a/"
-            "SmolLM2-135M-Instruct-Q8_0.gguf",
-            workflow,
-        )
-        self.assertIn(
-            "Qwen3.5-0.8B-GGUF/resolve/"
-            "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/"
-            "Qwen3.5-0.8B-Q4_K_M.gguf",
-            workflow,
-        )
-        # The recurrent leg rides the same job via the KV smoke inputs; both
-        # models must still be cached before the smoke script runs.
-        self.assertIn("model_cache_scope: two-node-split-smoke-model", workflow)
-        self.assertIn("kv_recurrent_model_file: Qwen3.5-0.8B-Q4_K_M.gguf", workflow)
-        self.assertIn(
-            "kv_recurrent_model_cache_scope: "
-            "two-node-split-recurrent-smoke-model",
-            workflow,
-        )
-        self.assertIn("kv_recurrent_context_size: '4096'", workflow)
-        self.assertIn(
-            "kv_recurrent_expected_exact_payload_kind: kv-recurrent", workflow
-        )
-        self.assertNotIn("\n      expected_exact_payload_kind: kv-recurrent", workflow)
-        self.assertIn("model_context_size:", scripted)
-        self.assertIn(
-            "MESH_LLM_SMOKE_CONTEXT_SIZE: ${{ inputs.model_context_size }}",
-            scripted,
-        )
-        self.assertIn(
-            "MESH_TWO_NODE_SPLIT_RECURRENT_EXPECTED_EXACT_PAYLOAD_KIND:", scripted
-        )
-        self.assertIn("MESH_TWO_NODE_SPLIT_RECURRENT_MODEL_FILE:", scripted)
-        self.assertNotIn("format('{0}/.models/{1}', github.workspace", scripted)
-        self.assertIn(
-            "Resolve recurrent smoke model for the KV caching leg", scripted
-        )
-        self.assertLess(
-            scripted.index("Resolve recurrent smoke model for the KV caching leg"),
-            scripted.index("Run scripted smoke"),
-        )
-        self.assertIn("Restore recurrent smoke model cache", scripted)
-        self.assertIn("Save recurrent smoke model cache", scripted)
+        self.assertIn("restore-product-integration-inputs", workflow)
+        self.assertIn("dense_model_artifact_id:", restore)
+        self.assertIn("dense_model_sha256:", restore)
+        self.assertIn("recurrent_model_artifact_id:", restore)
+        self.assertIn("recurrent_model_sha256:", restore)
+        self.assertIn("steps.resolve.outputs.dense_artifact_id", restore)
+        self.assertIn("steps.resolve.outputs.dense_sha256", restore)
+        self.assertIn("steps.resolve.outputs.recurrent_artifact_id", restore)
+        self.assertIn("steps.resolve.outputs.recurrent_sha256", restore)
+        self.assertIn("tr '[:lower:]' '[:upper:]'", restore)
+        self.assertNotIn("${fixture^^}", restore)
+        self.assertIn("steps.inputs.outputs.dense_model_artifact_id", workflow)
+        self.assertIn("steps.inputs.outputs.dense_model_sha256", workflow)
+        self.assertIn("steps.inputs.outputs.recurrent_model_artifact_id", workflow)
+        self.assertIn("steps.inputs.outputs.recurrent_model_sha256", workflow)
+        self.assertIn("smollm2-q8-inference", restore)
+        self.assertIn("family-granite-hybrid", restore)
+        self.assertIn("--github-output-prefix dense_", restore)
+        self.assertIn("--github-output-prefix recurrent_", restore)
+        self.assertIn("MESH_TWO_NODE_SPLIT_CLIENT_ROUTING=1", product_script)
+        self.assertIn("run_phase dense-split-kv", product_script)
+        self.assertIn("run_phase recurrent-split-kv", product_script)
+        self.assertIn("MESH_TWO_NODE_SPLIT_EXPECTED_EXACT_PAYLOAD_KIND=kv-recurrent", product_script)
+        self.assertNotIn("MESH_TWO_NODE_SPLIT_RECURRENT_MODEL=", product_script)
+        self.assertIn("run_client_routing_probe", smoke_script)
+        self.assertIn("Passive client routing and streaming validated", smoke_script)
         self.assertIn(
             'checkpointed_restore = exact_payload_kind == "kv-recurrent"',
             smoke_script,
@@ -247,6 +231,40 @@ class CiWorkflowArtifactTests(unittest.TestCase):
         self.assertIn(
             "if not checkpointed_restore and (", smoke_script
         )
+
+    def test_product_integration_uploads_reconciled_phase_evidence_on_every_outcome(self):
+        workflow = (WORKFLOWS / "product-integration-smoke.yml").read_text()
+
+        self.assertIn("name: Upload product integration phase evidence", workflow)
+        self.assertIn("if: success() || failure()", workflow)
+        self.assertIn("phase-results.json", workflow)
+        self.assertIn("*/split-evidence.json", workflow)
+        self.assertIn("*/split-evidence-snapshots/*.json", workflow)
+        self.assertIn("*/*.log", workflow)
+        self.assertIn("-evidence", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+
+    def test_protected_catalog_defers_product_integration_rollout(self):
+        slices = json.loads(SLICES.read_text())
+        smoke_ids = {row["id"] for row in slices["smoke_rows"]}
+        linux = (WORKFLOWS / "ci-linux-product-smoke-slice.yml").read_text()
+
+        self.assertNotIn("product-integration-cpu", smoke_ids)
+        self.assertNotIn("qwen-recurrent-gate", smoke_ids)
+        self.assertIn("core", smoke_ids)
+        self.assertIn("two-node-client", smoke_ids)
+        self.assertIn("two-node-split", smoke_ids)
+        for smoke_id in ("core", "two-node-client", "two-node-split"):
+            self.assertIn(
+                f"contains(fromJson(inputs.smoke_matrix).*.id, '{smoke_id}')",
+                linux,
+            )
+        self.assertIn("Qwen3.5-0.8B-Q4_K_M.gguf", linux)
+        self.assertIn("expected_exact_payload_kind: kv-recurrent", linux)
+        self.assertNotIn("product-integration-cuda", smoke_ids)
+        self.assertNotIn("product-integration-metal", smoke_ids)
+        self.assertIn("core-cuda", smoke_ids)
+        self.assertIn("metal-model-load", smoke_ids)
 
     def test_cuda_product_supports_the_registered_gpu_runner_architecture(self):
         runtimes = json.loads(SLICES.read_text())["runtime_rows"]

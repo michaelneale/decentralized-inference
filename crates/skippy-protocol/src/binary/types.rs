@@ -1,10 +1,12 @@
 use std::io;
 
+use crate::StageActivationCodec;
+
 use super::invalid_data;
 
-// v14 expands the fixed StageReplyStats payload from 23 to 27 i64 fields. Stage peers must be
-// upgraded together so older readers reject the changed wire contract before decoding it.
-pub const STAGE_STATE_VERSION: i32 = 14;
+// v15 adds an explicit activation codec and encoded byte count to every stage frame. Stage peers
+// must be upgraded together so older readers reject compact payloads before decoding them as F32.
+pub const STAGE_STATE_VERSION: i32 = 15;
 pub const MAX_STAGE_LOGIT_BIAS: usize = 256;
 pub const MAX_STAGE_SAMPLERS: usize = 16;
 pub const MAX_STAGE_DRY_SEQUENCE_BREAKERS: usize = 8;
@@ -17,10 +19,10 @@ pub const MAX_STAGE_ACTIVATION_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_STAGE_DECODED_ACTIVATION_BYTES: usize = 512 * 1024 * 1024;
 pub const READY_MAGIC: i32 = 0x5352_4459; // "SRDY"
 pub const LLAMA_TOKEN_NULL: i32 = -1;
-pub const STAGE_STATE_HEADER_BYTES: usize = 9 * 4;
+pub const STAGE_STATE_HEADER_BYTES: usize = 10 * 4;
 pub const STAGE_SAMPLING_CONFIG_BASE_BYTES: usize = 27 * 4;
 pub const STAGE_LOGIT_BIAS_WIRE_BYTES: usize = 4 + 4;
-pub const STAGE_WIRE_FIXED_HEADER_BYTES: usize = 5 * 4 + STAGE_STATE_HEADER_BYTES + 2 * 8;
+pub const STAGE_WIRE_FIXED_HEADER_BYTES: usize = 6 * 4 + STAGE_STATE_HEADER_BYTES + 2 * 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -214,6 +216,7 @@ pub struct StageStateHeader {
     pub decode_step: i32,
     pub current_token: i32,
     pub source_stage_index: i32,
+    pub activation_codec: StageActivationCodec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -329,6 +332,7 @@ impl StageStateHeader {
             decode_step: -1,
             current_token: LLAMA_TOKEN_NULL,
             source_stage_index: -1,
+            activation_codec: StageActivationCodec::default(),
         };
         if matches!(
             kind,

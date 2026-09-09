@@ -8,7 +8,7 @@ LLAMA_UPSTREAM_URL="${LLAMA_UPSTREAM_URL:-https://github.com/ggml-org/llama.cpp.
 LLAMA_WORKDIR="${LLAMA_WORKDIR:-$ROOT/.deps/llama.cpp}"
 PIN_FILE="${LLAMA_PIN_FILE:-$ROOT/third_party/llama.cpp/upstream.txt}"
 PATCH_DIR="${LLAMA_PATCH_DIR:-$ROOT/third_party/llama.cpp/patches}"
-PREPARE_SCHEMA=3
+PREPARE_SCHEMA=4
 
 if [[ ! -f "$PIN_FILE" ]]; then
   echo "missing llama upstream pin: $PIN_FILE" >&2
@@ -162,6 +162,45 @@ validate_patch_sequence() {
 }
 
 validate_patch_sequence
+
+GENERATED_PATCH_DIR="$PATCH_DIR/generated"
+GENERATED_SERIES="$GENERATED_PATCH_DIR/series"
+if [[ -e "$GENERATED_PATCH_DIR" && ! -f "$GENERATED_SERIES" ]]; then
+  echo "generated family patch directory is missing its series file: $GENERATED_PATCH_DIR" >&2
+  exit 1
+fi
+if [[ -f "$GENERATED_SERIES" ]]; then
+  generated_expected=1
+  generated_count=0
+  while IFS= read -r filename || [[ -n "$filename" ]]; do
+    # Git for Windows may check this text manifest out with CRLF endings.
+    # Bash read removes the newline but retains the carriage return.
+    filename="${filename%$'\r'}"
+    if [[ ! "$filename" =~ ^([0-9]{4})-family-[a-z0-9.-]+(--[a-z0-9.-]+)*\.patch$ ]]; then
+      echo "invalid generated family patch filename in series: $filename" >&2
+      exit 1
+    fi
+    sequence=$((10#${BASH_REMATCH[1]}))
+    if (( sequence != generated_expected )); then
+      printf -v expected_prefix '%04d' "$generated_expected"
+      echo "invalid generated family patch sequence: expected $expected_prefix, found ${BASH_REMATCH[1]} ($filename)" >&2
+      exit 1
+    fi
+    patch="$GENERATED_PATCH_DIR/$filename"
+    if [[ ! -f "$patch" ]]; then
+      echo "generated family patch listed by series is missing: $patch" >&2
+      exit 1
+    fi
+    PATCHES+=("$patch")
+    generated_expected=$((generated_expected + 1))
+    generated_count=$((generated_count + 1))
+  done < "$GENERATED_SERIES"
+  actual_generated_count="$(find "$GENERATED_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' | wc -l | tr -d '[:space:]')"
+  if (( generated_count == 0 || actual_generated_count != generated_count )); then
+    echo "generated family patch series does not exactly cover its patch directory" >&2
+    exit 1
+  fi
+fi
 
 python_bin() {
   local candidate

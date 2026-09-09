@@ -47,3 +47,18 @@ jobs:
       timeout_minutes: ${{ inputs.timeout_minutes }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  product_integration_metal:
+    name: Metal product integration suite
+    if: ${{ contains(fromJson(inputs.smoke_matrix).*.id, 'product-integration-metal') }}
+    uses: ./.github/workflows/product-integration-smoke.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      artifact_name: ci-product-macos-${{ inputs.architecture }}-metal
+      artifact_path: ci-artifacts/macos
+      staged_binary_path: ${{ inputs.binary_target }}
+      platform: macos
+      backend: metal
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -7,7 +7,7 @@ use crate::crypto::{
     OwnerKeychainLoadError, default_keystore_path, default_trust_store_path, keystore_exists,
     keystore_metadata, load_keystore, load_owner_keypair_from_keychain, load_trust_store,
 };
-use crate::inference::election;
+use crate::inference::{election, skippy};
 use crate::mesh;
 use crate::models;
 use crate::plugin;
@@ -76,6 +76,7 @@ pub(super) struct StartupModelPlan {
     pub(super) declared_ref: String,
     pub(super) config_model_id: Option<String>,
     pub(super) resolved_path: PathBuf,
+    pub(super) preindexed_split_package: Option<skippy::SkippyPackageIdentity>,
     pub(super) mmproj_path: Option<PathBuf>,
     pub(super) ctx_size: Option<u32>,
     pub(super) gpu_id: Option<String>,
@@ -1022,6 +1023,7 @@ pub(super) async fn resolve_local_model_only_startup_models(
             declared_ref,
             config_model_id: spec.config_model_id.clone(),
             resolved_path,
+            preindexed_split_package: None,
             mmproj_path,
             ctx_size: spec.ctx_size,
             gpu_id: spec.gpu_id.clone(),
@@ -1062,9 +1064,27 @@ async fn resolve_startup_models_with_package_discovery(
     let mut plans = Vec::with_capacity(specs.len());
     for spec in specs {
         if spec.local_source_required {
-            plans.push(resolve_local_required_startup_model(spec)?);
+            let mut plan = resolve_local_required_startup_model(spec)?;
+            let model_id = spec
+                .config_model_id
+                .as_deref()
+                .or(spec.declared_ref.as_deref())
+                .unwrap_or(plan.declared_ref.as_str())
+                .to_string();
+            let model_path = plan.resolved_path.clone();
+            let identity = tokio::task::spawn_blocking(move || {
+                skippy::synthetic_direct_gguf_package(&model_id, &model_path)
+            })
+            .await
+            .context("join direct GGUF indexing task")??;
+            if spec.config_model_id.is_none() && spec.declared_ref.is_none() {
+                plan.declared_ref = direct_gguf_model_id(&identity);
+            }
+            plan.preindexed_split_package = Some(identity);
+            plans.push(plan);
             continue;
         }
+        let direct_local_gguf = is_direct_local_gguf_source(&spec.model_ref);
         let requested_ref = spec
             .config_model_id
             .clone()
@@ -1091,8 +1111,30 @@ async fn resolve_startup_models_with_package_discovery(
             Some(mmproj) => Some(resolve_model(mmproj).await?),
             None => None,
         };
+        let preindexed_split_package = if direct_local_gguf {
+            let model_id = spec
+                .config_model_id
+                .as_deref()
+                .or(spec.declared_ref.as_deref())
+                .unwrap_or(requested_ref.as_str())
+                .to_string();
+            let model_path = resolved_path.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    skippy::synthetic_direct_gguf_package(&model_id, &model_path)
+                })
+                .await
+                .context("join direct GGUF indexing task")??,
+            )
+        } else {
+            None
+        };
         let declared_ref = if let Some(declared_ref) = &spec.declared_ref {
             declared_ref.clone()
+        } else if spec.config_model_id.is_none()
+            && let Some(identity) = preindexed_split_package.as_ref()
+        {
+            direct_gguf_model_id(identity)
         } else {
             find_remote_catalog_model_exact_blocking(requested_ref.clone())
                 .await
@@ -1117,6 +1159,7 @@ async fn resolve_startup_models_with_package_discovery(
             declared_ref,
             config_model_id: spec.config_model_id.clone(),
             resolved_path,
+            preindexed_split_package,
             mmproj_path,
             ctx_size: spec.ctx_size,
             gpu_id: spec.gpu_id.clone(),
@@ -1132,6 +1175,18 @@ async fn resolve_startup_models_with_package_discovery(
         });
     }
     Ok(plans)
+}
+
+pub(super) fn is_direct_local_gguf_source(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+}
+
+fn direct_gguf_model_id(identity: &skippy::SkippyPackageIdentity) -> String {
+    format!("local-gguf/sha256-{}", identity.source_model_sha256)
 }
 
 /// Read the `model_id` field from a layer package's `model-package.json`.

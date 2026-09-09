@@ -103,6 +103,25 @@ enough to promote.
 
 Raw run artifacts stay under `target/family-certify/...`.
 
+### Representative cut lattice
+
+The default `activation_handoff_matches_full_model` lane exercises exactly one
+split pair per family. A Granite-class failure can hide in any untested cut,
+because the native builders hand-copy the stage-filter snippet per model file.
+`p0_llama_representative_cut_lattice_matches_full_model` covers a lattice of
+cuts for the P0 `llama` representative instead: the full ordered-pair lattice
+when `layer_count <= 12`, and otherwise the deduplicated union of all adjacent
+pairs `(s, s+1)`, first-edge pairs `(1, s2)`, final-edge pairs `(s1, L-1)`,
+plus the reviewed manifest pair. Coverage mode and pair count are printed on
+every run, and a failing cut reports model, `(s1, s2)`, layer count, and the
+stage ranges so a null-weight crash names its cut:
+
+```bash
+LLAMA_STAGE_BUILD_DIR="$PWD/.deps/llama-build/build-stage-abi-cpu" \
+  cargo test -p skippy-correctness --test parity_models \
+  p0_llama_representative_cut_lattice_matches_full_model -- --ignored
+```
+
 ## Tracking Plan
 
 We track each llama.cpp family through separate gates. A family is not promoted

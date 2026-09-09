@@ -2888,7 +2888,13 @@ class CiArtifactActionTests(unittest.TestCase):
                     block = step_block(workflow, marker)
                     with self.subTest(consumer=marker):
                         if "restore-sccache-seed" in marker:
-                            self.assertIn("allow_trusted_sccache_seed", block)
+                            if filename == "ci-linux-runtime-slice.yml":
+                                self.assertEqual(
+                                    re.findall(r'^\s*allow_trusted_seed:\s*(.+)$', block, re.MULTILINE),
+                                    ['"false"'],
+                                )
+                            else:
+                                self.assertIn("allow_trusted_sccache_seed", block)
                         else:
                             self.assertIn("allow_native_github_cache", block)
 
@@ -2930,11 +2936,11 @@ class CiArtifactActionTests(unittest.TestCase):
         # baked pnpm store instead (#1392); see the comment on
         # `eligible_consumers` above.
         self.assertIn(
-            f"cache: ${{{{ {native_cache_expression} && 'pnpm' || '' }}}}",
+            f"cache: ${{{{ inputs.ui_artifact_name == '' && {native_cache_expression} && 'pnpm' || '' }}}}",
             swift,
         )
         self.assertIn(
-            f"package-manager-cache: ${{{{ {native_cache_expression} }}}}",
+            f"package-manager-cache: ${{{{ inputs.ui_artifact_name == '' && {native_cache_expression} }}}}",
             swift,
         )
         self.assertIn(
