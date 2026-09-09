@@ -34,9 +34,10 @@ pub use gguf_writer::{
 };
 pub use logging::{
     LLAMA_LOG_LEVEL_DEBUG, MeasuredNativeBuffers, NativeLogEvent, disable_verbose_native_logs,
-    enable_verbose_native_logs, measured_native_buffers, redirect_native_logs_to_file,
-    register_filtered_native_logs, restore_native_logs, set_filtered_native_logs_enabled,
-    suppress_native_logs, unregister_filtered_native_logs, write_native_log_note,
+    enable_verbose_native_logs, measured_native_buffers, record_measured_lane_count,
+    redirect_native_logs_to_file, register_filtered_native_logs, restore_native_logs,
+    set_filtered_native_logs_enabled, suppress_native_logs, unregister_filtered_native_logs,
+    write_native_log_note,
 };
 pub use native::{StageModel, StageModelReader};
 pub use native_mtp::NativeMtpDraft;

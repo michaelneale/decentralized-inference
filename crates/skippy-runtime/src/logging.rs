@@ -106,6 +106,11 @@ impl ProgressTracker {
 pub struct MeasuredNativeBuffers {
     pub compute_mib: Option<f64>,
     pub kv_mib: Option<f64>,
+    /// Lane count (`parallel`) the buffers were measured at. Compute buffers
+    /// scale ~linearly with lanes (measured 399/783/1551 MiB at 2/4/8 lanes
+    /// on the 5080, granite), so re-planning at a different lane count must
+    /// scale the compute charge. `None` until a plan resolves lanes.
+    pub lane_count: Option<u32>,
 }
 
 /// Snapshot of the measured native buffer sizes observed so far in this
@@ -119,7 +124,22 @@ pub fn measured_native_buffers() -> Option<MeasuredNativeBuffers> {
     Some(MeasuredNativeBuffers {
         compute_mib: aggregator.measured_compute_mib,
         kv_mib: aggregator.measured_kv_mib,
+        lane_count: aggregator.measured_lane_count,
     })
+}
+
+/// Record the lane count (`parallel`) the host runtime planned for the model
+/// currently being opened. Called by the host when a plan resolves lanes, so
+/// the measured compute-buffer footprint carries the lane count it was
+/// measured at; a re-plan at a different lane count scales the compute charge
+/// accordingly.
+pub fn record_measured_lane_count(lane_count: u32) {
+    if lane_count == 0 {
+        return;
+    }
+    if let Ok(mut aggregator) = native_log_aggregator().lock() {
+        aggregator.measured_lane_count = Some(lane_count);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -221,6 +241,11 @@ struct NativeLogAggregator {
     /// [`measured_native_buffers`] after model open completes.
     measured_compute_mib: Option<f64>,
     measured_kv_mib: Option<f64>,
+    /// Lane count the current measured buffers were measured at, recorded by
+    /// the host runtime when a plan resolves lanes (see
+    /// `record_measured_lane_count`). Used to scale the compute charge when a
+    /// re-plan chooses a different lane count.
+    measured_lane_count: Option<u32>,
 }
 
 fn native_log_file() -> &'static Mutex<Option<LineWriter<File>>> {
@@ -275,6 +300,12 @@ impl NativeLogAggregator {
         self.tensor_groups.clear();
         self.tensor_groups_emitted = false;
         self.kv_layers_seen.clear();
+        // A new model load invalidates the previous model's measured buffer
+        // sizes: buffer scales are model/shape-specific, and charging one
+        // model's HWM against another's budget would be wrong both directions.
+        self.measured_compute_mib = None;
+        self.measured_kv_mib = None;
+        self.measured_lane_count = None;
     }
 
     fn process_line(&mut self, line: &str) -> Vec<NativeLogEvent> {

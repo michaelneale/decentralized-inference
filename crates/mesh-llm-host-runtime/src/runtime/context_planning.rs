@@ -165,6 +165,11 @@ pub(super) struct MeasuredBufferFootprint {
     pub(super) kv_bytes: u64,
     /// The context length the KV buffer was measured at.
     pub(super) context_length: u32,
+    /// Lane count the buffers were measured at. Compute buffers scale
+    /// ~linearly with lanes (measured 399/783/1551 MiB at 2/4/8 lanes on the
+    /// 5080 for granite), so a plan resolving a different lane count scales
+    /// the compute charge by the lane ratio.
+    pub(super) lane_count: u32,
 }
 
 /// Plan context length and parallel slots.
@@ -428,7 +433,7 @@ const DEFAULT_UTILIZATION_TARGET_DENOMINATOR: u64 = 100;
 /// unchanged from the probe context.
 fn planned_context_length_budget_driven(input: &RuntimeResourcePlanInput<'_>) -> Option<u32> {
     let measured = input.measured_buffers?;
-    if measured.context_length == 0 || measured.kv_bytes == 0 {
+    if measured.context_length == 0 || measured.kv_bytes == 0 || measured.lane_count == 0 {
         return None;
     }
     let Some(metadata) = input.metadata else {
@@ -443,7 +448,20 @@ fn planned_context_length_budget_driven(input: &RuntimeResourcePlanInput<'_>) ->
     let post_weight = input.vram_bytes.saturating_sub(input.model_bytes);
     let utilised = u128::from(post_weight) * u128::from(DEFAULT_UTILIZATION_TARGET_NUMERATOR)
         / u128::from(DEFAULT_UTILIZATION_TARGET_DENOMINATOR);
-    let budget = utilised.saturating_sub(u128::from(measured.compute_bytes));
+    // Scale the measured compute charge by the lane ratio when the plan's
+    // resolved lane count differs from the one the footprint was measured at:
+    // compute buffers scale ~linearly with lanes (CUDA_Host + device graphs),
+    // while the unified KV pool is lane-invariant. Linear-through-origin
+    // slightly overestimates when scaling up (~2-3% at 4→8 on measured data),
+    // which is the conservative direction; scaling down is symmetric.
+    let resolved_lanes = input
+        .parallel_override
+        .map(|slots| slots.max(1) as u64)
+        .unwrap_or_else(|| planned_parallel_slots() as u64);
+    let lane_ratio_num = u128::from(resolved_lanes);
+    let lane_ratio_den = u128::from(measured.lane_count);
+    let compute_charge = u128::from(measured.compute_bytes) * lane_ratio_num / lane_ratio_den;
+    let budget = utilised.saturating_sub(compute_charge);
     let kv_per_token = u128::from(measured.kv_bytes) / u128::from(measured.context_length);
     if kv_per_token == 0 {
         return None;
@@ -856,6 +874,7 @@ mod tests {
                 compute_bytes: 512 * 1024 * 1024,
                 kv_bytes: 2 * 1024 * 1024 * 1024,
                 context_length: 16_384,
+                lane_count: 4,
             }),
         });
         assert_eq!(plan.context_length, 65_536);
@@ -878,6 +897,7 @@ mod tests {
                 compute_bytes: 128 * 1024 * 1024,
                 kv_bytes: 512 * 1024 * 1024,
                 context_length: 16_384,
+                lane_count: 4,
             }),
         });
         assert_eq!(tight.context_length, 131_072);
@@ -911,19 +931,27 @@ mod tests {
             measured_buffers: None,
         };
 
-        // Zero-context or zero-KV measurements cannot drive the budget model;
-        // the plan must equal the static-ladder answer.
+        // Zero-context, zero-KV, or zero-lane measurements cannot drive the
+        // budget model; the plan must equal the static-ladder answer.
         let ladder = plan_runtime_resources(base).context_length;
         for unusable in [
             MeasuredBufferFootprint {
                 compute_bytes: 512 * 1024 * 1024,
                 kv_bytes: 0,
                 context_length: 16_384,
+                lane_count: 4,
             },
             MeasuredBufferFootprint {
                 compute_bytes: 512 * 1024 * 1024,
                 kv_bytes: 2 * 1024 * 1024 * 1024,
                 context_length: 0,
+                lane_count: 4,
+            },
+            MeasuredBufferFootprint {
+                compute_bytes: 512 * 1024 * 1024,
+                kv_bytes: 2 * 1024 * 1024 * 1024,
+                context_length: 16_384,
+                lane_count: 0,
             },
             // Compute larger than the whole utilized budget saturates the
             // budget to zero; the ladder answers rather than planning an
@@ -932,6 +960,7 @@ mod tests {
                 compute_bytes: u64::MAX,
                 kv_bytes: 2 * 1024 * 1024 * 1024,
                 context_length: 16_384,
+                lane_count: 4,
             },
         ] {
             let degraded = plan_runtime_resources(RuntimeResourcePlanInput {
@@ -940,6 +969,47 @@ mod tests {
             });
             assert_eq!(degraded.context_length, ladder);
         }
+    }
+
+    #[test]
+    fn budget_driven_compute_charge_scales_with_lane_count() {
+        // Compute buffers scale ~linearly with lanes (measured 399/783/1551
+        // MiB at 2/4/8 on the 5080). A footprint measured at 4 lanes must be
+        // charged at 2x when the plan resolves 8 lanes, and at 0.5x when it
+        // resolves 2 — and the context depth must follow the charge.
+        let metadata = gqa_metadata(131_072);
+        let footprint = MeasuredBufferFootprint {
+            compute_bytes: 512 * 1024 * 1024,
+            kv_bytes: 2 * 1024 * 1024 * 1024,
+            context_length: 16_384,
+            lane_count: 4,
+        };
+        let plan_at = |parallel_override: Option<usize>| {
+            plan_runtime_resources(RuntimeResourcePlanInput {
+                ctx_size_override: None,
+                parallel_override,
+                model_bytes: 3 * 1024 * 1024 * 1024,
+                vram_bytes: 16 * 1024 * 1024 * 1024,
+                metadata: Some(&metadata),
+                kv_cache_quant: GgufKvCacheQuant::Q8_0,
+                local_layer_fraction: None,
+                planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
+                measured_buffers: Some(footprint),
+            })
+            .context_length
+        };
+
+        let at2 = plan_at(Some(2));
+        let at4 = plan_at(Some(4));
+        let at8 = plan_at(Some(8));
+        // Scaling the charge DOWN (fewer lanes than measured) frees budget and
+        // can only deepen (or hold) the plan; scaling UP can only shallow it.
+        assert!(at2 >= at4);
+        assert!(at8 <= at4);
+        // At the measured lane count the charge is exactly the measured value,
+        // so this matches the roomy-node case of
+        // budget_driven_context_uses_measured_kv_and_compute.
+        assert_eq!(at4, 65_536);
     }
 
     #[test]
@@ -976,6 +1046,7 @@ mod tests {
         let measured = skippy_runtime::MeasuredNativeBuffers {
             compute_mib: Some(512.0),
             kv_mib: Some(2048.0),
+            lane_count: Some(4),
         };
         let reconciled = reconcile_memory_plan_with_measurements(&breakdown, Some(measured));
         assert_eq!(reconciled.measured_compute_bytes, Some(512 * 1024 * 1024));
