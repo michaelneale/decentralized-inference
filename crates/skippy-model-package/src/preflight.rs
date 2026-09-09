@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
+use skippy_model::package_carrier::resolve_package_carrier;
 use skippy_package_format::{
     Artifact, Generation, PACKAGE_SCHEMA_VERSION, PackageManifest, ProposerKind, StrategyKind,
     TensorStorage, WindowPolicy,
@@ -154,7 +155,7 @@ pub(crate) fn preflight_package(
     report.model_id = Some(manifest.model_id.clone());
     report.layer_count = Some(manifest.layer_count);
     report.generation = manifest.generation.clone();
-    if let Err(errors) = manifest.validate() {
+    if let Err(errors) = manifest.validate_root() {
         for issue in errors.issues() {
             let code = serde_json::to_value(issue.code)
                 .ok()
@@ -168,9 +169,29 @@ pub(crate) fn preflight_package(
             );
         }
     }
-    validate_runtime_generation(&manifest, &mut report);
-
     validate_artifacts(package, &manifest, options.verify_sha256, &mut report);
+    let metadata_artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id);
+    let manifest = match metadata_artifact
+        .and_then(|artifact| safe_relative_path(&artifact.path).ok())
+        .map(|path| resolve_package_carrier(manifest, package.join(path)))
+    {
+        Some(Ok(manifest)) => manifest,
+        Some(Err(error)) => {
+            report.error(
+                "invalid_metadata_carrier",
+                format!("cannot resolve package inventory from metadata carrier: {error:#}"),
+                Some("shared/metadata.gguf".to_string()),
+                "redownload or rebuild the package metadata carrier",
+            );
+            return report.finalize();
+        }
+        None => return report.finalize(),
+    };
+    validate_runtime_generation(&manifest, &mut report);
     build_stage_reports(&manifest, options.stages, &mut report);
     report.finalize()
 }
@@ -675,7 +696,7 @@ mod tests {
         );
         assert!(report.valid, "{:?}", report.issues);
         assert_eq!(report.schema_version, PACKAGE_SCHEMA_VERSION);
-        assert_eq!(report.checked_artifact_count, 1);
+        assert_eq!(report.checked_artifact_count, 3);
         assert_eq!(report.stages.len(), 2);
         assert!(report.stages.iter().all(|stage| !stage.parts.is_empty()));
     }

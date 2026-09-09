@@ -3779,29 +3779,29 @@
   ],
   "crates/skippy-model-package/src/main.rs": [
     {
-      "line": 31,
+      "line": 32,
       "macro_name": "eprintln!"
     },
     {
-      "line": 39,
+      "line": 40,
       "macro_name": "eprintln!"
     },
     {
-      "line": 70,
+      "line": 71,
       "macro_name": "println!"
     },
     {
-      "line": 136,
+      "line": 137,
       "macro_name": "println!"
     },
     {
-      "line": 156,
+      "line": 157,
       "macro_name": "println!"
     }
   ],
   "crates/skippy-model-package/src/package_v2.rs": [
     {
-      "line": 106,
+      "line": 169,
       "macro_name": "println!"
     }
   ],

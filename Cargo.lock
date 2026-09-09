@@ -7456,6 +7456,7 @@ dependencies = [
  "safetensors",
  "serde",
  "serde_json",
+ "skippy-package-format",
 ]
 
 [[package]]

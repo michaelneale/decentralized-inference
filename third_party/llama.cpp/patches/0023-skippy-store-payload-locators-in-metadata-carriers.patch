@@ -1,0 +1,162 @@
+From 2f8577ee154597d361d23669211bb18a97e04311 Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Wed, 9 Sep 2026 13:19:51 +1000
+Subject: [PATCH] skippy: store payload locators in metadata carriers
+
+Keep tensor placement in the GGUF planning carrier so the JSON package root can omit its duplicated tensor catalog.
+
+Assisted-by: scama
+---
+ src/skippy/model_package.cpp | 44 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/src/skippy/model_package.cpp b/src/skippy/model_package.cpp
+index b2dce591b..6df18689e 100644
+--- a/src/skippy/model_package.cpp
++++ b/src/skippy/model_package.cpp
+@@ -52,6 +52,7 @@ struct skippy_slice_plan {
+ struct skippy_source_tensor {
+     const skippy_model_info * source = nullptr;
+     const skippy_tensor_meta * tensor = nullptr;
++    uint32_t part_index = 0;
+ };
+ 
+ struct skippy_model_info {
+@@ -292,6 +293,14 @@ static void skippy_clear_split_metadata(gguf_context * ctx) {
+     gguf_remove_key(ctx, "split.tensors.count");
+ }
+ 
++static void skippy_clear_slice_metadata(gguf_context * ctx) {
++    gguf_remove_key(ctx, "skippy.slice.stage_index");
++    gguf_remove_key(ctx, "skippy.slice.layer_start");
++    gguf_remove_key(ctx, "skippy.slice.layer_end");
++    gguf_remove_key(ctx, "skippy.slice.include_embeddings");
++    gguf_remove_key(ctx, "skippy.slice.include_output");
++}
++
+ static skippy_model_info * skippy_model_info_open_owned(const char * path) {
+     gguf_init_params params = {
+         /*.no_alloc =*/ true,
+@@ -650,6 +659,10 @@ enum skippy_status skippy_write_gguf_metadata_from_parts(
+         skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "input paths and output_path are required");
+         return SKIPPY_STATUS_INVALID_ARGUMENT;
+     }
++    if (input_count > std::numeric_limits<uint32_t>::max()) {
++        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "input part count exceeds uint32");
++        return SKIPPY_STATUS_INVALID_ARGUMENT;
++    }
+ 
+     std::vector<skippy_model_info *> sources;
+     sources.reserve(input_count);
+@@ -674,10 +687,11 @@ enum skippy_status skippy_write_gguf_metadata_from_parts(
+ 
+     std::vector<skippy_source_tensor> selected;
+     std::set<std::string> names;
+-    for (const skippy_model_info * source : sources) {
++    for (size_t part_index = 0; part_index < sources.size(); ++part_index) {
++        const skippy_model_info * source = sources[part_index];
+         for (const skippy_tensor_meta & tensor : source->tensors) {
+             if (names.insert(tensor.name).second) {
+-                selected.push_back({ source, &tensor });
++                selected.push_back({ source, &tensor, static_cast<uint32_t>(part_index) });
+             }
+         }
+     }
+@@ -693,8 +707,34 @@ enum skippy_status skippy_write_gguf_metadata_from_parts(
+ 
+     gguf_set_kv(out_ctx, sources.front()->ctx);
+     skippy_clear_split_metadata(out_ctx);
++    skippy_clear_slice_metadata(out_ctx);
++    gguf_remove_key(out_ctx, "skippy.package.materialized");
+     gguf_set_val_bool(out_ctx, "skippy.package.metadata_only", true);
+     gguf_set_val_u32(out_ctx, "skippy.package.part_count", static_cast<uint32_t>(input_count));
++    gguf_set_val_u32(out_ctx, "skippy.package.locator_schema", 1);
++
++    std::vector<uint32_t> tensor_parts;
++    std::vector<uint64_t> tensor_offsets;
++    std::vector<uint64_t> tensor_sizes;
++    std::vector<uint32_t> tensor_alignments;
++    tensor_parts.reserve(selected.size());
++    tensor_offsets.reserve(selected.size());
++    tensor_sizes.reserve(selected.size());
++    tensor_alignments.reserve(selected.size());
++    for (const skippy_source_tensor & item : selected) {
++        tensor_parts.push_back(item.part_index);
++        tensor_offsets.push_back(static_cast<uint64_t>(gguf_get_data_offset(item.source->ctx)) + item.tensor->offset);
++        tensor_sizes.push_back(item.tensor->size);
++        tensor_alignments.push_back(static_cast<uint32_t>(gguf_get_alignment(item.source->ctx)));
++    }
++    gguf_set_arr_data(out_ctx, "skippy.package.tensor_part", GGUF_TYPE_UINT32,
++            tensor_parts.data(), tensor_parts.size());
++    gguf_set_arr_data(out_ctx, "skippy.package.tensor_offset", GGUF_TYPE_UINT64,
++            tensor_offsets.data(), tensor_offsets.size());
++    gguf_set_arr_data(out_ctx, "skippy.package.tensor_size", GGUF_TYPE_UINT64,
++            tensor_sizes.data(), tensor_sizes.size());
++    gguf_set_arr_data(out_ctx, "skippy.package.tensor_alignment", GGUF_TYPE_UINT32,
++            tensor_alignments.data(), tensor_alignments.size());
+ 
+     const size_t tensor_mem = ggml_tensor_overhead() * (selected.size() + 1) + 1024 * 1024;
+     ggml_init_params ggml_params = {
+-- 
+2.54.0 (Apple Git-157)
+
+diff --git a/src/skippy/tests/renamed_multishard_planning.cpp b/src/skippy/tests/renamed_multishard_planning.cpp
+index 783e7b869..103542e0a 100644
+--- a/src/skippy/tests/renamed_multishard_planning.cpp
++++ b/src/skippy/tests/renamed_multishard_planning.cpp
+@@ -306,16 +306,40 @@ bool inspect_metadata_carrier(
+     }
+     const int metadata_only_key = gguf_find_key(metadata.get(), "skippy.package.metadata_only");
+     const int part_count_key = gguf_find_key(metadata.get(), "skippy.package.part_count");
+-    if (metadata_only_key < 0 || part_count_key < 0 ||
++    const int locator_schema_key = gguf_find_key(metadata.get(), "skippy.package.locator_schema");
++    const int tensor_part_key = gguf_find_key(metadata.get(), "skippy.package.tensor_part");
++    const int tensor_offset_key = gguf_find_key(metadata.get(), "skippy.package.tensor_offset");
++    const int tensor_size_key = gguf_find_key(metadata.get(), "skippy.package.tensor_size");
++    const int tensor_alignment_key = gguf_find_key(metadata.get(), "skippy.package.tensor_alignment");
++    if (metadata_only_key < 0 || part_count_key < 0 || locator_schema_key < 0 ||
++            tensor_part_key < 0 || tensor_offset_key < 0 || tensor_size_key < 0 || tensor_alignment_key < 0 ||
+             gguf_get_kv_type(metadata.get(), metadata_only_key) != GGUF_TYPE_BOOL ||
+             gguf_get_kv_type(metadata.get(), part_count_key) != GGUF_TYPE_UINT32 ||
++            gguf_get_kv_type(metadata.get(), locator_schema_key) != GGUF_TYPE_UINT32 ||
++            gguf_get_kv_type(metadata.get(), tensor_part_key) != GGUF_TYPE_ARRAY ||
++            gguf_get_arr_type(metadata.get(), tensor_part_key) != GGUF_TYPE_UINT32 ||
++            gguf_get_kv_type(metadata.get(), tensor_offset_key) != GGUF_TYPE_ARRAY ||
++            gguf_get_arr_type(metadata.get(), tensor_offset_key) != GGUF_TYPE_UINT64 ||
++            gguf_get_kv_type(metadata.get(), tensor_size_key) != GGUF_TYPE_ARRAY ||
++            gguf_get_arr_type(metadata.get(), tensor_size_key) != GGUF_TYPE_UINT64 ||
++            gguf_get_kv_type(metadata.get(), tensor_alignment_key) != GGUF_TYPE_ARRAY ||
++            gguf_get_arr_type(metadata.get(), tensor_alignment_key) != GGUF_TYPE_UINT32 ||
+             !gguf_get_val_bool(metadata.get(), metadata_only_key) ||
+             gguf_get_val_u32(metadata.get(), part_count_key) != expected_part_count ||
++            gguf_get_val_u32(metadata.get(), locator_schema_key) != 1 ||
+             std::filesystem::file_size(path) != gguf_get_data_offset(metadata.get()) ||
+-            gguf_get_n_tensors(metadata.get()) != static_cast<int64_t>(source.tensors.size())) {
++            gguf_get_n_tensors(metadata.get()) != static_cast<int64_t>(source.tensors.size()) ||
++            gguf_get_arr_n(metadata.get(), tensor_part_key) != source.tensors.size() ||
++            gguf_get_arr_n(metadata.get(), tensor_offset_key) != source.tensors.size() ||
++            gguf_get_arr_n(metadata.get(), tensor_size_key) != source.tensors.size() ||
++            gguf_get_arr_n(metadata.get(), tensor_alignment_key) != source.tensors.size()) {
+         error = "metadata carrier markers, size, or tensor count are invalid";
+         return false;
+     }
++    const auto * tensor_parts = static_cast<const uint32_t *>(gguf_get_arr_data(metadata.get(), tensor_part_key));
++    const auto * tensor_offsets = static_cast<const uint64_t *>(gguf_get_arr_data(metadata.get(), tensor_offset_key));
++    const auto * tensor_sizes = static_cast<const uint64_t *>(gguf_get_arr_data(metadata.get(), tensor_size_key));
++    const auto * tensor_alignments = static_cast<const uint32_t *>(gguf_get_arr_data(metadata.get(), tensor_alignment_key));
+     std::map<std::string, const skippy_package_tensor_binding_input *> source_by_name;
+     for (const auto & tensor : source.tensors) {
+         source_by_name.emplace(tensor.native_name, &tensor);
+@@ -331,6 +355,12 @@ bool inspect_metadata_carrier(
+             return false;
+         }
+         const auto & expected = *found->second;
++        if (tensor_parts[index] != expected.split_no || tensor_offsets[index] != expected.data_offset ||
++                tensor_sizes[index] != expected.stored_length || tensor_alignments[index] == 0 ||
++                (tensor_alignments[index] & (tensor_alignments[index] - 1)) != 0) {
++            error = "metadata carrier tensor locator differs from source";
++            return false;
++        }
+         const int dimensions = ggml_n_dims(tensor);
+         if (expected.dimensions.size() != static_cast<size_t>(dimensions) ||
+                 tensor->type != expected.type ||
