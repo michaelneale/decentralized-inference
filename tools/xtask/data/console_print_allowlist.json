@@ -1579,31 +1579,31 @@
   ],
   "crates/mesh-llm-host-runtime/src/inference/skippy/materialization/package_download.rs": [
     {
-      "line": 151,
+      "line": 163,
       "macro_name": "eprintln!"
     },
     {
-      "line": 195,
+      "line": 207,
       "macro_name": "eprint!"
     },
     {
-      "line": 199,
+      "line": 211,
       "macro_name": "eprintln!"
     },
     {
-      "line": 304,
+      "line": 316,
       "macro_name": "eprintln!"
     },
     {
-      "line": 309,
+      "line": 321,
       "macro_name": "eprintln!"
     },
     {
-      "line": 506,
+      "line": 518,
       "macro_name": "eprint!"
     },
     {
-      "line": 509,
+      "line": 521,
       "macro_name": "eprintln!"
     }
   ],
