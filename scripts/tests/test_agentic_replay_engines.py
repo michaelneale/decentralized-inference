@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -225,7 +226,9 @@ class AgenticReplayEnginesTest(unittest.TestCase):
             ):
                 resolved = ENGINES.resolve_engine_executable(arm)
 
-            self.assertEqual(resolved, str(engine_bin.resolve()))
+            self.assertEqual(
+                resolved, str(Path(os.path.abspath(engine_bin)))
+            )
 
     def test_bare_executable_name_resolves_on_runner_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -278,14 +281,48 @@ class AgenticReplayEnginesTest(unittest.TestCase):
             ) as version:
                 build = ENGINES.verify_engine_arm(arm)
 
+            expected = str(Path(os.path.abspath(engine_bin)))
             self.assertEqual(
                 build["provenance"]["resolved_executable"],
-                str(engine_bin.resolve()),
+                expected,
             )
+            self.assertEqual(version.call_args.args[1], expected)
+
+    def test_venv_python_symlink_is_not_dereferenced(self) -> None:
+        """Regression: ndizazzo P2 — resolve() followed a virtualenv's
+        python symlink to the system interpreter, so preflight and launch
+        lost the venv's installed packages (PackageNotFoundError in sglang).
+        The resolver must absolutize without dereferencing symlinks."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            venv_bin = root / "venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            system_python = root / "system" / "python3.11"
+            system_python.parent.mkdir()
+            system_python.write_text("#!/bin/sh\n")
+            system_python.chmod(0o755)
+            venv_python = venv_bin / "python"
+            venv_python.symlink_to(system_python)
+
+            arm = self.arm(
+                "sglang",
+                executable=str(venv_python),
+                cwd=root / "engine",
+            )
+            arm.cwd.mkdir(parents=True, exist_ok=True)
+
+            with mock.patch.object(
+                ENGINES,
+                "engine_version",
+                return_value="sglang 0.5.0",
+            ) as version:
+                build = ENGINES.verify_engine_arm(arm)
+
             self.assertEqual(
-                version.call_args.args[1],
-                str(engine_bin.resolve()),
+                build["provenance"]["resolved_executable"],
+                str(venv_python),
             )
+            self.assertEqual(version.call_args.args[1], str(venv_python))
 
     def test_duplicate_external_labels_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

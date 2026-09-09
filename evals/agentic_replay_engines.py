@@ -356,7 +356,10 @@ def resolve_engine_executable(arm: EngineArm) -> str:
         if not candidate.is_absolute():
             candidate = arm.cwd / candidate
         if candidate.is_file():
-            return str(candidate.resolve())
+            # absolutize WITHOUT dereferencing: resolve() would follow a
+            # virtualenv's python symlink to the system interpreter, which
+            # loses the venv's installed packages (sglang preflight/launch).
+            return str(Path(os.path.abspath(candidate)))
         return ""
     return shutil.which(arm.executable) or ""
 
