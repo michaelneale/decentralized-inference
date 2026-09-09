@@ -240,6 +240,9 @@ pub(crate) fn required_admitted_stage_package_artifacts(
     );
     let manifest: skippy_package_format::PackageManifest =
         serde_json::from_slice(&manifest_contents).context("parse package-v2 manifest")?;
+    let manifest =
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, package_dir)
+            .context("resolve package-v2 metadata carrier")?;
     let descriptor = skippy_package_format::stage_admission::StageAdmissionDescriptor {
         package_id: admission.package_id.clone(),
         resident_tensor_ids: admission.resident_tensor_ids.clone(),
@@ -273,6 +276,37 @@ pub(crate) fn required_admitted_stage_package_artifacts(
             })
         })
         .collect()
+}
+
+pub(crate) fn package_v2_metadata_carrier_request(
+    package_dir: &Path,
+    package_ref: &str,
+    manifest_sha256: &str,
+) -> Result<PackageArtifactRequest> {
+    validate_sha256(manifest_sha256).context("invalid package manifest sha256")?;
+    let manifest_contents = read_bounded_package_manifest(package_dir)?;
+    anyhow::ensure!(
+        sha256_bytes(&manifest_contents).eq_ignore_ascii_case(manifest_sha256),
+        "package manifest sha256 mismatch"
+    );
+    let manifest: skippy_package_format::PackageManifest =
+        serde_json::from_slice(&manifest_contents).context("parse package-v2 manifest")?;
+    manifest
+        .validate_root()
+        .context("validate package-v2 manifest root")?;
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter()
+        .find(|artifact| artifact.id == manifest.source_model.metadata_artifact_id)
+        .context("package-v2 metadata artifact is absent")?;
+    Ok(PackageArtifactRequest {
+        package_ref: package_ref.to_string(),
+        manifest_sha256: manifest_sha256.to_ascii_lowercase(),
+        relative_path: safe_relative_artifact_path(&artifact.path)?,
+        expected_size: Some(artifact.byte_size),
+        expected_sha256: Some(artifact.sha256.to_ascii_lowercase()),
+    })
 }
 
 pub(crate) fn local_artifact_path(package_dir: &Path, request: &PackageArtifactRequest) -> PathBuf {
@@ -694,86 +728,19 @@ mod tests {
     }
 
     fn write_package_v2_manifest(root: &Path) -> (PathBuf, String, String, String) {
-        use skippy_package_format::{
-            Artifact, ArtifactCatalog, PackageManifest, SourceFile, SourceModel, Tensor,
-            TensorCatalog, TensorIntegrity, TensorStorage,
-        };
-        let digest = "aa".repeat(32);
-        let mut manifest = PackageManifest {
-            schema_version: skippy_package_format::PACKAGE_SCHEMA_VERSION,
-            package_id: String::new(),
-            model_id: "meshllm/demo".to_string(),
-            source_model: SourceModel {
-                sha256: digest.clone(),
-                metadata_artifact_id: "primary".to_string(),
-                repo: Some("meshllm/demo".to_string()),
-                revision: Some("abc123".to_string()),
-                primary_file: Some("model-00001-of-00002.gguf".to_string()),
-                canonical_ref: None,
-                distribution_id: None,
-                files: vec![SourceFile {
-                    path: "model-00001-of-00002.gguf".to_string(),
-                    byte_size: 256,
-                    sha256: digest.clone(),
-                }],
-            },
-            format: "gguf".to_string(),
-            layer_count: 2,
-            model_metadata: std::collections::BTreeMap::from([(
-                "general.architecture".to_string(),
-                serde_json::Value::String("llama".to_string()),
-            )]),
-            artifact_catalog: ArtifactCatalog {
-                entries: vec![
-                    Artifact {
-                        id: "primary".to_string(),
-                        path: "artifacts/source-00000.gguf".to_string(),
-                        byte_size: 256,
-                        sha256: digest.clone(),
-                    },
-                    Artifact {
-                        id: "resident".to_string(),
-                        path: "artifacts/source-00001.gguf".to_string(),
-                        byte_size: 128,
-                        sha256: digest.clone(),
-                    },
-                    Artifact {
-                        id: "unowned".to_string(),
-                        path: "artifacts/unowned.gguf".to_string(),
-                        byte_size: 64,
-                        sha256: digest.clone(),
-                    },
-                ],
-            },
-            tensor_catalog: TensorCatalog {
-                entries: vec![Tensor {
-                    id: "tensor-resident".to_string(),
-                    name: "blk.1.weight".to_string(),
-                    ggml_type: 0,
-                    dimensions: vec![4, 4],
-                    layer_ordinal: Some(1),
-                    storage: TensorStorage::Owned {
-                        artifact_id: "resident".to_string(),
-                        data_offset: 0,
-                        stored_length: 64,
-                        alignment: 32,
-                        integrity: TensorIntegrity::ArtifactSha256,
-                    },
-                }],
-            },
-            sidecars: Vec::new(),
-            generation: None,
-            native_abi_version: "0.1.49".to_string(),
-            generator_version: "test".to_string(),
-            created_at_unix_secs: 1,
-        };
-        manifest.package_id = manifest.computed_package_id().unwrap();
-        manifest.validate().unwrap();
+        let manifest = crate::inference::skippy::write_test_package_v2_fixture(
+            root,
+            "meshllm/demo",
+            &[
+                ("primary", "artifacts/source-00000.gguf", "input.weight"),
+                ("resident", "artifacts/source-00001.gguf", "tensor-resident"),
+                ("unowned", "artifacts/unowned.gguf", "tensor-unowned"),
+            ],
+        )
+        .unwrap();
         let package_id = manifest.package_id.clone();
-        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let bytes = fs::read(root.join(PACKAGE_MANIFEST_FILE)).unwrap();
         let manifest_sha = sha256_hex(&bytes);
-        fs::create_dir_all(root).unwrap();
-        fs::write(root.join(PACKAGE_MANIFEST_FILE), bytes).unwrap();
         (
             root.to_path_buf(),
             "hf://meshllm/demo@abc123".to_string(),
@@ -979,7 +946,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             paths,
-            vec!["artifacts/source-00000.gguf", "artifacts/source-00001.gguf"]
+            vec!["shared/metadata.gguf", "artifacts/source-00001.gguf"]
         );
         assert!(!paths.iter().any(|path| path.contains("unowned")));
     }

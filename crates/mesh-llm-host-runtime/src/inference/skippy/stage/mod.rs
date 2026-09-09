@@ -952,11 +952,13 @@ pub(crate) fn admitted_resident_tensor_names(
     let manifest: skippy_package_format::PackageManifest = if super::is_package_v2_ref(package_ref)
     {
         let manifest_path = Path::new(package_ref).join("model-package.json");
-        serde_json::from_slice(
-            &std::fs::read(&manifest_path)
-                .with_context(|| format!("read package-v2 manifest {}", manifest_path.display()))?,
-        )
-        .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?
+        let manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).with_context(|| {
+                format!("read package-v2 manifest {}", manifest_path.display())
+            })?)
+            .with_context(|| format!("parse package-v2 manifest {}", manifest_path.display()))?;
+        skippy_model::package_carrier::resolve_package_carrier_from_dir(manifest, package_ref)
+            .context("resolve package-v2 metadata carrier")?
     } else if super::is_content_addressed_gguf_ref(&load.package_ref) {
         let model_path = load
             .model_path

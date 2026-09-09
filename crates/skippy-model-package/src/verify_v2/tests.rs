@@ -40,7 +40,10 @@ impl Case {
         .unwrap();
     }
     fn manifest(&self) -> PackageManifest {
-        serde_json::from_slice(&fs::read(self.package.join("model-package.json")).unwrap()).unwrap()
+        let root =
+            serde_json::from_slice(&fs::read(self.package.join("model-package.json")).unwrap())
+                .unwrap();
+        resolve_package_carrier(root, self.package.join("shared/metadata.gguf")).unwrap()
     }
     fn save(&self, mut manifest: PackageManifest) {
         manifest.package_id = manifest.computed_package_id().unwrap();
@@ -54,7 +57,7 @@ impl Case {
         verify_package(&self.package, &self.source, None, &[])
     }
     fn artifact(&self) -> PathBuf {
-        self.package.join("artifacts/source-00000.gguf")
+        self.package.join("shared/common.gguf")
     }
 }
 
@@ -71,7 +74,7 @@ fn verifies_whole_shard_package_read_only_and_accepts_catalog_reordering() {
             report.checked_artifacts,
             report.checked_tensors
         ),
-        (1, 1, 2)
+        (1, 3, 2)
     );
     assert_eq!(
         before,
@@ -79,15 +82,42 @@ fn verifies_whole_shard_package_read_only_and_accepts_catalog_reordering() {
     );
     let mut manifest = case.manifest();
     manifest.tensor_catalog.entries.reverse();
-    manifest.artifact_catalog.entries[0].id = "renamed-container".into();
-    manifest.source_model.metadata_artifact_id = "renamed-container".into();
-    for t in &mut manifest.tensor_catalog.entries {
-        if let TensorStorage::Owned { artifact_id, .. } = &mut t.storage {
-            *artifact_id = "renamed-container".into();
-        }
-    }
+    manifest.artifact_catalog.entries.reverse();
     case.save(manifest);
     case.verify().unwrap();
+}
+
+#[test]
+fn verifies_repacked_tensor_artifacts_against_source_payloads() {
+    let case = Case::new();
+    case.write(vec![]);
+    let layer_path = case.package.join("layers/layer-00001.gguf");
+
+    assert_eq!(case.verify().unwrap().checked_tensors, 2);
+
+    let mut bytes = fs::read(&layer_path).unwrap();
+    let (_, layer_catalog) = inspect(&layer_path, "layer-00001").unwrap();
+    let TensorStorage::Owned { data_offset, .. } = layer_catalog.entries[0].storage else {
+        panic!("fixture tensor must own storage");
+    };
+    bytes[data_offset as usize] ^= 0xff;
+    fs::write(&layer_path, bytes).unwrap();
+    let mut manifest = case.manifest();
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter_mut()
+        .find(|artifact| artifact.id == "layer-00001")
+        .unwrap();
+    artifact.sha256 = file_sha256(&layer_path).unwrap();
+    case.save(manifest);
+
+    assert!(
+        case.verify()
+            .unwrap_err()
+            .to_string()
+            .contains("payload differs")
+    );
 }
 
 #[test]
@@ -111,54 +141,19 @@ fn verifies_complete_multishard_source_and_rejects_missing_or_renamed_partial_so
 }
 
 #[test]
-fn rejects_self_consistent_but_incomplete_or_substituted_manifest_catalogs() {
+fn rejects_legacy_inline_inventory_fields() {
     let case = Case::new();
     case.write(vec![]);
-    let original = case.manifest();
-    for mutation in 0..9 {
-        let mut m = original.clone();
-        match mutation {
-            0 => {
-                m.tensor_catalog.entries.pop();
-            }
-            1 => {
-                m.tensor_catalog.entries[0].name = "substituted".into();
-            }
-            2 => {
-                m.tensor_catalog.entries[0].id = "substituted".into();
-            }
-            3 => {
-                m.tensor_catalog.entries[0].ggml_type = 1;
-            }
-            4 => {
-                m.tensor_catalog.entries[0].dimensions = vec![4];
-            }
-            5 => {
-                m.tensor_catalog.entries[0].layer_ordinal = Some(0);
-            }
-            6 => {
-                if let TensorStorage::Owned { stored_length, .. } =
-                    &mut m.tensor_catalog.entries[0].storage
-                {
-                    *stored_length = 8;
-                }
-            }
-            7 => {
-                if let TensorStorage::Owned { data_offset, .. } =
-                    &mut m.tensor_catalog.entries[0].storage
-                {
-                    *data_offset += 32;
-                }
-            }
-            _ => {
-                m.tensor_catalog
-                    .entries
-                    .push(m.tensor_catalog.entries[0].clone());
-            }
-        }
-        case.save(m);
-        assert!(case.verify().is_err(), "mutation {mutation}");
-    }
+    let mut root: serde_json::Value =
+        serde_json::from_slice(&fs::read(case.package.join("model-package.json")).unwrap())
+            .unwrap();
+    root["tensor_catalog"] = serde_json::json!({"entries": []});
+    fs::write(
+        case.package.join("model-package.json"),
+        serde_json::to_vec_pretty(&root).unwrap(),
+    )
+    .unwrap();
+    assert!(case.verify().is_err());
 }
 
 #[test]
@@ -166,17 +161,13 @@ fn rejects_forged_source_identity_metadata_and_primary_digest() {
     let case = Case::new();
     case.write(vec![]);
     let original = case.manifest();
-    for mutation in 0..6 {
+    for mutation in 0..5 {
         let mut m = original.clone();
         match mutation {
             0 => m.source_model.files[0].sha256 = "0".repeat(64),
             1 => m.source_model.files[0].byte_size += 1,
             2 => m.source_model.sha256 = "0".repeat(64),
             3 => m.layer_count += 1,
-            4 => {
-                m.model_metadata
-                    .insert("llama.block_count".into(), 99.into());
-            }
             _ => m.source_model.files.push(m.source_model.files[0].clone()),
         }
         case.save(m);
@@ -202,9 +193,15 @@ fn rejects_corrupt_truncated_missing_and_rehashed_substituted_artifacts() {
     );
     fixture(&case.artifact(), &[tensor("omission", 0)], None);
     let mut manifest = case.manifest();
-    manifest.artifact_catalog.entries[0].sha256 = file_sha256(&case.artifact()).unwrap();
-    manifest.artifact_catalog.entries[0].byte_size = fs::metadata(case.artifact()).unwrap().len();
-    manifest.tensor_catalog.entries = inspect(&case.artifact(), "source-00000").unwrap().1.entries;
+    let artifact = manifest
+        .artifact_catalog
+        .entries
+        .iter_mut()
+        .find(|artifact| artifact.id == "common")
+        .unwrap();
+    artifact.sha256 = file_sha256(&case.artifact()).unwrap();
+    artifact.byte_size = fs::metadata(case.artifact()).unwrap().len();
+    manifest.tensor_catalog.entries = inspect(&case.artifact(), "common").unwrap().1.entries;
     case.save(manifest);
     assert!(
         case.verify().is_err(),
@@ -272,20 +269,19 @@ fn rejects_v1_unknown_fields_wrong_package_id_and_duplicate_artifacts() {
 }
 
 #[test]
-fn rejects_unproven_alias_claims_and_native_shared_offsets() {
+fn rejects_inline_alias_claims_and_native_shared_offsets() {
     let case = Case::new();
     case.write(vec![]);
-    let mut m = case.manifest();
-    m.tensor_catalog.entries[1].storage = TensorStorage::Alias {
-        target_tensor_id: m.tensor_catalog.entries[0].id.clone(),
-    };
-    case.save(m);
-    assert!(
-        case.verify()
-            .unwrap_err()
-            .to_string()
-            .contains("alias claims")
-    );
+    let mut root: serde_json::Value =
+        serde_json::from_slice(&fs::read(case.package.join("model-package.json")).unwrap())
+            .unwrap();
+    root["tensor_catalog"] = serde_json::json!({"entries": [{"storage": {"kind": "alias"}}]});
+    fs::write(
+        case.package.join("model-package.json"),
+        serde_json::to_vec_pretty(&root).unwrap(),
+    )
+    .unwrap();
+    assert!(case.verify().is_err());
     fixture(
         &case.source,
         &[tensor("first", 0), tensor("alias", 0)],
@@ -309,7 +305,8 @@ fn projectors_require_matching_independent_sources_and_integrity() {
     )
     .unwrap();
     assert_eq!(report.checked_projectors, 1);
-    let mut m = case.manifest();
+    let original = case.manifest();
+    let mut m = original.clone();
     m.sidecars.push(m.sidecars[0].clone());
     case.save(m);
     assert!(
@@ -321,7 +318,7 @@ fn projectors_require_matching_independent_sources_and_integrity() {
         )
         .is_err()
     );
-    let mut m = case.manifest();
+    let mut m = original;
     m.sidecars.pop();
     case.save(m);
     fixture(&projector, &[tensor("substituted", 0)], None);
@@ -367,12 +364,6 @@ fn quantized_stored_size_is_verified_against_native_inventory() {
     fs::write(&case.source, bytes).unwrap();
     case.write(vec![]);
     case.verify().unwrap();
-    let mut m = case.manifest();
-    if let TensorStorage::Owned { stored_length, .. } = &mut m.tensor_catalog.entries[0].storage {
-        *stored_length = 64;
-    }
-    case.save(m);
-    assert!(case.verify().is_err());
 }
 
 #[test]
@@ -431,12 +422,7 @@ fn rejects_unaccounted_artifacts_and_artifact_path_traversal() {
         sha256: file_sha256(&extra).unwrap(),
     });
     case.save(m);
-    assert!(
-        case.verify()
-            .unwrap_err()
-            .to_string()
-            .contains("unaccounted")
-    );
+    assert!(case.verify().is_err());
     let mut m = original;
     m.artifact_catalog.entries[0].path = "../source.gguf".into();
     case.save(m);
