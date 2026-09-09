@@ -195,7 +195,11 @@ the planner, not represented as permanent skipped jobs.
 Host actions emit executable, checksum and import-policy evidence. The native
 runtime action emits a manifested archive. compose-product-input verifies exact
 producer bytes and performs no compilation, relinking, restamping or
-substitution. Smoke and SDK consumers download those artifacts only.
+substitution. Smoke and SDK consumers download those artifacts only. Linux CPU
+composition readiness additionally executes the shared SDK runtime reader on
+the real host's available-runtime JSON with fallback building disabled, even
+when full SDK rows are not selected. The #1675 path regression protects its
+existing host/runtime/product reachability without changing the catalogs.
 
 Selected PR and main product rows both use release-profile hosts. Native
 runtime compilation does not depend on host production, so each platform lane

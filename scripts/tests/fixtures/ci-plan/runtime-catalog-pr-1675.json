@@ -1,0 +1,50 @@
+{
+  "profile": "pr-ready",
+  "event_name": "pull_request",
+  "source_sha": "14ec8d0ab5ed80edae2f9eb43f1d9a310d9cb7fe",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "changed_files": [
+    "crates/mesh-llm-commands/src/runtime_native.rs",
+    "crates/mesh-llm-commands/src/runtime_native/formatters.rs",
+    "crates/mesh-llm-commands/src/runtime_native/setup_helpers.rs",
+    "crates/mesh-llm-host-runtime/src/system/native_runtime.rs",
+    "crates/mesh-llm-native-runtime/src/resolver.rs",
+    "crates/mesh-llm-runtime-install/src/install.rs",
+    "crates/mesh-llm-runtime-install/src/lib.rs",
+    "crates/mesh-llm-runtime-install/src/manifest.rs",
+    "crates/mesh-llm-runtime-install/src/types.rs",
+    "scripts/check-env-mutation-contract.py",
+    "scripts/tests/test_env_mutation_contract.py",
+    "tools/xtask/data/console_print_allowlist.json",
+    "website/src/docs/pages/CLI.md"
+  ],
+  "affected_crates": [
+    "mesh-llm",
+    "mesh-llm-commands",
+    "mesh-llm-host-runtime",
+    "mesh-llm-native-runtime",
+    "mesh-llm-runtime-install"
+  ],
+  "workspace_packages": [
+    {
+      "name": "mesh-llm",
+      "path": "crates/mesh-llm"
+    },
+    {
+      "name": "mesh-llm-commands",
+      "path": "crates/mesh-llm-commands"
+    },
+    {
+      "name": "mesh-llm-host-runtime",
+      "path": "crates/mesh-llm-host-runtime"
+    },
+    {
+      "name": "mesh-llm-native-runtime",
+      "path": "crates/mesh-llm-native-runtime"
+    },
+    {
+      "name": "mesh-llm-runtime-install",
+      "path": "crates/mesh-llm-runtime-install"
+    }
+  ]
+}

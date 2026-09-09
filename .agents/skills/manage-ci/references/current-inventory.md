@@ -497,6 +497,11 @@ fail-open policy.
   a reliable import-library path for the tool.
 - `prepare-static-abi-input`: portable static ABI archive.
 - `compose-product-input`: exact host/runtime verification and composition.
+  Linux CPU readiness also feeds the composed host's real `runtime list
+  --available --json` output through `ci-prepare-native-runtime.sh`, the shared
+  SDK reader, with fallback building disabled. This covers CLI JSON changes
+  even when full SDK rows are unselected; accelerator compatibility is not
+  required on driverless composition workers.
 - `ci/model-artifacts/registry.json`: canonical immutable model identities,
   integrity, family capability tags, and allowed suite/cadence membership.
   `scripts/generate-test-model-manifests.py` owns the family battery and
