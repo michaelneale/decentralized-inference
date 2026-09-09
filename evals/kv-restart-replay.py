@@ -161,9 +161,10 @@ def build_manifest(turns: int, turn_target_tokens: int, system_tokens: int) -> d
 def server_command(binary: Path, model: str, extra_args: Sequence[str]) -> list[str]:
     command = [str(binary), "serve", "--model", model, "--log-format", "json"]
     command.extend(extra_args)
-    for option in FORBIDDEN_STARTUP_OPTIONS:
-        if option in command:
-            raise AssertionError(f"default-startup benchmark cannot use {option}")
+    for argument in command:
+        for option in FORBIDDEN_STARTUP_OPTIONS:
+            if argument == option or argument.startswith(f"{option}="):
+                raise AssertionError(f"default-startup benchmark cannot use {option}")
     return command
 
 
@@ -344,7 +345,7 @@ def stream_request(
                 completion_tokens / (ended - first_token_at) if ended > first_token_at else None
             ),
         }
-    except (OSError, TimeoutError) as error:
+    except (OSError, TimeoutError, http.client.HTTPException) as error:
         return {"request_id": request_id, "error": str(error)}
     finally:
         connection.close()
@@ -410,7 +411,7 @@ def binary_provenance(binary: Path) -> dict[str, Any]:
             ["git", "rev-parse", "HEAD"], cwd=str(REPO), capture_output=True, text=True, check=True
         )
         provenance["source_sha"] = commit.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, OSError):
         provenance["git_describe"] = "unknown"
     return provenance
 
@@ -450,8 +451,13 @@ def summarize_cohort(name: str, rows: Sequence[dict[str, Any]]) -> dict[str, Any
 
 
 def messages_through(messages: list[dict[str, Any]], turn_index: int) -> list[dict[str, Any]]:
-    """Conversation prefix up to and including turn ``turn_index`` (0-based)."""
-    return messages[: 2 * (turn_index + 1) + 1]
+    """Conversation prefix ending on the user message of ``turn_index`` (0-based).
+
+    Fill requests must look like the requests a real session produces: the last
+    message is always the user turn being answered, never the canned assistant
+    reply that follows it in the canonical conversation.
+    """
+    return messages[: 2 * (turn_index + 1)]
 
 
 def run_arm(args: argparse.Namespace, output: Path) -> dict[str, Any]:
@@ -480,7 +486,7 @@ def run_arm(args: argparse.Namespace, output: Path) -> dict[str, Any]:
         with requests_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
 
-    def replay_frozen(cohort: str) -> None:
+    def replay_frozen(cohort: str, repeats: Optional[int] = None) -> None:
         connection = http.client.HTTPConnection(DEFAULT_HOST, DEFAULT_PORT, timeout=5)
         try:
             connection.request("GET", "/v1/models")
@@ -488,7 +494,7 @@ def run_arm(args: argparse.Namespace, output: Path) -> dict[str, Any]:
             model_id = (document.get("data") or [{}])[0].get("id", "default")
         finally:
             connection.close()
-        for repeat in range(args.restore_repeats):
+        for repeat in range(args.restore_repeats if repeats is None else repeats):
             result = stream_request(
                 f"{cohort}-{repeat + 1}",
                 conversation,
@@ -554,7 +560,11 @@ def run_arm(args: argparse.Namespace, output: Path) -> dict[str, Any]:
             "method": "SIGINT to the serving process group, then fresh start on the same state directory",
             "restart_to_ready_seconds": restart_gap_seconds,
         }
-        replay_frozen("restore")
+        # Cohort: restore — the FIRST post-restart replay alone is the
+        # first-request-after-restart measurement; later replays warm from the
+        # resident cache and are recorded under the warm cohort instead.
+        replay_frozen("restore", repeats=1)
+        replay_frozen("warm", repeats=max(args.restore_repeats - 1, 0))
 
         # Cohort: warm — repeat replays without restart.
         replay_frozen("warm")
