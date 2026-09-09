@@ -396,8 +396,8 @@ fn test_hydrate_gpu_facts_backfill_tags_unknown_gpu_name_source() {
 }
 
 // Mirrors the cfg on `tegra_gpu_name_from_model_path`: the Tegra collector only
-// compiles for Linux non-skippy / dynamic-native-runtime builds. The test now
-// drives the model path directly, so it no longer depends on host filesystem
+// compiles for Linux non-skippy / dynamic-native-runtime builds. The tests now
+// drive the model path directly, so they no longer depend on host filesystem
 // state (the deterministic fix), only on the collector being present at all.
 #[cfg(all(
     target_os = "linux",
@@ -422,6 +422,35 @@ fn test_tegra_collector_gpu_name_absent_leaves_source_none() {
 
     assert_eq!(survey.gpu_name, None);
     assert_eq!(survey.gpu_name_source, None);
+}
+
+// Sysfs-PRESENT case: the helper reads a real temp file containing a Tegra
+// model string, parses it, and tags both the name and source. Exercisable on
+// any platform because the helper is path-injectable.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        not(feature = "skippy-devices"),
+        feature = "dynamic-native-runtime",
+        test
+    )
+))]
+#[test]
+fn test_tegra_collector_gpu_name_present_tags_sysfs_source() {
+    use std::io::Write as _;
+
+    let path = std::env::temp_dir().join("mesh_llm_test_tegra_model_present");
+    let mut f = std::fs::File::create(&path).expect("create temp model file");
+    write!(f, "NVIDIA Jetson AGX Orin Developer Kit\0").expect("write model file");
+    drop(f);
+
+    let mut survey = HardwareSurvey::default();
+    tegra_gpu_name_from_model_path(&mut survey, &path);
+
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(survey.gpu_name.as_deref(), Some("Jetson AGX Orin"));
+    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::Sysfs));
 }
 
 #[test]
@@ -905,7 +934,10 @@ fn test_skippy_probe_gpu_name_unchanged_and_source_tagged() {
     );
     assert!(handled);
     assert_eq!(survey.gpu_name.as_deref(), Some("GPU 0"));
-    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::NativeRuntimeDevice));
+    assert_eq!(
+        survey.gpu_name_source,
+        Some(GpuNameSource::NativeRuntimeDevice)
+    );
 }
 
 #[test]
@@ -928,7 +960,10 @@ fn test_skippy_probe_metal_backend_device_tagged_metal_default_device() {
     );
     assert!(handled);
     assert_eq!(survey.gpu_name.as_deref(), Some("Apple M4 Max"));
-    assert_eq!(survey.gpu_name_source, Some(GpuNameSource::MetalDefaultDevice));
+    assert_eq!(
+        survey.gpu_name_source,
+        Some(GpuNameSource::MetalDefaultDevice)
+    );
 }
 
 #[cfg(target_os = "macos")]

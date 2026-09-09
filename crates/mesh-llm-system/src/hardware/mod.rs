@@ -125,6 +125,7 @@ pub struct HardwareSurvey {
     pub vram_bytes: u64,
     /// GPU name as reported by the OS/driver (e.g. Metal, nvidia-smi, ROCm).
     /// Best-effort and OS-reported, not an independently verified measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name: Option<String>,
     /// Collection mechanism behind `gpu_name`. A source, not a verification —
     /// it names which probe produced the string, not that the string is a
@@ -151,7 +152,12 @@ pub struct HardwareSurvey {
 /// Where a `HardwareSurvey.gpu_name` value came from. Each variant names a
 /// collection mechanism, not a claim that the resulting string is a verified
 /// GPU identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// `HardwareSurvey` and `GpuFacts` are serialize-only (`serde::Serialize`).
+/// This enum therefore derives only `Serialize` — a `Deserialize` impl would
+/// be unreachable through any serializable struct and is omitted to avoid a
+/// dead, untestable code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuNameSource {
     /// A Metal device name from `MTLDevice.name` (macOS). Assigned when the
@@ -163,9 +169,13 @@ pub enum GpuNameSource {
     /// verified GPU identifier.
     MetalDefaultDevice,
     /// macOS `sysctl -n machdep.cpu.brand_string`, used before upstream
-    /// commit 6e16b84a2 (`fix(system): report the real macOS GPU name`). The
-    /// variant is kept in the vocabulary for consumers that may have recorded
-    /// it from earlier surveys; it will not be assigned by new collections.
+    /// commit 6e16b84a2 (`fix(system): report the real macOS GPU name`).
+    /// **Not assigned by new collections.** Kept in the vocabulary so that
+    /// consumers reading surveys recorded before 6e16b84a2 can deserialise
+    /// the field; it will never appear in a freshly collected survey.
+    /// (`HardwareSurvey` has no `Deserialize` impl today, so this variant
+    /// is currently write-only; it is preserved for when a `Deserialize` impl
+    /// is added rather than forcing a breaking vocabulary change at that point.)
     CpuBrandString,
     /// The skippy native-runtime's backend device enumeration reporting a
     /// non-Metal accelerator (CUDA, ROCm, Vulkan, SYCL, ...). Names whichever
@@ -506,24 +516,24 @@ fn apply_gpu_probe_outcome_to_survey<E>(
 
     if metrics.contains(&Metric::GpuName) {
         let names: Vec<String> = gpus.iter().map(|gpu| gpu.display_name.clone()).collect();
-        survey.gpu_name = summarize_gpu_name(&names);
-        if survey.gpu_name.is_some() {
-            // Derive the source from the actual backend device names the
-            // runtime reported, not from the target OS: a macOS host running
-            // MoltenVK/Vulkan stamps non-MTL device names and must not be
-            // labelled MetalDefaultDevice.
-            let is_metal = gpus.iter().any(|gpu| {
-                gpu.backend_device
-                    .as_deref()
-                    .map(|d| d.starts_with("MTL"))
-                    .unwrap_or(false)
-            });
-            survey.gpu_name_source = Some(if is_metal {
-                GpuNameSource::MetalDefaultDevice
-            } else {
-                GpuNameSource::NativeRuntimeDevice
-            });
-        }
+        // Derive the source from the actual backend device names the
+        // runtime reported, not from the target OS: a macOS host running
+        // MoltenVK/Vulkan stamps non-MTL device names and must not be
+        // labelled MetalDefaultDevice.
+        let is_metal = gpus.iter().any(|gpu| {
+            gpu.backend_device
+                .as_deref()
+                .map(|d| d.starts_with("MTL"))
+                .unwrap_or(false)
+        });
+        let name = summarize_gpu_name(&names);
+        let source = if is_metal {
+            GpuNameSource::MetalDefaultDevice
+        } else {
+            GpuNameSource::NativeRuntimeDevice
+        };
+        survey.gpu_name_source = name.is_some().then_some(source);
+        survey.gpu_name = name;
     }
     if metrics.contains(&Metric::GpuCount) {
         survey.gpu_count = u8::try_from(gpus.len()).unwrap_or(u8::MAX);
@@ -582,10 +592,10 @@ impl Collector for DefaultCollector {
                 survey.gpu_reserved = vec![reserved_bytes];
             }
             if metrics.contains(&Metric::GpuName) {
-                survey.gpu_name = sanitize_macos_gpu_name(query_metal_device_name());
-                if survey.gpu_name.is_some() {
-                    survey.gpu_name_source = Some(GpuNameSource::MetalDefaultDevice);
-                }
+                let name = sanitize_macos_gpu_name(query_metal_device_name());
+                survey.gpu_name_source =
+                    name.is_some().then_some(GpuNameSource::MetalDefaultDevice);
+                survey.gpu_name = name;
             }
             if metrics.contains(&Metric::GpuCount) {
                 survey.gpu_count = 1;
@@ -767,10 +777,9 @@ impl Collector for DefaultCollector {
 
                 if let Some(ref names) = nvidia_names {
                     if metrics.contains(&Metric::GpuName) {
-                        survey.gpu_name = summarize_gpu_name(names);
-                        if survey.gpu_name.is_some() {
-                            survey.gpu_name_source = Some(GpuNameSource::NvidiaSmi);
-                        }
+                        let name = summarize_gpu_name(names);
+                        survey.gpu_name_source = name.is_some().then_some(GpuNameSource::NvidiaSmi);
+                        survey.gpu_name = name;
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -785,10 +794,10 @@ impl Collector for DefaultCollector {
                             if let Ok(s) = String::from_utf8(out.stdout) {
                                 let names = parse_rocm_gpu_names(&s);
                                 if metrics.contains(&Metric::GpuName) {
-                                    survey.gpu_name = summarize_gpu_name(&names);
-                                    if survey.gpu_name.is_some() {
-                                        survey.gpu_name_source = Some(GpuNameSource::RocmSmi);
-                                    }
+                                    let name = summarize_gpu_name(&names);
+                                    survey.gpu_name_source =
+                                        name.is_some().then_some(GpuNameSource::RocmSmi);
+                                    survey.gpu_name = name;
                                 }
                                 if metrics.contains(&Metric::GpuCount) {
                                     survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -813,11 +822,10 @@ impl Collector for DefaultCollector {
                                         let names: Vec<String> =
                                             gpus.iter().map(|gpu| gpu.name.clone()).collect();
                                         if metrics.contains(&Metric::GpuName) {
-                                            survey.gpu_name = summarize_gpu_name(&names);
-                                            if survey.gpu_name.is_some() {
-                                                survey.gpu_name_source =
-                                                    Some(GpuNameSource::XpuSmi);
-                                            }
+                                            let name = summarize_gpu_name(&names);
+                                            survey.gpu_name_source =
+                                                name.is_some().then_some(GpuNameSource::XpuSmi);
+                                            survey.gpu_name = name;
                                         }
                                         if metrics.contains(&Metric::GpuCount) {
                                             survey.gpu_count =
@@ -912,10 +920,9 @@ impl Collector for DefaultCollector {
             if want_gpu_info {
                 if let Some(ref names) = nvidia_names {
                     if metrics.contains(&Metric::GpuName) {
-                        survey.gpu_name = summarize_gpu_name(names);
-                        if survey.gpu_name.is_some() {
-                            survey.gpu_name_source = Some(GpuNameSource::NvidiaSmi);
-                        }
+                        let name = summarize_gpu_name(names);
+                        survey.gpu_name_source = name.is_some().then_some(GpuNameSource::NvidiaSmi);
+                        survey.gpu_name = name;
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -924,10 +931,11 @@ impl Collector for DefaultCollector {
                     let names: Vec<String> =
                         windows_gpus.iter().map(|(name, _)| name.clone()).collect();
                     if metrics.contains(&Metric::GpuName) {
-                        survey.gpu_name = summarize_gpu_name(&names);
-                        if survey.gpu_name.is_some() {
-                            survey.gpu_name_source = Some(GpuNameSource::WindowsVideoController);
-                        }
+                        let name = summarize_gpu_name(&names);
+                        survey.gpu_name_source = name
+                            .is_some()
+                            .then_some(GpuNameSource::WindowsVideoController);
+                        survey.gpu_name = name;
                     }
                     if metrics.contains(&Metric::GpuCount) {
                         survey.gpu_count = u8::try_from(names.len()).unwrap_or(u8::MAX);
@@ -955,12 +963,11 @@ impl Collector for DefaultCollector {
     )
 ))]
 fn tegra_gpu_name_from_model_path(survey: &mut HardwareSurvey, model_path: &std::path::Path) {
-    survey.gpu_name = std::fs::read_to_string(model_path)
+    let name = std::fs::read_to_string(model_path)
         .ok()
         .and_then(|model| parse_tegra_model_name(&model));
-    if survey.gpu_name.is_some() {
-        survey.gpu_name_source = Some(GpuNameSource::Sysfs);
-    }
+    survey.gpu_name_source = name.is_some().then_some(GpuNameSource::Sysfs);
+    survey.gpu_name = name;
 }
 
 #[cfg(all(
@@ -1398,10 +1405,9 @@ fn hydrate_gpu_facts_with_identities(
             .iter()
             .map(|gpu| gpu.display_name.clone())
             .collect();
-        survey.gpu_name = summarize_gpu_name(&names);
-        if survey.gpu_name.is_some() {
-            survey.gpu_name_source = Some(GpuNameSource::Unknown);
-        }
+        let name = summarize_gpu_name(&names);
+        survey.gpu_name_source = name.is_some().then_some(GpuNameSource::Unknown);
+        survey.gpu_name = name;
     }
 }
 
