@@ -62,6 +62,20 @@
       "rotating"
     ]
   },
+  "unverified_consumers": [
+    {
+      "path": "scripts/ci-hf-xet-portability-smoke.sh",
+      "reason": "metadata.gguf has no immutable revision and file digest/size in the checked-in source; leave outside the registry until verified"
+    },
+    {
+      "path": "evals/skippy-radix-cache-models.json#qwen35-hybrid",
+      "reason": "the source has an immutable revision but no verified size or SHA-256 yet"
+    },
+    {
+      "path": "evals/skippy-radix-cache-models.json#qwen3next-linear",
+      "reason": "the source has an immutable revision but no verified size or SHA-256 yet"
+    }
+  ],
   "artifacts": [
     {
       "id": "family-qwen3-dense",
@@ -1738,18 +1752,18 @@
         "radix-cache"
       ],
       "artifact": {
-        "repo": "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
-        "revision": "7d1f70022fcab2038000074bd0342e03e1d8b755",
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "revision": "067b946cf014b7c697f3654f621d577a3e3afd1c",
         "selector": "Q4_K_M",
         "files": [
           {
-            "path": "llama-3.2-1b-instruct-q4_k_m.gguf",
-            "size_bytes": 807690656,
-            "sha256": "1d0e9419ec4e12aef73ccf4ffd122703e94c48344a96bc7c5f0f2772c2152ce3"
+            "path": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            "size_bytes": 807694464,
+            "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83"
           }
         ]
       },
-      "notes": "Shared parity and radix-cache Llama variant; intentionally differs from the family canary repository."
+      "notes": "Deduplicated with family-llama: same model and quant as the bartowski upload, so the parity/radix suites now share the canary's artifact instead of a second upload of identical weights."
     },
     {
       "id": "gemma2-q4-parity-radix",
@@ -3898,20 +3912,6 @@
         "MXFP4_MOE"
       ],
       "notes": "SafeTensors direct-load fixture used across every supported load-time quantization."
-    }
-  ],
-  "unverified_consumers": [
-    {
-      "path": "scripts/ci-hf-xet-portability-smoke.sh",
-      "reason": "metadata.gguf has no immutable revision and file digest/size in the checked-in source; leave outside the registry until verified"
-    },
-    {
-      "path": "evals/skippy-radix-cache-models.json#qwen35-hybrid",
-      "reason": "the source has an immutable revision but no verified size or SHA-256 yet"
-    },
-    {
-      "path": "evals/skippy-radix-cache-models.json#qwen3next-linear",
-      "reason": "the source has an immutable revision but no verified size or SHA-256 yet"
     }
   ]
 }

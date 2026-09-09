@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manifest_kind": "test-model-artifacts",
   "suite": "skippy-correctness",
-  "registry_sha256": "c53ef3a778779d187599a5fa48fc22c2c61eb7a0d9caa80606e248e33b2b3f3b",
+  "registry_sha256": "0fb272556fa31f2ab91d06c8265af82aa531c2001dbcbe6c3af3dab941140b3c",
   "artifacts": [
     {
       "id": "qwen3-q8-correctness",

@@ -4,14 +4,14 @@
       "key": "llama-gqa",
       "artifact_id": "llama-q4-parity-radix",
       "family": "Llama GQA",
-      "model_id": "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF:Q4_K_M",
-      "model_path": "$SKIPPY_MODEL_ROOT/llama-gqa/llama-3.2-1b-instruct-q4_k_m.gguf",
+      "model_id": "bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M",
+      "model_path": "$SKIPPY_MODEL_ROOT/llama-gqa/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
       "layer_end": 16,
       "payload": "resident-kv",
       "source": {
-        "repo": "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
-        "revision": "7d1f70022fcab2038000074bd0342e03e1d8b755",
-        "filename": "llama-3.2-1b-instruct-q4_k_m.gguf"
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "revision": "067b946cf014b7c697f3654f621d577a3e3afd1c",
+        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
       }
     },
     {
